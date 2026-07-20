@@ -167,16 +167,15 @@ class ActivityLifecycleDraftAdapter:
     def __init__(self, *, model: ActivityLifecycleDraftModel, temperature: float = 0.2) -> None:
         if not 0 <= temperature <= 2:
             raise ValueError("ActivityLifecycleDraft temperature must be between 0 and 2")
-        if not isinstance(model.model, str) or not model.model:
-            raise ValueError("ActivityLifecycleDraft model requires a model identifier")
         self._model = model
+        self._model_id = (str(getattr(model, "model", "")).strip() or type(model).__name__)[:256]
         self._temperature = temperature
 
     async def deliberate(self, *, capsule: ActivityLifecycleDraftCapsule) -> ActivityLifecycleModelDraft:
         if not capsule.openings:
             return ActivityLifecycleModelDraft(decision="no_op")
         raw = await self._model.complete(self._messages(capsule), temperature=self._temperature)
-        return materialize_activity_lifecycle_draft(raw=raw, capsule=capsule, model=self._model.model)
+        return materialize_activity_lifecycle_draft(raw=raw, capsule=capsule, model=self._model_id)
 
     @staticmethod
     def _messages(capsule: ActivityLifecycleDraftCapsule) -> list[dict[str, str]]:
@@ -184,7 +183,11 @@ class ActivityLifecycleDraftAdapter:
             {
                 "role": "system",
                 "content": (
-                    "Choose at most one offered opaque opening token, or decline. Return exactly one JSON "
+                    "Choose at most one offered opaque opening token, or decline. Every opening has already "
+                    "passed plan-state, time-relation, capability, and authority checks. Prefer one coherent "
+                    "transition so an accepted life plan can actually progress; use no_op only when none of "
+                    "the supplied summaries fits the current situation, not merely because details are abstract. "
+                    "Return exactly one JSON "
                     'object: {"decision":"no_op"} or '
                     '{"decision":"select","opening_token":"one offered token"}. '
                     "Do not return operations, plan ids, world ids, evidence, revisions, event ids, hashes, "

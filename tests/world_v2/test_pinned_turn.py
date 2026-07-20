@@ -295,7 +295,7 @@ class _EmotionAdvice:
         self.received = request
         return (
             CandidateDistribution(
-                catalog_version="world-v2-matrix-1",
+                catalog_version="world-v2-matrix-2",
                 field_id="appraisal.negative",
                 candidates=(
                     ClassificationCandidate(
@@ -570,7 +570,7 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
 
     outcome = await runtime.ingest(observation)
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "observed_only", outcome
     projection = ledger.project()
     assert projection.appraisals[0].hypotheses[0].meaning == "disappointment"
     assert projection.trigger_processes[0].state == "terminal"

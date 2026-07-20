@@ -7,6 +7,11 @@
   "canvas": {"width": 1000, "height": 760},
   "grid": {"minX": 0, "maxX": 7, "minY": 0, "maxY": 7},
   "tile": {"width": 85, "height": 42, "origin": [714, 393]},
+  "projection": {
+    "assetKit": "../../asset-kits/orthographic-isometric-v1.json",
+    "camera": {"projection": "orthographic", "azimuthDegrees": 45, "elevationDegrees": 30},
+    "screenAxes": {"x": [85, 42], "y": [-85, 42], "z": [0, -84]}
+  },
   "images": {
     "room": {
       "source": "../../zhizhi-room-isometric-v2.png",
@@ -41,7 +46,7 @@
       "display": [132, 132]
     },
     "poses": {
-      "idle": {"image": "idle", "crop": [100, 70, 250, 500], "display": [58, 116]},
+      "idle": {"image": "sprite", "walkFrame": 0, "display": [132, 132]},
       "sit": {"image": "idle", "crop": [380, 620, 360, 470], "display": [96, 102]},
       "sleep": {"image": "idle", "crop": [690, 720, 520, 390], "display": [170, 112]}
     }
@@ -85,6 +90,7 @@
   "objects": [
     {
       "id": "desk",
+      "dimensions": {"width": 2, "depth": 1, "height": 1.5},
       "depthTile": [1, 5, 0],
       "footprint": [[1, 5]],
       "frontOccluder": {
@@ -97,6 +103,7 @@
     },
     {
       "id": "bed",
+      "dimensions": {"width": 2, "depth": 2, "height": 0.8},
       "depthTile": [6, 1, 0],
       "footprint": [[6, 1]],
       "frontOccluder": {
@@ -109,6 +116,7 @@
     },
     {
       "id": "sofa",
+      "dimensions": {"width": 2, "depth": 1, "height": 1.1},
       "depthTile": [4, 6, 0],
       "footprint": [[4, 6], [5, 6]],
       "frontOccluder": {
@@ -122,6 +130,7 @@
     },
     {
       "id": "table",
+      "dimensions": {"width": 1, "depth": 1, "height": 0.7},
       "depthTile": [5, 6, 0],
       "footprint": [[6, 6]],
       "frontOccluder": {
@@ -134,6 +143,7 @@
     },
     {
       "id": "dining",
+      "dimensions": {"width": 2, "depth": 2, "height": 0.7},
       "depthTile": [2, 1, 0],
       "footprint": [[1, 1], [2, 1], [2, 2]],
       "frontOccluder": {
@@ -147,6 +157,7 @@
     },
     {
       "id": "divider",
+      "dimensions": {"width": 2, "depth": 0.5, "height": 2.5},
       "depthTile": [5, 3, 0],
       "footprint": [[4, 2], [4, 3], [5, 2], [5, 3]],
       "frontOccluder": {
@@ -162,6 +173,7 @@
       "id": "teal-stool",
       "category": "furniture",
       "assetMode": "layered",
+      "dimensions": {"width": 0.75, "depth": 0.75, "height": 0.75},
       "depthTile": [6.8, 0, 0],
       "occupancy": {"kind": "footprint", "tiles": [[7, 0]]},
       "layers": [
@@ -1366,8 +1378,8 @@
       {
         "id": "teal-stool", "category": "furniture", "assetMode": "layered",
         "depthTile": [5.5, 7, 0], "occupancy": {"kind": "none", "tiles": []},
-        "layers": [{"role": "front", "source": "sources/teal-stool-chroma-v2.png", "sourceTransform": {"crop": [360, 330, 900, 940], "chromaKey": "#ff00ff", "transparentThreshold": 12, "opaqueThreshold": 220, "despill": true, "resize": [120, 135]}, "output": "teal-stool-draft.png", "origin": [626, 900], "depthBias": 500}],
-        "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png", "source": "sources/teal-stool-chroma-v2.png"}, "audit": {}
+        "layers": [{"role": "front", "source": "../../zhizhi-room-isometric-v2.png", "sourceTransform": {"crop": [600, 870, 780, 1040], "alphaMask": {"source": "sources/teal-stool-chroma-v2.png", "sourceTransform": {"crop": [422, 383, 845, 887], "chromaKey": "#ff00ff", "transparentThreshold": 12, "opaqueThreshold": 220, "despill": true, "resize": [108, 104]}, "origin": [40, 42], "excludeRects": [[100, 40, 108, 104]]}}, "output": "teal-stool-draft.png", "origin": [600, 870], "depthBias": 500, "calibration": {"referenceBounds": [640, 912, 748, 1016], "maxDrift": 1}}],
+        "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "master-pixels-with-ai-alpha-mask", "reference": "zhizhi-room-isometric-v2.png", "source": "../../zhizhi-room-isometric-v2.png"}, "audit": {}
       },
       {
         "id": "living-floor-lamp", "category": "lighting", "assetMode": "layered",

@@ -5,6 +5,8 @@ import hashlib
 import json
 import sqlite3
 
+from legacy_migration_support import read_head_state_json
+
 import pytest
 
 from companion_daemon.world_v2.deliberation import (
@@ -60,6 +62,49 @@ def _event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldE
         causation_id="cause:audit",
         correlation_id="corr:audit",
         idempotency_key=f"key:{event_id}",
+        payload=payload,
+    )
+
+
+def _world_change(event_id: str) -> WorldEvent:
+    """Advance world revision without reinitializing the authoritative clock."""
+
+    observation_id = f"observation:{event_id}"
+    payload = {
+        "schema_version": "world-v2.1",
+        "observation_kind": "message",
+        "observation_id": observation_id,
+        "world_id": WORLD,
+        "logical_time": NOW.isoformat(),
+        "created_at": NOW.isoformat(),
+        "trace_id": "trace:audit",
+        "causation_id": f"cause:{event_id}",
+        "correlation_id": "corr:audit",
+        "source": "test",
+        "source_event_id": f"source:{event_id}",
+        "actor": "system:test",
+        "channel": "test",
+        "payload_ref": f"payload:{event_id}",
+        "payload_hash": "f" * 64,
+        "received_at": NOW.isoformat(),
+    }
+    identity = domain_idempotency_key(
+        event_type="ObservationRecorded", world_id=WORLD, payload=payload
+    )
+    assert identity is not None
+    return WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=event_id,
+        world_id=WORLD,
+        event_type="ObservationRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="system:test",
+        source="test",
+        trace_id="trace:audit",
+        causation_id=f"cause:{event_id}",
+        correlation_id="corr:audit",
+        idempotency_key=identity,
         payload=payload,
     )
 
@@ -450,7 +495,7 @@ def test_audit_preserves_stale_proposal_after_world_advances() -> None:
     ledger = WorldLedger.in_memory(world_id=WORLD)
     _started(ledger)
     ledger.commit(
-        [_event("event:world:advanced", "WorldStarted", {})],
+        [_world_change("event:world:advanced")],
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )
@@ -501,7 +546,7 @@ def test_acceptance_manifest_v2_stale_closes_old_proposal_and_accepted_fails_clo
     ledger = WorldLedger.in_memory(world_id=WORLD)
     _started(ledger)
     ledger.commit(
-        [_event("event:world:before-audit", "WorldStarted", {})],
+        [_world_change("event:world:before-audit")],
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )
@@ -702,10 +747,7 @@ def test_v16_sqlite_head_migrates_to_v18_without_forged_audit_indexes(tmp_path) 
     before = ledger.project()
     ledger.close()
     connection = sqlite3.connect(path)
-    row = connection.execute(
-        "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-    ).fetchone()
-    state = json.loads(row[0])
+    state = json.loads(read_head_state_json(connection, WORLD))
     state.pop("model_result_audits", None)
     state.pop("proposal_audits", None)
     legacy_payload = ReducerState.model_validate_json(json.dumps(state)).semantic_payload(
@@ -748,9 +790,7 @@ def test_v17_sqlite_head_migrates_to_v18_preserving_proposal_audit(tmp_path) -> 
     before = ledger.project()
     ledger.close()
     with sqlite3.connect(path) as connection:
-        state_json = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0]
+        state_json = read_head_state_json(connection, WORLD)
         state = json.loads(state_json)
         state.pop("acceptance_manifests_v2", None)
         legacy_state = ReducerState.model_validate_json(json.dumps(state))

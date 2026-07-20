@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
+from .model_json import extract_json_object_text
 from .schema_core import FrozenModel
 from .schemas import (
     MEMORY_SALIENCE_MATRIX_DIGEST,
@@ -34,7 +35,7 @@ class FactMemoryRetentionDraft(FrozenModel):
 
 def _parse(raw: str) -> dict[str, object]:
     try:
-        value = json.loads(raw)
+        value = json.loads(extract_json_object_text(raw))
     except json.JSONDecodeError as exc:
         raise ValueError("Fact-memory model did not return one JSON object") from exc
     if not isinstance(value, dict):
@@ -56,11 +57,37 @@ class FactMemoryDraftAdapter:
     async def classify(
         self, *, predicate_code: str, source_text: str
     ) -> FactMemoryRetentionDraft | None:
-        raw = await self._model.complete(
-            self._messages(predicate_code=predicate_code, source_text=source_text),
-            temperature=self._temperature,
+        messages = self._messages(predicate_code=predicate_code, source_text=source_text)
+        raw = await self._complete(messages)
+        try:
+            return materialize_fact_memory_draft(raw)
+        except ValueError as violation:
+            # One bounded corrective pass mirroring the Fact draft adapter:
+            # the retry restates the violated contract, the strict validator
+            # still gates the result, and a second failure propagates.
+            corrected = await self._complete([
+                *messages,
+                {"role": "assistant", "content": raw},
+                {
+                    "role": "user",
+                    "content": (
+                        "Your answer violated the contract: "
+                        + str(violation)
+                        + ". Return exactly one corrected JSON object now. Remember: salience "
+                        "values are basis-point integers 0..10000 and retain=false answers "
+                        'contain only {"retain":false}.'
+                    ),
+                },
+            ])
+            return materialize_fact_memory_draft(corrected)
+
+    async def _complete(self, messages: list[dict[str, str]]) -> str:
+        structured = getattr(self._model, "complete_json", None)
+        return (
+            await structured(messages, temperature=self._temperature)
+            if callable(structured)
+            else await self._model.complete(messages, temperature=self._temperature)
         )
-        return materialize_fact_memory_draft(raw)
 
     @staticmethod
     def _messages(*, predicate_code: str, source_text: str) -> list[dict[str, str]]:
@@ -74,7 +101,8 @@ class FactMemoryDraftAdapter:
                     "cue_kind, retention_rationales, and salience. salience must contain exactly "
                     "autobiographical_relevance_bp, relationship_relevance_bp, emotional_residue_bp, "
                     "unfinished_business_bp, recurrence_bp, novelty_bp, future_utility_bp, and "
-                    "world_continuity_bp as integers 0..10000. Do not return summaries, ids, hashes, "
+                    "world_continuity_bp as basis-point integers 0..10000 (for example 7900, never 0.79). "
+                    "Do not return summaries, ids, hashes, "
                     "privacy, source refs, actions, or behaviour instructions."
                 ),
             },
@@ -107,12 +135,18 @@ def materialize_fact_memory_draft(raw: str) -> FactMemoryRetentionDraft | None:
     salience = value["salience"]
     if not isinstance(cue_kind, str) or not isinstance(rationales, list) or not isinstance(salience, dict):
         raise ValueError("Fact-memory retained draft has invalid field types")
+    normalized_salience: dict[str, object] = {}
+    for key, item in salience.items():
+        if isinstance(item, float) and 0 <= item <= 1:
+            normalized_salience[key] = round(item * 10_000)
+        else:
+            normalized_salience[key] = item
     try:
         result = FactMemoryRetentionDraft(
             cue_kind=cue_kind,
             retention_rationales=tuple(rationales),
             salience=MemorySalienceVector(
-                **salience,
+                **normalized_salience,
                 matrix_digest=MEMORY_SALIENCE_MATRIX_DIGEST,
             ),
         )

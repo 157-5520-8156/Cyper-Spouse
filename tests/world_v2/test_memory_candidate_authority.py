@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from legacy_migration_support import strip_v16_state_fields
+from legacy_migration_support import read_head_state_json, strip_v16_state_fields
 
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.fact_events import FactChangedPayload, fact_mutation_hash
@@ -482,13 +482,19 @@ def mutation(
     return MemoryCandidateChangedPayload.model_validate(raw)
 
 
-def event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
+def event(
+    event_id: str,
+    event_type: str,
+    payload: dict[str, object],
+    *,
+    logical_time: datetime = NOW,
+) -> WorldEvent:
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
         event_id=event_id,
         world_id=WORLD,
         event_type=event_type,
-        logical_time=NOW,
+        logical_time=logical_time,
         created_at=NOW,
         actor="system:test",
         source="test",
@@ -632,8 +638,9 @@ def initialized_ledger_with_fact(
     ledger: WorldLedger | SQLiteWorldLedger | None = None,
 ) -> tuple[WorldLedger | SQLiteWorldLedger, MemorySourceBinding]:
     ledger = ledger or WorldLedger.in_memory(world_id=WORLD)
+    origin = NOW - timedelta(minutes=1)
     ledger.commit(
-        [event("world:start", "WorldStarted", {})],
+        [event("world:start", "WorldStarted", {}, logical_time=origin)],
         expected_world_revision=0,
         expected_deliberation_revision=0,
     )
@@ -643,7 +650,7 @@ def initialized_ledger_with_fact(
                 "clock:start",
                 "ClockAdvanced",
                 {
-                    "logical_time_from": (NOW - timedelta(minutes=1)).isoformat(),
+                    "logical_time_from": origin.isoformat(),
                     "logical_time_to": NOW.isoformat(),
                 },
             )
@@ -1625,11 +1632,12 @@ def test_sqlite_migrates_nonempty_v13_head_to_v14_and_rebuilds(tmp_path) -> None
 
     with sqlite3.connect(path) as connection:
         row = connection.execute(
-            "SELECT world_revision, state_json FROM world_v2_heads WHERE world_id = ?",
+            "SELECT world_revision FROM world_v2_heads WHERE world_id = ?",
             (WORLD,),
         ).fetchone()
         assert row is not None
-        world_revision, state_json = row
+        world_revision = row[0]
+        state_json = read_head_state_json(connection, WORLD)
         state = ReducerState.model_validate_json(state_json)
         legacy_semantic = state.semantic_payload(
             world_id=WORLD,

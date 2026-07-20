@@ -79,6 +79,17 @@ class CharacterMediaFactBinder:
                     )
             except ValueError:
                 continue
+            # The P3 selection/acceptance contract is private-only.  Keep
+            # that boundary at discovery as well: a recipient-scoped
+            # ``personal`` declaration is not an implicit downgrade to the
+            # private lane, nor may it leave a candidate that no later stage
+            # can lawfully select.  A future personal product surface needs
+            # its own candidate/selection/authorization contract.
+            if (
+                declaration_event.event_type == "RecipientScopedImageEvidenceDeclared"
+                and declaration.image_evidence.visibility != "private"
+            ):
+                continue
             character = declaration.image_evidence.character_media
             if character is None:
                 continue

@@ -9,6 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+from companion_daemon.media_suggestive_lane import (
+    EXPLICIT_PRIVATE_LANE,
+    PRIVATE_RENDER_LANES,
+    SUGGESTIVE_PRIVATE_LANE,
+)
+
 
 PRIVATE_BASIS_KINDS = frozenset(
     {
@@ -20,6 +26,64 @@ PRIVATE_BASIS_KINDS = frozenset(
     }
 )
 CHARGE_RANK = {"none": 0, "subtle": 1, "charged": 2, "veiled": 3}
+
+# These names describe what the recipient is being shown, rather than how
+# much skin happens to be visible.  `explicit_reserved` is kept only to reject
+# stale proposal payloads; current high private lanes are renderable through a
+# separately configured provider capability.
+MEDIA_LANES = frozenset(
+    {
+        "ordinary_life",
+        "alluring_life",
+        "exclusive_private",
+        SUGGESTIVE_PRIVATE_LANE,
+        EXPLICIT_PRIVATE_LANE,
+        "explicit_reserved",
+    }
+)
+RECIPIENT_ACCESS = frozenset({"ambient", "recipient_directed", "recipient_exclusive"})
+ATTRACTION_EXPRESSIONS = frozenset(
+    {
+        "none",
+        "feminine",
+        "charged",
+        "sexual_suggestive",
+        "explicit_adult",
+        "explicit_reserved",
+    }
+)
+HIGH_PRIVATE_INTENT_BY_LANE = {
+    SUGGESTIVE_PRIVATE_LANE: "sexual_suggestive",
+    EXPLICIT_PRIVATE_LANE: "explicit_adult",
+}
+
+
+@dataclass(frozen=True)
+class MediaLaneRecommendation:
+    """The bounded semantic recommendation returned by the planning model."""
+
+    lane: str
+    recipient_access: str
+    attraction_expression: str
+
+    @classmethod
+    def from_proposal(cls, proposal: Mapping[str, object]) -> "MediaLaneRecommendation":
+        # MediaPlan payloads store this value as the compact contract itself;
+        # planner proposals carry the same fields at top level.
+        return cls(
+            lane=str(proposal.get("lane") or proposal.get("media_lane") or ""),
+            recipient_access=str(proposal.get("recipient_access") or ""),
+            attraction_expression=str(proposal.get("attraction_expression") or ""),
+        )
+
+    def validate(self) -> str | None:
+        if self.lane not in MEDIA_LANES:
+            return "invalid_media_lane"
+        if self.recipient_access not in RECIPIENT_ACCESS:
+            return "invalid_recipient_access"
+        if self.attraction_expression not in ATTRACTION_EXPRESSIONS:
+            return "invalid_attraction_expression"
+        return None
 
 
 @dataclass(frozen=True)
@@ -191,6 +255,178 @@ class MediaEligibilityRouter:
             "private_expression", True, required_charge=private_expression_basis.required_charge
         )
 
+    def classify_recommendation(
+        self,
+        *,
+        family: str,
+        privacy_ceiling: str,
+        expression_charge_ceiling: str,
+        event_snapshot: Mapping[str, object],
+        private_expression_basis: PrivateExpressionBasis | None,
+        recipient_ref: str,
+        recommendation: MediaLaneRecommendation,
+        selected_expression_charge: str,
+        selected_capture_mode: str,
+        selected_share_intent: str,
+        selected_privacy: str,
+        selected_address_mode: str,
+        selected_interaction_bid: str = "",
+        selected_attraction_mechanism: str | None = None,
+        selected_coverage_mode: str | None = None,
+    ) -> MediaLaneDecision:
+        """Accept a proposed Lane only when its frozen visual contract supports it.
+
+        This is deliberately called after the model has selected an indivisible
+        v5 candidate: the router can verify the actual capture authorship and
+        expression charge instead of trusting prose about them.
+        """
+
+        error = recommendation.validate()
+        if error:
+            return MediaLaneDecision(recommendation.lane or "unknown", False, error)
+        if recommendation.lane == "explicit_reserved":
+            return MediaLaneDecision(
+                "explicit_reserved", False, "explicit_media_capability_disabled"
+            )
+        if recommendation.lane in PRIVATE_RENDER_LANES:
+            high_lane = recommendation.lane
+            if family != "character_media":
+                return MediaLaneDecision(
+                    high_lane, False, "media_lane_requires_character_media"
+                )
+            # A high provider route is not a cosmetic upgrade for an ordinary
+            # selfie.  World must freeze a recipient-bound, event-grounded
+            # private-expression basis before the planner may select one.
+            # This is visual provenance, not the separate adult-authorization
+            # decision owned by the upstream policy environment.
+            private_grounding = self.classify(
+                family=family,
+                privacy_ceiling=privacy_ceiling,
+                expression_charge_ceiling=expression_charge_ceiling,
+                event_snapshot=event_snapshot,
+                private_expression_basis=private_expression_basis,
+                recipient_ref=recipient_ref,
+            )
+            if not private_grounding.allowed:
+                return MediaLaneDecision(
+                    high_lane,
+                    False,
+                    private_grounding.reason,
+                    private_grounding.details,
+                )
+            intent_error = _high_private_intent_error(
+                event_snapshot,
+                lane=high_lane,
+                recipient_ref=recipient_ref,
+            )
+            if intent_error:
+                return MediaLaneDecision(high_lane, False, intent_error)
+            expected_expression = (
+                "sexual_suggestive"
+                if high_lane == SUGGESTIVE_PRIVATE_LANE
+                else "explicit_adult"
+            )
+            if (
+                recommendation.recipient_access != "recipient_exclusive"
+                or recommendation.attraction_expression != expected_expression
+                or privacy_ceiling != "intimate"
+                or selected_privacy != "intimate"
+                or selected_share_intent != "intimate_signal"
+                or selected_interaction_bid != "invite_desire"
+                or selected_capture_mode not in {"character_front_camera", "mirror"}
+                or selected_address_mode != "direct_recipient"
+                or selected_expression_charge not in {"charged", "veiled"}
+                or not selected_attraction_mechanism
+                or selected_coverage_mode not in {"private_apparel", "strategic_cover"}
+            ):
+                return MediaLaneDecision(
+                    high_lane, False, "private_render_lane_visual_contract_invalid"
+                )
+            if CHARGE_RANK[selected_expression_charge] < max(
+                CHARGE_RANK["charged"], CHARGE_RANK[private_grounding.required_charge]
+            ):
+                return MediaLaneDecision(
+                    high_lane, False, "private_render_charge_below_grounding_floor"
+                )
+            # Authorization and relation policy are intentionally upstream
+            # responsibilities.  This router only verifies a coherent,
+            # self-authored photographic contract; no model output can invent
+            # its capture physics or recipient-directed visual semantics.
+            return MediaLaneDecision(high_lane, True, required_charge="charged")
+        if family != "character_media":
+            return MediaLaneDecision(
+                recommendation.lane, False, "media_lane_requires_character_media"
+            )
+        if selected_expression_charge not in CHARGE_RANK:
+            return MediaLaneDecision(
+                recommendation.lane, False, "invalid_candidate_expression_charge"
+            )
+
+        if recommendation.lane == "ordinary_life":
+            if (
+                recommendation.attraction_expression != "none"
+                or recommendation.recipient_access == "recipient_exclusive"
+                or selected_expression_charge != "none"
+            ):
+                return MediaLaneDecision(
+                    "ordinary_life", False, "ordinary_lane_contains_attraction_expression"
+                )
+            return MediaLaneDecision("ordinary_life", True)
+
+        if recommendation.lane == "alluring_life":
+            if recommendation.recipient_access == "recipient_exclusive":
+                return MediaLaneDecision(
+                    "alluring_life", False, "alluring_lane_cannot_claim_exclusive_access"
+                )
+            if recommendation.attraction_expression not in {"feminine", "charged"}:
+                return MediaLaneDecision(
+                    "alluring_life", False, "alluring_lane_requires_attraction_expression"
+                )
+            if (
+                not recipient_ref
+                or privacy_ceiling != "intimate"
+                or selected_privacy != "intimate"
+                or selected_share_intent != "intimate_signal"
+                or selected_expression_charge == "none"
+                or CHARGE_RANK[selected_expression_charge] > CHARGE_RANK[expression_charge_ceiling]
+            ):
+                return MediaLaneDecision(
+                    "alluring_life", False, "alluring_lane_visual_contract_invalid"
+                )
+            return MediaLaneDecision("alluring_life", True)
+
+        # `exclusive_private` intentionally reuses the existing evidence-only
+        # basis contract.  A private label is never granted by the model alone.
+        legacy = self.classify(
+            family=family,
+            privacy_ceiling=privacy_ceiling,
+            expression_charge_ceiling=expression_charge_ceiling,
+            event_snapshot=event_snapshot,
+            private_expression_basis=private_expression_basis,
+            recipient_ref=recipient_ref,
+        )
+        if not legacy.allowed:
+            return MediaLaneDecision("exclusive_private", False, legacy.reason, legacy.details)
+        if recommendation.recipient_access != "recipient_exclusive":
+            return MediaLaneDecision(
+                "exclusive_private", False, "exclusive_lane_requires_recipient_access"
+            )
+        if recommendation.attraction_expression not in {"feminine", "charged"}:
+            return MediaLaneDecision(
+                "exclusive_private", False, "exclusive_lane_requires_attraction_expression"
+            )
+        if (
+            selected_capture_mode not in {"character_front_camera", "mirror"}
+            or selected_address_mode not in {"direct_recipient", "photographer_relational"}
+            or selected_privacy != "intimate"
+            or selected_share_intent != "intimate_signal"
+            or CHARGE_RANK[selected_expression_charge] < CHARGE_RANK[legacy.required_charge]
+        ):
+            return MediaLaneDecision(
+                "exclusive_private", False, "exclusive_lane_visual_contract_invalid"
+            )
+        return MediaLaneDecision("exclusive_private", True, required_charge=legacy.required_charge)
+
 
 _MISSING = object()
 
@@ -201,6 +437,30 @@ _BASIS_ROOTS = {
     "private_transition": "/activity/private_transition",
     "shared_ritual": "/relationship_media_context/shared_ritual",
 }
+
+
+def _high_private_intent_error(
+    snapshot: Mapping[str, object], *, lane: str, recipient_ref: str
+) -> str | None:
+    """Require an explicit world fact about *what* the private display means.
+
+    ``recipient_display`` alone means that a character is intentionally
+    showing something to one person; it does not imply sexual content.  The
+    high rendering route therefore needs a discrete content intent alongside
+    the event proof.  This is not an adult-consent check: upstream owns that
+    separately.  It is a routing fact that prevents a normal affectionate
+    image from being cosmetically re-labelled as high private media.
+    """
+
+    expected = HIGH_PRIVATE_INTENT_BY_LANE.get(lane)
+    display = _pointer(snapshot, "/relationship_media_context/declared_display")
+    if not isinstance(display, Mapping):
+        return "high_private_intent_evidence_missing"
+    if str(display.get("recipient_ref") or "").strip() != recipient_ref:
+        return "high_private_intent_recipient_conflict"
+    if str(display.get("media_intent") or "").strip() != expected:
+        return "high_private_intent_mismatch"
+    return None
 
 
 def _meaningful(value: object) -> bool:
@@ -215,8 +475,9 @@ def _meaningful(value: object) -> bool:
 
 def _basis_value_matches_kind(*, kind: str, root_value: object, recipient_ref: str) -> bool:
     if kind == "embodied_state":
-        return isinstance(root_value, list) and any(
-            isinstance(cue, Mapping) and str(cue.get("cue_id") or "").strip() for cue in root_value
+        cues = root_value.get("cues") if isinstance(root_value, Mapping) else None
+        return isinstance(cues, list) and any(
+            isinstance(cue, Mapping) and str(cue.get("cue_id") or "").strip() for cue in cues
         )
     if not isinstance(root_value, Mapping):
         return False

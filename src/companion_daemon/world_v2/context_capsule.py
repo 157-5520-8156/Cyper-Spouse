@@ -37,12 +37,15 @@ from .schemas import (
 )
 from .situation_compiler import SituationProjection
 from .world_life_context import WorldLifeContextItem
+from .perception_result_context import PerceptionResultContextItem
+from .recent_dialogue import RecentDialogueItem
 
 
 T = TypeVar("T")
 SliceName = Literal[
     "character_core",
     "current_situation",
+    "recent_dialogue",
     "relationship_slice",
     "appraisals",
     "affect_episodes",
@@ -50,6 +53,7 @@ SliceName = Literal[
     "relevant_facts",
     "recent_experiences",
     "world_life",
+    "perception_results",
     "active_memory_candidates",
     "available_capabilities",
     "action_budget",
@@ -60,6 +64,7 @@ TruncationReason = Literal[
     "item_budget",
     "field_budget",
     "character_budget",
+    "source_envelope_budget",
     "global_character_budget",
 ]
 
@@ -73,6 +78,48 @@ MAX_INPUT_SERIALIZED_CHARACTERS_PER_SLICE = 1_000_000
 
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class FactRecallItem(_FrozenModel):
+    """Model-facing Fact semantics closed over Fact + Observation authority.
+
+    The persistent Fact deliberately retains an opaque value ref/hash.  This
+    read model recovers no value by inference: it exposes only the exact text
+    of the Observation which the accepted Fact assertion binds.
+    """
+
+    fact_id: str = Field(min_length=1)
+    subject_ref: str = Field(min_length=1)
+    predicate_code: str = Field(min_length=1, max_length=128)
+    source_excerpt: str = Field(min_length=1, max_length=4_096)
+    confidence_bp: int = Field(ge=1, le=10_000)
+    privacy_class: PrivacyClass
+    status: Literal["active"] = "active"
+    committed_at: datetime
+    updated_at: datetime
+    accepted_fact_event_ref: str = Field(min_length=1)
+    accepted_fact_world_revision: int = Field(ge=1)
+    accepted_fact_payload_hash: str = Field(min_length=64, max_length=64)
+    observation_event_ref: str = Field(min_length=1)
+    observation_world_revision: int = Field(ge=1)
+    observation_event_payload_hash: str = Field(min_length=64, max_length=64)
+    source_observation_id: str = Field(min_length=1)
+    assertion_payload_ref: str = Field(min_length=1)
+    assertion_payload_hash: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def authority_is_distinct_and_ordered(self) -> "FactRecallItem":
+        for value in (
+            self.accepted_fact_payload_hash,
+            self.observation_event_payload_hash,
+            self.assertion_payload_hash,
+        ):
+            _validate_hex_digest(value, label="Fact recall authority hash")
+        if self.accepted_fact_event_ref == self.observation_event_ref:
+            raise ValueError("Fact recall requires distinct Fact and Observation events")
+        if self.observation_world_revision >= self.accepted_fact_world_revision:
+            raise ValueError("Fact recall Observation must precede its accepted Fact")
+        return self
 
 
 def _canonical_json(value: object) -> str:
@@ -95,13 +142,18 @@ RANK_POLICY_VERSION = "context-capsule-rank-policy.1"
 RANK_DOMAIN_IMPORTANCE_BP: dict[SliceName, int] = {
     "character_core": 10_000,
     "current_situation": 10_000,
+    "recent_dialogue": 9_500,
     "relationship_slice": 8_500,
     "appraisals": 8_500,
     "affect_episodes": 8_500,
     "open_threads": 8_000,
-    "relevant_facts": 7_500,
+    # Durable user facts must not be globally evicted behind generic old
+    # dialogue/appraisal envelopes.  A real two-part recall probe otherwise
+    # retained the name Fact but dropped the equally active preference Fact.
+    "relevant_facts": 9_000,
     "recent_experiences": 7_000,
     "world_life": 7_250,
+    "perception_results": 8_000,
     "active_memory_candidates": 7_500,
     "available_capabilities": 6_000,
     "action_budget": 6_000,
@@ -158,7 +210,9 @@ def _validate_hex_digest(value: str, *, label: str) -> str:
 
 
 class ResolvedSourceBinding(_FrozenModel):
-    source_kind: Literal["committed_event", "execution_receipt", "projection_snapshot"]
+    source_kind: Literal[
+        "committed_event", "execution_receipt", "projection_snapshot", "immutable_payload"
+    ]
     authority_type: str = Field(min_length=1, max_length=128)
     ref: str = Field(min_length=1, max_length=MAX_SOURCE_REF_CHARACTERS)
     source_world_revision: int = Field(ge=0)
@@ -321,7 +375,10 @@ class InnerAdvisoryProjection(_FrozenModel):
             raise ValueError("advisory source refs must be unique")
         if len(self.candidate_refs) != len(set(self.candidate_refs)):
             raise ValueError("advisory candidate refs must be unique")
-        if self.candidates and tuple(item.candidate_ref for item in self.candidates) != self.candidate_refs:
+        if (
+            self.candidates
+            and tuple(item.candidate_ref for item in self.candidates) != self.candidate_refs
+        ):
             raise ValueError("advisory candidate summaries must match candidate refs")
         return self
 
@@ -342,27 +399,61 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
     current_situation: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=1, max_fields=96, max_characters=12_000)
     )
-    relationship_slice: SliceBudget = Field(
-        default_factory=lambda: SliceBudget(max_items=1, max_fields=48, max_characters=2_000)
+    recent_dialogue: SliceBudget = Field(
+        # Short-horizon dialogue is deliberately smaller than durable Fact /
+        # Memory context. Eight verified utterances preserve local reference
+        # and tone without allowing duplicated delivery provenance to evict a
+        # two-part long-term recall under the global prompt cap.
+        default_factory=lambda: SliceBudget(max_items=8, max_fields=96, max_characters=10_000)
     )
-    appraisals: SliceBudget = Field(default_factory=SliceBudget)
+    relationship_slice: SliceBudget = Field(
+        # A current relationship head includes hysteresis and exact accepted
+        # source bindings.  Two thousand characters can reject that single
+        # item wholesale, which makes accepted relationship changes invisible
+        # to ordinary chat.  Keep exactly one bounded head with enough room for
+        # its complete authority envelope.
+        default_factory=lambda: SliceBudget(max_items=1, max_fields=48, max_characters=4_000)
+    )
+    appraisals: SliceBudget = Field(
+        # A mixed same-turn appraisal carries several weighted hypotheses plus
+        # exact Observation and accepted-event authority.  The generic 4k
+        # envelope can drop that one fresh item wholesale.
+        default_factory=lambda: SliceBudget(max_items=8, max_fields=96, max_characters=6_500)
+    )
     # An accepted episode carries its appraisal hypotheses and immutable
     # provenance.  Four thousand characters can reject the entire highest
     # priority episode, leaving the next deliberation affect-blind.  Reserve
-    # enough room for one fully source-bound episode; the global capsule cap
-    # and per-slice selection still bound total context.
+    # enough room for one fully source-bound episode, including a merged
+    # multi-stimulus lineage; the global capsule cap and per-slice selection
+    # still bound total context.
     affect_episodes: SliceBudget = Field(
-        default_factory=lambda: SliceBudget(max_items=8, max_fields=96, max_characters=6_000)
+        default_factory=lambda: SliceBudget(max_items=8, max_fields=96, max_characters=16_000)
     )
     open_threads: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=12, max_fields=144, max_characters=4_000)
     )
     relevant_facts: SliceBudget = Field(
-        default_factory=lambda: SliceBudget(max_items=16, max_fields=192, max_characters=4_000)
+        # A verified FactRecall item deliberately carries both the accepted
+        # Fact and source Observation authority.  At 4k, that proof envelope
+        # retained only one of two active facts in the real 32-turn journey:
+        # the user's name survived while their drink preference vanished.
+        # Reserve enough for at least two independently sourced recalls; the
+        # item/field/global caps still bound the lane and provider-facing
+        # compaction removes the cryptographic proof noise.
+        default_factory=lambda: SliceBudget(max_items=16, max_fields=192, max_characters=12_000)
     )
     recent_experiences: SliceBudget = Field(default_factory=SliceBudget)
     world_life: SliceBudget = Field(default_factory=SliceBudget)
-    active_memory_candidates: SliceBudget = Field(default_factory=SliceBudget)
+    perception_results: SliceBudget = Field(
+        default_factory=lambda: SliceBudget(max_items=4, max_fields=72, max_characters=4_000)
+    )
+    active_memory_candidates: SliceBudget = Field(
+        # Two compact source excerpts are the minimum useful cross-turn recall
+        # unit for questions that join identity and preference/history.  The
+        # former 4k default frequently retained only one otherwise-active
+        # memory, making an explicit two-part recall question look forgotten.
+        default_factory=lambda: SliceBudget(max_items=8, max_fields=128, max_characters=8_000)
+    )
     available_capabilities: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=8, max_fields=96, max_characters=2_000)
     )
@@ -371,7 +462,13 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
     )
     private_impressions: SliceBudget = Field(default_factory=SliceBudget)
     advisories: SliceBudget = Field(
-        default_factory=lambda: SliceBudget(max_items=12, max_fields=96, max_characters=3_000)
+        # One source-bound advisory item includes resolver metadata as well as
+        # its compact alternatives.  The former 3k cap routinely retained
+        # only the first classification, making user-affect/thread/interrupt
+        # alternatives disappear before the main model could weigh them.
+        # Eight kilobytes fits the complete bounded semantic matrix while the
+        # capsule-wide 32k hard cap still limits total prompt growth.
+        default_factory=lambda: SliceBudget(max_items=12, max_fields=96, max_characters=8_000)
     )
 
 
@@ -386,18 +483,21 @@ class ContextCapsuleRequest(_FrozenModel):
     deliberation_revision: int = Field(ge=0)
     ledger_sequence: int = Field(ge=0)
     logical_time: datetime | None = None
+    relationship_evaluation_requested: bool = False
     situation: ResolvedSlice[SituationProjection]
+    recent_dialogue: ResolvedSlice[tuple[RecentDialogueItem, ...]] | None = None
     character_core: ResolvedSlice[CharacterCoreProjection] | None = None
     relationship_slice: ResolvedSlice[RelationshipStateProjection] | None = None
     appraisals: ResolvedSlice[tuple[AppraisalProjection, ...]] | None = None
     affect_episodes: ResolvedSlice[tuple[AffectEpisodeProjection, ...]] | None = None
     open_threads: ResolvedSlice[tuple[ThreadProjection, ...]] | None = None
-    relevant_facts: ResolvedSlice[tuple[FactProjection, ...]] | None = None
+    relevant_facts: ResolvedSlice[tuple[FactProjection | FactRecallItem, ...]] | None = None
     recent_experiences: ResolvedSlice[tuple[ExperienceProjection, ...]] | None = None
     world_life: ResolvedSlice[tuple[WorldLifeContextItem, ...]] | None = None
-    active_memory_candidates: ResolvedSlice[
-        tuple[MemoryCandidateProjection | MemoryRetrievalItem, ...]
-    ] | None = None
+    perception_results: ResolvedSlice[tuple[PerceptionResultContextItem, ...]] | None = None
+    active_memory_candidates: (
+        ResolvedSlice[tuple[MemoryCandidateProjection | MemoryRetrievalItem, ...]] | None
+    ) = None
     available_capabilities: ResolvedSlice[tuple[CapabilityStateProjection, ...]] | None = None
     action_budget: ResolvedSlice[tuple[BudgetAccount, ...]] | None = None
     private_impressions: ResolvedSlice[tuple[PrivateImpressionProjection, ...]] | None = None
@@ -541,6 +641,44 @@ class ContextBudgetAudit(_FrozenModel):
         return self
 
 
+class RelationshipEvaluationSource(_FrozenModel):
+    """Compact, source-bound authority descriptor for the relationship lane."""
+
+    item_ref: str = Field(min_length=1)
+    source_bindings: tuple[ResolvedSourceBinding, ...] = Field(min_length=1)
+    source_hash: str = Field(min_length=64, max_length=64)
+    value_hash: str = Field(min_length=64, max_length=64)
+
+
+class RelationshipEvaluationContext(_FrozenModel):
+    """Bounded relationship/appraisal view for a post-appraisal deliberation.
+
+    This is deliberately not a second relationship authority.  It is a compact
+    model-facing view whose values and source descriptors are derived from the
+    same pinned resolver output as the ordinary slices.  In particular, it
+    keeps the exact triggering appraisal available even when accumulated
+    generic slices cannot fit their whole-item envelopes.
+    """
+
+    subject_ref: str = Field(min_length=1)
+    trigger_appraisal_id: str = Field(min_length=1)
+    appraisal_summary_json: str = Field(min_length=2)
+    relationship_summary_json: str = Field(min_length=2)
+    appraisal_source: RelationshipEvaluationSource
+    relationship_source: RelationshipEvaluationSource | None = None
+
+    @field_validator("appraisal_summary_json", "relationship_summary_json")
+    @classmethod
+    def summaries_are_canonical_objects(cls, value: str) -> str:
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("relationship evaluation summary is invalid JSON") from exc
+        if not isinstance(decoded, dict) or _canonical_json(decoded) != value:
+            raise ValueError("relationship evaluation summary must be canonical JSON object")
+        return value
+
+
 class ContextCapsule(_FrozenModel):
     capsule_id: str = Field(min_length=64, max_length=64)
     provenance_kind: Literal["trusted_resolver_compiled", "test_only_untrusted"]
@@ -558,6 +696,7 @@ class ContextCapsule(_FrozenModel):
     logical_time: datetime | None
     character_core: CapsuleSlice
     current_situation: CapsuleSlice
+    recent_dialogue: CapsuleSlice
     relationship_slice: CapsuleSlice
     appraisals: CapsuleSlice
     affect_episodes: CapsuleSlice
@@ -565,11 +704,13 @@ class ContextCapsule(_FrozenModel):
     relevant_facts: CapsuleSlice
     recent_experiences: CapsuleSlice
     world_life: CapsuleSlice
+    perception_results: CapsuleSlice | None = None
     active_memory_candidates: CapsuleSlice
     available_capabilities: CapsuleSlice
     action_budget: CapsuleSlice
     private_impressions: CapsuleSlice
     advisories: CapsuleSlice
+    relationship_evaluation: RelationshipEvaluationContext | None = None
     model_content_json: str
     budget: ContextBudgetAudit
 
@@ -591,6 +732,7 @@ class ContextCapsule(_FrozenModel):
             "logical_time": self.logical_time.isoformat() if self.logical_time else None,
             "character_core": self.character_core.model_dump(mode="json"),
             "current_situation": self.current_situation.model_dump(mode="json"),
+            "recent_dialogue": self.recent_dialogue.model_dump(mode="json"),
             "relationship_slice": self.relationship_slice.model_dump(mode="json"),
             "appraisals": self.appraisals.model_dump(mode="json"),
             "affect_episodes": self.affect_episodes.model_dump(mode="json"),
@@ -606,6 +748,12 @@ class ContextCapsule(_FrozenModel):
             "model_content_json": self.model_content_json,
             "budget": self.budget.model_dump(mode="json"),
         }
+        if self.relationship_evaluation is not None:
+            material["relationship_evaluation"] = self.relationship_evaluation.model_dump(
+                mode="json"
+            )
+        if self.perception_results is not None:
+            material["perception_results"] = self.perception_results.model_dump(mode="json")
         result_material = dict(material)
         for field in ("provenance_kind", "compiler_result_hash", "compiler_result_tag"):
             result_material.pop(field)
@@ -629,14 +777,16 @@ class ContextCapsule(_FrozenModel):
 _ITEM_IDS: dict[SliceName, str] = {
     "character_core": "core_id",
     "current_situation": "actor_ref",
+    "recent_dialogue": "dialogue_id",
     "relationship_slice": "relationship_id",
     "appraisals": "appraisal_id",
     "affect_episodes": "episode_id",
     "open_threads": "thread_id",
-        "relevant_facts": "fact_id",
-        "recent_experiences": "experience_id",
-        "world_life": "occurrence_id",
-        "active_memory_candidates": "candidate_id",
+    "relevant_facts": "fact_id",
+    "recent_experiences": "experience_id",
+    "world_life": "occurrence_id",
+    "perception_results": "result_id",
+    "active_memory_candidates": "candidate_id",
     "available_capabilities": "grant_id",
     "action_budget": "account_id",
     "private_impressions": "impression_id",
@@ -699,6 +849,7 @@ def _derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyCla
     conservative: dict[SliceName, PrivacyClass] = {
         "character_core": "withhold",
         "current_situation": "private",
+        "recent_dialogue": "private",
         "relationship_slice": "private",
         "appraisals": "private",
         "affect_episodes": "private",
@@ -706,6 +857,7 @@ def _derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyCla
         "relevant_facts": "personal",
         "recent_experiences": "personal",
         "world_life": "personal",
+        "perception_results": "private",
         "active_memory_candidates": "personal",
         "available_capabilities": "private",
         "action_budget": "withhold",
@@ -742,8 +894,12 @@ def _derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyCla
         return _strictest_privacy(tuple(typed))
     if slice_name == "affect_episodes":
         typed.append(item.privacy_class)
-    if slice_name in {"open_threads", "relevant_facts", "recent_experiences"}:
+    if slice_name in {"open_threads", "recent_experiences"}:
         typed.append(item.values.privacy_class)
+    if slice_name == "relevant_facts":
+        typed.append(
+            item.privacy_class if isinstance(item, FactRecallItem) else item.values.privacy_class
+        )
     if slice_name == "active_memory_candidates":
         typed.append(
             getattr(getattr(item, "values", None), "privacy_ceiling", None)
@@ -756,6 +912,8 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
     if slice_name == "current_situation":
         refs = tuple(source.event_ref for source in item.source_revisions)
         return tuple(sorted(set(refs))) or None
+    if slice_name == "recent_dialogue" and isinstance(item, RecentDialogueItem):
+        return tuple(sorted(claim.authority_event_ref for claim in item.source_claims))
     if slice_name == "private_impressions":
         origin = getattr(item, "origin", None)
         refs = set(item.source_refs)
@@ -769,10 +927,14 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
         if item.content is not None:
             refs.add(item.content.descriptor_event_ref)
         return tuple(sorted(refs))
+    if slice_name == "perception_results" and isinstance(item, PerceptionResultContextItem):
+        return tuple(sorted({item.source.result_event_ref, item.source.receipt_event_ref}))
     if slice_name == "relevant_facts" and isinstance(item, FactProjection):
         # The accepted Fact event is the whole immutable authority for the
         # projection.  Its observation id stays an internal Fact anchor.
         return (item.origin.accepted_event_ref,)
+    if slice_name == "relevant_facts" and isinstance(item, FactRecallItem):
+        return tuple(sorted((item.accepted_fact_event_ref, item.observation_event_ref)))
     if slice_name == "active_memory_candidates" and isinstance(item, MemoryRetrievalItem):
         return tuple(sorted({source.authority_event_ref for source in item.source_excerpts}))
 
@@ -797,11 +959,40 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
 
 
 def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str], ...]:
+    if isinstance(item, RecentDialogueItem):
+        return tuple(
+            (
+                "committed_event",
+                claim.authority_event_ref,
+                claim.authority_world_revision,
+                claim.authority_payload_hash,
+            )
+            for claim in item.source_claims
+        )
     if isinstance(item, FactProjection):
         # The Fact reducer validates its immutable evidence closure.  Context
         # pins the resulting accepted Fact event, while the retained evidence
         # uses durable observation identities rather than committed event ids.
         return ()
+    if isinstance(item, FactRecallItem):
+        return tuple(
+            sorted(
+                (
+                    (
+                        "committed_event",
+                        item.accepted_fact_event_ref,
+                        item.accepted_fact_world_revision,
+                        item.accepted_fact_payload_hash,
+                    ),
+                    (
+                        "committed_event",
+                        item.observation_event_ref,
+                        item.observation_world_revision,
+                        item.observation_event_payload_hash,
+                    ),
+                )
+            )
+        )
     if isinstance(item, WorldLifeContextItem):
         authorities = {
             (
@@ -821,6 +1012,21 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
                 )
             )
         return tuple(sorted(authorities))
+    if isinstance(item, PerceptionResultContextItem):
+        return (
+            (
+                "committed_event",
+                item.source.receipt_event_ref,
+                item.source.receipt_world_revision,
+                item.source.receipt_payload_hash,
+            ),
+            (
+                "committed_event",
+                item.source.result_event_ref,
+                item.source.result_world_revision,
+                item.source.result_payload_hash,
+            ),
+        )
     authorities: set[tuple[str, str, int, str]] = set()
     values = getattr(item, "values", None)
     for evidence in (
@@ -867,49 +1073,103 @@ def _typed_source_hashes(item: BaseModel) -> tuple[tuple[str, str, str], ...]:
 
 def _slice_model_content(
     *,
+    slice_name: SliceName,
     source_refs: tuple[str, ...],
     source_hash: str,
     resolver_proof: ResolverProof,
     items: tuple[CapsuleItem, ...],
+    model_content_profile: Literal["general", "proactive_decision"] = "general",
 ) -> str:
-    return _canonical_json(
-        {
-            "availability": "available",
-            "source_refs": source_refs,
-            "source_hash": source_hash,
-            "resolver_proof": resolver_proof.model_dump(mode="json"),
-            "items": tuple(
-                {
-                    "item_ref": item.item_ref,
-                    "rank_score_bp": item.rank_score_bp,
-                    "privacy_class": item.privacy_class,
-                    "source_bindings": tuple(
-                        binding.model_dump(mode="json") for binding in item.source_bindings
-                    ),
-                    "source_hash": item.source_hash,
-                    "value_hash": item.value_hash,
-                    "value": json.loads(item.payload_json),
-                }
-                for item in items
+    def model_item(item: CapsuleItem) -> dict[str, object]:
+        value = json.loads(item.payload_json)
+        material: dict[str, object] = {
+            "item_ref": item.item_ref,
+            "rank_score_bp": item.rank_score_bp,
+            "privacy_class": item.privacy_class,
+            "source_bindings": tuple(
+                binding.model_dump(mode="json") for binding in item.source_bindings
             ),
+            "source_hash": item.source_hash,
+            "value_hash": item.value_hash,
+            "value": value,
         }
-    )
+        if slice_name == "recent_dialogue":
+            # The full cryptographic closure remains on ``CapsuleItem`` and in
+            # the resolver proof. Repeating every acceptance/payload/receipt
+            # hash inside the model prompt made four delivered lines cost more
+            # context than the dialogue itself and could evict two active
+            # memories. The model needs the verified text and stable source
+            # identities, not duplicate hash material.
+            material.pop("source_bindings")
+            if isinstance(value, dict):
+                material["value"] = {
+                    key: field_value
+                    for key, field_value in value.items()
+                    if key not in {"source_claims", "sidecar_ref", "sidecar_hash"}
+                }
+        if model_content_profile == "proactive_decision" and slice_name in {
+            "character_core",
+            "current_situation",
+        }:
+            # The trusted CapsuleItem below remains a complete whole item with
+            # its exact authority closure.  This request-specific model view
+            # removes only duplicated proof bookkeeping, never semantic state.
+            material.pop("source_bindings")
+            material.pop("source_hash")
+            material.pop("value_hash")
+            if slice_name == "current_situation" and isinstance(value, dict):
+                material["value"] = {
+                    key: field_value
+                    for key, field_value in value.items()
+                    if key
+                    not in {
+                        "world_id",
+                        "authority_snapshot_hash",
+                        "situation_policy_input_hash",
+                        "compiled_at_world_revision",
+                        "actor_ref",
+                        "source_revisions",
+                        "policy_versions",
+                        "internal_semantic_hash",
+                    }
+                }
+        return material
+
+    content: dict[str, object] = {
+        "availability": "available",
+        "source_refs": source_refs,
+        "source_hash": source_hash,
+        "resolver_proof": resolver_proof.model_dump(mode="json"),
+        "items": tuple(model_item(item) for item in items),
+    }
+    if slice_name == "recent_dialogue":
+        # The exact refs remain in CapsuleSlice.source_refs and CapsuleItem;
+        # the model-facing packet only needs proof that the verified authority
+        # set is fixed. Long provider-generated ids are otherwise repeated at
+        # the slice and item levels despite carrying no conversational meaning.
+        content["source_ref_count"] = len(source_refs)
+        content.pop("source_refs")
+    return _canonical_json(content)
 
 
 def _make_available_slice(
     *,
+    slice_name: SliceName,
     bound: ResolvedSlice[object],
     limit: SliceBudget,
     items: tuple[CapsuleItem, ...],
     source_refs: tuple[str, ...],
     source_hash: str,
     truncated: bool,
+    model_content_profile: Literal["general", "proactive_decision"] = "general",
 ) -> CapsuleSlice:
     content = _slice_model_content(
+        slice_name=slice_name,
         source_refs=source_refs,
         source_hash=source_hash,
         resolver_proof=bound.resolver_proof,
         items=items,
+        model_content_profile=model_content_profile,
     )
     fields = sum(len(item.included_fields) for item in items)
     material = {
@@ -945,6 +1205,7 @@ def _compile_slice(
     slice_name: SliceName,
     bound: ResolvedSlice[object] | None,
     limit: SliceBudget,
+    model_content_profile: Literal["general", "proactive_decision"] = "general",
 ) -> tuple[CapsuleSlice, tuple[TruncationEntry, ...]]:
     if bound is None:
         return _unavailable(limit), ()
@@ -991,7 +1252,21 @@ def _compile_slice(
         ):
             raise ValueError(f"{slice_name} metadata privacy downgrades typed authority")
         resolved.append((item, metadata))
-    resolved.sort(key=lambda pair: (-pair[1].rank_score_bp, pair[1].item_ref))
+    # A proactive opportunity is not merely another classifier hint: it is
+    # the exact semantic subject of the proactive lane's model request.  Keep
+    # it ahead of optional advisories so both the per-slice cap and the global
+    # tail-eviction policy preserve its source-bound contract.
+    resolved.sort(
+        key=lambda pair: (
+            0
+            if slice_name == "advisories"
+            and isinstance(pair[0], InnerAdvisoryProjection)
+            and pair[0].kind == "proactive_opportunity"
+            else 1,
+            -pair[1].rank_score_bp,
+            pair[1].item_ref,
+        )
+    )
     eligible = resolved
     log: list[TruncationEntry] = []
     over_item_limit = eligible[limit.max_items :]
@@ -1037,10 +1312,12 @@ def _compile_slice(
             }
         )
         candidate_content = _slice_model_content(
+            slice_name=slice_name,
             source_refs=selected_refs,
             source_hash=selected_hash,
             resolver_proof=bound.resolver_proof,
             items=(*output, candidate),
+            model_content_profile=model_content_profile,
         )
         if len(candidate_content) > limit.max_characters:
             omitted_characters += 1
@@ -1077,22 +1354,40 @@ def _compile_slice(
         }
     )
     minimum_content = _slice_model_content(
+        slice_name=slice_name,
         source_refs=source_refs,
         source_hash=source_hash,
         resolver_proof=bound.resolver_proof,
         items=tuple(output),
+        model_content_profile=model_content_profile,
     )
     if len(minimum_content) > limit.max_characters:
         if slice_name in {"character_core", "current_situation"}:
             raise ValueError(f"{slice_name} minimum whole-item budget is not satisfied")
-        raise ValueError(f"{slice_name} budget cannot represent its source envelope")
+        # Optional domains must not make an otherwise valid turn unavailable
+        # merely because their resolver proof/source envelope grew beyond a
+        # small lane budget.  Mark the entire slice unavailable instead of
+        # emitting an unauditable partial envelope; required situation/core
+        # remain fail-closed above.
+        return _unavailable(limit), tuple(
+            (
+                *log,
+                TruncationEntry(
+                    slice_name=slice_name,
+                    reason="source_envelope_budget",
+                    omitted_count=max(1, len(values)),
+                ),
+            )
+        )
     compiled = _make_available_slice(
+        slice_name=slice_name,
         bound=bound,
         limit=limit,
         items=tuple(output),
         source_refs=source_refs,
         source_hash=source_hash,
         truncated=bool(log),
+        model_content_profile=model_content_profile,
     )
     if compiled.budget.used_characters > limit.max_characters:
         raise ValueError(f"{slice_name} budget cannot represent its source envelope")
@@ -1104,6 +1399,7 @@ def _compile_slice(
 def _validate_input_contract(request: ContextCapsuleRequest) -> None:
     bound_slices: tuple[tuple[SliceName, ResolvedSlice[object] | None], ...] = (
         ("current_situation", request.situation),
+        ("recent_dialogue", request.recent_dialogue),
         ("character_core", request.character_core),
         ("relationship_slice", request.relationship_slice),
         ("appraisals", request.appraisals),
@@ -1118,6 +1414,8 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
         ("private_impressions", request.private_impressions),
         ("advisories", request.advisories),
     )
+    if request.perception_results is not None:
+        bound_slices = (*bound_slices, ("perception_results", request.perception_results))
     if any(
         bound is not None and bound.pinned_world_revision != request.world_revision
         for _, bound in bound_slices
@@ -1275,7 +1573,8 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
     ):
         raise ValueError("Context Capsule accepts only open threads")
     if request.relevant_facts is not None and any(
-        item.values.status != "active" for item in request.relevant_facts.value
+        (item.status if isinstance(item, FactRecallItem) else item.values.status) != "active"
+        for item in request.relevant_facts.value
     ):
         raise ValueError("Context Capsule accepts only active facts")
     if request.active_memory_candidates is not None and any(
@@ -1308,23 +1607,119 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
             raise ValueError("advisory sources must be resolved by the advisory slice")
 
 
-def _context_model_content(request: ContextCapsuleRequest, slices: dict[str, CapsuleSlice]) -> str:
-    return _canonical_json(
+def _relationship_evaluation_context(
+    request: ContextCapsuleRequest,
+) -> RelationshipEvaluationContext | None:
+    """Derive the relationship lane's compact view from untruncated authority."""
+
+    if not request.relationship_evaluation_requested or request.appraisals is None:
+        return None
+    appraisals = _values(request.appraisals)
+    matches = tuple(
+        item
+        for item in appraisals
+        if isinstance(item, AppraisalProjection)
+        and item.origin.accepted_event_ref == request.trigger_ref
+    )
+    if len(matches) != 1:
+        return None
+    appraisal = matches[0]
+    appraisal_metadata = next(
+        item for item in request.appraisals.item_metadata if item.item_ref == appraisal.appraisal_id
+    )
+    appraisal_summary = {
+        "status": appraisal.status,
+        "confidence_bp": appraisal.confidence_bp,
+        "expires_at": appraisal.expires_at.isoformat(),
+        "hypotheses": [
+            {
+                "meaning": item.meaning,
+                "attribution": item.attribution,
+                "controllability": item.controllability,
+                "severity": item.severity,
+                "weight_bp": item.weight_bp,
+            }
+            for item in appraisal.hypotheses
+        ],
+    }
+    relationship = None
+    relationship_source = None
+    if request.relationship_slice is not None:
+        states = _values(request.relationship_slice)
+        matching_states = tuple(
+            item
+            for item in states
+            if isinstance(item, RelationshipStateProjection)
+            and item.subject_ref == appraisal.subject_ref
+        )
+        if len(matching_states) == 1:
+            relationship = matching_states[0]
+            metadata = next(
+                item
+                for item in request.relationship_slice.item_metadata
+                if item.item_ref == relationship.relationship_id
+            )
+            relationship_source = RelationshipEvaluationSource(
+                item_ref=metadata.item_ref,
+                source_bindings=metadata.source_bindings,
+                source_hash=metadata.source_hash,
+                value_hash=metadata.value_hash,
+            )
+    relationship_summary = (
         {
-            "world_id": request.world_id,
-            "snapshot_id": request.snapshot_id,
-            "snapshot_hash": request.snapshot_hash,
-            "actor_ref": request.actor_ref,
-            "consumer_scope": request.consumer_scope,
-            "trigger_ref": request.trigger_ref,
-            "world_revision": request.world_revision,
-            "deliberation_revision": request.deliberation_revision,
-            "logical_time": request.logical_time.isoformat() if request.logical_time else None,
-            "slices": {
-                name: json.loads(slice_.model_content_json) for name, slice_ in slices.items()
+            "stage": relationship.stage,
+            "variables": relationship.variables.model_dump(mode="json"),
+            "temperature": relationship.temperature,
+        }
+        if relationship is not None
+        else {
+            "stage": "stranger",
+            "variables": {
+                "trust_bp": 0,
+                "closeness_bp": 0,
+                "respect_bp": 0,
+                "reliability_bp": 0,
+                "mutuality_bp": 0,
+                "repair_confidence_bp": 0,
             },
+            "temperature": "ordinary",
         }
     )
+    return RelationshipEvaluationContext(
+        subject_ref=appraisal.subject_ref,
+        trigger_appraisal_id=appraisal.appraisal_id,
+        appraisal_summary_json=_canonical_json(appraisal_summary),
+        relationship_summary_json=_canonical_json(relationship_summary),
+        appraisal_source=RelationshipEvaluationSource(
+            item_ref=appraisal_metadata.item_ref,
+            source_bindings=appraisal_metadata.source_bindings,
+            source_hash=appraisal_metadata.source_hash,
+            value_hash=appraisal_metadata.value_hash,
+        ),
+        relationship_source=relationship_source,
+    )
+
+
+def _context_model_content(
+    request: ContextCapsuleRequest,
+    slices: dict[str, CapsuleSlice],
+    relationship_evaluation: RelationshipEvaluationContext | None,
+) -> str:
+    material: dict[str, object] = {
+        "world_id": request.world_id,
+        "snapshot_id": request.snapshot_id,
+        "snapshot_hash": request.snapshot_hash,
+        "actor_ref": request.actor_ref,
+        "consumer_scope": request.consumer_scope,
+        "trigger_ref": request.trigger_ref,
+        "world_revision": request.world_revision,
+        "deliberation_revision": request.deliberation_revision,
+        "logical_time": request.logical_time.isoformat() if request.logical_time else None,
+        "slices": {name: json.loads(slice_.model_content_json) for name, slice_ in slices.items()},
+    }
+    if relationship_evaluation is not None:
+        material["relationship_evaluation"] = relationship_evaluation.model_dump(mode="json")
+    return _canonical_json(material)
 
 
 def _evict_last_item(
@@ -1333,6 +1728,7 @@ def _evict_last_item(
     compiled: CapsuleSlice,
     bound: ResolvedSlice[object],
     limit: SliceBudget,
+    model_content_profile: Literal["general", "proactive_decision"] = "general",
 ) -> CapsuleSlice:
     retained = compiled.items[:-1]
     source_refs = tuple(
@@ -1346,12 +1742,14 @@ def _evict_last_item(
         }
     )
     return _make_available_slice(
+        slice_name=slice_name,
         bound=bound,
         limit=limit,
         items=retained,
         source_refs=source_refs,
         source_hash=source_hash,
         truncated=True,
+        model_content_profile=model_content_profile,
     )
 
 
@@ -1360,6 +1758,7 @@ def _compile_resolved_context(
     *,
     policy: ContextCapsuleBudgetPolicy | None = None,
     _authority: object | None = None,
+    model_content_profile: Literal["general", "proactive_decision"] = "general",
 ) -> ContextCapsule:
     """Compile a deterministic, bounded packet without I/O, inference or randomness."""
 
@@ -1374,6 +1773,7 @@ def _compile_resolved_context(
     inputs: tuple[tuple[SliceName, ResolvedSlice[object] | None], ...] = (
         ("character_core", request.character_core),
         ("current_situation", request.situation),
+        ("recent_dialogue", request.recent_dialogue),
         ("relationship_slice", request.relationship_slice),
         ("appraisals", request.appraisals),
         ("affect_episodes", request.affect_episodes),
@@ -1387,6 +1787,8 @@ def _compile_resolved_context(
         ("private_impressions", request.private_impressions),
         ("advisories", request.advisories),
     )
+    if request.perception_results is not None:
+        inputs = (*inputs, ("perception_results", request.perception_results))
     slices: dict[str, CapsuleSlice] = {}
     bounds = {name: bound for name, bound in inputs}
     truncation_log: list[TruncationEntry] = []
@@ -1395,23 +1797,86 @@ def _compile_resolved_context(
             slice_name=slice_name,
             bound=bound,
             limit=getattr(active_policy, slice_name),
+            model_content_profile=model_content_profile,
         )
         slices[slice_name] = compiled
         truncation_log.extend(entries)
 
-    model_content = _context_model_content(request, slices)
+    relationship_evaluation = _relationship_evaluation_context(request)
+    model_content = _context_model_content(request, slices, relationship_evaluation)
     global_omissions: dict[SliceName, int] = {}
-    protected = {"character_core", "current_situation"}
+    # Preserve one unit of the state that gives an otherwise capable reply its
+    # interpersonal continuity.  Treating these like ordinary ranked items
+    # allowed a large capability/budget/advisory envelope to evict the sole
+    # relationship, affect episode, or unfinished thread.  The model would
+    # then have durable state in the ledger but be unable to use it in chat.
+    # Additional items remain rank-evictable, so this is a minimum continuity
+    # floor rather than an unbounded prompt reservation.
+    minimum_retained_items: dict[SliceName, int] = {
+        "character_core": 1,
+        "current_situation": 1,
+        "recent_dialogue": 8,
+        "relationship_slice": 1,
+        "appraisals": 1,
+        "affect_episodes": 1,
+        "open_threads": 1,
+        # Two independently sourced durable facts are the minimum useful unit
+        # for ordinary compound recall (for example identity + preference).
+        # Without this floor the global envelope kept only the first Fact even
+        # when the fact slice itself had ample budget.
+        "relevant_facts": 2,
+        "world_life": 1,
+        "active_memory_candidates": 2,
+        # An advisory overlay is the semantic decision matrix explicitly
+        # requested by the current lane.  Keep the whole bounded matrix
+        # together: dropping the thread or boundary coordinate while keeping
+        # only affect would make the model see a distorted interpretation of
+        # the same utterance.  The compiler already caps the slice and the
+        # global envelope remains the final safety bound.
+        "advisories": len(slices["advisories"].items),
+    }
+    proactive_advisory_present = any(
+        json.loads(item.payload_json).get("kind") == "proactive_opportunity"
+        for item in slices["advisories"].items
+    )
     while len(model_content) > active_policy.hard_max_characters:
         candidates = [
             (slice_.items[-1].rank_score_bp, name)
             for name, slice_ in slices.items()
-            if name not in protected and slice_.items
+            if len(slice_.items) > minimum_retained_items.get(name, 0)
         ]
         if not candidates:
-            raise ValueError(
-                "global Context Capsule budget cannot represent required whole-item envelopes"
-            )
+            # A deliberately tiny deployment budget, or several maximum-size
+            # continuity heads at once, must still fail soft.  Core identity
+            # and current situation remain mandatory; continuity floors then
+            # compete by their ordinary rank only after every non-floor item
+            # has gone.  This emergency tier prevents prompt construction from
+            # blocking the visible reply while making the omission explicit.
+            emergency_protected = {
+                "character_core",
+                "current_situation",
+                "active_memory_candidates",
+                "relevant_facts",
+            }
+            if proactive_advisory_present:
+                # In this lane the exact opportunity is the request itself.
+                # Under the emergency cap it outranks otherwise useful recall
+                # context; those items remain present whenever the ordinary
+                # 32k envelope can represent them.
+                emergency_protected = {
+                    "character_core",
+                    "current_situation",
+                    "advisories",
+                }
+            candidates = [
+                (slice_.items[-1].rank_score_bp, name)
+                for name, slice_ in slices.items()
+                if name not in emergency_protected and slice_.items
+            ]
+            if not candidates:
+                raise ValueError(
+                    "global Context Capsule budget cannot represent required whole-item envelopes"
+                )
         _, selected_name = min(candidates, key=lambda item: (item[0], item[1]))
         selected_bound = bounds[selected_name]
         if selected_bound is None:  # pragma: no cover - guarded by available items
@@ -1421,9 +1886,10 @@ def _compile_resolved_context(
             compiled=slices[selected_name],
             bound=selected_bound,
             limit=getattr(active_policy, selected_name),
+            model_content_profile=model_content_profile,
         )
         global_omissions[selected_name] = global_omissions.get(selected_name, 0) + 1
-        model_content = _context_model_content(request, slices)
+        model_content = _context_model_content(request, slices, relationship_evaluation)
     truncation_log.extend(
         TruncationEntry(
             slice_name=name,
@@ -1460,6 +1926,8 @@ def _compile_resolved_context(
         "model_content_json": model_content,
         "budget": budget.model_dump(mode="json"),
     }
+    if relationship_evaluation is not None:
+        result_material["relationship_evaluation"] = relationship_evaluation.model_dump(mode="json")
     compiler_result_hash = _hash(result_material)
     trusted = _authority is _COMPILER_AUTHORITY
     provenance_kind = "trusted_resolver_compiled" if trusted else "test_only_untrusted"
@@ -1485,6 +1953,7 @@ def _compile_resolved_context(
         deliberation_revision=request.deliberation_revision,
         ledger_sequence=request.ledger_sequence,
         logical_time=request.logical_time,
+        relationship_evaluation=relationship_evaluation,
         model_content_json=model_content,
         budget=budget,
         **slices,
@@ -1515,6 +1984,36 @@ class TrustedContextCapsuleHandle:
         raise TypeError("trusted Context Capsule handles cannot be serialized")
 
 
+class PreparedContextCapsuleHandle:
+    """Opaque one-resolution Context material awaiting an optional advisory overlay.
+
+    The base capsule and the overlay must consume the same typed resolver result.
+    Keeping that result behind a compiler-instance capability removes a second
+    full projection resolution without exposing a caller-mutable Context request.
+    """
+
+    __slots__ = ("__capsule", "__issuer", "__query", "__resolved")
+
+    def __init__(
+        self,
+        *,
+        query: ContextCompileQuery,
+        resolved: ContextCapsuleRequest,
+        capsule: ContextCapsule,
+        issuer: object,
+    ) -> None:
+        self.__query = query
+        self.__resolved = resolved
+        self.__capsule = capsule
+        self.__issuer = issuer
+
+    def issued_by(self, issuer: object) -> bool:
+        return self.__issuer is issuer
+
+    def __reduce__(self) -> object:
+        raise TypeError("prepared Context Capsule handles cannot be serialized")
+
+
 class ContextCapsuleCompiler:
     """Production seam: resolve internally, then compile the pinned trusted result."""
 
@@ -1532,8 +2031,11 @@ class ContextCapsuleCompiler:
             supplied_policy.model_dump(mode="python", warnings="error")
         )
         self._resolver = resolver
+        self._prepared_issuer = object()
 
-    def _resolve(self, query: ContextCompileQuery) -> tuple[ContextCompileQuery, ContextCapsuleRequest]:
+    def _resolve(
+        self, query: ContextCompileQuery
+    ) -> tuple[ContextCompileQuery, ContextCapsuleRequest]:
         pinned_query = ContextCompileQuery.model_validate(
             query.model_dump(mode="python", warnings="error")
         )
@@ -1572,12 +2074,70 @@ class ContextCapsuleCompiler:
         )
 
     def compile_for_deliberation(self, query: ContextCompileQuery) -> TrustedContextCapsuleHandle:
-        return TrustedContextCapsuleHandle(self.compile(query), _authority=_COMPILER_AUTHORITY)
+        return self.finalize_prepared(self.prepare_for_deliberation(query))
+
+    def prepare_for_deliberation(
+        self,
+        query: ContextCompileQuery,
+        *,
+        relationship_evaluation: bool = False,
+    ) -> PreparedContextCapsuleHandle:
+        """Resolve one pinned Context exactly once before optional enrichment."""
+
+        pinned_query, resolved = self._resolve(query)
+        if relationship_evaluation:
+            resolved = resolved.model_copy(update={"relationship_evaluation_requested": True})
+        capsule = _compile_resolved_context(
+            resolved, policy=self._policy, _authority=_COMPILER_AUTHORITY
+        )
+        return PreparedContextCapsuleHandle(
+            query=pinned_query,
+            resolved=resolved,
+            capsule=capsule,
+            issuer=self._prepared_issuer,
+        )
+
+    def _prepared_material(
+        self, prepared: PreparedContextCapsuleHandle
+    ) -> tuple[ContextCompileQuery, ContextCapsuleRequest, ContextCapsule]:
+        if type(prepared) is not PreparedContextCapsuleHandle or not prepared.issued_by(
+            self._prepared_issuer
+        ):
+            raise ValueError("prepared Context handle belongs to another compiler")
+        return (
+            object.__getattribute__(prepared, "_PreparedContextCapsuleHandle__query"),
+            object.__getattribute__(prepared, "_PreparedContextCapsuleHandle__resolved"),
+            object.__getattribute__(prepared, "_PreparedContextCapsuleHandle__capsule"),
+        )
+
+    def finalize_prepared(
+        self, prepared: PreparedContextCapsuleHandle
+    ) -> TrustedContextCapsuleHandle:
+        """Finalize a base prepared result without another resolver read."""
+
+        _, _, capsule = self._prepared_material(prepared)
+        return TrustedContextCapsuleHandle(capsule, _authority=_COMPILER_AUTHORITY)
+
+    def compile_for_relationship_deliberation(
+        self, query: ContextCompileQuery
+    ) -> TrustedContextCapsuleHandle:
+        """Compile a normal capsule plus the bounded post-appraisal relation view.
+
+        Only the relationship lane requests this overlay.  Other deliberations
+        retain their generic context shape and cannot accidentally depend on a
+        relationship-specific compact projection.
+        """
+
+        return self.finalize_prepared(
+            self.prepare_for_deliberation(query, relationship_evaluation=True)
+        )
 
     def compile_for_deliberation_with_advisories(
         self,
         query: ContextCompileQuery,
         advisories: tuple[InnerAdvisoryProjection, ...],
+        *,
+        model_content_profile: Literal["general", "proactive_decision"] = "general",
     ) -> TrustedContextCapsuleHandle:
         """Compile one trusted capsule with resolver-verified advisory candidates.
 
@@ -1586,7 +2146,21 @@ class ContextCapsuleCompiler:
         they can enter a Context Capsule; this method is not a mutation path.
         """
 
-        pinned_query, resolved = self._resolve(query)
+        prepared = self.prepare_for_deliberation(query)
+        return self.compile_prepared_with_advisories(
+            prepared, advisories, model_content_profile=model_content_profile
+        )
+
+    def compile_prepared_with_advisories(
+        self,
+        prepared: PreparedContextCapsuleHandle,
+        advisories: tuple[InnerAdvisoryProjection, ...],
+        *,
+        model_content_profile: Literal["general", "proactive_decision"] = "general",
+    ) -> TrustedContextCapsuleHandle:
+        """Attach verified advisories to an already resolved pinned Context."""
+
+        pinned_query, resolved, _ = self._prepared_material(prepared)
         build_slice = getattr(self._resolver, "resolve_advisory_slice", None)
         if not callable(build_slice):
             raise ValueError("Context resolver does not support advisory overlays")
@@ -1595,6 +2169,9 @@ class ContextCapsuleCompiler:
             raise TypeError("Context resolver returned an unsupported advisory slice")
         enriched = resolved.model_copy(update={"advisories": advisory_slice})
         capsule = _compile_resolved_context(
-            enriched, policy=self._policy, _authority=_COMPILER_AUTHORITY
+            enriched,
+            policy=self._policy,
+            _authority=_COMPILER_AUTHORITY,
+            model_content_profile=model_content_profile,
         )
         return TrustedContextCapsuleHandle(capsule, _authority=_COMPILER_AUTHORITY)

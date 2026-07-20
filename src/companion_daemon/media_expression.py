@@ -471,6 +471,7 @@ def build_complete_candidates(
     presentation_candidates: Sequence[Mapping[str, object]] = (),
     recent_perceptual_signatures: Sequence[str] = (),
     identity_assets: Sequence[str] = (),
+    identity_assets_by_profile: Mapping[str, Sequence[str]] | None = None,
     reference_pose_metadata: Mapping[str, Mapping[str, str]] | None = None,
     identity_catalog_version: str = "",
     event_snapshot: Mapping[str, object] | None = None,
@@ -513,6 +514,12 @@ def build_complete_candidates(
     for index, (bids, address_values) in enumerate(recipes):
         for subject_index, presentation in enumerate(source):
             charge = str(address_values["expression_charge"])
+            reference_profile = _reference_profile_for_expression_charge(charge)
+            candidate_identity_assets = (
+                tuple(identity_assets_by_profile.get(reference_profile, ()))
+                if identity_assets_by_profile is not None
+                else tuple(identity_assets)
+            ) or tuple(identity_assets)
             embodied = presentation.get("embodied_presentation") if presentation else None
             if embodied and str(embodied.get("sensual_charge")) != charge:
                 continue
@@ -629,9 +636,10 @@ def build_complete_candidates(
                             identity_reference_selection=(
                                 _identity_selection(
                                     geometry,
-                                    assets=identity_assets,
+                                    assets=candidate_identity_assets,
                                     metadata=reference_pose_metadata or {},
                                     catalog_version=identity_catalog_version,
+                                    selection_seed=f"{opportunity_id}:{candidate_id}",
                                 )
                                 if family == "character_media"
                                 and capture_mode != "existing_artifact"
@@ -1025,11 +1033,31 @@ def _identity_selection(
     assets: Sequence[str],
     metadata: Mapping[str, Mapping[str, str]],
     catalog_version: str,
+    selection_seed: str = "identity-reference-default",
 ) -> IdentityReferenceSelection | None:
     available = tuple(dict.fromkeys(item for item in assets if item and Path(item).is_file()))
     if not available:
         return None
-    canonical = available[0]
+    # Reference files do not all carry the same evidentiary weight.  In
+    # particular, a profile/turn-around image is useful for making a planned
+    # camera angle physically plausible, but cannot establish a face on its
+    # own.  Keep this policy here (rather than in the renderer) so the frozen
+    # plan records exactly which reference was allowed to do which job.
+    def usage(item: str) -> str:
+        declared = metadata.get(item, {}).get("identity_usage")
+        if declared:
+            return str(declared)
+        # Unknown assets must not silently become geometry support: a newly
+        # added profile or scene-heavy image could otherwise influence a
+        # frozen plan before it has been catalogued.  The first configured
+        # file retains legacy canonical behaviour; every other unclassified
+        # file is excluded until given an explicit role.
+        return "canonical_identity" if item == available[0] else "scene_only"
+
+    canonical = next(
+        (item for item in available if usage(item) == "canonical_identity"),
+        available[0],
+    )
     target_yaw = {
         "front": "near_front",
         "left_three_quarter": "toward_frame_left",
@@ -1037,35 +1065,69 @@ def _identity_selection(
         "rear_three_quarter": "toward_frame_left",
         "right_three_quarter": "toward_frame_right",
         "right_profile": "toward_frame_right",
-    }.get(geometry.view_axis, "near_front")
-    angle = next(
-        (item for item in available if metadata.get(item, {}).get("head_yaw") == target_yaw),
-        canonical,
+    }.get(geometry.view_axis)
+    angle_candidates = tuple(
+        item
+        for item in available
+        if usage(item) in {"canonical_identity", "angle_support"}
+        and target_yaw is not None
+        and metadata.get(item, {}).get("head_yaw") == target_yaw
     )
-    scale = (
-        next((item for item in available if "fullbody" in Path(item).stem.lower()), canonical)
-        if geometry.shot_distance in {"full_body", "long", "wide"}
-        else canonical
+    # An oblique mirror / over-shoulder camera has no intrinsic left/right
+    # face yaw.  A canonical image alone is too weak for a medium/full-body
+    # reflection, while a side image alone is unsafe.  Add at most one
+    # *eligible* angle support deterministically; the canonical identity
+    # anchor remains first and is always present.
+    if (
+        not angle_candidates
+        and geometry.view_axis in {"reflection_oblique", "over_shoulder"}
+        and geometry.subject_occupancy not in {"detail", "trace", "absent"}
+    ):
+        angle_candidates = tuple(
+            item
+            for item in available
+            if item != canonical and usage(item) == "angle_support"
+        )
+    # Do not always reuse the first file with the requested yaw.  The choice
+    # is deterministic for replay, but varies between opportunities and lets
+    # the existing angle anchors counter a repeated exposed-ear/three-quarter
+    # reference bias without loosening identity control.
+    angle = min(
+        angle_candidates,
+        key=lambda item: _stable_rank(selection_seed, item),
+        default=canonical,
     )
+    # One identity anchor plus at most one geometry anchor is a provider-
+    # independent contract.  Do not add a third "scale" photo for full-body
+    # shots: three independent source poses make reference-driven models blend
+    # wardrobe, hair and framing instead of preserving a stable person.
     selected_assets = (
         (canonical,)
         if geometry.subject_occupancy == "detail"
-        else tuple(
-            dict.fromkeys(
-                (canonical, scale, angle)
-                if geometry.shot_distance in {"full_body", "long", "wide"}
-                else (canonical, angle)
-            )
-        )
+        else tuple(dict.fromkeys((canonical, angle)))[:2]
     )
     return IdentityReferenceSelection.create(
         asset_ids=selected_assets,
         roles=tuple(
-            "identity_anchor" if item == canonical else "geometry_anchor"
+            "identity_anchor" if item == canonical else "angle_support"
             for item in selected_assets
         ),
         catalog_version=catalog_version or "visual-identity-unknown",
     )
+
+
+def _reference_profile_for_expression_charge(charge: str) -> str:
+    """Choose identity anchors independently from the requested intimacy.
+
+    A reference photo containing a pool, tennis court, bedroom, or a specific
+    outfit is useful for human review, but is a poor identity anchor for an
+    unrelated generated event: reference-image models readily copy that scene
+    and overwhelm the frozen plan.  v5 expression charge is carried by the
+    frozen address/embodiment contracts, not by a wardrobe-heavy source image.
+    """
+
+    del charge
+    return "everyday_selfie"
 
 
 def _life_modes(charge: str) -> tuple[str, ...]:

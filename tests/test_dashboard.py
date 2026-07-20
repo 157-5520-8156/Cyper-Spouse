@@ -6,37 +6,51 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import companion_daemon.app as app_module
+from companion_daemon.config import Settings
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 
 
-def test_dashboard_serves_local_control_panel() -> None:
-    client = TestClient(app_module.app)
+def test_dashboard_defaults_to_v2_login_without_legacy_browser_calls(tmp_path: Path) -> None:
+    dashboard_app = app_module.create_http_asgi_app(
+        settings=Settings(
+            database_path=tmp_path / "dashboard-v2-login.sqlite",
+            DELIVERY_RECONCILIATION_TOKEN="operator-secret",
+        )
+    )
+    client = TestClient(dashboard_app)
 
     response = client.get("/dashboard")
 
     assert response.status_code == 200
-    assert "知栀的小屋" in response.text
-    assert "为什么是这个动作" in response.text
-    assert 'id="roomCanvas"' in response.text
-    assert "loadRoomBundle" in response.text
-    assert "/assets/dashboard/rooms/zhizhi-home/runtime/room.bundle.json" in response.text
-    assert '/dashboard-static/room/runtime.js' in response.text
-    assert '/dashboard-static/room/editor.js' in response.text
-    assert "DashboardRoomRuntime.load" in response.text
-    assert "roomRuntime.setActor" in response.text
-    assert "roomRuntime.activatePreview" in response.text
-    assert "roomRuntime.preloadArtDraft" in response.text
-    assert "get('freeze') === '1'" in response.text
-    assert "get('view') === 'canvas'" in response.text
-    assert "applyPreviewMode" in response.text
-    assert "用户列表读取失败" in response.text
-    assert "The visual home remains usable" in response.text
-    assert "状态同步失败 · 可稍后重试" in response.text
-    assert "/debug/users" in response.text
-    assert "世界审计" in response.text
-    assert "/world-runtime/enablement" in response.text
+    assert "World v2 Dashboard 登录" in response.text
+    assert 'action="/world-v2/dashboard/session"' in response.text
+    assert "operator-secret" not in response.text
+    for legacy_path in ("/debug/", "/world-runtime/", "/dashboard-static/"):
+        assert legacy_path not in response.text
+
+
+def test_dashboard_scene_registry_has_a_default_scene_with_a_runtime_bundle() -> None:
+    client = TestClient(app_module.app)
+
+    response = client.get("/assets/dashboard/rooms/scene-registry.json")
+
+    assert response.status_code == 200
+    registry = response.json()
+    assert registry["schemaVersion"] == 1
+    assert registry["defaultScene"] == "zhizhi-home-legacy"
+    assert registry["scenes"] == [{
+        "id": "zhizhi-home-tile",
+        "label": "知栀的小屋 · TileRoom（已弃用）",
+        "renderer": "tile-v1",
+        "bundle": "/assets/dashboard/tile-rooms/zhizhi-home/runtime/room.bundle.json",
+    }, {
+        "id": "zhizhi-home-legacy",
+        "label": "知栀的小屋 · 旧版回退",
+        "renderer": "legacy",
+        "bundle": "/assets/dashboard/rooms/zhizhi-home/runtime/room.bundle.json",
+    }]
 
 
 def test_dashboard_room_runtime_is_served_as_an_independent_module() -> None:
@@ -69,6 +83,17 @@ def test_dashboard_room_runtime_is_served_as_an_independent_module() -> None:
     assert "data-action=\"solo\"" in editor.text
     assert "data-field=\"audit-status\"" in editor.text
 
+    tile_runtime = client.get("/dashboard-static/room/tile-runtime.js")
+    assert tile_runtime.status_code == 200
+    assert "class TileRoomRuntime" in tile_runtime.text
+    assert "pathfind(start, target)" in tile_runtime.text
+    assert "projection must use the fixed 2:1 128×64 contract" in tile_runtime.text
+
+    tile_editor = client.get("/dashboard-static/room/tile-editor.js")
+    assert tile_editor.status_code == 200
+    assert "class TileRoomEditor" in tile_editor.text
+    assert "syncCollider(object)" in tile_editor.text
+
 
 def test_dashboard_visual_baseline_manifest_matches_captured_files() -> None:
     root = Path(__file__).resolve().parents[1]
@@ -96,7 +121,7 @@ def test_debug_state_and_memory_controls_reject_direct_mutation(tmp_path: Path, 
     seed_user(store)
     engine = CompanionEngine(store, FakeCompanionModel(), "你是沈知栀。")
     monkeypatch.setattr(app_module, "engine", engine)
-    client = TestClient(app_module.app)
+    client = TestClient(app_module.archive_app)
 
     users = client.get("/debug/users").json()
     assert users["users"] == ["geoff"]

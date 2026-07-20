@@ -144,6 +144,20 @@ class ActionPump:
             None,
         )
         if action is not None:
+            # The HTTP ingress has already authorized a specific Action and
+            # can safely use one atomic lifecycle batch when it is due and all
+            # dependencies are satisfied.  This preserves the durable
+            # scheduled -> claimed -> dispatch_started history while avoiding
+            # three full reducer-state snapshots on the visible reply path.
+            # Generic scheduler drains intentionally retain the stepwise
+            # transitions so another worker can observe and recover each
+            # intermediate state independently.
+            if (
+                target_action_id is not None
+                and self._is_due(action=action, logical_time=projection.logical_time)
+                and self._dependencies_satisfied(action=action, actions=projection.actions)
+            ):
+                return await self._fast_start_and_dispatch(action=action, projection=projection)
             await self._schedule(action=action, projection=projection)
             projection = await self._project()
         action = next(
@@ -153,7 +167,7 @@ class ActionPump:
                 if self._is_eligible(item, target_action_id)
                 if item.state == "scheduled"
                 and self._is_due(action=item, logical_time=projection.logical_time)
-                and self._dependencies_delivered(action=item, actions=projection.actions)
+                and self._dependencies_satisfied(action=item, actions=projection.actions)
                 and self._expression_dispatch_allowed(item, projection)
             ),
             None,
@@ -208,6 +222,97 @@ class ActionPump:
         if action is not None:
             return await self._recover_provider_accepted(action)
         return ActionPumpResult(status="idle")
+
+    async def _fast_start_and_dispatch(self, *, action: Action, projection) -> ActionPumpResult:
+        """Atomically claim and start an ingress-bound Action before dispatch.
+
+        This is deliberately limited to a targeted ingress drain.  The batch
+        contains the same three lifecycle events emitted by the ordinary
+        scheduler, in their contract order, so replay, recovery, and audit
+        semantics are unchanged.  Only the expensive persisted-head snapshot
+        is shared across the transitions.
+        """
+
+        at = projection.logical_time or action.logical_time
+        attempt_id = "attempt:action-pump:" + _digest([action.action_id, "initial"])
+        lease = ClaimLease(
+            owner_id=self._owner_id,
+            attempt_id=attempt_id,
+            acquired_at=at,
+            expires_at=at + timedelta(seconds=self._lease_seconds),
+        )
+        scheduled_payload = {"action_id": action.action_id}
+        claimed_payload = {
+            "action_id": action.action_id,
+            "claim_lease": lease.model_dump(mode="json"),
+        }
+        dispatch_payload = {
+            "action_id": action.action_id,
+            "owner_id": lease.owner_id,
+            "attempt_id": lease.attempt_id,
+            "started_at": at.isoformat(),
+        }
+        events = [
+            self._lifecycle_event(
+                action=action,
+                event_type="ActionScheduled",
+                payload=scheduled_payload,
+                suffix="scheduled",
+                at=at,
+            ),
+            self._lifecycle_event(
+                action=action,
+                event_type="ActionClaimed",
+                payload=claimed_payload,
+                suffix=attempt_id,
+                at=at,
+            ),
+            self._lifecycle_event(
+                action=action,
+                event_type="ActionDispatchStarted",
+                payload=dispatch_payload,
+                suffix=f"dispatch:{attempt_id}",
+                at=at,
+            ),
+        ]
+        commit_id = "commit:action-pump:dispatch-fast:" + _digest(
+            [action.action_id, attempt_id]
+        )
+        if self._ledger.blocks_event_loop:
+            import asyncio
+
+            await asyncio.to_thread(
+                self._ledger.commit,
+                events,
+                expected_world_revision=projection.world_revision,
+                expected_deliberation_revision=projection.deliberation_revision,
+                commit_id=commit_id,
+            )
+        else:
+            self._ledger.commit(
+                events,
+                expected_world_revision=projection.world_revision,
+                expected_deliberation_revision=projection.deliberation_revision,
+                commit_id=commit_id,
+            )
+
+        # Re-read after the atomic CAS.  No provider call is allowed to use a
+        # stale pre-commit Action or lease.
+        latest = await self._project()
+        current = next(
+            (item for item in latest.actions if item.action_id == action.action_id),
+            None,
+        )
+        if (
+            current is None
+            or current.state != "dispatch_started"
+            or current.claim_lease is None
+            or current.claim_lease.attempt_id != attempt_id
+        ):
+            return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
+        await self._enforce_executor_authority(action=current, projection=latest)
+        result = await self._executor.dispatch(current)
+        return await self._settle_or_pending(action=current, result=result, dispatched=True)
 
     def _is_eligible(self, action: Action, target_action_id: str | None) -> bool:
         return (
@@ -372,13 +477,38 @@ class ActionPump:
         return await self._settle_or_pending(action=action, result=result, dispatched=False)
 
     async def _recover_provider_accepted(self, action: Action) -> ActionPumpResult:
-        await self._enforce_executor_authority(action=action, projection=await self._project())
-        current_time = (await self._project()).logical_time or action.logical_time
+        projection = await self._project()
+        await self._enforce_executor_authority(action=action, projection=projection)
+        current_time = projection.logical_time or action.logical_time
         if action.claim_lease is not None and current_time < action.claim_lease.expires_at:
             return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
-        # A provider acknowledgement is not delivery. Once its recovery lease
-        # has elapsed, preserve that fact but terminate the original Action as
-        # unknown; any later provider result goes through reconciliation.
+        # A provider acknowledgement is not delivery, but before terminating
+        # the Action as unknown, give a capable executor one read-only chance
+        # to convert the durable ack reference into terminal evidence (e.g. a
+        # positive OneBot ``get_msg`` lookup).  Verification never re-sends.
+        verify = getattr(self._executor, "verify_delivery", None)
+        if callable(verify):
+            ack = next(
+                (
+                    receipt
+                    for receipt in projection.execution_receipts
+                    if receipt.action_id == action.action_id
+                    and receipt.observed_state == "provider_accepted"
+                    and not receipt.is_terminal
+                ),
+                None,
+            )
+            if ack is not None:
+                verified = await verify(action, provider_ref=ack.provider_ref)
+                if verified is not None and verified.status in {"delivered", "failed"}:
+                    await self._settle_checked(
+                        action=action,
+                        result=self._external_observation(action=action, receipt=verified),
+                    )
+                    return ActionPumpResult(action_id=action.action_id, status="settled")
+        # Once the recovery lease has elapsed without terminal evidence,
+        # preserve that fact but terminate the original Action as unknown;
+        # any later provider result goes through reconciliation.
         receipt = await self._unknown_receipt(
             action, error_class="provider_accepted_without_terminal_receipt"
         )
@@ -528,6 +658,41 @@ class ActionPump:
         suffix: str,
         at,
     ) -> None:
+        event = self._lifecycle_event(
+            action=action,
+            event_type=event_type,
+            payload=payload,
+            suffix=suffix,
+            at=at,
+        )
+        commit_id = f"commit:action-pump:{event_type.lower()}:{_digest([action.action_id, suffix])}"
+        if self._ledger.blocks_event_loop:
+            import asyncio
+
+            await asyncio.to_thread(
+                self._ledger.commit,
+                [event],
+                expected_world_revision=projection.world_revision,
+                expected_deliberation_revision=projection.deliberation_revision,
+                commit_id=commit_id,
+            )
+            return
+        self._ledger.commit(
+            [event],
+            expected_world_revision=projection.world_revision,
+            expected_deliberation_revision=projection.deliberation_revision,
+            commit_id=commit_id,
+        )
+
+    def _lifecycle_event(
+        self,
+        *,
+        action: Action,
+        event_type: str,
+        payload: dict[str, object],
+        suffix: str,
+        at,
+    ) -> WorldEvent:
         # The event catalog gives action lifecycle events a stable identity
         # shape, but they intentionally have no public domain-id function:
         # claim ownership is runtime-private.  Bind that private identity to
@@ -550,24 +715,7 @@ class ActionPump:
             idempotency_key=identity,
             payload=payload,
         )
-        commit_id = f"commit:action-pump:{event_type.lower()}:{_digest([action.action_id, suffix])}"
-        if self._ledger.blocks_event_loop:
-            import asyncio
-
-            await asyncio.to_thread(
-                self._ledger.commit,
-                [event],
-                expected_world_revision=projection.world_revision,
-                expected_deliberation_revision=projection.deliberation_revision,
-                commit_id=commit_id,
-            )
-            return
-        self._ledger.commit(
-            [event],
-            expected_world_revision=projection.world_revision,
-            expected_deliberation_revision=projection.deliberation_revision,
-            commit_id=commit_id,
-        )
+        return event
 
     async def _project(self):
         if self._ledger.blocks_event_loop:
@@ -581,8 +729,25 @@ class ActionPump:
         return action.not_before is None or (logical_time is not None and action.not_before <= logical_time)
 
     @staticmethod
-    def _dependencies_delivered(*, action: Action, actions: tuple[Action, ...]) -> bool:
+    def _dependencies_satisfied(*, action: Action, actions: tuple[Action, ...]) -> bool:
         by_id = {item.action_id: item for item in actions}
-        return all(by_id.get(dependency_id) is not None and by_id[dependency_id].state == "delivered" for dependency_id in action.dependencies)
+        for dependency_id in action.dependencies:
+            dependency = by_id.get(dependency_id)
+            if dependency is None:
+                return False
+            if dependency.state == "delivered":
+                continue
+            # Ordered beats need proof that the provider accepted the prior
+            # dispatch, not a false claim that the human saw it.  This permits
+            # QQ/OneBot to emit a natural multi-message expression while each
+            # beat still retains its truthful provider_accepted lifecycle.
+            if (
+                dependency.state == "provider_accepted"
+                and action.expression_plan_id is not None
+                and dependency.expression_plan_id == action.expression_plan_id
+            ):
+                continue
+            return False
+        return True
 
 __all__ = ["ActionExecutor", "ActionPump", "ActionPumpResult"]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 
 import pytest
@@ -25,6 +25,7 @@ from companion_daemon.world_v2.schemas import (
     Action,
     BudgetAccount,
     BudgetReservation,
+    ClaimLease,
     CommitResult,
     ExpressionBeatLifecycleEntry,
     ExpressionBeatProjection,
@@ -450,6 +451,9 @@ async def test_replacement_decision_atomically_cancels_undispatched_action_and_r
     assert projection.actions[0].state == "cancelled"
     assert projection.budget_reservations[0].state == "released"
     assert projection.budget_accounts[0].reserved == 0
+    assert projection.expression_plans[0].state == "terminated"
+    assert projection.expression_plans[0].history[-1].terminal_disposition == "superseded"
+    assert projection.expression_beats[0].state == "terminated"
     assert projection.trigger_processes[0].state == "terminal"
     assert "replacement:1" in (projection.trigger_processes[0].runtime_outcome_ref or "")
 
@@ -480,6 +484,167 @@ async def test_defer_is_durable_and_keeps_the_old_payload_gated() -> None:
     assert result.status == "deferred"
     assert projection.actions[0].state == "authorized"
     assert expression_beat_is_gated(
+        projection=projection, plan_id="plan:expression:1", beat_id="beat:expression:2"
+    )
+
+
+class _CountingCancelReviewer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def review(self, **_kwargs):
+        self.calls += 1
+        return "cancel"
+
+
+def _interjection(sequence: int) -> tuple[Observation, WorldEvent]:
+    observation, _event = _observation()
+    observation = observation.model_copy(
+        update={
+            "observation_id": f"observation:user-interjection:{sequence}",
+            "source_event_id": f"message:{sequence}",
+            "payload_ref": f"ingress:message:{sequence}",
+        }
+    )
+    event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=f"event:trigger:observation:{sequence}",
+        world_id=WORLD_ID,
+        event_type="ObservationRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor=observation.actor,
+        source=observation.source,
+        trace_id=observation.trace_id,
+        causation_id=observation.causation_id,
+        correlation_id=observation.correlation_id,
+        idempotency_key=f"observation:message:{sequence}",
+        payload=observation.model_dump(mode="json"),
+    )
+    return observation, event
+
+
+@pytest.mark.asyncio
+async def test_gate_backlog_on_one_beat_drains_after_first_cancel_makes_the_rest_moot() -> None:
+    """Recovery semantics for gates opened while production had no reviewer.
+
+    Several user interjections each opened a durable gate on the same frozen
+    beat.  Once a reviewer is attached, the first drained gate carries the one
+    real decision; every later gate on the now-retired beat completes as a
+    recorded moot continuation without another model call.
+    """
+
+    action = _action()
+    state = _state().model_copy(
+        update={
+            "budget_accounts": (
+                BudgetAccount(
+                    account_id="account:chat:1", category="chat", window_id="window:1",
+                    limit=100, reserved=10,
+                ),
+            ),
+            "budget_reservations": (
+                BudgetReservation(
+                    reservation_id=action.budget_reservation_id, account_id="account:chat:1",
+                    action_id=action.action_id, category="chat", amount_limit=10,
+                ),
+            ),
+        }
+    )
+    ledger = _TriggerLedger(state)
+    for sequence in (1, 2, 3):
+        observation, source_event = _interjection(sequence)
+        ledger.commit(
+            (
+                source_event,
+                expression_reconsideration_trigger_event(
+                    world_id=WORLD_ID,
+                    source_event=source_event,
+                    observation=observation,
+                    plan_id="plan:expression:1",
+                    beat_id="beat:expression:2",
+                ),
+            )
+        )
+    reviewer = _CountingCancelReviewer()
+    runtime = ExpressionReconsiderationRuntime(
+        ledger=ledger, owner_id="worker:reconsideration", reviewer=reviewer
+    )
+
+    first = await runtime.drain_one()
+    second = await runtime.drain_one()
+    third = await runtime.drain_one()
+    idle = await runtime.drain_one()
+
+    projection = ledger.project()
+    assert first.status == "cancelled"
+    assert {second.status, third.status} == {"moot"}
+    assert idle.status == "idle"
+    assert reviewer.calls == 1
+    assert projection.actions[0].state == "cancelled"
+    assert projection.budget_reservations[0].state == "released"
+    assert all(item.state == "terminal" for item in projection.trigger_processes)
+    assert not expression_beat_is_gated(
+        projection=projection, plan_id="plan:expression:1", beat_id="beat:expression:2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gate_on_already_dispatched_action_completes_moot_without_a_model_call() -> None:
+    """A gate legitimately opened earlier may outlive its beat's dispatch.
+
+    The reducer only opens gates for un-dispatched beats, but a previously
+    opened durable gate can still be sitting there after the action settled
+    (for example after a continue decision released a sibling gate).  Draining
+    it must not consult the reviewer or attempt an impossible cancellation.
+    """
+
+    observation, source_event = _observation()
+    process = TriggerProcess.model_validate_json(
+        json.dumps(
+            expression_reconsideration_trigger_event(
+                world_id=WORLD_ID,
+                source_event=source_event,
+                observation=observation,
+                plan_id="plan:expression:1",
+                beat_id="beat:expression:2",
+            ).payload()["process"]
+        )
+    )
+    action = _action().model_copy(
+        update={
+            "state": "delivered",
+            "claim_lease": ClaimLease(
+                owner_id="pump:test",
+                attempt_id="attempt:pump:1",
+                acquired_at=NOW,
+                expires_at=NOW + timedelta(seconds=120),
+            ),
+        }
+    )
+    state = _state().model_copy(
+        update={
+            "actions": (action,),
+            "pending_actions": (),
+            "trigger_processes": (process,),
+        }
+    )
+    ledger = _TriggerLedger(state)
+    ledger.commit((source_event,))
+    reviewer = _CountingCancelReviewer()
+
+    result = await ExpressionReconsiderationRuntime(
+        ledger=ledger, owner_id="worker:reconsideration", reviewer=reviewer
+    ).drain_one()
+
+    projection = ledger.project()
+    assert result.status == "moot"
+    assert reviewer.calls == 0
+    assert projection.trigger_processes[0].state == "terminal"
+    assert "moot-gate:action-delivered" in (
+        projection.trigger_processes[0].runtime_outcome_ref or ""
+    )
+    assert not expression_beat_is_gated(
         projection=projection, plan_id="plan:expression:1", beat_id="beat:expression:2"
     )
 

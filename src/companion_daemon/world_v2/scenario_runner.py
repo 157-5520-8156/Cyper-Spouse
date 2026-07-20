@@ -69,12 +69,43 @@ class ScenarioVerificationError(AssertionError):
 # payload.  That deliberately changes acceptance/event/replay identities,
 # while the frozen suite proves that its observable scenario behaviour did not
 # change.  It is not human-likeness evidence.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.4"
+# ``.7`` establishes the post-refactor executable baseline after the shared
+# expression draft, same-turn affect/fact composition, compact model-facing
+# capsule, and proactive/life runtime were connected to the public application
+# seam.  Every scenario predicate must still pass; the hash records the changed
+# audit/action identities and background work trace, not a human-likeness score.
+# ``.8`` records the intentional single-call cognition, affect-expression,
+# epistemic claim, and durable two-Fact continuity contracts.  These alter
+# proposal/context identities while all fixed scenario predicates remain the
+# same executable gate.
+# ``.9`` records the ``activity-opening.4`` catalog: ordinary activity
+# completion now tracks the accepted schedule window instead of a one-minute
+# elapsed floor, so a sixty-minute plan no longer "completes" after one wake.
+# Catalog version and opening-token identities change accordingly; committed
+# ``activity-opening.3`` and ``.2`` proposals still replay against their
+# exact frozen rules and every fixed scenario predicate remains the gate.
+# The recorded manifest is the complete fixed fake-suite hash produced by the
+# executable corpus; keeping the version while correcting the stale digest is
+# intentional and does not claim human-likeness evidence.
+# ``.10`` re-baselines after the inner-life coverage verticals landed: the
+# Change Phase advisory (and life-author-weight.4's phase prior), the per-NPC
+# relationship reading (npc-initiative-weight.2), the pending shared_private
+# invitation advisory, the private-impression background producer, and the
+# aspiration crystallization seam.  Capsule advisory content and versioned
+# weight identities legitimately shift the fixed-suite manifest; every fixed
+# scenario predicate still passes unchanged.
+# ``.11`` re-baselines after the phone-attention advisory (attention-view.1)
+# joined the chat and inbound-cognition Pinned Turns: capsules now carry one
+# additional deterministic advisory ("【手机注意力：…】") derived from active
+# Plans, the local civil hour, and active Affect, so capsule/audit identities
+# legitimately shift.  The advisory is texture for timing_choice only; every
+# fixed scenario predicate still passes unchanged.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.11"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "9be374805c19fb3302287ca375310eb81830fd89934f1cacf5708ff70cf2c02e"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "ebd4a446f5599758c72d5ddc9497c6b4030803539a9f1b9246052398641f1f3e"
 
 
 class _FixedScenarioRouter:
@@ -940,7 +971,8 @@ class ScenarioRunner:
         )
         if limit is None and suite.manifest_hash != FROZEN_OFFLINE_SUITE_MANIFEST_HASH:
             raise ScenarioVerificationError(
-                "offline scenario manifest drifted; establish a new versioned mechanism baseline"
+                "offline scenario manifest drifted; establish a new versioned mechanism baseline: "
+                f"expected={FROZEN_OFFLINE_SUITE_MANIFEST_HASH}, actual={suite.manifest_hash}"
             )
         return suite
 

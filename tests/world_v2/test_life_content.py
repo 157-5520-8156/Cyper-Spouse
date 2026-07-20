@@ -10,6 +10,10 @@ from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.schemas import CommittedWorldEventRef, LifeContentDescriptorProjection, ProjectionCursor
 from companion_daemon.world_v2.world_life_context import WorldLifeContextCompiler
 from companion_daemon.world_v2.context_capsule import _typed_source_authorities, _typed_source_refs
+from companion_daemon.world_v2.ledger_context_resolver import (
+    _typed_authority_claims as _resolver_typed_authorities,
+    _typed_refs as _resolver_typed_refs,
+)
 from test_life_projection import WORLD_ID, commit, seed_through_proposal, settlement_batch
 
 
@@ -103,6 +107,11 @@ def test_life_content_compiler_emits_only_descriptor_bound_sidecar_text() -> Non
         "occurrence-settled",
     )
     assert len(_typed_source_authorities(world_life[0])) == 2
+    assert _resolver_typed_refs(world_life[0], observation_aliases={}) == (
+        "life-content-recorded:tea",
+        "occurrence-settled",
+    )
+    assert len(_resolver_typed_authorities(world_life[0], observation_aliases={})) == 2
 
 
 def test_life_content_compiler_fails_closed_when_bytes_or_privacy_do_not_match() -> None:

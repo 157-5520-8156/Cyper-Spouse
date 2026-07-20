@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "defaultScene": "zhizhi-home-legacy",
+  "scenes": [
+    {
+      "id": "zhizhi-home-tile",
+      "label": "知栀的小屋 · TileRoom（已弃用）",
+      "renderer": "tile-v1",
+      "bundle": "/assets/dashboard/tile-rooms/zhizhi-home/runtime/room.bundle.json"
+    },
+    {
+      "id": "zhizhi-home-legacy",
+      "label": "知栀的小屋 · 旧版回退",
+      "renderer": "legacy",
+      "bundle": "/assets/dashboard/rooms/zhizhi-home/runtime/room.bundle.json"
+    }
+  ]
+}

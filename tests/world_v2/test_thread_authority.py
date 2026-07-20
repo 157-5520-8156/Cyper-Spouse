@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import sqlite3
 
 import pytest
 
-from legacy_migration_support import legacy_state_json
+from legacy_migration_support import legacy_state_json, read_head_state_json
 
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.reducers import ReducerState
-from companion_daemon.world_v2.projection import InternalProjectionReader
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.schemas import (
     EvidenceRef,
@@ -166,10 +165,11 @@ def proposal(value: ThreadChangedPayload) -> ThreadProposalProjection:
 
 def initialized() -> WorldLedger:
     ledger = WorldLedger.in_memory(world_id=WORLD)
-    ledger.commit([event("world:start", "WorldStarted", {})],
+    initial_time = NOW - timedelta(minutes=1)
+    ledger.commit([event("world:start", "WorldStarted", {}, at=initial_time)],
                   expected_world_revision=0, expected_deliberation_revision=0)
     ledger.commit([event("clock:start", "ClockAdvanced", {
-        "logical_time_from": "2026-07-15T09:59:00+00:00",
+        "logical_time_from": initial_time.isoformat(),
         "logical_time_to": NOW.isoformat(),
     })], expected_world_revision=1, expected_deliberation_revision=0)
     ledger.commit([event("operator:evidence", "OperatorObservationRecorded", {
@@ -608,10 +608,11 @@ def test_supersession_requires_active_structurally_linked_successor() -> None:
 def test_sqlite_thread_roundtrip_rebuild_and_context_isolation(tmp_path) -> None:
     path = tmp_path / "thread.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
-    ledger.commit([event("world:start", "WorldStarted", {})],
+    initial_time = NOW - timedelta(minutes=1)
+    ledger.commit([event("world:start", "WorldStarted", {}, at=initial_time)],
                   expected_world_revision=0, expected_deliberation_revision=0)
     ledger.commit([event("clock:start", "ClockAdvanced", {
-        "logical_time_from": "2026-07-15T09:59:00+00:00",
+        "logical_time_from": initial_time.isoformat(),
         "logical_time_to": NOW.isoformat(),
     })], expected_world_revision=1, expected_deliberation_revision=0)
     ledger.commit([event("operator:evidence", "OperatorObservationRecorded", {
@@ -621,9 +622,8 @@ def test_sqlite_thread_roundtrip_rebuild_and_context_isolation(tmp_path) -> None
                     proposal_id="proposal:sqlite")
     record_accept_mutate(ledger, value)
     expected = ledger.project()
-    snapshot = InternalProjectionReader(ledger=ledger).snapshot(world_id=WORLD)
-    assert snapshot.conversation_threads == ()
-    assert snapshot.pending_actions == ()
+    assert expected.threads == (thread(),)
+    assert expected.pending_actions == ()
     assert expected.affect_episodes == expected.relationship_states == ()
     ledger.close()
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
@@ -631,9 +631,7 @@ def test_sqlite_thread_roundtrip_rebuild_and_context_isolation(tmp_path) -> None
     assert reopened.rebuild() == expected
     reopened.close()
     with sqlite3.connect(path) as connection:
-        raw = json.loads(connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0])
+        raw = json.loads(read_head_state_json(connection, WORLD))
         raw["threads"][0]["values"]["importance_bp"] = 1
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ? WHERE world_id = ?",
@@ -715,9 +713,7 @@ def test_sqlite_verified_v9_head_migrates_to_v11(tmp_path) -> None:
                   expected_world_revision=0, expected_deliberation_revision=0)
     ledger.close()
     with sqlite3.connect(path) as connection:
-        state_json = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0]
+        state_json = read_head_state_json(connection, WORLD)
         state = ReducerState.model_validate_json(state_json)
         semantic = state.semantic_payload(
             world_id=WORLD, world_revision=1,
@@ -744,10 +740,11 @@ def test_sqlite_verified_thread_authority_head_migrates_to_v12(
 ) -> None:
     path = tmp_path / f"thread-{legacy_bundle.rsplit('.', 1)[-1]}.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
-    ledger.commit([event("world:v10", "WorldStarted", {})],
+    initial_time = NOW - timedelta(minutes=1)
+    ledger.commit([event("world:v10", "WorldStarted", {}, at=initial_time)],
                   expected_world_revision=0, expected_deliberation_revision=0)
     ledger.commit([event("clock:v10", "ClockAdvanced", {
-        "logical_time_from": "2026-07-15T09:59:00+00:00",
+        "logical_time_from": initial_time.isoformat(),
         "logical_time_to": NOW.isoformat(),
     })], expected_world_revision=1, expected_deliberation_revision=0)
     ledger.commit([event("operator:v10", "OperatorObservationRecorded", {
@@ -759,10 +756,11 @@ def test_sqlite_verified_thread_authority_head_migrates_to_v12(
     expected_thread = ledger.project().threads
     ledger.close()
     with sqlite3.connect(path) as connection:
-        state_json, world_revision = connection.execute(
-            "SELECT state_json, world_revision FROM world_v2_heads WHERE world_id = ?",
+        world_revision = connection.execute(
+            "SELECT world_revision FROM world_v2_heads WHERE world_id = ?",
             (WORLD,),
-        ).fetchone()
+        ).fetchone()[0]
+        state_json = read_head_state_json(connection, WORLD)
         state = ReducerState.model_validate_json(state_json)
         semantic = state.semantic_payload(
             world_id=WORLD, world_revision=world_revision,

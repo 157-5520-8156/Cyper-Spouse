@@ -86,6 +86,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       border-bottom:3px solid #241b18;
     }
     .live { color:#f3ce86; }
+    .scene-picker {
+      max-width:160px;
+      padding:4px 6px;
+      color:#fff2d6;
+      background:#3e302c;
+      border:1px solid #b88b61;
+      font:12px Pixel, sans-serif;
+    }
     .live::before {
       content:"";
       display:inline-block;
@@ -257,7 +265,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <main class="wrap">
     <section>
       <div class="game-frame">
-        <div class="game-chrome"><span>沈知栀 · 上海</span><span class="live" id="gameAction">正在进入小屋</span></div>
+        <div class="game-chrome"><span>沈知栀 · 上海</span><span class="live" id="gameAction">正在进入小屋</span><select id="roomScene" class="scene-picker" aria-label="选择视觉场景"></select></div>
         <canvas id="roomCanvas" width="1000" height="760" aria-label="知栀会按 daemon 状态行动的等距像素小屋"></canvas>
         <div class="scene-info"><div><strong id="sceneActivity">正在同步生活状态</strong><span id="sceneDetail">动作来自当前活动、手机注意力和情绪投影。</span></div><div class="tag" id="sceneTag">--</div></div>
       </div>
@@ -274,21 +282,60 @@ DASHBOARD_HTML = r"""<!doctype html>
       <details class="wide"><summary>查看原始 daemon 状态</summary><pre id="state"></pre></details>
     </aside>
   </main>
+  <script src="/dashboard-static/room/tile-editor.js?v=5"></script>
+  <script src="/dashboard-static/room/tile-runtime.js?v=5"></script>
   <script src="/dashboard-static/room/editor.js"></script>
-  <script src="/dashboard-static/room/runtime.js?v=3"></script>
+  <script src="/dashboard-static/room/runtime.js?v=4"></script>
   <script>
     const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const labels = {desk:'书桌', kitchen:'餐桌', entry:'门口', sofa:'沙发', vanity:'梳妆台', bed:'床边', window:'窗前', rug:'地毯', study:'看书', eat:'吃饭', walk_out:'出门', social:'和同学待着', relax:'放松', tidy:'收拾', sleep:'睡着', gaze:'发呆', idle:'发会儿呆', notice_phone:'收到提醒', glance_phone:'瞄到消息', read_phone:'看消息', type_phone:'组织回复', withdraw:'先不看手机'};
     const expressionLabels = {neutral:'平静', smile:'心情不错', spark:'好奇', soft:'有点想你', worry:'挂心', sleepy:'困', pout:'有点别扭', guarded:'收着', hurt:'受伤'};
     const roomCanvas = document.getElementById('roomCanvas');
-    const roomBundlePath = '/assets/dashboard/rooms/zhizhi-home/runtime/room.bundle.json';
+    const roomRegistryPath = '/assets/dashboard/rooms/scene-registry.json';
     let roomRuntime = null;
+    let roomRegistry = null;
     let snapshot = null;
     let loading = false;
     let selectedCalendarDate = null;
 
-    async function loadRoomBundle() {
-      roomRuntime = await DashboardRoomRuntime.load({canvas:roomCanvas, bundleUrl:roomBundlePath, labels});
+    async function loadRoomRegistry() {
+      if (roomRegistry) return roomRegistry;
+      const response = await fetch(roomRegistryPath, {cache:'no-store'});
+      if (!response.ok) throw new Error(`场景注册表读取失败 (${response.status})`);
+      const registry = await response.json();
+      if (!Array.isArray(registry.scenes) || !registry.scenes.length) throw new Error('场景注册表没有可用场景');
+      if (!registry.scenes.every(item => item.id && item.label && item.bundle)) throw new Error('场景注册表存在无效条目');
+      roomRegistry = registry;
+      return registry;
+    }
+    function roomDefinition(registry, requestedId) {
+      return registry.scenes.find(item => item.id === requestedId)
+        || registry.scenes.find(item => item.id === registry.defaultScene)
+        || registry.scenes[0];
+    }
+    function renderRoomPicker(registry, selectedId) {
+      const picker = document.getElementById('roomScene');
+      picker.innerHTML = registry.scenes.map(item => `<option value="${esc(item.id)}">${esc(item.label)}</option>`).join('');
+      picker.value = selectedId;
+    }
+    async function loadRoomBundle(requestedId) {
+      const registry = await loadRoomRegistry();
+      const selected = roomDefinition(registry, requestedId || new URLSearchParams(location.search).get('room'));
+      renderRoomPicker(registry, selected.id);
+      roomRuntime?.stop();
+      const Runtime = selected.renderer === 'tile-v1' ? TileRoomRuntime : DashboardRoomRuntime;
+      roomRuntime = await Runtime.load({canvas:roomCanvas, bundleUrl:selected.bundle, labels});
+      if (snapshot?.dashboard?.scene) applyScene(snapshot.dashboard.scene);
+      return selected;
+    }
+    async function selectRoom(event) {
+      const params = new URLSearchParams(location.search);
+      params.set('room', event.target.value);
+      history.replaceState(null, '', `${location.pathname}?${params}`);
+      await loadRoomBundle(event.target.value);
+      await applyPreviewMode();
+      if (new URLSearchParams(location.search).get('freeze') === '1') roomRuntime.draw(0);
+      else roomRuntime.start();
     }
     function applyScene(scene) {
       roomRuntime.setActor(scene);
@@ -298,6 +345,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function init() {
       if (new URLSearchParams(location.search).get('view') === 'canvas') document.body.classList.add('canvas-only');
       await loadRoomBundle();
+      document.getElementById('roomScene').onchange = selectRoom;
       const select = document.getElementById('user');
       try {
         const response = await fetch('/debug/users');

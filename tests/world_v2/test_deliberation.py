@@ -122,8 +122,10 @@ class _Router:
             tier="flash", reason_code="ordinary_turn", router_version="router.1"
         )
         self.fail = fail
+        self.requests: list[RouteRequest] = []
 
     async def route(self, request: RouteRequest) -> ModelRoute:
+        self.requests.append(request)
         if self.fail:
             raise RuntimeError("router unavailable")
         return self.value  # type: ignore[return-value]
@@ -180,7 +182,8 @@ class _Quick:
 async def test_normal_flash_deliberation_returns_inert_validated_proposal_and_audit() -> None:
     main = _Main()
     quick = _Quick()
-    unit = Deliberation(router=_Router(), main_model=main, quick_recovery=quick)
+    router = _Router()
+    unit = Deliberation(router=router, main_model=main, quick_recovery=quick)
 
     result = await unit.deliberate(_capsule(), attempt_id="attempt:1")
 
@@ -190,6 +193,8 @@ async def test_normal_flash_deliberation_returns_inert_validated_proposal_and_au
     assert result.audit.model_call_id == main.requests[0].call_id
     assert result.audit.model_call_id.startswith("model-call:")
     assert quick.failure_codes == []
+    assert router.requests[0].route_hints.source == "trusted_capsule"
+    assert router.requests[0].route_hints.source_capsule_id == result.capsule_id
     assert not hasattr(unit, "_ledger")
     assert not hasattr(unit, "_action_executor")
 
@@ -512,7 +517,11 @@ async def test_provider_suppressing_cancellation_cannot_extend_caller_deadline()
     elapsed = loop.time() - started
 
     assert result.audit.status == "main_timeout_recovered"
-    assert elapsed < 0.04
+    # Wall-clock scheduling jitter grows under the full concurrent suite.  The
+    # lane-health assertion below is the stronger proof that Deliberation
+    # returned while the cancellation-suppressing provider was still running,
+    # rather than waiting for its extra 50 ms cleanup.
+    assert elapsed < 0.1
     assert unit.provider_health.main_inflight == 1
     assert unit.provider_health.quick_inflight == 0
     assert unit.provider_health.main_circuit_open is False

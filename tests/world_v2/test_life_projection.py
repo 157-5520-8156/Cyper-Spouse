@@ -8,25 +8,39 @@ import sqlite3
 
 import pytest
 
-from legacy_migration_support import strip_v16_state_fields
+from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
+from legacy_migration_support import read_head_state_json, strip_v16_state_fields
 
 from companion_daemon.world_v2.batch_invariants import appraisal_trigger_identity
 from companion_daemon.world_v2.appraisal_events import appraisal_mutation_hash
+from companion_daemon.world_v2.deliberation import ModelRoute
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.errors import IdempotencyConflict
 from companion_daemon.world_v2.errors import LedgerIntegrityError
+from companion_daemon.world_v2.expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from companion_daemon.world_v2.ledger import LedgerPort, WorldLedger
+from companion_daemon.world_v2.ledger_context_resolver import (
+    ContextRelevanceScope,
+    context_capsule_compiler_from_ledger,
+)
 from companion_daemon.world_v2.life_events import outcome_mutation_hash
+from companion_daemon.world_v2.proactive_action import (
+    ProactiveActionRuntime,
+    ProactiveDeliberationTurn,
+    ProactiveDraftAdapter,
+)
+from companion_daemon.world_v2.production_proposal_grammar import compose_production_deliberation
+from companion_daemon.world_v2.proposal_envelope import validate_proposal_envelope
 from companion_daemon.world_v2.experience_events import (
     ExperienceCommittedPayload,
     experience_mutation_hash,
 )
-from companion_daemon.world_v2.projection import InternalProjectionReader
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import (
     AppraisalHypothesis,
     AppraisalOrigin,
     AppraisalProjection,
+    BudgetAccount,
     ClaimLease,
     CommittedWorldEventRef,
     DueWindow,
@@ -187,7 +201,11 @@ def advance_life_clock(ledger: LedgerPort) -> None:
     )
 
 
-def seed_through_proposal(ledger: LedgerPort) -> str:
+def seed_through_proposal(
+    ledger: LedgerPort,
+    *,
+    event_visibility: str = "private",
+) -> str:
     advance_life_clock(ledger)
     commit(
         ledger,
@@ -226,7 +244,7 @@ def seed_through_proposal(ledger: LedgerPort) -> str:
         entity_revision=1,
         stable_identity_ref="identity:npc:lin",
         known_trait_refs=("trait:quiet",),
-        privacy_class="private",
+        privacy_class=event_visibility,
     )
     commit(
         ledger,
@@ -275,6 +293,7 @@ def seed_through_proposal(ledger: LedgerPort) -> str:
         participant_refs=("npc:lin",),
         location_ref="room:kitchen",
         owner_actor_ref="actor:companion",
+        privacy_class=event_visibility,
     )
     commit(
         ledger,
@@ -312,7 +331,7 @@ def seed_through_proposal(ledger: LedgerPort) -> str:
         ),
         precondition_refs=("plan:plan-tea",),
         candidate_outcome_refs=("result:tea-good", "result:tea-spilled"),
-        visibility="private",
+        visibility=event_visibility,
         status="committed",
     )
     commit(
@@ -587,9 +606,7 @@ def settlement_batch() -> list[WorldEvent]:
         "change_id": origin.change_id,
         "transition_id": origin.transition_id,
         "expected_entity_revision": 0,
-        "evidence_refs": (
-            EvidenceRef.model_validate_json(json.dumps(settled_evidence)),
-        ),
+        "evidence_refs": (EvidenceRef.model_validate_json(json.dumps(settled_evidence)),),
         "policy_refs": origin.policy_refs,
         "acceptance_id": "acceptance:experience-tea",
         "proposal_id": "proposal:experience-tea",
@@ -651,9 +668,7 @@ def settlement_batch() -> list[WorldEvent]:
 
 
 def experience_proposal_event() -> WorldEvent:
-    payload = ExperienceCommittedPayload.model_validate_json(
-        settlement_batch()[3].payload_json
-    )
+    payload = ExperienceCommittedPayload.model_validate_json(settlement_batch()[3].payload_json)
     proposal = ExperienceProposalProjection(
         proposal_id=payload.proposal_id,
         proposal_encoding="typed-authority-v1",
@@ -689,6 +704,133 @@ def assert_completed_vertical(ledger: LedgerPort) -> None:
     assert projection.world_occurrences[0].result_id == "result-tea-good"
     assert projection.experiences[0].experience_id == "experience-tea"
     assert projection.trigger_processes[0].process_kind == "npc_world_appraisal"
+
+
+@pytest.mark.asyncio
+async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -> None:
+    """A real life settlement is an opportunity, never a timer-authored message."""
+
+    class Router:
+        async def route(self, _request) -> ModelRoute:  # type: ignore[no-untyped-def]
+            return ModelRoute(
+                tier="flash",
+                reason_code="settled-world-event-test",
+                router_version="test.1",
+            )
+
+    class DraftModel:
+        model = "test-proactive-flash"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, _messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+            del temperature
+            self.calls += 1
+            return json.dumps(
+                {
+                    "timing_choice": "now",
+                    "response_text": "刚才和小林泡茶时发生了件挺有意思的事。",
+                    "behavior_tendency": "share_lived_experience",
+                    "stance": "warm_but_unforced",
+                    "display_strategy": "casual_recollection",
+                    "brief_rationale": "新近经历与当前关系值得分享，但不把分享写成固定规则。",
+                    "confidence": 8_100,
+                },
+                ensure_ascii=False,
+            )
+
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    seed_through_proposal(ledger, event_visibility="shareable")
+    commit(ledger, settlement_batch())
+    account = BudgetAccount(
+        account_id="account:proactive:life-test",
+        category="proactive",
+        window_id="day:life-test",
+        limit=100,
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "budget-proactive-life-test",
+                "BudgetAccountConfigured",
+                {"account": account.model_dump(mode="json")},
+            )
+        ],
+    )
+    model = DraftModel()
+    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
+    turn = ProactiveDeliberationTurn(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            relevance_scope=ContextRelevanceScope(
+                actor_ref="actor:companion",
+                related_subject_refs=("user:primary",),
+            ),
+        ),
+        deliberation=compose_production_deliberation(
+            lane_id="proactive",
+            router=Router(),
+            main_model=adapter,
+            quick_recovery=adapter,
+        ),
+        companion_actor_ref="actor:companion",
+    )
+    runtime = ProactiveActionRuntime(
+        ledger=ledger,
+        turn=turn,
+        batch_issuer=issuer,
+        policy=ExpressionPlanBudgetPolicy(
+            account_id=account.account_id,
+            amount_limit_per_action=10,
+            actor="actor:companion",
+            allowed_targets=("user:primary",),
+            recovery_policy="effect_once",
+            category="proactive",
+        ),
+        owner_id="worker:proactive:life-test",
+    )
+
+    opened = await runtime.drain_one()
+    authorized = await runtime.drain_one()
+
+    assert opened.status == "opened"
+    assert opened.source_ref == "occurrence-settled"
+    assert authorized.status == "authorized"
+    assert model.calls == 1
+    projection = ledger.project()
+    assert projection.actions[-1].kind == "proactive_message"
+    assert projection.actions[-1].intent_ref.startswith(
+        projection.proposal_audits[-1].proposal_id + ":"
+    )
+    assert projection.proposal_audits[-1].trigger_ref == "occurrence-settled"
+    audited_proposal = validate_proposal_envelope(
+        json.loads(projection.proposal_audits[-1].proposal_json)
+    )
+    expression_payload = audited_proposal.proposed_changes[0].payload.value()
+    settlement_ref = next(
+        item
+        for item in projection.committed_world_event_refs
+        if item.event_id == "occurrence-settled"
+    )
+    assert expression_payload["event_share_claim"] == {
+        "claim_text": "刚才和小林泡茶时发生了件挺有意思的事。",
+        "recipient_ref": "user:primary",
+        "source_event_ref": "occurrence-settled",
+        "source_payload_hash": "sha256:" + settlement_ref.payload_hash,
+        "source_world_revision": settlement_ref.world_revision,
+    }
+    assert projection.budget_reservations[-1].category == "proactive"
+    process = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "proactive_action_deliberation"
+    )
+    assert process.source_evidence_ref == "occurrence-settled"
+    assert process.state == "terminal"
     assert (
         ledger.project_at(
             ProjectionCursor(
@@ -701,20 +843,81 @@ def assert_completed_vertical(ledger: LedgerPort) -> None:
         .status
         == "active"
     )
-    snapshot = InternalProjectionReader(ledger=ledger).snapshot(world_id=WORLD_ID)
-    assert snapshot.npcs[0].npc_id == "lin"
-    assert snapshot.plans[0].plan_id == "plan-tea"
-    assert snapshot.world_occurrences[0].status == "settled"
-    assert snapshot.outcome_observations[0].observation_id == "observation-tea"
-    assert snapshot.experiences[0].experience_id == "experience-tea"
-    available = {window.slice_name for window in snapshot.slice_windows}
-    assert {
-        "npcs",
-        "plans",
-        "world_occurrences",
-        "outcome_observations",
-        "experiences",
-    } <= available
+    assert projection.npcs[0].npc_id == "lin"
+    assert projection.plans[0].plan_id == "plan-tea"
+    assert projection.world_occurrences[0].status == "settled"
+    assert projection.outcome_observations[0].observation_id == "observation-tea"
+    assert projection.experiences[0].experience_id == "experience-tea"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_visibility", ["personal", "private", "withhold"])
+async def test_non_shareable_settled_occurrence_never_reaches_proactive_model(
+    event_visibility: str,
+) -> None:
+    """Recipient-unsafe life facts are not proactive opportunities."""
+
+    class NeverCalledModel:
+        model = "test-proactive-never-called"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, _messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+            del temperature
+            self.calls += 1
+            raise AssertionError("non-shareable occurrence reached proactive deliberation")
+
+    class Router:
+        async def route(self, _request) -> ModelRoute:  # type: ignore[no-untyped-def]
+            return ModelRoute(tier="flash", reason_code="privacy-test", router_version="test.1")
+
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    seed_through_proposal(ledger, event_visibility=event_visibility)
+    settlement_events = settlement_batch()
+    commit(ledger, [settlement_events[0], settlement_events[1], settlement_events[4]])
+    model = NeverCalledModel()
+    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
+    runtime = ProactiveActionRuntime(
+        ledger=ledger,
+        turn=ProactiveDeliberationTurn(
+            ledger=ledger,
+            capsule_compiler=context_capsule_compiler_from_ledger(
+                ledger=ledger,
+                relevance_scope=ContextRelevanceScope(
+                    actor_ref="actor:companion",
+                    related_subject_refs=("user:primary",),
+                ),
+            ),
+            deliberation=compose_production_deliberation(
+                lane_id="proactive",
+                router=Router(),
+                main_model=adapter,
+                quick_recovery=adapter,
+            ),
+            companion_actor_ref="actor:companion",
+        ),
+        batch_issuer=issuer,
+        policy=ExpressionPlanBudgetPolicy(
+            account_id="account:unused",
+            amount_limit_per_action=10,
+            actor="actor:companion",
+            allowed_targets=("user:primary",),
+            recovery_policy="effect_once",
+            category="proactive",
+        ),
+        owner_id="worker:proactive:privacy-test",
+    )
+
+    result = await runtime.drain_one()
+
+    assert result.status == "idle"
+    assert model.calls == 0
+    assert not any(
+        item.process_kind == "proactive_action_deliberation"
+        for item in ledger.project().trigger_processes
+    )
 
 
 def test_lived_world_settlement_creates_experience_and_appraisal_atomically() -> None:
@@ -750,11 +953,7 @@ def test_sqlite_state_hash_rejects_tampered_proposal_audit(tmp_path: Path) -> No
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        row = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
-        ).fetchone()
-        assert row is not None
-        state = json.loads(row[0])
+        state = json.loads(read_head_state_json(connection, WORLD_ID))
         state["outcome_proposals"][0]["candidate_result_ref"] = "result:forged"
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ? WHERE world_id = ?",
@@ -995,8 +1194,7 @@ def test_claimed_world_trigger_can_commit_multi_hypothesis_appraisal() -> None:
         ],
     )
     assert len(ledger.project().appraisals[0].hypotheses) == 2
-    snapshot = InternalProjectionReader(ledger=ledger).snapshot(world_id=WORLD_ID)
-    assert snapshot.appraisals[0].appraisal_id == "appraisal:tea-result"
+    assert ledger.project().appraisals[0].appraisal_id == "appraisal:tea-result"
 
 
 def test_settlement_cannot_open_a_second_appraisal_continuation() -> None:
@@ -1044,9 +1242,7 @@ def test_sqlite_migrates_a_real_v3_life_trigger_with_derived_provenance(
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        state_json = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
-        ).fetchone()[0]
+        state_json = read_head_state_json(connection, WORLD_ID)
         raw_state = json.loads(state_json)
         strip_v16_state_fields(raw_state)
         raw_state.pop("message_observations", None)
@@ -1077,9 +1273,14 @@ def test_sqlite_migrates_a_real_v3_life_trigger_with_derived_provenance(
         legacy_payload.pop("actor_authority_transitions")
         legacy_payload.pop("consumed_actor_root_nonces")
         for key in (
-            "capability_grants", "capability_transitions", "consent_grants",
-            "consent_transitions", "privacy_policies", "privacy_transitions",
-            "consumed_authorization_root_nonces", "consumed_authorization_challenge_ids",
+            "capability_grants",
+            "capability_transitions",
+            "consent_grants",
+            "consent_transitions",
+            "privacy_policies",
+            "privacy_transitions",
+            "consumed_authorization_root_nonces",
+            "consumed_authorization_challenge_ids",
             "consumed_authorization_source_ids",
         ):
             legacy_payload.pop(key)
@@ -1387,7 +1588,9 @@ def test_activity_lifecycle_is_revisioned_and_terminal() -> None:
         )
 
 
-def test_plan_authority_allows_later_transition_of_earlier_plan_but_rejects_same_tick_swap() -> None:
+def test_plan_authority_allows_later_transition_of_earlier_plan_but_rejects_same_tick_swap() -> (
+    None
+):
     def head(
         plan_id: str,
         *,
@@ -1416,27 +1619,29 @@ def test_plan_authority_allows_later_transition_of_earlier_plan_but_rejects_same
         )
         projection_hash = plan_authority_projection_hash(plan)
         return plan.model_copy(
-            update={"authority_origin": PlanAuthorityOrigin(
-                transition_id=transition_id,
-                accepted_event_type=event.event_type,
-                accepted_event_ref=event.event_id,
-                accepted_world_revision=event.world_revision,
-                accepted_payload_hash=event.payload_hash,
-                accepted_at=event.logical_time,
-                authority_projection_hash=projection_hash,
-                binding_hash=plan_authority_binding_hash(
-                    plan_id=plan_id,
-                    owner_actor_ref=owner,
-                    entity_revision=revision,
+            update={
+                "authority_origin": PlanAuthorityOrigin(
                     transition_id=transition_id,
-                    event_type=event.event_type,
+                    accepted_event_type=event.event_type,
                     accepted_event_ref=event.event_id,
                     accepted_world_revision=event.world_revision,
                     accepted_payload_hash=event.payload_hash,
                     accepted_at=event.logical_time,
-                    projection_hash=projection_hash,
-                ),
-            )},
+                    authority_projection_hash=projection_hash,
+                    binding_hash=plan_authority_binding_hash(
+                        plan_id=plan_id,
+                        owner_actor_ref=owner,
+                        entity_revision=revision,
+                        transition_id=transition_id,
+                        event_type=event.event_type,
+                        accepted_event_ref=event.event_id,
+                        accepted_world_revision=event.world_revision,
+                        accepted_payload_hash=event.payload_hash,
+                        accepted_at=event.logical_time,
+                        projection_hash=projection_hash,
+                    ),
+                )
+            },
         )
 
     event_b = CommittedWorldEventRef(
@@ -1602,9 +1807,7 @@ def test_sqlite_migrates_ownerless_v15_plan_lifecycle_and_reopens(tmp_path: Path
         raw_event["payload_json"] = json.dumps(
             raw_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
-        raw_event["payload_hash"] = hashlib.sha256(
-            raw_event["payload_json"].encode()
-        ).hexdigest()
+        raw_event["payload_hash"] = hashlib.sha256(raw_event["payload_json"].encode()).hexdigest()
         event_json = json.dumps(
             raw_event, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
@@ -1616,10 +1819,7 @@ def test_sqlite_migrates_ownerless_v15_plan_lifecycle_and_reopens(tmp_path: Path
                 "legacy-plan-created",
             ),
         )
-        head = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
-        ).fetchone()
-        raw_state = json.loads(head["state_json"])
+        raw_state = json.loads(read_head_state_json(connection, WORLD_ID))
         strip_v16_state_fields(raw_state)
         for ref in raw_state["committed_world_event_refs"]:
             if ref["event_id"] == "legacy-plan-created":

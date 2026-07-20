@@ -13,7 +13,13 @@ from companion_daemon.world_v2.schemas import WorldEvent
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 
 
-def event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
+def event(
+    event_id: str,
+    event_type: str,
+    payload: dict[str, object],
+    *,
+    logical_time: datetime = NOW,
+) -> WorldEvent:
     identity = domain_idempotency_key(
         event_type=event_type,
         world_id="world-v2-ledger-test",
@@ -24,7 +30,7 @@ def event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEv
         event_id=event_id,
         world_id="world-v2-ledger-test",
         event_type=event_type,
-        logical_time=NOW,
+        logical_time=logical_time,
         created_at=NOW,
         actor="system:test",
         source="test",
@@ -180,9 +186,7 @@ def test_multi_event_unit_of_work_retry_joins_the_original_result() -> None:
 
 def test_commit_rejects_reused_commit_or_in_batch_identity_atomically() -> None:
     ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
-    original = event(
-        "event-observation-1", "ObservationRecorded", {"observation_id": "obs-1"}
-    )
+    original = event("event-observation-1", "ObservationRecorded", {"observation_id": "obs-1"})
     ledger.commit(
         [original],
         commit_id="commit-trigger-1",
@@ -215,15 +219,19 @@ def test_commit_rejects_reused_commit_or_in_batch_identity_atomically() -> None:
 
 def test_late_observation_does_not_move_logical_time_backwards() -> None:
     ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
-    later = event("event-clock", "ClockAdvanced", {
-        "logical_time_from": NOW.isoformat(),
-        "logical_time_to": NOW.replace(hour=13).isoformat()
-    })
-    ledger.commit(
-        [later], expected_world_revision=0, expected_deliberation_revision=0
+    later = event(
+        "event-clock",
+        "ClockAdvanced",
+        {"logical_time_from": NOW.isoformat(), "logical_time_to": NOW.replace(hour=13).isoformat()},
     )
+    ledger.commit([later], expected_world_revision=0, expected_deliberation_revision=0)
     ledger.commit(
-        [event("event-late", "ObservationRecorded", {"observation_id": "obs-late"})],
+        [event(
+            "event-late",
+            "ObservationRecorded",
+            {"observation_id": "obs-late"},
+            logical_time=NOW.replace(hour=13),
+        )],
         expected_world_revision=1,
         expected_deliberation_revision=0,
     )
@@ -238,13 +246,15 @@ def test_clock_from_must_match_the_current_logical_time() -> None:
         expected_world_revision=0,
         expected_deliberation_revision=0,
     )
-    mismatched = event("event-clock", "ClockAdvanced", {
-        "logical_time_from": NOW.replace(hour=11).isoformat(),
-        "logical_time_to": NOW.replace(hour=13).isoformat(),
-    })
+    mismatched = event(
+        "event-clock",
+        "ClockAdvanced",
+        {
+            "logical_time_from": NOW.replace(hour=11).isoformat(),
+            "logical_time_to": NOW.replace(hour=13).isoformat(),
+        },
+    )
 
     with pytest.raises(ValueError, match="logical_time_from"):
-        ledger.commit(
-            [mismatched], expected_world_revision=1, expected_deliberation_revision=0
-        )
+        ledger.commit([mismatched], expected_world_revision=1, expected_deliberation_revision=0)
     assert ledger.project().world_revision == 1

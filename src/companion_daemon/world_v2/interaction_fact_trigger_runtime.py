@@ -14,12 +14,14 @@ import hashlib
 import json
 from typing import Literal
 
+from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
 from .fact_accepted_contracts import rehydrate_fact_commit_intent_v2_json
 from .fact_draft_adapter import FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
 from .fact_memory_draft import FactMemoryDraftAdapter
 from .fact_proposal_audit_v2 import build_fact_commit_proposal_recorded_event_v2
+from .proposal_envelope_v2 import validate_fact_commit_proposal_v2
 from .fact_reducers import INSTALLED_FACT_PREDICATE_CARDINALITY
 from .fact_v2_acceptance_envelope_authority import FactV2AcceptanceEnvelopeRequestV2
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
@@ -84,7 +86,9 @@ class InteractionFactTriggerRuntime:
         )
         if process is None:
             return FactTriggerRunResult(trigger_id="", status="idle")
-        source_event, observation = await self._source_observation(process, self._cursor(projection))
+        source_event, observation = await self._source_observation(
+            process, self._cursor(projection)
+        )
         active = await self._claim_or_reclaim(
             process=process, source_event=source_event, projection=projection
         )
@@ -93,17 +97,27 @@ class InteractionFactTriggerRuntime:
 
         before = await self._project()
         cursor = self._cursor(before)
+        # The observation is historical evidence, but Fact materialization is
+        # a lived-world mutation.  A scheduler may advance the durable clock
+        # between opening the trigger and accepting its proposal; reducers
+        # deliberately reject an accepted mutation stamped with that older
+        # observation time.  Rebase the acceptance envelope to the current
+        # authoritative world time while retaining the source observation's
+        # exact timestamp in its evidence binding.
+        acceptance_logical_time = before.logical_time or source_event.logical_time
         source_commit = await self._lookup_event_commit(source_event.event_id)
         if source_commit is None:
             raise ValueError("interaction fact source event is no longer available")
         source_world_revision = source_commit[1].world_revision
+        proposal = self._existing_proposal(before, source_event.event_id)
         try:
-            proposal = await self._adapter.propose(
-                observation=observation,
-                observation_event=source_event,
-                source_world_revision=source_world_revision,
-                evaluated_world_revision=cursor.world_revision,
-            )
+            if proposal is None:
+                proposal = await self._adapter.propose(
+                    observation=observation,
+                    observation_event=source_event,
+                    source_world_revision=source_world_revision,
+                    evaluated_world_revision=cursor.world_revision,
+                )
         except ValueError:
             # A malformed or overreaching model draft has no durable meaning.
             # Mark the source opportunity consumed without producing either a
@@ -129,25 +143,68 @@ class InteractionFactTriggerRuntime:
                 trigger_id=active.trigger_id, status="processed", work_status="no_change"
             )
 
-        audit_event = build_fact_commit_proposal_recorded_event_v2(
-            proposal=proposal,
-            world_id=self._ledger.world_id,
-            logical_time=source_event.logical_time,
-            created_at=source_event.created_at,
-            actor=self._owner_id,
-            source=self._source,
-            trace_id=source_event.trace_id,
-            causation_id=source_event.event_id,
-            correlation_id=source_event.correlation_id,
+        intent = rehydrate_fact_commit_intent_v2_json(
+            proposal.proposed_changes[0].payload.canonical_json
         )
-        audit_commit = await self._commit_at_cursor(
-            (audit_event,),
-            cursor=cursor,
-            commit_id="commit:interaction-fact:audit:" + _digest(proposal.proposal_id),
+        # Repeated observations often restate the same user fact.  The fact
+        # reducer correctly rejects a duplicate semantic identity, but a
+        # scheduler wake must treat that durable state as an idempotent
+        # no-change rather than surfacing a 500 and leaving the trigger open.
+        if any(
+            item.values.status == "active"
+            and item.values.subject_ref == intent.subject_ref
+            and item.values.predicate_code == intent.predicate_code
+            and item.values.value_hash == str(intent.value_hash).removeprefix("sha256:")
+            for item in before.facts
+        ):
+            await self._complete(
+                process=active,
+                source_event=source_event,
+                cursor=cursor,
+                outcome_ref=f"outcome:{active.trigger_id}:duplicate-fact",
+            )
+            return FactTriggerRunResult(
+                trigger_id=active.trigger_id, status="processed", work_status="no_change"
+            )
+
+        existing_audit = next(
+            (
+                item
+                for item in before.fact_commit_proposal_audits_v2
+                if item.proposal_id == proposal.proposal_id
+            ),
+            None,
         )
-        audit_cursor = self._cursor_from_commit(audit_commit)
-        handle = self._acceptance.pin_proposal(cursor=audit_cursor, proposal_id=proposal.proposal_id)
-        intent = rehydrate_fact_commit_intent_v2_json(proposal.proposed_changes[0].payload.canonical_json)
+        if existing_audit is None:
+            audit_event = build_fact_commit_proposal_recorded_event_v2(
+                proposal=proposal,
+                world_id=self._ledger.world_id,
+                logical_time=source_event.logical_time,
+                # Replay and clock-controlled hosts may assign a logical
+                # observation time ahead of wall-clock event creation.  The
+                # audit remains bound to that historical source observation.
+                created_at=max(source_event.created_at, source_event.logical_time),
+                actor=self._owner_id,
+                source=self._source,
+                trace_id=source_event.trace_id,
+                causation_id=source_event.event_id,
+                correlation_id=source_event.correlation_id,
+            )
+            audit_commit = await self._commit_at_cursor(
+                (audit_event,),
+                cursor=cursor,
+                commit_id="commit:interaction-fact:audit:" + _digest(proposal.proposal_id),
+            )
+            audit_cursor = self._cursor_from_commit(audit_commit)
+        else:
+            # Crash recovery joins the immutable audit already committed for
+            # this exact source.  Re-asking the model at a newer cursor would
+            # reuse the semantic proposal id with different envelope bytes and
+            # turn every later background wake into an IdempotencyConflict.
+            audit_cursor = cursor
+        handle = self._acceptance.pin_proposal(
+            cursor=audit_cursor, proposal_id=proposal.proposal_id
+        )
         sources = self._acceptance.resolve_sources(
             cursor=audit_cursor,
             intent=intent,
@@ -168,29 +225,59 @@ class InteractionFactTriggerRuntime:
                 policy_refs=("policy:fact-commit.2",),
             ),
         )
-        identity = _digest(
-            {"proposal_id": proposal.proposal_id, "trigger_id": active.trigger_id}
-        )
-        accepted = self._acceptance.accept(
-            request=FactV2AcceptanceEnvelopeRequestV2(
-                acceptance_id=f"acceptance:interaction-fact:{identity}",
-                acceptance_event_id=f"event:interaction-fact:accepted:{identity}",
-                acceptance_causation_id=self._acceptance.proposal_audit_event_ref(
-                    proposal_handle=handle
+        identity = _digest({"proposal_id": proposal.proposal_id, "trigger_id": active.trigger_id})
+        try:
+            accepted = self._acceptance.accept(
+                request=FactV2AcceptanceEnvelopeRequestV2(
+                    acceptance_id=f"acceptance:interaction-fact:{identity}",
+                    acceptance_event_id=f"event:interaction-fact:accepted:{identity}",
+                    acceptance_causation_id=self._acceptance.proposal_audit_event_ref(
+                        proposal_handle=handle
+                    ),
+                    cursor=audit_cursor,
+                    world_id=self._ledger.world_id,
+                    logical_time=acceptance_logical_time,
+                    # A scheduler wake may have rebased ``acceptance_logical_time``
+                    # beyond the historical observation.  The envelope invariant
+                    # still requires its creation boundary to be at least that
+                    # logical time; otherwise delayed fact materialization raises
+                    # before it can complete the trigger and blocks all later
+                    # scheduled work (including proactive contact).
+                    created_at=max(
+                        source_event.created_at,
+                        source_event.logical_time,
+                        acceptance_logical_time,
+                    ),
+                    actor=self._owner_id,
+                    source=self._source,
+                    trace_id=source_event.trace_id,
+                    correlation_id=source_event.correlation_id,
                 ),
-                cursor=audit_cursor,
-                world_id=self._ledger.world_id,
-                logical_time=source_event.logical_time,
-                created_at=source_event.created_at,
-                actor=self._owner_id,
-                source=self._source,
-                trace_id=source_event.trace_id,
-                correlation_id=source_event.correlation_id,
-            ),
-            proposal_handle=handle,
-            prepared=prepared,
-            sources=sources,
-        )
+                proposal_handle=handle,
+                prepared=prepared,
+                sources=sources,
+            )
+        except ConcurrencyConflict:
+            # A cursor race is retryable; the durable audit is rejoined on the
+            # next wake and acceptance is attempted again at a fresh cursor.
+            raise
+        except ValueError:
+            # A durably rejected acceptance can never succeed at any later
+            # cursor.  The dominant case is a single-cardinality slot that
+            # already holds a different active value (this runtime only
+            # commits; corrections are a separate future lane).  Completing
+            # the trigger as consumed keeps one unacceptable draft from
+            # poisoning every later background pass; the message's other
+            # facts return with future observations.
+            await self._complete(
+                process=active,
+                source_event=source_event,
+                cursor=self._cursor(await self._project()),
+                outcome_ref=f"outcome:{active.trigger_id}:acceptance-rejected",
+            )
+            return FactTriggerRunResult(
+                trigger_id=active.trigger_id, status="processed", work_status="no_change"
+            )
         if self._memory_adapter is not None:
             assert self._memory_lifecycle is not None
             try:
@@ -216,7 +303,24 @@ class InteractionFactTriggerRuntime:
             trigger_id=active.trigger_id, status="processed", work_status="accepted"
         )
 
-    async def _materialize_memory(self, *, accepted, observation: Observation, source_event: WorldEvent) -> None:
+    def _existing_proposal(self, projection, source_event_ref: str):
+        matches = []
+        for audit in projection.fact_commit_proposal_audits_v2:
+            try:
+                proposal = validate_fact_commit_proposal_v2(
+                    json.loads(audit.proposal_json), world_id=self._ledger.world_id
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if proposal.trigger_ref == source_event_ref:
+                matches.append(proposal)
+        if len(matches) > 1:
+            raise ValueError("interaction fact source has multiple durable proposal audits")
+        return matches[0] if matches else None
+
+    async def _materialize_memory(
+        self, *, accepted, observation: Observation, source_event: WorldEvent
+    ) -> None:
         if observation.text is None:
             return
         projection = await self._project()
@@ -268,7 +372,11 @@ class InteractionFactTriggerRuntime:
             raise ValueError("interaction fact trigger has no source observation")
         projection = await self._project_at(cursor)
         reference = next(
-            (item for item in projection.message_observations if item.observation_id == observation_id),
+            (
+                item
+                for item in projection.message_observations
+                if item.observation_id == observation_id
+            ),
             None,
         )
         if reference is None or not reference.source or not reference.source_event_id:
@@ -297,7 +405,10 @@ class InteractionFactTriggerRuntime:
     ) -> TriggerProcess | None:
         at = projection.logical_time or source_event.logical_time
         if process.state == "claimed" and process.claim_lease is not None:
-            if process.claim_lease.owner_id == self._owner_id and at <= process.claim_lease.expires_at:
+            if (
+                process.claim_lease.owner_id == self._owner_id
+                and at <= process.claim_lease.expires_at
+            ):
                 return process
             if at < process.claim_lease.expires_at:
                 return None
@@ -316,7 +427,9 @@ class InteractionFactTriggerRuntime:
                 "attempt_ids": (*process.attempt_ids, attempt_id),
             }
         )
-        event_type = "TriggerProcessClaimed" if process.state == "open" else "TriggerProcessReclaimed"
+        event_type = (
+            "TriggerProcessClaimed" if process.state == "open" else "TriggerProcessReclaimed"
+        )
         payload = {"process": claimed.model_dump(mode="json")}
         identity = domain_idempotency_key(
             event_type=event_type, world_id=self._ledger.world_id, payload=payload
@@ -357,7 +470,9 @@ class InteractionFactTriggerRuntime:
         if process.claim_lease is None:
             raise ValueError("interaction fact completion requires a claimed process")
         projection = await self._project_at(cursor)
-        at = max(projection.logical_time or source_event.logical_time, process.claim_lease.acquired_at)
+        at = max(
+            projection.logical_time or source_event.logical_time, process.claim_lease.acquired_at
+        )
         if at > process.claim_lease.expires_at:
             raise ValueError("interaction fact lease expired before completion")
         payload = {
@@ -403,7 +518,9 @@ class InteractionFactTriggerRuntime:
     async def _lookup_event_commit(self, event_id: str):
         return await asyncio.to_thread(self._ledger.lookup_event_commit, event_id)
 
-    async def _commit(self, events, *, world_revision: int, deliberation_revision: int, commit_id: str):
+    async def _commit(
+        self, events, *, world_revision: int, deliberation_revision: int, commit_id: str
+    ):
         return await asyncio.to_thread(
             self._ledger.commit,
             events,

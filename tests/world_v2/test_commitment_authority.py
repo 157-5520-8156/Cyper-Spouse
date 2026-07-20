@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from legacy_migration_support import legacy_state_json
+from legacy_migration_support import legacy_state_json, read_head_state_json
 
 from companion_daemon.world_v2.commitment_events import (
     CommitmentChangedPayload,
@@ -162,10 +162,6 @@ def initialized() -> WorldLedger:
     ledger = WorldLedger.in_memory(world_id=WORLD)
     ledger.commit([event("world:start", "WorldStarted", {})],
                   expected_world_revision=0, expected_deliberation_revision=0)
-    ledger.commit([event("clock:start", "ClockAdvanced", {
-        "logical_time_from": (NOW - timedelta(minutes=1)).isoformat(),
-        "logical_time_to": NOW.isoformat(),
-    })], expected_world_revision=1, expected_deliberation_revision=0)
     for index, (ref, digest) in enumerate((("operator:commitment", "a" * 64),)):
         projection = ledger.project()
         ledger.commit([event(f"operator:{index}", "OperatorObservationRecorded", {
@@ -538,7 +534,7 @@ def test_accepted_break_reason_and_predecessor_lineage_fail_closed() -> None:
 def test_sqlite_commitment_roundtrip_and_rebuild(tmp_path) -> None:
     path = tmp_path / "commitment.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
-    ledger.commit([event("world:sqlite", "WorldStarted", {})],
+    ledger.commit([event("world:sqlite", "WorldStarted", {}, at=NOW - timedelta(minutes=1))],
                   expected_world_revision=0, expected_deliberation_revision=0)
     ledger.commit([event("clock:sqlite", "ClockAdvanced", {
         "logical_time_from": (NOW - timedelta(minutes=1)).isoformat(),
@@ -560,10 +556,11 @@ def test_sqlite_commitment_roundtrip_and_rebuild(tmp_path) -> None:
     assert reopened.rebuild() == expected
     reopened.close()
     with sqlite3.connect(path) as connection:
-        state_json, world_revision = connection.execute(
-            "SELECT state_json, world_revision FROM world_v2_heads WHERE world_id = ?",
+        world_revision = connection.execute(
+            "SELECT world_revision FROM world_v2_heads WHERE world_id = ?",
             (WORLD,),
-        ).fetchone()
+        ).fetchone()[0]
+        state_json = read_head_state_json(connection, WORLD)
         state = ReducerState.model_validate_json(state_json)
         semantic = state.semantic_payload(
             world_id=WORLD,

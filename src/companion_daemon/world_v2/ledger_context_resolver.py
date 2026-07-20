@@ -468,7 +468,7 @@ def _binding(event: CommittedWorldEventRef) -> ResolvedSourceBinding:
     )
 
 
-def _fact_recall_items(
+def fact_recall_items(
     *,
     ledger: LedgerPort,
     projection: LedgerProjection,
@@ -805,7 +805,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             for item in projection.facts
             if item.values.status != "withdrawn" and item.values.subject_ref in subject_refs
         )
-        recalled_facts = _fact_recall_items(
+        recalled_facts = fact_recall_items(
             ledger=self._ledger,
             projection=projection,
             facts=scoped_facts,

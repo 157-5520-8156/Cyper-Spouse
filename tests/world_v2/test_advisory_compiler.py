@@ -49,7 +49,7 @@ def _distribution(
     frequency_budget: FrequencyBudget | None = None,
 ) -> CandidateDistribution:
     return CandidateDistribution(
-        catalog_version="world-v2-matrix-1",
+        catalog_version="world-v2-matrix-2",
         field_id=field_id,
         candidates=(
             ClassificationCandidate(
@@ -157,7 +157,7 @@ async def test_compiles_source_bound_rejectable_advisory_without_mutation_ports(
     ).compile(_request())
 
     assert result.world_revision == 7
-    assert result.catalog_version == "world-v2-matrix-1"
+    assert result.catalog_version == "world-v2-matrix-2"
     assert len(result.advisories) == 1
     assert result.advisories[0].field_id == "appraisal.negative"
     assert result.advisories[0].candidates[0].value == "disappointment"
@@ -322,7 +322,7 @@ async def test_forged_candidate_is_revalidated_and_fails_open() -> None:
         expires_at=NOW + timedelta(seconds=30),
     )
     forged_distribution = CandidateDistribution.model_construct(
-        catalog_version="world-v2-matrix-1",
+        catalog_version="world-v2-matrix-2",
         field_id="appraisal.negative",
         candidates=(forged_candidate,),
         frequency_budget=None,
@@ -517,7 +517,7 @@ async def test_candidate_input_order_cannot_change_canonical_advisory() -> None:
 
     def distribution(candidates: tuple[ClassificationCandidate, ...]) -> CandidateDistribution:
         return CandidateDistribution(
-            catalog_version="world-v2-matrix-1",
+            catalog_version="world-v2-matrix-2",
             field_id="appraisal.negative",
             candidates=candidates,
             produced_at=NOW,
@@ -650,7 +650,7 @@ async def test_million_item_raw_containers_are_rejected_by_constant_time_preflig
     distribution = _distribution()
     million_distributions = (distribution,) * 1_000_000
     forged_many_candidates = CandidateDistribution.model_construct(
-        catalog_version="world-v2-matrix-1",
+        catalog_version="world-v2-matrix-2",
         field_id="appraisal.negative",
         candidates=(candidate,) * 1_000_000,
         frequency_budget=None,
@@ -765,14 +765,14 @@ async def test_nested_million_item_forgery_is_bounded_before_model_dump() -> Non
         source_refs=("event:message:1",) * 1_000_000,
     )
     candidate_distribution = CandidateDistribution.model_construct(
-        catalog_version="world-v2-matrix-1",
+        catalog_version="world-v2-matrix-2",
         field_id="appraisal.negative",
         candidates=(forged_candidate,),
         frequency_budget=None,
         produced_at=NOW,
     )
     budget_distribution = CandidateDistribution.model_construct(
-        catalog_version="world-v2-matrix-1",
+        catalog_version="world-v2-matrix-2",
         field_id="appraisal.negative",
         candidates=(base.model_copy(update={"producer": "nested@classifier-1"}),),
         frequency_budget=forged_budget,

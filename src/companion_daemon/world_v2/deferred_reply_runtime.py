@@ -26,7 +26,7 @@ from .schema_core import FrozenModel
 from .schemas import (
     Action, BudgetReservation, CommitmentFulfillmentContract, CommitmentOrigin,
     CommitmentProjection, CommitmentProposedMutation, CommitmentProposalProjection,
-    CommitmentValues, EvidenceRef, ProjectionCursor, WorldEvent,
+    CommitmentValues, EvidenceRef, Observation, ProjectionCursor, WorldEvent,
     commitment_semantic_fingerprint,
 )
 
@@ -68,16 +68,32 @@ class ReplyLaterCommand(FrozenModel):
         return self
 
 
-class DeferredReplyRuntime:
-    """Author and close reply-later responsibilities through typed authority."""
+class _LegacyReplyLaterAuthority:
+    __slots__ = ()
 
-    def __init__(self, *, ledger, actor: str = "actor:companion", source: str = "world-v2:reply-later") -> None:
+
+_LEGACY_REPLY_LATER_AUTHORITY = _LegacyReplyLaterAuthority()
+
+
+class DeferredReplyRuntime:
+    """Settle deferred responsibilities; legacy command authoring is isolated.
+
+    Production authoring goes through ``SocialActionWorker``.  The opt-in
+    command seam exists only so archived fixtures/migrations can replay old
+    authority without becoming a second live decision path.
+    """
+
+    def __init__(self, *, ledger, actor: str = "actor:companion",
+                 source: str = "world-v2:reply-later") -> None:
         if not actor:
             raise ValueError("reply-later runtime needs a companion actor")
         self._ledger, self._actor, self._source = ledger, actor, source
 
-    def defer(self, command: ReplyLaterCommand, *, logical_time: datetime, created_at: datetime,
-              trace_id: str, causation_id: str, correlation_id: str):
+    def _defer_legacy(self, command: ReplyLaterCommand, *, authority: _LegacyReplyLaterAuthority,
+                      logical_time: datetime, created_at: datetime, trace_id: str,
+                      causation_id: str, correlation_id: str):
+        if authority is not _LEGACY_REPLY_LATER_AUTHORITY:
+            raise ValueError("reply_later.migration_authority_required")
         if command.world_id != self._ledger.world_id:
             raise ValueError("reply-later command belongs to another world")
         projection = self._ledger.project()
@@ -109,7 +125,7 @@ class DeferredReplyRuntime:
         action = Action(schema_version="world-v2.1", action_id=command.action_id,
             world_id=command.world_id, logical_time=logical_time, created_at=created_at,
             trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id,
-            kind="reply_later", layer="external_action", intent_ref=command.commitment_id,
+            kind="followup", layer="external_action", intent_ref=command.commitment_id,
             actor=self._actor, target=command.target, payload_ref=command.payload_ref,
             payload_hash=command.payload_hash,
             idempotency_key="reply-later:" + _digest([command.world_id, command.command_id]),
@@ -292,11 +308,112 @@ class DeferredReplyRuntime:
         else:
             evidence = EvidenceRef(ref_id=receipt.receipt_id, evidence_type="settled_external_result",
                 claim_purpose="conversation_continuity", immutable_hash=_digest(receipt.model_dump(mode="json")))
-        proposal_id = "proposal:reply-later-terminal:" + _digest([self._ledger.world_id, target.commitment_id, receipt.receipt_id])
-        acceptance_id = "acceptance:reply-later-terminal:" + _digest([self._ledger.world_id, target.commitment_id, receipt.receipt_id])
-        change_id = "change:reply-later-terminal:" + _digest([target.commitment_id, receipt.receipt_id])
-        transition_id = "transition:reply-later-terminal:" + _digest([target.commitment_id, receipt.receipt_id])
-        mutation_event_id = "event:reply-later:terminal:" + _digest([self._ledger.world_id, target.commitment_id, receipt.receipt_id])
+        return self._record_terminal_transition(
+            projection=projection,
+            target=target,
+            operation=operation,
+            reason=reason,
+            evidence=evidence,
+            settlement_key=receipt.receipt_id,
+            logical_time=logical_time,
+            created_at=created_at,
+            trace_id=trace_id,
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
+
+    def release_interrupted_action(
+        self,
+        *,
+        action_id: str,
+        observation_event_id: str,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+    ):
+        """Release an interrupted deferred promise from exact committed input.
+
+        This is a recovery seam, not a social decision seam: the Action must
+        already be durably cancelled and the later Observation must already be
+        committed.  Replaying it joins the same terminal transition.
+        """
+        projection = self._ledger.project()
+        action = next((item for item in projection.actions if item.action_id == action_id), None)
+        target = next(
+            (
+                item
+                for item in projection.commitments
+                if item.values.status in {"open", "due"}
+                and item.values.fulfillment_contract.contract_kind == "execution_receipt"
+                and item.values.fulfillment_contract.expected_action_id == action_id
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        if action is None or action.state != "cancelled":
+            raise ValueError("interrupted commitment release requires its cancelled Action")
+        located = self._ledger.lookup_event_commit(observation_event_id)
+        if located is None or located[0].event_type != "ObservationRecorded":
+            raise ValueError("interrupted commitment release requires a committed Observation")
+        observation = Observation.model_validate_json(located[0].payload_json)
+        source = next(
+            (
+                item
+                for item in projection.message_observations
+                if item.observation_id == observation.observation_id
+            ),
+            None,
+        )
+        if (
+            source is None
+            or source.event_payload_hash != located[0].payload_hash
+            or source.world_revision != located[1].world_revision
+        ):
+            raise ValueError("interrupted commitment release source binding is invalid")
+        evidence = EvidenceRef(
+            ref_id=source.observation_id,
+            evidence_type="observed_message",
+            claim_purpose="conversation_continuity",
+            source_world_revision=source.world_revision,
+            immutable_hash=source.event_payload_hash,
+        )
+        return self._record_terminal_transition(
+            projection=projection,
+            target=target,
+            operation="release",
+            reason="user_withdrew",
+            evidence=evidence,
+            settlement_key=observation_event_id,
+            logical_time=logical_time,
+            created_at=created_at,
+            trace_id=trace_id,
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
+
+    def _record_terminal_transition(
+        self,
+        *,
+        projection,
+        target: CommitmentProjection,
+        operation: str,
+        reason: str,
+        evidence: EvidenceRef,
+        settlement_key: str,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+    ):
+        proposal_id = "proposal:reply-later-terminal:" + _digest([self._ledger.world_id, target.commitment_id, settlement_key])
+        acceptance_id = "acceptance:reply-later-terminal:" + _digest([self._ledger.world_id, target.commitment_id, settlement_key])
+        change_id = "change:reply-later-terminal:" + _digest([target.commitment_id, settlement_key])
+        transition_id = "transition:reply-later-terminal:" + _digest([target.commitment_id, settlement_key])
+        mutation_event_id = "event:reply-later:terminal:" + _digest([self._ledger.world_id, target.commitment_id, settlement_key])
         values = target.values.model_copy(update={"source_evidence_refs": (*target.values.source_evidence_refs, evidence),
             "status": {"fulfill": "fulfilled", "break": "broken", "release": "released"}[operation],
             "settlement_evidence_ref": evidence.ref_id, "settlement_reason_code": reason})

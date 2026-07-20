@@ -80,10 +80,14 @@ class _LedgerWithDeclarationLookup(_Ledger):
         return None if event is None else (event, object())
 
 
-def _projection(*, refs, plans=(), occurrences=(), experiences=(), facts=(), npcs=()):  # type: ignore[no-untyped-def]
+def _projection(
+    *, refs, plans=(), occurrences=(), experiences=(), facts=(), npcs=(),
+    message_observations=(),
+):  # type: ignore[no-untyped-def]
     return SimpleNamespace(
         world_revision=10, deliberation_revision=0, ledger_sequence=10, logical_time=NOW,
         committed_world_event_refs=tuple(refs), plans=tuple(plans),
+        message_observations=tuple(message_observations),
         world_occurrences=tuple(occurrences), experiences=tuple(experiences), facts=tuple(facts),
         npcs=tuple(npcs), photo_candidates=(), media_opportunities=(),
     )
@@ -148,6 +152,9 @@ def test_production_capable_ecology_requires_one_exact_visual_declaration() -> N
     runtime = EventEcologyMediaCandidateRuntime(
         ledger=without_declaration, sidecar=InMemoryImmutableMediaPayloadStore(), policy=EcologyPolicy(),
     )
+    assert runtime.discover_source_taxonomy()[0].media_readiness == (
+        "visual_declaration_required"
+    )
 
     assert runtime.drain_once(
         wake_event_ref=source.event_id, logical_time=NOW, actor="worker:event-ecology",
@@ -177,6 +184,7 @@ def test_production_capable_ecology_requires_one_exact_visual_declaration() -> N
     runtime = EventEcologyMediaCandidateRuntime(
         ledger=with_declaration, sidecar=InMemoryImmutableMediaPayloadStore(), policy=EcologyPolicy(),
     )
+    assert runtime.discover_source_taxonomy()[0].media_readiness == "declared"
 
     result = runtime.drain_once(
         wake_event_ref=source.event_id, logical_time=NOW, actor="worker:event-ecology",
@@ -188,6 +196,186 @@ def test_production_capable_ecology_requires_one_exact_visual_declaration() -> N
     assert candidate_event.payload()["candidate"]["source_event_refs"] == sorted(
         (source.event_id, declaration.event_id)
     )
+
+
+def test_taxonomy_preserves_life_matrix_and_real_evidence_gates() -> None:
+    user_event = _world_event(
+        "event:user-shaped-plan",
+        "ActivityCompleted",
+        {"policy_refs": [
+            "matrix:source:user_influence", "matrix:domain:creative_photo_writing",
+            "matrix:social:user_relayed", "matrix:deviation:change_plan",
+            "matrix:visual:activity", "matrix:privacy:shareable",
+        ]},
+    )
+    paused_event = _world_event(
+        "event:paused-plan", "ActivityPaused",
+        {"policy_refs": [
+            "matrix:source:interruption", "matrix:domain:study_class",
+            "matrix:social:alone", "matrix:deviation:change_plan",
+            "matrix:visual:object", "matrix:privacy:personal",
+        ]},
+    )
+    resumed_event = _world_event(
+        "event:resumed-plan", "ActivityResumed",
+        {"policy_refs": [
+            "matrix:source:aftermath", "matrix:domain:errand_household",
+            "matrix:social:alone", "matrix:deviation:repair",
+            "matrix:visual:object", "matrix:privacy:private",
+        ]},
+    )
+    sleep_event = _world_event(
+        "event:sleep-result", "ActivityCompleted",
+        {"policy_refs": [
+            "matrix:source:routine", "matrix:domain:sleep_wake",
+            "matrix:social:alone", "matrix:deviation:persist",
+            "matrix:visual:private_transition", "matrix:privacy:private",
+        ]},
+    )
+    replacement_event = _world_event(
+        "event:replacement-plan", "ActivityPlanned",
+        {"policy_refs": [
+            "matrix:source:user_influence", "matrix:domain:study_class",
+            "matrix:social:user_relayed", "matrix:deviation:change_plan",
+            "matrix:visual:none", "matrix:privacy:personal",
+        ]},
+    )
+    settlement_event = _world_event("event:private-shared", "WorldOccurrenceSettled", {})
+    forged_user_event = _world_event(
+        "event:forged-user-shaped-plan",
+        "ActivityCompleted",
+        {"policy_refs": [
+            "matrix:source:user_influence", "matrix:domain:study_class",
+            "matrix:social:user_relayed", "matrix:deviation:persist",
+            "matrix:visual:none", "matrix:privacy:personal",
+        ]},
+    )
+    message_ref = _ref("user-message", "MessageObserved")
+    message_observation = SimpleNamespace(
+        observation_id=message_ref.event_id,
+        world_revision=message_ref.world_revision,
+        event_payload_hash=message_ref.payload_hash,
+    )
+    refs = (
+        message_ref,
+        _event_ref(user_event, revision=2),
+        _event_ref(paused_event, revision=3),
+        _event_ref(resumed_event, revision=4),
+        _event_ref(sleep_event, revision=5),
+        _event_ref(replacement_event, revision=6),
+        _event_ref(settlement_event, revision=7),
+        _event_ref(forged_user_event, revision=8),
+    )
+    projection = _projection(
+        refs=refs,
+        plans=(
+            SimpleNamespace(
+                plan_id="plan:user-shaped", status="completed",
+                authority_origin=SimpleNamespace(
+                    accepted_event_ref=user_event.event_id,
+                    accepted_event_type="ActivityCompleted", accepted_at=NOW,
+                ),
+                privacy_class="shareable", activity_kind="creative.user-requested-notes",
+                participant_refs=("user:1",),
+                evidence_refs=(SimpleNamespace(
+                    evidence_type="observed_message", ref_id=message_ref.event_id,
+                    source_world_revision=message_ref.world_revision,
+                    immutable_hash=message_ref.payload_hash,
+                ),),
+            ),
+            SimpleNamespace(
+                plan_id="plan:forged-user-shaped", status="completed",
+                authority_origin=SimpleNamespace(
+                    accepted_event_ref=forged_user_event.event_id,
+                    accepted_event_type="ActivityCompleted", accepted_at=NOW,
+                ),
+                privacy_class="personal", activity_kind="study.not-user-authorized",
+                participant_refs=("user:1",),
+                evidence_refs=(SimpleNamespace(
+                    evidence_type="observed_message", ref_id=paused_event.event_id,
+                    source_world_revision=3,
+                    immutable_hash=paused_event.payload_hash,
+                ),),
+            ),
+            SimpleNamespace(
+                plan_id="plan:paused", status="paused",
+                authority_origin=SimpleNamespace(
+                    accepted_event_ref=paused_event.event_id,
+                    accepted_event_type="ActivityPaused", accepted_at=NOW,
+                ),
+                privacy_class="personal", activity_kind="study.interrupted",
+                participant_refs=(), evidence_refs=(),
+            ),
+            SimpleNamespace(
+                plan_id="plan:resumed", status="active",
+                authority_origin=SimpleNamespace(
+                    accepted_event_ref=resumed_event.event_id,
+                    accepted_event_type="ActivityResumed", accepted_at=NOW,
+                ),
+                privacy_class="private", activity_kind="household.resume_fix",
+                participant_refs=(), evidence_refs=(),
+            ),
+            SimpleNamespace(
+                plan_id="plan:sleep", status="completed",
+                authority_origin=SimpleNamespace(
+                    accepted_event_ref=sleep_event.event_id,
+                    accepted_event_type="ActivityCompleted", accepted_at=NOW,
+                ),
+                privacy_class="private", activity_kind="sleep.prepare_for_bed",
+                participant_refs=(), evidence_refs=(),
+            ),
+            SimpleNamespace(
+                plan_id="plan:replacement", status="planned",
+                supersedes_plan_id="plan:paused",
+                authority_origin=SimpleNamespace(
+                    accepted_event_ref=replacement_event.event_id,
+                    accepted_event_type="ActivityPlanned", accepted_at=NOW,
+                ),
+                privacy_class="personal", activity_kind="study.changed_destination",
+                participant_refs=("user:1",),
+                evidence_refs=(SimpleNamespace(
+                    evidence_type="observed_message", ref_id=message_ref.event_id,
+                    source_world_revision=message_ref.world_revision,
+                    immutable_hash=message_ref.payload_hash,
+                ),),
+            ),
+        ),
+        occurrences=(SimpleNamespace(
+            status="settled", settlement_event_ref=settlement_event.event_id,
+            visibility="private", participant_refs=("agent:companion", "npc:roommate"),
+            trigger_ref="plan:resumed",
+        ),),
+        npcs=(SimpleNamespace(npc_id="roommate", privacy_class="personal"),),
+        message_observations=(message_observation,),
+    )
+    runtime = EventEcologyMediaCandidateRuntime(
+        ledger=_LedgerWithDeclarationLookup(
+            projection, user_event, paused_event, resumed_event, sleep_event,
+            replacement_event, settlement_event, forged_user_event,
+        ),
+        sidecar=InMemoryImmutableMediaPayloadStore(),
+    )
+
+    by_source = {
+        item.source_event_refs[0]: item
+        for item in runtime.discover_source_taxonomy()
+    }
+
+    assert by_source[user_event.event_id].category == "user_influenced_activity"
+    assert by_source[user_event.event_id].event_source == "user_influence"
+    assert by_source[user_event.event_id].domain == "creative_photo_writing"
+    assert by_source[user_event.event_id].social_shape == "user_relayed"
+    assert by_source[user_event.event_id].deviation == "change_plan"
+    assert by_source[user_event.event_id].visual_potential == "activity"
+    assert by_source[user_event.event_id].media_readiness == "visual_declaration_required"
+    assert by_source[paused_event.event_id].category == "plan_change"
+    assert by_source[resumed_event.event_id].category == "plan_repair"
+    assert by_source[sleep_event.event_id].category == "sleep_wake_result"
+    assert by_source[replacement_event.event_id].category == "plan_change"
+    assert by_source[replacement_event.event_id].media_readiness == "not_lived_event"
+    assert by_source[settlement_event.event_id].category == "shared_private_outcome"
+    assert by_source[settlement_event.event_id].media_readiness == "privacy_blocked"
+    assert by_source[forged_user_event.event_id].category == "activity_result"
 
 
 def test_ecology_derives_diverse_candidates_only_from_existing_shareable_authority() -> None:
@@ -240,7 +428,9 @@ def test_ecology_derives_diverse_candidates_only_from_existing_shareable_authori
                 ),
             ),
         ),
-        npcs=(SimpleNamespace(npc_id="npc:friend", privacy_class="public"),),
+        # Production NPC ids are stored without the participant ``npc:`` ref
+        # prefix.  The ecology must normalize that boundary explicitly.
+        npcs=(SimpleNamespace(npc_id="friend", privacy_class="public"),),
     )
     ledger = _Ledger(projection)
     store = InMemoryImmutableMediaPayloadStore()
@@ -351,6 +541,37 @@ def test_ecology_recovers_an_older_committed_wake_at_the_current_logical_time() 
 
     assert result.status == "created"
     assert len(result.candidate_ids) == 1
+
+
+def test_ecology_can_consume_a_real_paused_plan_as_plan_change() -> None:
+    paused = _ref("paused", "ActivityPaused", at=NOW)
+    projection = _projection(
+        refs=(paused,),
+        plans=(SimpleNamespace(
+            plan_id="plan:paused", status="paused",
+            authority_origin=SimpleNamespace(
+                accepted_event_ref=paused.event_id,
+                accepted_event_type="ActivityPaused", accepted_at=NOW,
+            ),
+            evidence_refs=(), privacy_class="shareable", last_transitioned_at=NOW,
+            activity_kind="study.interrupted", location_ref="location:library",
+            participant_refs=("agent:companion",),
+        ),),
+    )
+    ledger = _Ledger(projection)
+    compiler = _Compiler()
+    runtime = EventEcologyMediaCandidateRuntime(
+        ledger=ledger, sidecar=InMemoryImmutableMediaPayloadStore(),
+        policy=EcologyPolicy(direct_preview_compatibility=True), compiler=compiler,
+    )
+
+    result = runtime.drain_once(
+        wake_event_ref=paused.event_id, logical_time=NOW, actor="worker:event-ecology",
+        trace_id="trace:paused", correlation_id="correlation:paused",
+    )
+
+    assert result.status == "created"
+    assert [item.category for item in compiler.requests] == ["plan_change"]
 
 
 def test_ecology_refuses_an_uncommitted_or_non_life_wake() -> None:

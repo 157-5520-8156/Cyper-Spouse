@@ -72,6 +72,7 @@ class OpenAIMultimodalAnalyzer(MultimodalAnalyzer):
         budget_gate: BudgetGate,
         allow_vision: bool = True,
         allow_transcription: bool = True,
+        proxy_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.api_key = api_key
@@ -81,6 +82,7 @@ class OpenAIMultimodalAnalyzer(MultimodalAnalyzer):
         self.budget_gate = budget_gate
         self.allow_vision = allow_vision
         self.allow_transcription = allow_transcription
+        self.proxy_url = proxy_url
         self.transport = transport
 
     async def analyze(self, attachment: MessageAttachment) -> AttachmentInsight:
@@ -175,7 +177,12 @@ class OpenAIMultimodalAnalyzer(MultimodalAnalyzer):
         return AttachmentInsight("audio", f"语音转写：{transcript}", 0.85)
 
     def _client(self, *, timeout: float) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=timeout, transport=self.transport, trust_env=False)
+        options: dict[str, Any] = {"timeout": timeout, "trust_env": False}
+        if self.proxy_url:
+            options["proxy"] = self.proxy_url
+        if self.transport is not None:
+            options["transport"] = self.transport
+        return httpx.AsyncClient(**options)
 
     def _headers(self) -> dict[str, str]:
         return {

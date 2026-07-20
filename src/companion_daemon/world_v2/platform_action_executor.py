@@ -15,6 +15,7 @@ from typing import Literal, Protocol
 from .action_pump import ActionExecutor
 from .media_provider_grants import require_provider_media_grant
 from .media_delivery_runtime import require_current_media_delivery_approval
+from .production_latency_trace import ProductionLatencyRecorder, TurnLatencyTrace
 from .schema_core import FrozenModel
 from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
 
@@ -51,7 +52,10 @@ class ResolvedActionPayload(FrozenModel):
 
 class PlatformDispatchRequest(FrozenModel):
     action_id: str
-    kind: Literal["reply", "reaction", "typing", "sticker", "media_delivery"]
+    kind: Literal[
+        "reply", "followup", "proactive_message", "reaction", "typing", "sticker",
+        "media_delivery",
+    ]
     target: str
     payload_ref: str
     payload_hash: str
@@ -107,11 +111,18 @@ class PlatformActionExecutor(ActionExecutor):
     path.
     """
 
-    def __init__(self, *, payloads: AuthorizedPayloadReader, transport: PlatformTransport) -> None:
+    def __init__(
+        self,
+        *,
+        payloads: AuthorizedPayloadReader,
+        transport: PlatformTransport,
+        latency_recorder: ProductionLatencyRecorder | None = None,
+    ) -> None:
         if not transport.provider:
             raise ValueError("platform transport provider is required")
         self._payloads = payloads
         self._transport = transport
+        self._latency = latency_recorder
 
     async def assert_dispatch_authorized(
         self, *, action: Action, projection: LedgerProjection
@@ -126,16 +137,96 @@ class PlatformActionExecutor(ActionExecutor):
             )
 
     async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None:
-        request = await self._request_for(action)
-        result = await self._transport.send(request)
-        return self._bind_result(action=action, result=result, request=request)
+        trace = self._trace(action)
+        if trace is None:
+            request = await self._request_for(action)
+            result = await self._transport.send(request)
+        else:
+            async with trace.measure("dispatch"):
+                request = await self._request_for(action)
+            async with trace.measure("receipt"):
+                result = await self._transport.send(request)
+        bound = self._bind_result(action=action, result=result, request=request)
+        self._mark_visible_if_observed(trace=trace, action=action, result=bound)
+        return bound
 
     async def lookup_result(self, action: Action) -> ProviderReceipt | DispatchPending | None:
-        request = await self._request_for(action)
-        result = await self._transport.lookup(
-            idempotency_key=action.idempotency_key, request_fingerprint=request.fingerprint
+        trace = self._trace(action)
+        if trace is None:
+            request = await self._request_for(action)
+            result = await self._transport.lookup(
+                idempotency_key=action.idempotency_key, request_fingerprint=request.fingerprint
+            )
+        else:
+            async with trace.measure("dispatch"):
+                request = await self._request_for(action)
+            async with trace.measure("receipt"):
+                result = await self._transport.lookup(
+                    idempotency_key=action.idempotency_key,
+                    request_fingerprint=request.fingerprint,
+                )
+        bound = self._bind_result(action=action, result=result, request=request)
+        self._mark_visible_if_observed(trace=trace, action=action, result=bound)
+        return bound
+
+    async def verify_delivery(
+        self, action: Action, *, provider_ref: str
+    ) -> ProviderReceipt | None:
+        """Ask the transport for terminal delivery evidence of an acked send.
+
+        This is a read-only provider query keyed by the durable ack reference;
+        it can never dispatch.  Transports without a verification capability
+        simply leave the caller's uncertainty policy in force.
+        """
+
+        verify = getattr(self._transport, "verify_delivery", None)
+        if not callable(verify):
+            return None
+        result = await verify(
+            idempotency_key=action.idempotency_key,
+            target=action.target,
+            provider_ref=provider_ref,
         )
-        return self._bind_result(action=action, result=result, request=request)
+        if result is None:
+            return None
+        if result.status not in {"delivered", "failed"}:
+            raise ValueError("delivery verification must return terminal evidence or None")
+        if result.idempotency_key != action.idempotency_key:
+            raise ValueError("delivery verification receipt does not bind the Action")
+        return ProviderReceipt(
+            provider_receipt_id=result.provider_receipt_id,
+            action_id=action.action_id,
+            idempotency_key=action.idempotency_key,
+            provider=self._transport.provider,
+            provider_ref=result.provider_ref,
+            status=result.status,
+            artifact_refs=result.artifact_refs,
+            cost_actual=result.cost_actual,
+            error_class=result.error_class,
+            received_at=result.received_at,
+            raw_payload_hash=result.raw_payload_hash,
+        )
+
+    def _trace(self, action: Action) -> TurnLatencyTrace | None:
+        return self._latency.get(action.trace_id) if self._latency is not None else None
+
+    @staticmethod
+    def _mark_visible_if_observed(
+        *,
+        trace: TurnLatencyTrace | None,
+        action: Action,
+        result: ProviderReceipt | DispatchPending | None,
+    ) -> None:
+        if (
+            trace is not None
+            and action.kind in {"reply", "followup", "proactive_message"}
+            and isinstance(result, ProviderReceipt)
+            and result.status == "delivered"
+        ):
+            # Generic provider acceptance does not prove that a user could see
+            # the message. Pending/accepted/unknown/failure results therefore
+            # cannot close the user-visible SLO without a stronger adapter receipt.
+            trace.mark_visible()
 
     async def _request_for(self, action: Action) -> PlatformDispatchRequest:
         kind = self._kind(action)
@@ -155,11 +246,12 @@ class PlatformActionExecutor(ActionExecutor):
     @staticmethod
     def _kind(
         action: Action,
-    ) -> Literal["reply", "reaction", "typing", "sticker", "media_delivery"]:
+    ) -> Literal[
+        "reply", "followup", "proactive_message", "reaction", "typing", "sticker",
+        "media_delivery",
+    ]:
         if action.layer != "external_action" or action.kind not in SUPPORTED_PLATFORM_ACTION_KINDS:
             raise ValueError(f"platform executor does not support action kind {action.kind!r}")
-        if action.kind in {"followup", "proactive_message"}:
-            return "reply"
         return action.kind  # type: ignore[return-value]
 
     @staticmethod
@@ -374,17 +466,26 @@ class RoutedActionExecutor(ActionExecutor):
 
     def __init__(
         self, *, platform: ActionExecutor, media: ActionExecutor | None = None,
-        tool: ActionExecutor | None = None,
+        tool: ActionExecutor | None = None, perception: ActionExecutor | None = None,
     ) -> None:
-        if media is None and tool is None:
+        if media is None and tool is None and perception is None:
             raise ValueError("routed executor needs a non-platform route")
-        self._platform, self._media, self._tool = platform, media, tool
+        self._platform, self._media, self._tool, self._perception = (
+            platform,
+            media,
+            tool,
+            perception,
+        )
 
     def _delegate(self, action: Action) -> ActionExecutor:
         if action.kind == "read_only_tool":
             if self._tool is None:
                 raise ValueError("read-only tool route is not composed")
             return self._tool
+        if action.kind in {"vision", "transcription"} and action.layer == "perception_tool":
+            if self._perception is None:
+                raise ValueError("perception route is not composed")
+            return self._perception
         if action.kind in {"media_planning", "media_render", "media_inspection", "media_repair"}:
             if self._media is None:
                 raise ValueError("media provider route is not composed")
@@ -403,6 +504,14 @@ class RoutedActionExecutor(ActionExecutor):
 
     async def lookup_result(self, action: Action) -> ProviderReceipt | DispatchPending | None:
         return await self._delegate(action).lookup_result(action)
+
+    async def verify_delivery(
+        self, action: Action, *, provider_ref: str
+    ) -> ProviderReceipt | None:
+        verify = getattr(self._delegate(action), "verify_delivery", None)
+        if not callable(verify):
+            return None
+        return await verify(action, provider_ref=provider_ref)
 
 
 __all__ = [

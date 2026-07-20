@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from legacy_migration_support import strip_v16_state_fields
+from legacy_migration_support import read_head_state_json, strip_v16_state_fields
 from nacl.signing import SigningKey
 from pydantic import ValidationError
 
@@ -375,14 +375,15 @@ def ledger_event(
     *,
     source: str = "test",
     actor: str = "system:test",
+    at: datetime = NOW,
 ) -> WorldEvent:
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
         event_id=event_id,
         world_id=WORLD,
         event_type=event_type,
-        logical_time=NOW,
-        created_at=NOW,
+        logical_time=at,
+        created_at=at,
         actor=actor,
         source=source,
         trace_id="trace:character-core",
@@ -1650,7 +1651,14 @@ def test_sqlite_migrates_nonempty_v14_to_v15_replays_and_rejects_tamper(
     path = tmp_path / "character-core-v14.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
     ledger.commit(
-        [ledger_event("event:world:start", "WorldStarted", {})],
+        [
+            ledger_event(
+                "event:world:start",
+                "WorldStarted",
+                {},
+                at=NOW - timedelta(minutes=1),
+            )
+        ],
         expected_world_revision=0,
         expected_deliberation_revision=0,
     )
@@ -1673,11 +1681,12 @@ def test_sqlite_migrates_nonempty_v14_to_v15_replays_and_rejects_tamper(
     def downgrade(*, tamper: bool) -> None:
         with sqlite3.connect(path) as connection:
             row = connection.execute(
-                "SELECT world_revision, state_json FROM world_v2_heads WHERE world_id = ?",
+                "SELECT world_revision FROM world_v2_heads WHERE world_id = ?",
                 (WORLD,),
             ).fetchone()
             assert row is not None
-            world_revision, state_json = row
+            world_revision = row[0]
+            state_json = read_head_state_json(connection, WORLD)
             state = ReducerState.model_validate_json(state_json)
             legacy_semantic = state.semantic_payload(
                 world_id=WORLD,

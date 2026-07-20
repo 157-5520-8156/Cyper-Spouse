@@ -20,6 +20,7 @@ from typing import Literal, Protocol
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .image_evidence_contract import ImageEvidenceDeclaredPayload
+from .visual_fact import VisualFactRecordedPayload
 from .media_v2 import (
     ImmutableMediaPayloadStore,
     MediaOpportunity,
@@ -47,6 +48,18 @@ EcologyCategory = Literal[
     "shared_experience",
     "place_environment",
     "object_or_food",
+    "user_influenced_activity",
+    "sleep_wake_result",
+    "shared_private_outcome",
+    "plan_change",
+    "plan_repair",
+]
+
+MediaReadiness = Literal[
+    "declared",
+    "visual_declaration_required",
+    "privacy_blocked",
+    "not_lived_event",
 ]
 
 
@@ -65,14 +78,18 @@ _VISUAL_FACT_CATEGORY: dict[str, EcologyCategory] = {
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
 _ECOLOGY_WAKE_EVENT_TYPES = frozenset({
     "ClockAdvanced",
-    "ActivityStarted", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned",
+    "ActivityStarted", "ActivityPaused", "ActivityResumed", "ActivityCompleted",
+    "ActivityAbandoned",
     "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted", "FactCorrected",
     "ImageEvidenceDeclared",
+    "VisualFactRecorded",
     "NpcRegistered",
 })
 _ECOLOGY_CATEGORY_SET = frozenset({
     "activity_process", "activity_result", "settled_outcome", "npc_shared_outcome",
     "shared_experience", "place_environment", "object_or_food",
+    "user_influenced_activity", "sleep_wake_result", "shared_private_outcome",
+    "plan_change", "plan_repair",
 })
 
 
@@ -117,6 +134,23 @@ class EcologyDrainResult:
     reason_code: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class EcologySourceTaxon:
+    """Exact lived-source classification before declaration gating."""
+
+    category: EcologyCategory
+    source_event_refs: tuple[str, ...]
+    privacy_class: str
+    activity_kind: str | None = None
+    event_source: str | None = None
+    domain: str | None = None
+    social_shape: str | None = None
+    deviation: str | None = None
+    visual_potential: str | None = None
+    participant_refs: tuple[str, ...] = ()
+    media_readiness: MediaReadiness = "visual_declaration_required"
+
+
 class _MediaEvidenceCompiler(Protocol):
     def compile(self, request: MediaEvidenceCompileRequest) -> CompiledMediaEvidence: ...
 
@@ -127,6 +161,7 @@ class _ProjectionLike(Protocol):
     ledger_sequence: int
     logical_time: datetime | None
     committed_world_event_refs: tuple[object, ...]
+    message_observations: tuple[object, ...]
     plans: tuple[object, ...]
     world_occurrences: tuple[object, ...]
     experiences: tuple[object, ...]
@@ -182,6 +217,198 @@ class EventEcologyMediaCandidateRuntime:
     ) -> None:
         self._ledger, self._sidecar, self._policy = ledger, sidecar, policy
         self._compiler = compiler or MediaEvidenceSnapshotCompiler(ledger=ledger)
+
+    def discover_source_taxonomy(self) -> tuple[EcologySourceTaxon, ...]:
+        """Classify real ledger sources without claiming image renderability.
+
+        Visual declarations, privacy ceilings and cooldowns remain mandatory
+        in ``drain_once``.  This read-only seam distinguishes a starved world
+        from a world whose real sources are deliberately fail-closed later.
+        """
+
+        projection = self._ledger.project()
+        refs_by_id = {
+            item.event_id: item for item in projection.committed_world_event_refs
+        }
+        refs = set(refs_by_id)
+        message_observations = {
+            item.observation_id: item
+            for item in getattr(projection, "message_observations", ())
+        }
+        declarations = self._declared_visual_sources(
+            projection=projection, refs=refs_by_id
+        )
+        values: list[EcologySourceTaxon] = []
+        plan_by_id = {
+            plan_id: item for item in projection.plans
+            if (plan_id := getattr(item, "plan_id", None))
+        }
+        for plan in projection.plans:
+            origin = getattr(plan, "authority_origin", None)
+            if origin is None or plan.status not in {
+                "planned", "active", "paused", "completed", "abandoned"
+            }:
+                continue
+            if origin.accepted_event_ref in refs:
+                matrix = self._plan_matrix(plan)
+                category = self._plan_category(
+                    plan=plan, message_observations=message_observations, matrix=matrix,
+                )
+                values.append(EcologySourceTaxon(
+                    category=category,
+                    source_event_refs=(origin.accepted_event_ref,),
+                    privacy_class=plan.privacy_class,
+                    activity_kind=plan.activity_kind,
+                    event_source=matrix["event_source"],
+                    domain=matrix["domain"],
+                    social_shape=matrix["social_shape"],
+                    deviation=matrix["deviation"],
+                    visual_potential=matrix["visual_potential"],
+                    participant_refs=tuple(plan.participant_refs),
+                    media_readiness=(
+                        "not_lived_event"
+                        if plan.status in {"planned", "abandoned"}
+                        else self._media_readiness(
+                            source_refs=(origin.accepted_event_ref,),
+                            privacy=plan.privacy_class,
+                            declarations=declarations,
+                        )
+                    ),
+                ))
+        npc_ids = {item.npc_id for item in projection.npcs}
+        for occurrence in projection.world_occurrences:
+            if occurrence.status != "settled" or occurrence.settlement_event_ref not in refs:
+                continue
+            participants = tuple(occurrence.participant_refs)
+            plan = plan_by_id.get(getattr(occurrence, "trigger_ref", None))
+            matrix = self._plan_matrix(plan) if plan is not None else self._empty_matrix()
+            if occurrence.visibility in {"private", "withhold"} and len(participants) > 1:
+                category = "shared_private_outcome"
+            elif any(
+                item.startswith("npc:") and item.removeprefix("npc:") in npc_ids
+                for item in participants
+            ):
+                category = "npc_shared_outcome"
+            else:
+                category = "settled_outcome"
+            values.append(EcologySourceTaxon(
+                category=category,
+                source_event_refs=(occurrence.settlement_event_ref,),
+                privacy_class=occurrence.visibility,
+                activity_kind=getattr(plan, "activity_kind", None),
+                event_source=matrix["event_source"], domain=matrix["domain"],
+                social_shape=matrix["social_shape"], deviation=matrix["deviation"],
+                visual_potential=matrix["visual_potential"],
+                participant_refs=participants,
+                media_readiness=self._media_readiness(
+                    source_refs=(occurrence.settlement_event_ref,),
+                    privacy=occurrence.visibility, declarations=declarations,
+                ),
+            ))
+        for experience in projection.experiences:
+            origin = getattr(experience, "origin", None)
+            values_after = getattr(experience, "values", None)
+            if origin is not None and values_after is not None and origin.accepted_event_ref in refs:
+                values.append(EcologySourceTaxon(
+                    category="shared_experience",
+                    source_event_refs=(origin.accepted_event_ref,),
+                    privacy_class=values_after.privacy_class,
+                    participant_refs=tuple(values_after.participant_refs),
+                    media_readiness=self._media_readiness(
+                        source_refs=(origin.accepted_event_ref,),
+                        privacy=values_after.privacy_class,
+                        declarations=declarations,
+                    ),
+                ))
+        return tuple(values)
+
+    @staticmethod
+    def _empty_matrix() -> dict[str, str | None]:
+        return {
+            "event_source": None, "domain": None, "social_shape": None,
+            "deviation": None, "visual_potential": None,
+        }
+
+    def _plan_matrix(self, plan: object) -> dict[str, str | None]:
+        matrix = self._empty_matrix()
+        origin = getattr(plan, "authority_origin", None)
+        lookup = getattr(self._ledger, "lookup_event_commit", None)
+        if origin is None or not callable(lookup):
+            return matrix
+        located = lookup(getattr(origin, "accepted_event_ref", ""))
+        if located is None:
+            return matrix
+        event, _commit = located
+        try:
+            raw = event.payload()
+        except (AttributeError, ValueError):
+            return matrix
+        policy_refs = raw.get("policy_refs", ())
+        if not isinstance(policy_refs, (list, tuple)):
+            return matrix
+        prefixes = {
+            "matrix:source:": "event_source",
+            "matrix:domain:": "domain",
+            "matrix:social:": "social_shape",
+            "matrix:deviation:": "deviation",
+            "matrix:visual:": "visual_potential",
+        }
+        for policy_ref in policy_refs:
+            if not isinstance(policy_ref, str):
+                continue
+            for prefix, field in prefixes.items():
+                if policy_ref.startswith(prefix):
+                    matrix[field] = policy_ref.removeprefix(prefix)
+        return matrix
+
+    @staticmethod
+    def _plan_category(
+        *, plan: object, message_observations: dict[str, object],
+        matrix: dict[str, str | None],
+    ) -> EcologyCategory:
+        origin = getattr(plan, "authority_origin", None)
+        accepted_type = getattr(origin, "accepted_event_type", None)
+        user_influenced = False
+        for item in getattr(plan, "evidence_refs", ()):
+            observation = message_observations.get(str(getattr(item, "ref_id", "")))
+            if (
+                getattr(item, "evidence_type", None) == "observed_message"
+                and observation is not None
+                and getattr(item, "source_world_revision", None)
+                == getattr(observation, "world_revision", None)
+                and getattr(item, "immutable_hash", None)
+                == getattr(observation, "event_payload_hash", None)
+            ):
+                user_influenced = True
+                break
+        if (
+            accepted_type == "ActivityPaused"
+            or getattr(plan, "status", None) in {"paused", "abandoned"}
+            or getattr(plan, "supersedes_plan_id", None) is not None
+        ):
+            return "plan_change"
+        if user_influenced:
+            return "user_influenced_activity"
+        if accepted_type == "ActivityResumed":
+            return "plan_repair"
+        if matrix["domain"] == "sleep_wake" and getattr(plan, "status", None) == "completed":
+            return "sleep_wake_result"
+        return (
+            "activity_process"
+            if getattr(plan, "status", None) == "active"
+            else "activity_result"
+        )
+
+    @staticmethod
+    def _media_readiness(
+        *, source_refs: tuple[str, ...], privacy: object,
+        declarations: dict[str, tuple[str, str, Literal["public", "shareable"]]] | None,
+    ) -> MediaReadiness:
+        if _bounded_privacy(privacy) is None:
+            return "privacy_blocked"
+        if declarations is not None and all(item in declarations for item in source_refs):
+            return "declared"
+        return "visual_declaration_required"
 
     def drain_once(
         self, *, wake_event_ref: str, logical_time: datetime, actor: str, trace_id: str, correlation_id: str,
@@ -351,16 +578,29 @@ class EventEcologyMediaCandidateRuntime:
             ))
             daily += 1
 
+        message_observations = {
+            item.observation_id: item
+            for item in getattr(projection, "message_observations", ())
+        }
         for plan in projection.plans:
             origin = getattr(plan, "authority_origin", None)
-            if origin is None or getattr(plan, "status", None) not in {"active", "completed"}:
+            if origin is None or getattr(plan, "status", None) not in {
+                "active", "paused", "completed"
+            }:
                 continue
+            matrix = self._plan_matrix(plan)
             add(
-                category="activity_process" if plan.status == "active" else "activity_result",
+                category=self._plan_category(
+                    plan=plan, message_observations=message_observations, matrix=matrix,
+                ),
                 source_refs=(origin.accepted_event_ref,), privacy=getattr(plan, "privacy_class", None),
                 observed_at=getattr(plan, "last_transitioned_at", None) or getattr(origin, "accepted_at"),
                 context=self._activity_context(plan),
-                expiry=self._policy.fleeting_expiry if plan.status == "active" else self._policy.default_expiry,
+                expiry=(
+                    self._policy.fleeting_expiry
+                    if plan.status in {"active", "paused"}
+                    else self._policy.default_expiry
+                ),
             )
         npc_by_id = {item.npc_id: item for item in projection.npcs}
         for occurrence in projection.world_occurrences:
@@ -368,10 +608,22 @@ class EventEcologyMediaCandidateRuntime:
                 continue
             participant_npcs = tuple(
                 item for item in getattr(occurrence, "participant_refs", ())
-                if item.startswith("npc:") and _bounded_privacy(getattr(npc_by_id.get(item), "privacy_class", None)) is not None
+                if item.startswith("npc:")
+                and _bounded_privacy(
+                    getattr(
+                        npc_by_id.get(item.removeprefix("npc:")),
+                        "privacy_class", None,
+                    )
+                ) is not None
             )
+            participants = tuple(getattr(occurrence, "participant_refs", ()))
+            category: EcologyCategory
+            if getattr(occurrence, "visibility", None) in {"private", "withhold"} and len(participants) > 1:
+                category = "shared_private_outcome"
+            else:
+                category = "npc_shared_outcome" if participant_npcs else "settled_outcome"
             add(
-                category="npc_shared_outcome" if participant_npcs else "settled_outcome",
+                category=category,
                 source_refs=(occurrence.settlement_event_ref,), privacy=getattr(occurrence, "visibility", None),
                 observed_at=getattr(occurrence, "settled_at", None),
                 context={
@@ -411,6 +663,41 @@ class EventEcologyMediaCandidateRuntime:
                     "value_hash": values.value_hash,
                 }, expiry=self._policy.fleeting_expiry if category == "place_environment" else self._policy.default_expiry,
             )
+        # ``FactCommittedV2`` values are deliberately opaque and cannot be
+        # reinterpreted as food or objects.  VisualFactRecorded is the only
+        # production lane whose concrete slice lives in a content sidecar and
+        # is bound to an already committed lived-world source.
+        lookup = getattr(self._ledger, "lookup_event_commit", None)
+        if callable(lookup):
+            for ref in projection.committed_world_event_refs:
+                if getattr(ref, "event_type", None) != "VisualFactRecorded":
+                    continue
+                located = lookup(ref.event_id)
+                if located is None:
+                    continue
+                event, _commit = located
+                if event.payload_hash != getattr(ref, "payload_hash", None):
+                    continue
+                try:
+                    visual_fact = VisualFactRecordedPayload.model_validate_json(event.payload_json)
+                except ValueError:
+                    continue
+                if visual_fact.valid_until is not None and visual_fact.valid_until < logical_time:
+                    continue
+                add(
+                    category="object_or_food",
+                    source_refs=(event.event_id,),
+                    privacy=visual_fact.visibility,
+                    observed_at=visual_fact.observed_at,
+                    context={
+                        "facet": visual_fact.facet,
+                        "subject_ref": visual_fact.subject_ref,
+                        "content_ref": visual_fact.content_ref,
+                        "content_payload_hash": visual_fact.content_payload_hash,
+                        "source_event_ref": visual_fact.source_event_ref,
+                    },
+                    expiry=self._policy.default_expiry,
+                )
         # Newest evidence wins while deterministic IDs make retries/replay
         # independent of Python iteration order.
         ordered = sorted(discovered, key=lambda item: (-item.observed_at.timestamp(), item.category, item.source_event_refs))
@@ -433,6 +720,21 @@ class EventEcologyMediaCandidateRuntime:
         declared: dict[str, tuple[str, str, Literal["public", "shareable"]]] = {}
         ambiguous: set[str] = set()
         for ref in projection.committed_world_event_refs:
+            if getattr(ref, "event_type", None) == "VisualFactRecorded":
+                located = lookup(ref.event_id)
+                if located is None:
+                    continue
+                event, _commit = located
+                if event.payload_hash != getattr(ref, "payload_hash", None):
+                    continue
+                try:
+                    visual_fact = VisualFactRecordedPayload.model_validate_json(event.payload_json)
+                except ValueError:
+                    continue
+                # A VisualFact descriptor is itself the accepted declaration:
+                # the compiler still must resolve its exact sidecar bytes.
+                declared[event.event_id] = (event.event_id, event.payload_hash, visual_fact.visibility)
+                continue
             if getattr(ref, "event_type", None) != "ImageEvidenceDeclared":
                 continue
             located = lookup(ref.event_id)
@@ -490,5 +792,5 @@ class EventEcologyMediaCandidateRuntime:
 
 __all__ = [
     "EcologyCandidate", "EcologyCategory", "EcologyDrainResult", "EcologyPolicy",
-    "EventEcologyMediaCandidateRuntime",
+    "EcologySourceTaxon", "EventEcologyMediaCandidateRuntime", "MediaReadiness",
 ]

@@ -197,15 +197,6 @@ def test_real_ledger_acceptance_commits_one_selected_candidate_and_planning_acti
     world_id = "world:media-selection-acceptance-real"
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=world_id, accepted_batch_issuer=issuer)
-    clock = _event(
-        world_id=world_id, event_id="event:clock:media-selection", event_type="ClockAdvanced",
-        payload={
-            "logical_time_from": (NOW - timedelta(seconds=1)).isoformat(),
-            "logical_time_to": NOW.isoformat(),
-        },
-        causation_id="cause:clock",
-    )
-    ledger.commit((clock,), expected_world_revision=0, expected_deliberation_revision=0)
     started = _event(
         world_id=world_id, event_id="event:world-started:media-selection",
         event_type="WorldStarted", payload={}, causation_id="cause:world-started",
@@ -217,7 +208,7 @@ def test_real_ledger_acceptance_commits_one_selected_candidate_and_planning_acti
         world_id=world_id, event_id="event:account:media-selection", event_type="BudgetAccountConfigured",
         payload={"account": account.model_dump(mode="json")}, causation_id=started.event_id,
     )
-    ledger.commit((started, account_event), expected_world_revision=1, expected_deliberation_revision=0)
+    ledger.commit((started, account_event), expected_world_revision=0, expected_deliberation_revision=0)
     candidate = PhotoCandidate(
         candidate_id="candidate:media-selection", source_event_refs=(started.event_id,), family="life_share",
         privacy_ceiling="shareable", opened_at=NOW, expires_at=NOW + timedelta(hours=1),
@@ -284,14 +275,6 @@ def test_real_ledger_acceptance_preserves_p2_candidate_and_snapshot_lineages(mon
     world_id = "world:media-selection-acceptance-p2"
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=world_id, accepted_batch_issuer=issuer)
-    clock = _event(
-        world_id=world_id, event_id="event:clock:media-selection-p2", event_type="ClockAdvanced",
-        payload={
-            "logical_time_from": (NOW - timedelta(seconds=1)).isoformat(),
-            "logical_time_to": NOW.isoformat(),
-        }, causation_id="cause:clock",
-    )
-    ledger.commit((clock,), expected_world_revision=0, expected_deliberation_revision=0)
     started = _event(
         world_id=world_id, event_id="event:world-started:media-selection-p2",
         event_type="WorldStarted", payload={}, causation_id="cause:world-started",
@@ -303,7 +286,7 @@ def test_real_ledger_acceptance_preserves_p2_candidate_and_snapshot_lineages(mon
         world_id=world_id, event_id="event:account:media-selection-p2", event_type="BudgetAccountConfigured",
         payload={"account": account.model_dump(mode="json")}, causation_id=started.event_id,
     )
-    ledger.commit((started, account_event), expected_world_revision=1, expected_deliberation_revision=0)
+    ledger.commit((started, account_event), expected_world_revision=0, expected_deliberation_revision=0)
     source = MediaEvidenceSource(event_ref=started.event_id, payload_hash=started.payload_hash)
     contract = CharacterMediaCandidateContract(
         subject_ref="agent:companion", kind="selfie",
@@ -387,17 +370,6 @@ def test_pin_rejects_selection_proposal_not_caused_by_its_candidate_opening() ->
     world_id = "world:media-selection-forged-lineage"
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=world_id, accepted_batch_issuer=issuer)
-    clock = _event(
-        world_id=world_id,
-        event_id="event:clock:forged-lineage",
-        event_type="ClockAdvanced",
-        payload={
-            "logical_time_from": (NOW - timedelta(seconds=1)).isoformat(),
-            "logical_time_to": NOW.isoformat(),
-        },
-        causation_id="cause:clock",
-    )
-    ledger.commit((clock,), expected_world_revision=0, expected_deliberation_revision=0)
     started = _event(
         world_id=world_id,
         event_id="event:world-started:forged-lineage",
@@ -423,7 +395,7 @@ def test_pin_rejects_selection_proposal_not_caused_by_its_candidate_opening() ->
         payload=PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json"),
         causation_id=started.event_id,
     )
-    ledger.commit((started, candidate_event), expected_world_revision=1, expected_deliberation_revision=0)
+    ledger.commit((started, candidate_event), expected_world_revision=0, expected_deliberation_revision=0)
     projection = ledger.project()
     proposal = MediaSelectionProposalCompiler(catalog_version="test-media-selection.1").compile(
         projection=projection,

@@ -12,6 +12,7 @@ from companion_daemon.world_v2.schemas import (
     CommittedWorldEventRef,
     DueWindow,
     LedgerProjection,
+    MessageObservationRef,
     PlanStateProjection,
 )
 
@@ -113,6 +114,8 @@ def test_catalog_enumerates_the_exact_state_successor_matrix_with_opaque_tokens(
     )
 
     assert result.status == "openings_available"
+    # ``activity-opening.1`` replays its original frozen matrix: completion
+    # was not yet window-gated and ordinary transitions had no dwell floor.
     assert [opening.operation for opening in result.openings] == [
         "pause",
         "complete",
@@ -215,6 +218,106 @@ def test_catalog_reports_missing_capability_not_idle_when_every_live_plan_is_exc
     assert result.openings == ()
     assert result.blocked_plan_count == 1
     assert result.blocked_capabilities == (expected_capability,)
+
+
+def test_catalog_makes_user_influence_and_shared_private_selectable_only_with_exact_scope() -> None:
+    observation = MessageObservationRef(
+        observation_id="observation:user:invite",
+        source="test", source_event_id="message:invite",
+        content_payload_hash="b" * 64, event_payload_hash="c" * 64,
+        world_revision=8, actor="user:geoff", channel="direct",
+        payload_ref="payload:invite",
+    )
+    influenced = _plan("user-influenced").model_copy(update={
+        "evidence_refs": (EvidenceRef(
+            ref_id=observation.observation_id,
+            evidence_type="observed_message",
+            claim_purpose="future_plan",
+            source_world_revision=observation.world_revision,
+            immutable_hash=observation.event_payload_hash,
+        ),),
+        "participant_refs": ("user:geoff",),
+        "privacy_class": "private",
+    })
+    projection = _projection(influenced).model_copy(update={
+        "message_observations": (observation,),
+    })
+
+    result = _catalog().openings_for(projection=projection, wake_event_ref=WAKE_REF)
+
+    start = next(item for item in result.openings if item.operation == "start")
+    assert start.opening_kind == "shared_private"
+    resolved = _catalog().resolve_opening(
+        projection=projection, wake_event_ref=WAKE_REF,
+        opening_token=start.opening_token,
+    )
+    assert resolved is not None
+    assert resolved.opening_kind == "shared_private"
+    assert resolved.cause_observation_id == observation.observation_id
+
+    forged_scope = projection.model_copy(update={
+        "plans": (influenced.model_copy(update={
+            "participant_refs": ("user:someone-else",),
+        }),),
+    })
+    rejected = _catalog().openings_for(
+        projection=forged_scope, wake_event_ref=WAKE_REF
+    )
+    assert rejected.status == "blocked_by_missing_capability"
+    assert rejected.openings == ()
+    assert rejected.blocked_capabilities == ("participant_availability",)
+
+
+def test_catalog_binds_a_newer_real_message_as_an_interruption_cause() -> None:
+    observation = MessageObservationRef(
+        observation_id="observation:user:interrupt",
+        source="test", source_event_id="message:interrupt",
+        content_payload_hash="d" * 64, event_payload_hash="e" * 64,
+        world_revision=8, actor="user:geoff", channel="direct",
+        payload_ref="payload:interrupt",
+    )
+    active = _plan("active", status="active", entity_revision=2).model_copy(update={
+        "authority_origin": type("Origin", (), {
+            "accepted_world_revision": 7,
+        })(),
+    })
+    projection = _projection(active).model_copy(update={
+        "message_observations": (observation,),
+    })
+
+    result = _catalog().openings_for(projection=projection, wake_event_ref=WAKE_REF)
+
+    pause = next(item for item in result.openings if item.operation == "pause")
+    assert pause.opening_kind == "interruption"
+    resolved = _catalog().resolve_opening(
+        projection=projection, wake_event_ref=WAKE_REF,
+        opening_token=pause.opening_token,
+    )
+    assert resolved is not None
+    assert resolved.cause_observation_id == observation.observation_id
+
+
+def test_catalog_exposes_clock_activity_conflict_without_fabricating_external_cause() -> None:
+    active = _plan(
+        "overdue-active", status="active", entity_revision=2,
+        scheduled_window=DueWindow(
+            opens_at=NOW - timedelta(hours=1),
+            closes_at=NOW - timedelta(minutes=1),
+        ),
+    )
+    projection = _projection(active)
+
+    result = _catalog().openings_for(projection=projection, wake_event_ref=WAKE_REF)
+
+    pause = next(item for item in result.openings if item.operation == "pause")
+    assert pause.opening_kind == "interruption"
+    resolved = _catalog().resolve_opening(
+        projection=projection, wake_event_ref=WAKE_REF,
+        opening_token=pause.opening_token,
+    )
+    assert resolved is not None
+    assert resolved.cause_kind == "clock_activity_conflict"
+    assert resolved.cause_observation_id is None
 
 
 def test_catalog_reports_no_openings_for_terminal_or_foreign_plans_without_claiming_missing_capability() -> None:

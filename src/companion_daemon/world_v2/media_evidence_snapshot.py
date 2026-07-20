@@ -13,6 +13,7 @@ from typing import Literal, Protocol
 
 from .ledger import LedgerPort
 from .image_evidence_contract import ImageEvidenceDeclaredPayload
+from .visual_fact import VisualFactContentV1, VisualFactRecordedPayload
 from .appearance_state import AppearanceStateRecordedPayload, appearance_state_at
 from .visible_physical_state import (
     VisiblePhysicalStateRecordedPayload,
@@ -41,7 +42,7 @@ _SUPPORTED_EVENT_TYPES = frozenset({
     "ActivityPlanned", "ActivityStarted", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned",
     "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted", "FactCorrected",
     "FactCommitMaterializedV2", "ImageEvidenceDeclared", "AppearanceStateRecorded",
-    "VisiblePhysicalStateRecorded",
+    "VisiblePhysicalStateRecorded", "VisualFactRecorded",
 })
 _SECTION_FIELDS: dict[str, frozenset[str]] = {
     "location": frozenset({"id", "kind", "country", "region", "city", "publicness", "mirror_available"}),
@@ -146,8 +147,12 @@ class MediaEvidenceSnapshotCompiler:
     pointer provenance, and canonical hash construction behind that seam.
     """
 
-    def __init__(self, *, ledger: LedgerPort) -> None:
+    def __init__(self, *, ledger: LedgerPort, visual_fact_sidecar=None) -> None:  # type: ignore[no-untyped-def]
         self._ledger = ledger
+        # This capability is intentionally optional so embedded readers do
+        # not silently treat a descriptor hash as visual content.  The
+        # production composition injects the immutable media sidecar.
+        self._visual_fact_sidecar = visual_fact_sidecar
 
     def compile(self, request: MediaEvidenceCompileRequest) -> CompiledMediaEvidence:
         candidate = request.candidate
@@ -206,6 +211,9 @@ class MediaEvidenceSnapshotCompiler:
                     fallback_visibility=candidate.privacy_ceiling,
                     raw=declaration.image_evidence.planner_payload(),
                 )
+                continue
+            if event.event_type == "VisualFactRecorded":
+                self._merge_visual_fact_evidence(target=body, origins=origins, event=event)
                 continue
             self._merge_explicit_evidence(
                 target=body, origins=origins, event=event, fallback_visibility=candidate.privacy_ceiling,
@@ -392,6 +400,53 @@ class MediaEvidenceSnapshotCompiler:
             raise MediaEvidenceNotRenderable("readable_text_requires_artifact")
         if "requires_readable_text" in raw and raw["requires_readable_text"] is not False:
             raise MediaEvidenceNotRenderable("malformed_image_evidence")
+
+    def _merge_visual_fact_evidence(
+        self,
+        *,
+        target: dict[str, object],
+        origins: dict[str, tuple[WorldEvent, PrivacyClass]],
+        event: WorldEvent,
+    ) -> None:
+        """Read explicit object/food bytes only through their immutable sidecar.
+
+        A ``VisualFactRecorded`` ledger event intentionally contains the
+        content ref/hash, not a shadow copy of a food or object description.
+        Missing, re-bound, malformed or privacy-escalating sidecar bytes make
+        the candidate unrenderable; they never trigger a textual fallback.
+        """
+
+        try:
+            descriptor = VisualFactRecordedPayload.model_validate_json(event.payload_json)
+        except ValueError as exc:
+            raise MediaEvidenceNotRenderable("malformed_visual_fact_descriptor") from exc
+        store = self._visual_fact_sidecar
+        record = store.read_exact(payload_ref=descriptor.content_ref) if store is not None else None
+        if record is None:
+            raise MediaEvidenceNotRenderable("visual_fact_content_missing")
+        if (
+            record.content_type != "application/vnd.world-v2.visual-fact+json"
+            or record.payload_hash != descriptor.content_payload_hash
+        ):
+            raise MediaEvidenceNotRenderable("visual_fact_content_hash_mismatch")
+        try:
+            content = VisualFactContentV1.model_validate_json(record.body)
+        except ValueError as exc:
+            raise MediaEvidenceNotRenderable("malformed_visual_fact_content") from exc
+        if (
+            content.facet != descriptor.facet
+            or content.subject_ref != descriptor.subject_ref
+            or content.visibility != descriptor.visibility
+            or record.body != content.canonical_body()
+        ):
+            raise MediaEvidenceNotRenderable("visual_fact_content_descriptor_mismatch")
+        self._merge_explicit_evidence(
+            target=target,
+            origins=origins,
+            event=event,
+            fallback_visibility=descriptor.visibility,
+            raw=content.as_image_evidence(),
+        )
 
     def _freeze_character_evidence(
         self,

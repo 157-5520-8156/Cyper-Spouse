@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from legacy_migration_support import strip_v16_state_fields
+from legacy_migration_support import read_head_state_json, strip_v16_state_fields
 
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.experience_events import (
@@ -55,14 +55,20 @@ WORLD = "world-experience-authority"
 POLICY = ("policy:experience-v1",)
 
 
-def event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
+def event(
+    event_id: str,
+    event_type: str,
+    payload: dict[str, object],
+    *,
+    at: datetime = NOW,
+) -> WorldEvent:
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
         event_id=event_id,
         world_id=WORLD,
         event_type=event_type,
-        logical_time=NOW,
-        created_at=NOW,
+        logical_time=at,
+        created_at=at,
         actor="system:test",
         source="test",
         trace_id="trace:experience",
@@ -245,7 +251,7 @@ def proposal(value: ExperienceCommittedPayload) -> ExperienceProposalProjection:
 def initialized(kind=WorldLedger.in_memory):
     ledger = kind(world_id=WORLD)
     ledger.commit(
-        [event("world:start", "WorldStarted", {})],
+        [event("world:start", "WorldStarted", {}, at=NOW - timedelta(minutes=10))],
         expected_world_revision=0,
         expected_deliberation_revision=0,
     )
@@ -1090,12 +1096,13 @@ def test_sqlite_migrates_nonempty_v12_legacy_experience_without_fabricated_linea
 
     with sqlite3.connect(path) as connection:
         row = connection.execute(
-            "SELECT world_revision, deliberation_revision, ledger_sequence, state_json "
+            "SELECT world_revision, deliberation_revision, ledger_sequence "
             "FROM world_v2_heads WHERE world_id = ?",
             (WORLD,),
         ).fetchone()
         assert row is not None
-        world_revision, deliberation_revision, ledger_sequence, state_json = row
+        world_revision, deliberation_revision, ledger_sequence = row
+        state_json = read_head_state_json(connection, WORLD)
         current = ReducerState.model_validate_json(state_json)
         next_world_revision = int(world_revision) + 1
         next_sequence = int(ledger_sequence) + 1

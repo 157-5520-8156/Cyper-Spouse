@@ -94,6 +94,19 @@ class ExpressionBeatSettledPayload(FrozenModel):
     terminal_action_state: Literal["delivered", "failed", "unknown", "cancelled", "expired"]
 
 
+class ExpressionBeatTerminatedPayload(FrozenModel):
+    """An undispatched beat was explicitly retired with its Action authority."""
+
+    acceptance_id: str = Field(min_length=1, max_length=256)
+    proposal_id: str = Field(min_length=1, max_length=256)
+    plan_id: str = Field(min_length=1, max_length=512)
+    beat_id: str = Field(min_length=1, max_length=512)
+    action_id: str = Field(min_length=1, max_length=512)
+    disposition: Literal["cancelled", "superseded"]
+    source_event_ref: str = Field(min_length=1, max_length=512)
+    source_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ExpressionPlanCompletedPayload(FrozenModel):
     """The current minimal-reply plan has no remaining authorized beats."""
 
@@ -107,19 +120,49 @@ class ExpressionPlanCompletedPayload(FrozenModel):
     terminal_action_state: Literal["delivered", "failed", "unknown", "cancelled", "expired"]
 
 
+class ExpressionPlanTerminatedPayload(FrozenModel):
+    """Close a plan that can no longer truthfully reach delivered completion.
+
+    The source is either the exact terminal receipt which failed one beat, or
+    the durable cancellation authority produced by reconsideration.  Every
+    remaining undispatched beat must first receive explicit ActionCancelled,
+    ExpressionBeatTerminated and BudgetReleased authority; the plan reducer
+    never cascades those effects or represents them as delivered.
+    """
+
+    acceptance_id: str = Field(min_length=1, max_length=256)
+    proposal_id: str = Field(min_length=1, max_length=256)
+    plan_id: str = Field(min_length=1, max_length=512)
+    terminal_beat_id: str = Field(min_length=1, max_length=512)
+    disposition: Literal["failed", "unknown", "cancelled", "expired", "superseded"]
+    source_event_ref: str = Field(min_length=1, max_length=512)
+    source_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_id: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def receipt_dispositions_are_source_bound(self) -> "ExpressionPlanTerminatedPayload":
+        if self.disposition in {"failed", "unknown", "expired"} and self.receipt_id is None:
+            raise ValueError("receipt-derived expression termination requires receipt_id")
+        return self
+
+
 MINIMAL_REPLY_EVENT_PAYLOAD_MODELS = {
     "MessagePayloadStored": MessagePayloadStoredPayload,
     "ExpressionPlanAccepted": ExpressionPlanAcceptedPayload,
     "ExpressionBeatAuthorized": ExpressionBeatAuthorizedPayload,
     "ExpressionBeatSettled": ExpressionBeatSettledPayload,
+    "ExpressionBeatTerminated": ExpressionBeatTerminatedPayload,
     "ExpressionPlanCompleted": ExpressionPlanCompletedPayload,
+    "ExpressionPlanTerminated": ExpressionPlanTerminatedPayload,
 }
 
 
 __all__ = [
     "ExpressionBeatAuthorizedPayload",
     "ExpressionBeatSettledPayload",
+    "ExpressionBeatTerminatedPayload",
     "ExpressionPlanCompletedPayload",
+    "ExpressionPlanTerminatedPayload",
     "ExpressionPlanAcceptedPayload",
     "MINIMAL_REPLY_EVENT_PAYLOAD_MODELS",
     "MessagePayloadStoredPayload",

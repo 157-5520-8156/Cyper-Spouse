@@ -8,6 +8,7 @@ from typing import Protocol
 
 from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .perception import PerceptionAcceptanceRuntime, PerceptionProposal
+from .perception_input_source import PerceptionInputSource
 from .schema_core import FrozenModel
 from .schemas import Observation, PerceptionAuthorizationBinding, ProjectionCursor
 
@@ -56,19 +57,25 @@ class PerceptionProposalCompiler:
         actor_ref: str,
         budget_account_id: str,
         budget_limit: int,
+        input_source: PerceptionInputSource,
     ) -> None:
         if not actor_ref or not budget_account_id or budget_limit <= 0:
             raise ValueError("perception compiler needs deployment policy")
-        self._ledger, self._authority, self._authorization = (
+        self._ledger, self._authority, self._authorization, self._inputs = (
             ledger,
             DecisionProposalAuthorityReader(ledger=ledger),
             authorization_resolver,
+            input_source,
         )
         self._actor_ref, self._budget_account_id, self._budget_limit = (
             actor_ref,
             budget_account_id,
             budget_limit,
         )
+
+    @property
+    def ledger(self):
+        return self._ledger
 
     def accept(
         self, *, world_id: str, cursor: ProjectionCursor, proposal_id: str, actor: str, source: str
@@ -97,18 +104,24 @@ class PerceptionProposalCompiler:
             or raw.get("budget_limit") != self._budget_limit
         ):
             raise PerceptionProposalCompilerError("perception proposal shape is invalid")
-        input_body = str(raw.get("input_body", ""))
-        input_hash = "sha256:" + hashlib.sha256(input_body.encode()).hexdigest()
+        attachment_ref = raw.get("attachment_ref")
+        if not isinstance(attachment_ref, str) or not attachment_ref:
+            raise PerceptionProposalCompilerError("perception attachment selection is invalid")
+        selection_hash = "sha256:" + hashlib.sha256(attachment_ref.encode()).hexdigest()
         expected_ref = perception_input_ref(
             proposal_id=proposal.proposal_id, change_id=change.change_id
         )
-        if intent.payload_ref != expected_ref or intent.payload_hash != input_hash:
+        if intent.payload_ref != expected_ref or intent.payload_hash != selection_hash:
             raise PerceptionProposalCompilerError("perception input audit binding is invalid")
         source_pair = self._ledger.lookup_event_commit(authority.audit.trigger_ref)
         if source_pair is None or source_pair[0].event_type != "ObservationRecorded":
             raise PerceptionProposalCompilerError("perception source observation is missing")
         source_event, source_commit = source_pair
         observation = Observation.model_validate_json(source_event.payload_json)
+        if attachment_ref not in observation.attachment_refs:
+            raise PerceptionProposalCompilerError(
+                "perception attachment is not present in the source Observation"
+            )
         evidence = next(
             (item for item in proposal.evidence_refs if item.ref_id == observation.observation_id),
             None,
@@ -139,14 +152,20 @@ class PerceptionProposalCompiler:
             target=change.target_id,
             logical_time=projection.logical_time or source_event.logical_time,
         )
+        descriptor = self._inputs.describe(
+            attachment_ref=attachment_ref,
+            analysis_kind=kind,
+        )
+        if descriptor.attachment_ref != attachment_ref or descriptor.analysis_kind != kind:
+            raise PerceptionProposalCompilerError("perception input descriptor does not bind selection")
         accepted = PerceptionProposal(
             proposal_id=proposal.proposal_id,
             source_event_ref=source_event.event_id,
             source_world_revision=source_commit.world_revision,
             source_payload_hash=source_event.payload_hash,
             analysis_kind=kind,
-            input_ref=expected_ref,
-            input_hash=input_hash,
+            input_ref=descriptor.attachment_ref,
+            input_hash=descriptor.content_hash,
             content_privacy_class=raw.get("content_privacy_class", "private"),
             budget_account_id=self._budget_account_id,
             budget_limit=self._budget_limit,

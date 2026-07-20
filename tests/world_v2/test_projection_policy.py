@@ -10,10 +10,10 @@ from companion_daemon.world_v2 import (
     WorldRuntime,
 )
 from companion_daemon.world_v2.ledger import WorldLedger
+from companion_daemon.world_v2.context_resolver import projection_snapshot_id
 from companion_daemon.world_v2.projection import (
     AuthenticatedProjectionPrincipal,
     InternalAuthorityReader,
-    InternalProjectionReader,
     ProjectionAuthority,
     ProjectionCapabilityIssuer,
     ProjectionCompiler,
@@ -717,7 +717,7 @@ def test_action_projection_truncates_deterministically_without_breaking_other_vi
     assert room.view.view_kind == "room"
 
 
-def test_context_truncation_never_limits_authority_queries_or_recovery_paging() -> None:
+def test_authority_queries_and_recovery_paging_are_complete() -> None:
     base = ledger_with_private_action().project()
     source = base.actions[0]
     actions = tuple(
@@ -748,18 +748,8 @@ def test_context_truncation_never_limits_authority_queries_or_recovery_paging() 
             return projection
 
     ledger = StaticLedger()
-    context = InternalProjectionReader(
-        ledger=ledger,
-        limits=ProjectionLimits(pending_actions=1),
-    ).snapshot(world_id=WORLD_ID, cursor=cursor)
     authority_reader = InternalAuthorityReader(ledger=ledger)
 
-    assert tuple(action.action_id for action in context.pending_actions) == ("action-authority-2",)
-    action_window = next(
-        item for item in context.slice_windows if item.slice_name == "pending_actions"
-    )
-    assert action_window.truncated is True
-    assert action_window.authority_query_ref == "internal-authority:pending_actions"
     assert (
         authority_reader.action_by_id(
             world_id=WORLD_ID,
@@ -824,40 +814,23 @@ def test_projection_hash_binds_reducer_bundle_and_projection_values_are_deeply_f
         raise AssertionError("projection values must be deeply immutable")
 
 
-def test_internal_snapshot_is_revision_pinned_and_preserves_private_authority() -> None:
+def test_internal_authority_read_is_revision_pinned_and_preserves_private_authority() -> None:
     ledger = ledger_with_private_action()
-    reader = InternalProjectionReader(ledger=ledger)
-
-    snapshot = reader.snapshot(
+    reader = InternalAuthorityReader(ledger=ledger)
+    cursor = ProjectionCursor(
+        world_revision=4,
+        deliberation_revision=0,
+        ledger_sequence=4,
+    )
+    action = reader.action_by_id(
         world_id=WORLD_ID,
-        cursor=ProjectionCursor(
-            world_revision=4,
-            deliberation_revision=0,
-            ledger_sequence=4,
-        ),
+        cursor=cursor,
+        action_id="action-private",
     )
 
-    assert snapshot.world_revision == 4
-    assert snapshot.deliberation_revision == 0
-    assert snapshot.cursor.ledger_sequence == 4
-    assert snapshot.snapshot_id.startswith(f"snapshot:{WORLD_ID}:4:")
-    assert len(snapshot.snapshot_hash) == 64
-    assert snapshot.pending_actions[0].payload_ref == "encrypted:private-reply"
-    assert snapshot.budget_accounts[0].reserved == 100
-    assert tuple((version.name, version.version) for version in snapshot.reducer_versions) == (
-        ("schema", "world-v2.1"),
-        ("reducer_bundle", "world-v2-reducers.32"),
-    )
-    assert snapshot.system_health.status == "degraded"
-    affect_window = next(
-        item for item in snapshot.slice_windows if item.slice_name == "affect_episodes"
-    )
-    assert affect_window.availability == "available"
-    assert affect_window.returned_count == 0
-    assert snapshot.affect_baselines == ()
-    assert tuple(item.intensity_bp for item in snapshot.affect_aggregates) == (0,) * 8
-    assert snapshot.current_situation is None
-    assert snapshot.relationship_state is None
+    assert action is not None
+    assert action.payload_ref == "encrypted:private-reply"
+    assert reader.current_cursor(world_id=WORLD_ID) == cursor
 
 
 def test_pending_action_index_is_rejected_if_it_diverges_from_action_history() -> None:
@@ -877,10 +850,9 @@ def test_pending_action_index_is_rejected_if_it_diverges_from_action_history() -
         raise AssertionError("divergent pending action index must fail integrity checks")
 
 
-def test_deliberation_audit_changes_snapshot_identity_not_world_semantics() -> None:
+def test_deliberation_audit_changes_projection_identity_not_world_semantics() -> None:
     ledger = ledger_with_private_action()
-    reader = InternalProjectionReader(ledger=ledger)
-    before = reader.snapshot(world_id=WORLD_ID)
+    before = ledger.project()
     head = ledger.project()
     ledger.commit(
         [
@@ -894,23 +866,25 @@ def test_deliberation_audit_changes_snapshot_identity_not_world_semantics() -> N
         expected_deliberation_revision=head.deliberation_revision,
     )
 
-    after = reader.snapshot(world_id=WORLD_ID)
+    after = ledger.project()
 
     assert after.semantic_hash == before.semantic_hash
     assert after.world_revision == before.world_revision
     assert after.deliberation_revision == before.deliberation_revision + 1
-    assert after.snapshot_hash != before.snapshot_hash
+    assert projection_snapshot_id(after) != projection_snapshot_id(before)
 
 
-def test_historical_snapshot_is_pinned_by_complete_cursor_across_later_audit_events() -> None:
+def test_authority_read_is_pinned_by_complete_cursor_across_later_audit_events() -> None:
     ledger = ledger_with_private_action()
-    reader = InternalProjectionReader(ledger=ledger)
+    reader = InternalAuthorityReader(ledger=ledger)
     cursor = ProjectionCursor(
         world_revision=4,
         deliberation_revision=0,
         ledger_sequence=4,
     )
-    pinned_before = reader.snapshot(world_id=WORLD_ID, cursor=cursor)
+    pinned_before = reader.action_by_id(
+        world_id=WORLD_ID, cursor=cursor, action_id="action-private"
+    )
     head = ledger.project()
     ledger.commit(
         [
@@ -924,31 +898,42 @@ def test_historical_snapshot_is_pinned_by_complete_cursor_across_later_audit_eve
         expected_deliberation_revision=head.deliberation_revision,
     )
 
-    pinned_after = reader.snapshot(world_id=WORLD_ID, cursor=cursor)
-    current = reader.snapshot(world_id=WORLD_ID)
+    pinned_after = reader.action_by_id(
+        world_id=WORLD_ID, cursor=cursor, action_id="action-private"
+    )
+    current = reader.current_cursor(world_id=WORLD_ID)
 
     assert pinned_after == pinned_before
-    assert current.cursor == ProjectionCursor(
+    assert current == ProjectionCursor(
         world_revision=4,
         deliberation_revision=1,
         ledger_sequence=5,
     )
-    assert current.snapshot_hash != pinned_before.snapshot_hash
+    assert current != cursor
 
 
-def test_internal_snapshot_matches_across_memory_and_sqlite_adapters(tmp_path) -> None:
+def test_internal_authority_pages_match_across_memory_and_sqlite_adapters(tmp_path) -> None:
     memory = ledger_with_private_action()
     sqlite = SQLiteWorldLedger(path=tmp_path / "world-v2-projection.sqlite3", world_id=WORLD_ID)
     populate_ledger(sqlite)
 
-    memory_snapshot = InternalProjectionReader(ledger=memory).snapshot(world_id=WORLD_ID)
-    sqlite_snapshot = InternalProjectionReader(ledger=sqlite).snapshot(world_id=WORLD_ID)
+    memory_reader = InternalAuthorityReader(ledger=memory)
+    sqlite_reader = InternalAuthorityReader(ledger=sqlite)
+    memory_cursor = memory_reader.current_cursor(world_id=WORLD_ID)
+    sqlite_cursor = sqlite_reader.current_cursor(world_id=WORLD_ID)
+    memory_page = memory_reader.pending_action_page(
+        world_id=WORLD_ID, cursor=memory_cursor, limit=10
+    )
+    sqlite_page = sqlite_reader.pending_action_page(
+        world_id=WORLD_ID, cursor=sqlite_cursor, limit=10
+    )
 
-    assert sqlite_snapshot == memory_snapshot
+    assert sqlite_cursor == memory_cursor
+    assert sqlite_page == memory_page
     sqlite.close()
 
 
-def test_historical_snapshot_uses_requested_world_revision_with_current_authority() -> None:
+def test_historical_authority_read_uses_requested_complete_cursor() -> None:
     ledger = ledger_with_private_action()
     before = ledger.project()
     ledger.commit(
@@ -962,22 +947,24 @@ def test_historical_snapshot_uses_requested_world_revision_with_current_authorit
         expected_world_revision=before.world_revision,
         expected_deliberation_revision=before.deliberation_revision,
     )
-    reader = InternalProjectionReader(ledger=ledger)
-
-    historical = reader.snapshot(
-        world_id=WORLD_ID,
-        cursor=ProjectionCursor(
-            world_revision=4,
-            deliberation_revision=0,
-            ledger_sequence=4,
-        ),
+    reader = InternalAuthorityReader(ledger=ledger)
+    historical_cursor = ProjectionCursor(
+        world_revision=4,
+        deliberation_revision=0,
+        ledger_sequence=4,
     )
-    current = reader.snapshot(world_id=WORLD_ID)
 
-    assert historical.world_revision == 4
-    assert historical.ledger_sequence == 4
+    historical = reader.action_by_id(
+        world_id=WORLD_ID,
+        cursor=historical_cursor,
+        action_id="action-private",
+    )
+    current = reader.current_cursor(world_id=WORLD_ID)
+
+    assert historical is not None
+    assert historical.payload_ref == "encrypted:private-reply"
     assert current.world_revision == 5
-    assert historical.snapshot_hash != current.snapshot_hash
+    assert current != historical_cursor
 
 
 def test_viewer_historical_projection_is_redacted_by_current_principal_grant() -> None:

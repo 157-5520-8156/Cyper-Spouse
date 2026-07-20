@@ -119,15 +119,19 @@ class OpenWorldEventRuntime:
         situation_source: OpenWorldSituationSource,
         owner_actor_ref: str,
         actor: str = "worker:world-v2:open-world-event",
+        min_consultation_interval: timedelta = timedelta(hours=4),
     ) -> None:
         if not owner_actor_ref or not actor:
             raise ValueError("open-world event runtime requires owner and actor")
+        if min_consultation_interval <= timedelta(0):
+            raise ValueError("open-world consultation interval must be positive")
         self._ledger = ledger
         self._store = content_store
         self._model = model
         self._source = situation_source
         self._owner = owner_actor_ref
         self._actor = actor
+        self._min_consultation_interval = min_consultation_interval
         self._model_id = str(getattr(model, "model", "")).strip() or type(model).__name__
 
     async def advance_once(
@@ -141,28 +145,40 @@ class OpenWorldEventRuntime:
             )
         situations = self._source.situations(projection=projection, wake_event_ref=wake_event_ref)
         if not situations:
-            proposal_id = "proposal:open-world-event:" + _digest(
-                {"world": self._ledger.world_id, "wake": wake_event_ref}
-            )
-            if self._proposal_event(proposal_id) is None:
-                self._record_no_op(
-                    projection=projection,
-                    wake=wake,
-                    proposal_id=proposal_id,
-                    model="runtime:no-verified-situation",
-                    raw_output='{"decision":"no_op","reason":"no_verified_situation"}',
-                    trace_id=trace_id,
-                    correlation_id=correlation_id,
-                )
+            # An empty situation set is deterministically recomputable from
+            # the pinned projection, so it needs no durable no-op record.
+            # Writing one per quiet wake would append one noise event per
+            # scheduler tick forever.
             return OpenWorldEventRunResult(
                 status="no_op", reason_code="open_world_event.no_verified_situation",
-                proposal_id=proposal_id,
             )
         proposal_id = "proposal:open-world-event:" + _digest(
             {"world": self._ledger.world_id, "wake": wake_event_ref}
         )
         existing = self._proposal_event(proposal_id)
         if existing is None:
+            # Production wakes arrive every scheduler tick; without a floor
+            # the model would be consulted (and could author a fresh moment)
+            # every few seconds for the whole active window.  The last
+            # committed open-world proposal — select or decline — starts a
+            # deterministic cooldown, keeping this lane the intended rare
+            # texture.  Recovery of an already-recorded wake bypasses this.
+            last_consulted = max(
+                (
+                    item.logical_time
+                    for item in projection.committed_world_event_refs
+                    if item.event_id.startswith("event:open-world-event:proposal:")
+                ),
+                default=None,
+            )
+            if (
+                last_consulted is not None
+                and wake.logical_time - last_consulted < self._min_consultation_interval
+            ):
+                return OpenWorldEventRunResult(
+                    status="no_op",
+                    reason_code="open_world_event.consultation_cooldown",
+                )
             try:
                 draft = parse_open_world_event_draft(
                     raw=await self._model.complete(self._messages(situations), temperature=0.4),

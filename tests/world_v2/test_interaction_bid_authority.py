@@ -5,6 +5,8 @@ import hashlib
 import json
 import sqlite3
 
+from legacy_migration_support import read_head_state_json
+
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.deliberation import DeliberationResult
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
@@ -118,10 +120,10 @@ def test_sqlite_migrates_v30_head_without_fabricating_interaction_bids(tmp_path)
     ledger.commit([_event("WorldStarted", {}, "started")], expected_world_revision=0, expected_deliberation_revision=0)
     ledger.close()
     with sqlite3.connect(path) as connection:
-        row = connection.execute("SELECT state_json, world_revision FROM world_v2_heads WHERE world_id = ?", (WORLD,)).fetchone()
+        row = connection.execute("SELECT world_revision FROM world_v2_heads WHERE world_id = ?", (WORLD,)).fetchone()
         assert row is not None
-        state = ReducerState.model_validate_json(row[0])
-        semantic = state.semantic_payload(world_id=WORLD, world_revision=int(row[1]), reducer_bundle_version="world-v2-reducers.30")
+        state = ReducerState.model_validate_json(read_head_state_json(connection, WORLD))
+        semantic = state.semantic_payload(world_id=WORLD, world_revision=int(row[0]), reducer_bundle_version="world-v2-reducers.30")
         legacy_hash = hashlib.sha256(json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         connection.execute("UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ?, state_hash = '' WHERE world_id = ?", (legacy_hash, "world-v2-reducers.30", WORLD))
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)

@@ -49,6 +49,27 @@ def perception_authorized_ledger(
 
     monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
     ledger = WorldLedger.in_memory(world_id=world_id)
+    ledger.commit(
+        (
+            WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id="event:world-started:perception",
+                world_id=world_id,
+                event_type="WorldStarted",
+                logical_time=now,
+                created_at=now,
+                actor="system:test",
+                source="test",
+                trace_id="trace:perception-auth",
+                causation_id="cause:perception-auth",
+                correlation_id="correlation:perception-auth",
+                idempotency_key="world-started:perception",
+                payload={},
+            ),
+        ),
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
     user_authority = "authority:user:perception"
     operator_authority = "authority:operator:perception"
     _commit(

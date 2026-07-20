@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 from companion_daemon.world_v2.deferred_reply_runtime import DeferredReplyRuntime, ReplyLaterCommand
+from companion_daemon.world_v2.legacy_deferred_reply_migration import replay_legacy_reply_later
 from companion_daemon.world_v2.action_pump import ActionPump
 from companion_daemon.world_v2.activity_plan_runtime import (
     ActivityPlanCommand,
@@ -20,6 +21,7 @@ from companion_daemon.world_v2.schemas import (
     ProviderReceipt,
     WorldEvent,
 )
+import pytest
 
 
 NOW = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
@@ -36,7 +38,14 @@ def _event(event_id: str, event_type: str, payload: dict[str, object], *, at: da
 
 async def _initialized() -> tuple[WorldLedger, WorldRuntime]:
     ledger = WorldLedger.in_memory(world_id="world:reply-later")
-    ledger.commit((_event("event:start", "WorldStarted", {}),), expected_world_revision=0, expected_deliberation_revision=0)
+    # WorldStarted is the initial logical-clock authority.  This fixture then
+    # advances that real origin to NOW instead of pretending the clock starts
+    # one second before an already-started world.
+    ledger.commit(
+        (_event("event:start", "WorldStarted", {}, at=NOW - timedelta(seconds=1)),),
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
     projection = ledger.project()
     ledger.commit((_event("event:clock", "ClockAdvanced", {
         "logical_time_from": (NOW - timedelta(seconds=1)).isoformat(),
@@ -68,12 +77,21 @@ def _command() -> ReplyLaterCommand:
     )
 
 
+def test_legacy_hand_authored_reply_later_is_not_a_default_production_authority() -> None:
+    ledger, _runtime = asyncio.run(_initialized())
+    with pytest.raises(AttributeError):
+        DeferredReplyRuntime(ledger=ledger).defer(  # type: ignore[attr-defined]
+            _command(), logical_time=NOW, created_at=NOW, trace_id="trace:reply-later",
+            causation_id="cause:defer", correlation_id="correlation:reply-later",
+        )
+
+
 def test_defer_is_source_bound_idempotent_and_restart_safe() -> None:
     ledger, _runtime = asyncio.run(_initialized())
     command = _command()
-    first = DeferredReplyRuntime(ledger=ledger).defer(command, logical_time=NOW, created_at=NOW,
+    first = replay_legacy_reply_later(DeferredReplyRuntime(ledger=ledger), command, logical_time=NOW, created_at=NOW,
         trace_id="trace:reply-later", causation_id="cause:defer", correlation_id="correlation:reply-later")
-    second = DeferredReplyRuntime(ledger=ledger).defer(command, logical_time=NOW, created_at=NOW,
+    second = replay_legacy_reply_later(DeferredReplyRuntime(ledger=ledger), command, logical_time=NOW, created_at=NOW,
         trace_id="trace:reply-later", causation_id="cause:defer", correlation_id="correlation:reply-later")
     projection = ledger.project()
     assert first == second
@@ -84,7 +102,7 @@ def test_defer_is_source_bound_idempotent_and_restart_safe() -> None:
 
 def test_clock_marks_deferred_reply_due_without_inventing_completion() -> None:
     ledger, runtime = asyncio.run(_initialized())
-    DeferredReplyRuntime(ledger=ledger).defer(_command(), logical_time=NOW, created_at=NOW,
+    replay_legacy_reply_later(DeferredReplyRuntime(ledger=ledger), _command(), logical_time=NOW, created_at=NOW,
         trace_id="trace:reply-later", causation_id="cause:defer", correlation_id="correlation:reply-later")
     before = ledger.project()
     clock = ClockObservation(
@@ -122,7 +140,7 @@ class _DeliveredExecutor:
 def test_delivered_reply_later_fulfills_exact_private_commitment() -> None:
     ledger, runtime = asyncio.run(_initialized())
     deferred = DeferredReplyRuntime(ledger=ledger)
-    deferred.defer(_command(), logical_time=NOW, created_at=NOW,
+    replay_legacy_reply_later(deferred, _command(), logical_time=NOW, created_at=NOW,
         trace_id="trace:reply-later", causation_id="cause:defer", correlation_id="correlation:reply-later")
     before = ledger.project()
     clock = ClockObservation(

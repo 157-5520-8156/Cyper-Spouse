@@ -12,6 +12,9 @@ import asyncio
 from datetime import timedelta
 import hashlib
 import json
+import logging
+import time
+from typing import Literal
 
 from .advisory_compiler import (
     AdvisoryCompilation,
@@ -33,18 +36,40 @@ from .context_resolver import query_from_projection
 from .deliberation import Deliberation, TriggerMessage
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .ledger import LedgerPort
+from .model_facing_context import mechanism_consumption_summary
 from .proposal_audit import ProposalAuditCommit, ProposalAuditContext, ProposalAuditRecorder
 from .proposal_envelope import ProposalEvidenceRef
+from .production_latency_trace import ProductionLatencyRecorder, TurnLatencyTrace
+from .aspiration_view import active_aspiration_advisories
+from .attention_view import phone_attention_advisories
+from .change_phase_view import change_phase_advisories
+from .local_chronology import LocalChronology
+from .npc_relationship_view import npc_relationship_advisories
+from .shared_private_invitation import pending_shared_private_invitation_advisories
+from .response_expectation_view import (
+    pending_response_expectation,
+    response_expectation_advisory,
+)
 from .schemas import LedgerProjection, Observation, ProjectionCursor, WorldEvent
 
 
-def _attempt_id(*, trigger_ref: str, cursor: ProjectionCursor) -> str:
+_LOG = logging.getLogger(__name__)
+
+
+def _attempt_id(
+    *, trigger_ref: str, cursor: ProjectionCursor, namespace: str | None = None
+) -> str:
+    material: dict[str, object] = {
+        "contract": "pinned-turn.1",
+        "trigger_ref": trigger_ref,
+        "cursor": cursor.model_dump(mode="json"),
+    }
+    # Preserve pre-relationship attempt identities exactly.  Only a second
+    # consumer of the same accepted appraisal needs a namespace.
+    if namespace is not None:
+        material["namespace"] = namespace
     material = json.dumps(
-        {
-            "contract": "pinned-turn.1",
-            "trigger_ref": trigger_ref,
-            "cursor": cursor.model_dump(mode="json"),
-        },
+        material,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -63,6 +88,15 @@ class PinnedTurnCompiler:
         deliberation: Deliberation,
         companion_actor_ref: str,
         advisory_compiler: AdvisoryCompiler | None = None,
+        relationship_evaluation: bool = False,
+        latency_recorder: ProductionLatencyRecorder | None = None,
+        pending_expectation_advisory: bool = False,
+        aspiration_advisory: bool = False,
+        change_phase_advisory: bool = False,
+        npc_relationship_advisory: bool = False,
+        shared_private_invitation_advisory: bool = False,
+        attention_advisory: bool = False,
+        attention_chronology: LocalChronology | None = None,
     ) -> None:
         if not companion_actor_ref:
             raise ValueError("Pinned turn companion actor is required")
@@ -72,6 +106,30 @@ class PinnedTurnCompiler:
         self._recorder = ProposalAuditRecorder(ledger=ledger)
         self._companion_actor_ref = companion_actor_ref
         self._advisories = advisory_compiler
+        self._relationship_evaluation = relationship_evaluation
+        self._latency = latency_recorder
+        # Only the interaction-appraisal lane opts in: when she was waiting
+        # for a response she invited earlier, the appraisal model should know
+        # what she hoped this message would be.
+        self._pending_expectation_advisory = pending_expectation_advisory
+        # The expression lanes opt in: her active aspirations (ledger-backed
+        # low-stakes wishes) may surface naturally in what she says.
+        self._aspiration_advisory = aspiration_advisory
+        # Change Phase (CONTEXT.md): a projection-level reading of whether
+        # she is departing from or returning toward baseline.  Advisory only.
+        self._change_phase_advisory = change_phase_advisory
+        # Per-NPC relationship reading derived from committed shared history;
+        # like the others it is read-only texture, never a rule.
+        self._npc_relationship_advisory = npc_relationship_advisory
+        # A pending shared_private invitation plan she may still need to
+        # voice (or is waiting on); read-only texture, never an obligation.
+        self._shared_private_invitation_advisory = shared_private_invitation_advisory
+        # Phone attention (attention_view): where her attention actually is
+        # relative to the phone, derived from active Plans, the local civil
+        # hour, and active Affect.  Advisory texture for timing_choice only;
+        # it never schedules, delays, or vetoes anything by itself.
+        self._attention_advisory = attention_advisory
+        self._attention_chronology = attention_chronology or LocalChronology()
 
     async def audit_observation(
         self,
@@ -79,6 +137,7 @@ class PinnedTurnCompiler:
         observation: Observation,
         observation_event: WorldEvent,
         cursor: ProjectionCursor,
+        skip_advisories: bool = False,
     ) -> ProposalAuditCommit:
         """Compile an audit at a cursor that includes the committed Observation.
 
@@ -109,11 +168,32 @@ class PinnedTurnCompiler:
         if committed_observation != observation:
             raise ValueError("Pinned turn observation does not match its committed authority")
         observation = committed_observation
-        projection = await self._project_at(cursor)
+        started = time.perf_counter()
+        latency_trace = self._latency.get(observation.trace_id) if self._latency is not None else None
+        if latency_trace is None:
+            projection = await self._project_at(cursor)
+        else:
+            async with latency_trace.measure("snapshot"):
+                projection = await self._project_at(cursor)
+        _LOG.warning(
+            "pinned turn phases trace=%s phase=snapshot_ms value=%.1f",
+            observation.trace_id,
+            (time.perf_counter() - started) * 1000,
+        )
         query = query_from_projection(
             projection,
             actor_ref=self._companion_actor_ref,
             trigger_ref=observation_event.event_id,
+        )
+        trigger_message = self._trigger_message(
+            observation,
+            observation_event,
+            source_world_revision=stored[1].world_revision,
+        )
+        advisory_already_incorporated = skip_advisories or self._deliberation.main_has_precomputed_advisory(
+            trigger_ref=observation_event.event_id,
+            observation_ref=observation.observation_id,
+            event_payload_hash=trigger_message.event_payload_hash,
         )
         try:
             capsule = await self._compile_capsule_with_advisories(
@@ -121,12 +201,44 @@ class PinnedTurnCompiler:
                 projection=projection,
                 observation=observation,
                 observation_event=observation_event,
+                latency_trace=latency_trace,
+                skip_advisories=advisory_already_incorporated,
+                expectation_advisories=(
+                    *self._expectation_advisories(
+                        projection,
+                        observation_event=observation_event,
+                        source_world_revision=stored[1].world_revision,
+                    ),
+                    *self._aspiration_advisories(projection),
+                    *self._change_phase_view_advisories(projection),
+                    *self._attention_view_advisories(projection),
+                    *self._npc_relationship_view_advisories(projection),
+                    *self._shared_private_invitation_view_advisories(projection),
+                ),
             )
         except ValueError as exc:
             await self._raise_if_stale(cursor, exc)
             raise
-        result = await self._deliberation.deliberate(
-            capsule,
+        _LOG.warning(
+            "pinned turn phases trace=%s phase=context_ms value=%.1f",
+            observation.trace_id,
+            (time.perf_counter() - started) * 1000,
+        )
+        # Keep an operator-readable answer to the most important production
+        # question: did the character mechanisms reach this turn at all?  The
+        # summary contains only counts/statuses and never logs model-facing
+        # prose or private memory values.
+        _LOG.info(
+            "pinned turn mechanism consumption trace=%s summary=%s",
+            observation.trace_id,
+            json.dumps(
+                mechanism_consumption_summary(capsule.capsule.model_content_json),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        deliberate_kwargs = dict(
             attempt_id=_attempt_id(trigger_ref=observation_event.event_id, cursor=cursor),
             trigger_evidence=(
                 ProposalEvidenceRef(
@@ -136,9 +248,17 @@ class PinnedTurnCompiler:
                     immutable_hash="sha256:" + observation_event.payload_hash,
                 ),
             ),
-            trigger_message=self._trigger_message(
-                observation, observation_event, source_world_revision=stored[1].world_revision
-            ),
+            trigger_message=trigger_message,
+        )
+        if latency_trace is None:
+            result = await self._deliberation.deliberate(capsule, **deliberate_kwargs)
+        else:
+            async with latency_trace.measure("model_completion"):
+                result = await self._deliberation.deliberate(capsule, **deliberate_kwargs)
+        _LOG.warning(
+            "pinned turn phases trace=%s phase=model_ms value=%.1f",
+            observation.trace_id,
+            (time.perf_counter() - started) * 1000,
         )
         context = ProposalAuditContext(
             world_id=observation.world_id,
@@ -155,7 +275,13 @@ class PinnedTurnCompiler:
             expected_deliberation_revision=cursor.deliberation_revision,
         )
         try:
-            return await self._record(result, context)
+            recorded = await self._record(result, context)
+            _LOG.warning(
+                "pinned turn phases trace=%s phase=record_ms value=%.1f",
+                observation.trace_id,
+                (time.perf_counter() - started) * 1000,
+            )
+            return recorded
         except (ConcurrencyConflict, IdempotencyConflict) as exc:
             await self._raise_if_stale(cursor, exc)
             raise
@@ -165,6 +291,7 @@ class PinnedTurnCompiler:
         *,
         appraisal_event: WorldEvent,
         cursor: ProjectionCursor,
+        attempt_namespace: str | None = None,
     ) -> ProposalAuditCommit:
         """Audit one fresh affect deliberation after an accepted Appraisal.
 
@@ -174,6 +301,11 @@ class PinnedTurnCompiler:
         the stale user-message turn or fabricate a new appraisal source.
         """
 
+        if attempt_namespace is not None and (not attempt_namespace or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+            for character in attempt_namespace
+        )):
+            raise ValueError("Pinned turn appraisal attempt namespace is invalid")
         if appraisal_event.world_id != self._ledger.world_id:
             raise ValueError("Pinned turn appraisal belongs to another world")
         if appraisal_event.event_type != "AppraisalAccepted":
@@ -203,7 +335,15 @@ class PinnedTurnCompiler:
             raise
         result = await self._deliberation.deliberate(
             capsule,
-            attempt_id=_attempt_id(trigger_ref=appraisal_event.event_id, cursor=cursor),
+            # Affect and relationship both deliberate after the same immutable
+            # appraisal.  Their expensive calls must have distinct durable
+            # attempt identities; otherwise the second lane aliases the first
+            # lane's ModelResultRecorded audit on recovery.
+            attempt_id=_attempt_id(
+                trigger_ref=appraisal_event.event_id,
+                cursor=cursor,
+                namespace=attempt_namespace,
+            ),
             trigger_evidence=(
                 ProposalEvidenceRef(
                     ref_id=appraisal_event.event_id,
@@ -258,7 +398,132 @@ class PinnedTurnCompiler:
         return self._ledger.project_at(cursor)
 
     async def _compile_capsule(self, query):
+        if self._relationship_evaluation:
+            compile_relationship = getattr(
+                self._capsules, "compile_for_relationship_deliberation", None
+            )
+            if not callable(compile_relationship):
+                raise ValueError("Context Capsule compiler lacks relationship deliberation support")
+            return await asyncio.to_thread(compile_relationship, query)
         return await asyncio.to_thread(self._capsules.compile_for_deliberation, query)
+
+    def _expectation_advisories(
+        self,
+        projection: LedgerProjection,
+        *,
+        observation_event: WorldEvent,
+        source_world_revision: int,
+    ) -> tuple[InnerAdvisoryProjection, ...]:
+        """Derive the deterministic pending-expectation advisory, if opted in.
+
+        The revision bound keeps causality honest: an inbound message may
+        only be weighed against a hope she declared before it arrived.
+        """
+
+        if not self._pending_expectation_advisory:
+            return ()
+        try:
+            view = pending_response_expectation(
+                projection, before_world_revision=source_world_revision
+            )
+        except (TypeError, ValueError):
+            # Expectation advice is best-effort context.  A projection defect
+            # must not make a normal user turn fail.
+            return ()
+        if view is None:
+            return ()
+        return (
+            response_expectation_advisory(
+                view,
+                source_ref=observation_event.event_id,
+                logical_time=projection.logical_time or observation_event.logical_time,
+            ),
+        )
+
+    def _aspiration_advisories(
+        self, projection: LedgerProjection
+    ) -> tuple[InnerAdvisoryProjection, ...]:
+        """Derive the deterministic active-wish advisory, if opted in.
+
+        Best-effort context like the expectation advisory: a defect here must
+        never make an ordinary turn fail, it only omits the wish texture.
+        """
+
+        if not self._aspiration_advisory:
+            return ()
+        try:
+            return active_aspiration_advisories(projection)
+        except (TypeError, ValueError):
+            return ()
+
+    def _change_phase_view_advisories(
+        self, projection: LedgerProjection
+    ) -> tuple[InnerAdvisoryProjection, ...]:
+        """Derive the deterministic Change Phase advisory, if opted in.
+
+        Best-effort context like the wish advisory: expression should feel
+        the difference between "刚陷入低落" and "正在走出低落", but a defect
+        here must never fail an ordinary turn.
+        """
+
+        if not self._change_phase_advisory:
+            return ()
+        try:
+            return change_phase_advisories(projection)
+        except (TypeError, ValueError):
+            return ()
+
+    def _attention_view_advisories(
+        self, projection: LedgerProjection
+    ) -> tuple[InnerAdvisoryProjection, ...]:
+        """Derive the deterministic phone-attention advisory, if opted in.
+
+        Best-effort context like the Change Phase reading: "深夜她睡着了" and
+        "在自习室专注中" should reach the timing decision, but a defect here
+        must never fail an ordinary turn.
+        """
+
+        if not self._attention_advisory:
+            return ()
+        try:
+            return phone_attention_advisories(
+                projection, chronology=self._attention_chronology
+            )
+        except (TypeError, ValueError):
+            return ()
+
+    def _npc_relationship_view_advisories(
+        self, projection: LedgerProjection
+    ) -> tuple[InnerAdvisoryProjection, ...]:
+        """Derive the deterministic per-NPC relationship advisory, if opted in."""
+
+        if not self._npc_relationship_advisory:
+            return ()
+        try:
+            return npc_relationship_advisories(projection)
+        except (TypeError, ValueError):
+            return ()
+
+    def _shared_private_invitation_view_advisories(
+        self, projection: LedgerProjection
+    ) -> tuple[InnerAdvisoryProjection, ...]:
+        """Derive the pending shared_private invitation advisory, if opted in."""
+
+        if not self._shared_private_invitation_advisory:
+            return ()
+        try:
+            return pending_shared_private_invitation_advisories(projection)
+        except (TypeError, ValueError):
+            return ()
+
+    async def _compile_capsule_with_extra(
+        self, query, extra: tuple[InnerAdvisoryProjection, ...]
+    ):
+        if not extra:
+            return await self._compile_capsule(query)
+        return await asyncio.to_thread(
+            self._capsules.compile_for_deliberation_with_advisories, query, extra
+        )
 
     async def _compile_capsule_with_advisories(
         self,
@@ -267,9 +532,15 @@ class PinnedTurnCompiler:
         projection: LedgerProjection,
         observation: Observation,
         observation_event: WorldEvent,
+        latency_trace: TurnLatencyTrace | None = None,
+        skip_advisories: bool = False,
+        expectation_advisories: tuple[InnerAdvisoryProjection, ...] = (),
     ):
-        if self._advisories is None:
-            return await self._compile_capsule(query)
+        if self._advisories is None or skip_advisories:
+            if latency_trace is None:
+                return await self._compile_capsule_with_extra(query, expectation_advisories)
+            async with latency_trace.measure("context"):
+                return await self._compile_capsule_with_extra(query, expectation_advisories)
         try:
             request = self._advisory_request(
                 query=query,
@@ -280,33 +551,85 @@ class PinnedTurnCompiler:
         except (TypeError, ValueError):
             # Advisory input is deliberately best-effort.  A bounded-input
             # failure cannot make a normal user turn fail.
-            return await self._compile_capsule(query)
+            if latency_trace is None:
+                return await self._compile_capsule_with_extra(query, expectation_advisories)
+            async with latency_trace.measure("context"):
+                return await self._compile_capsule_with_extra(query, expectation_advisories)
         # Classifiers are a latency-bounded optional side path.  The Context
         # compiler and AdvisoryCompiler consume the same pinned cursor but do
         # not depend on each other's output, so run them concurrently.
-        base_task = asyncio.create_task(self._compile_capsule(query))
-        advisory_task = asyncio.create_task(
-            self._advisories.compile(self._advisories.issue_authenticated_request(request))
-        )
-        try:
-            base, compilation = await asyncio.gather(base_task, advisory_task)
-        except (TypeError, ValueError):
-            return await base_task
-        inner = self._inner_advisories(compilation)
-        if not inner:
-            return base
-        try:
-            return await asyncio.to_thread(
-                self._capsules.compile_for_deliberation_with_advisories,
-                query,
-                inner,
+        async def prepare():
+            if latency_trace is None:
+                return await asyncio.to_thread(
+                    self._capsules.prepare_for_deliberation,
+                    query,
+                    relationship_evaluation=self._relationship_evaluation,
+                )
+            async with latency_trace.measure("context"):
+                return await asyncio.to_thread(
+                    self._capsules.prepare_for_deliberation,
+                    query,
+                    relationship_evaluation=self._relationship_evaluation,
+                )
+
+        async def classify():
+            operation = self._advisories.compile(
+                self._advisories.issue_authenticated_request(request)
             )
+            if latency_trace is None:
+                return await operation
+            async with latency_trace.measure("advisor"):
+                return await operation
+
+        base_task = asyncio.create_task(prepare())
+        advisory_task = asyncio.create_task(classify())
+        try:
+            prepared, compilation = await asyncio.gather(base_task, advisory_task)
+        except (TypeError, ValueError):
+            prepared = await base_task
+            if latency_trace is None:
+                return await self._finalize_prepared_with_extra(
+                    prepared, expectation_advisories, query=query
+                )
+            async with latency_trace.measure("context"):
+                return await self._finalize_prepared_with_extra(
+                    prepared, expectation_advisories, query=query
+                )
+        inner = (*self._inner_advisories(compilation), *expectation_advisories)
+        if not inner:
+            if latency_trace is None:
+                return self._capsules.finalize_prepared(prepared)
+            async with latency_trace.measure("context"):
+                return self._capsules.finalize_prepared(prepared)
+        try:
+            operation = asyncio.to_thread(
+                self._capsules.compile_prepared_with_advisories, prepared, inner
+            )
+            if latency_trace is None:
+                return await operation
+            async with latency_trace.measure("context"):
+                return await operation
         except (TypeError, ValueError) as exc:
             # The re-binding pass is defense in depth.  If it rejects a bad
             # advisory (rather than a stale cursor), retain the already frozen
             # authoritative capsule and let the main model continue.
             await self._raise_if_stale(query.cursor, exc)
-            return base
+            return self._capsules.finalize_prepared(prepared)
+
+    async def _finalize_prepared_with_extra(
+        self, prepared, extra: tuple[InnerAdvisoryProjection, ...], *, query
+    ):
+        if not extra:
+            return self._capsules.finalize_prepared(prepared)
+        try:
+            return await asyncio.to_thread(
+                self._capsules.compile_prepared_with_advisories, prepared, extra
+            )
+        except (TypeError, ValueError) as exc:
+            # Same defense-in-depth stance as the classifier merge below: a
+            # rejected advisory keeps the frozen authoritative capsule.
+            await self._raise_if_stale(query.cursor, exc)
+            return self._capsules.finalize_prepared(prepared)
 
     @staticmethod
     def _advisory_request(
@@ -432,10 +755,12 @@ class PinnedTurnCompiler:
         *,
         source_world_revision: int,
     ) -> TriggerMessage | None:
-        """Expose actual inbound text, never a fabricated attachment description."""
+        """Expose text and bounded attachment tokens, never fabricated contents."""
 
-        if observation.text is None:
+        if observation.text is None and not observation.attachment_refs:
             return None
+        reply_context = observation.reply_context or {}
+        platform_message_id = reply_context.get("platform_message_id")
         return TriggerMessage(
             event_ref=observation_event.event_id,
             event_payload_hash=f"sha256:{observation_event.payload_hash}",
@@ -444,8 +769,34 @@ class PinnedTurnCompiler:
             actor=observation.actor,
             channel=observation.channel,
             reply_target=cls._reply_target(observation),
+            platform_message_id=(
+                platform_message_id
+                if isinstance(platform_message_id, str) and platform_message_id
+                else None
+            ),
             text=observation.text,
+            attachment_refs=observation.attachment_refs,
+            attachment_media_types=tuple(
+                cls._attachment_media_type(item) for item in observation.attachment_refs
+            ),
         )
+
+    @staticmethod
+    def _attachment_media_type(
+        attachment_ref: str,
+    ) -> Literal["image", "audio", "video", "file", "unknown"]:
+        """Read only the provider-normalized type prefix; never dereference content."""
+
+        tokens = tuple(token.lower() for token in attachment_ref.split(":"))
+        if "image" in tokens:
+            return "image"
+        if "record" in tokens or "audio" in tokens:
+            return "audio"
+        if "video" in tokens:
+            return "video"
+        if "file" in tokens:
+            return "file"
+        return "unknown"
 
     @staticmethod
     def _inner_advisories(compilation: AdvisoryCompilation) -> tuple[InnerAdvisoryProjection, ...]:

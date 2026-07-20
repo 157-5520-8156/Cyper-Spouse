@@ -148,7 +148,7 @@ class AppraisalProposalCompiler:
         )
 
     def _compile_activate(self, *, authority, change, projection, source_event: WorldEvent):
-        """Bind one appraisal candidate to its claimed message or settlement trigger."""
+        """Bind one appraisal candidate to its claimed message, settlement, silence, or disruption trigger."""
 
         if source_event.event_type == "ObservationRecorded":
             observation = self._observation(source_event)
@@ -186,6 +186,50 @@ class AppraisalProposalCompiler:
             source_evidence_type = "settled_world_event"
             subject_ref = self._companion_subject(projection)
             source_cluster_ref = "world-occurrence:" + _digest({"event": source_event.event_id})
+        elif source_event.event_type == "ExecutionReceiptRecorded":
+            trigger = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "silence_appraisal"
+                    and item.source_evidence_ref == source_event.event_id
+                ),
+                None,
+            )
+            if (
+                trigger is None
+                or trigger.state != "claimed"
+                or trigger.trigger_ref != f"silence:{source_event.event_id}"
+            ):
+                raise AppraisalProposalCompilerError("source_trigger_not_claimed")
+            source_evidence_ref = source_event.event_id
+            source_evidence_type = "committed_world_event"
+            # A silence appraisal is about her own unanswered message, so the
+            # companion is the appraised subject, mirroring the world lane.
+            subject_ref = self._companion_subject(projection)
+            source_cluster_ref = "silence:" + _digest({"event": source_event.event_id})
+        elif source_event.event_type == "ActivityAbandoned":
+            trigger = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "plan_disruption_appraisal"
+                    and item.source_evidence_ref == source_event.event_id
+                ),
+                None,
+            )
+            if (
+                trigger is None
+                or trigger.state != "claimed"
+                or trigger.trigger_ref != f"plan-disruption:{source_event.event_id}"
+            ):
+                raise AppraisalProposalCompilerError("source_trigger_not_claimed")
+            source_evidence_ref = source_event.event_id
+            source_evidence_type = "committed_world_event"
+            # A disrupted plan is her own lived-world loss, so the companion
+            # is the appraised subject, mirroring the silence lane.
+            subject_ref = self._companion_subject(projection)
+            source_cluster_ref = "plan-disruption:" + _digest({"event": source_event.event_id})
         else:
             raise AppraisalProposalCompilerError("trigger_source_unsupported")
         return self._compile_bound_activate(

@@ -1,0 +1,9 @@
+{
+  "scenario_id": "world-grounding-targeted-real-audit.v1",
+  "turns": [
+    {"id": "T28", "at_minutes": 0, "text": "你今天自己有什么印象深的事？"},
+    {"id": "T29", "at_minutes": 2, "text": "不是角色设定里的爱好，我问的是今天真的发生了什么。"},
+    {"id": "T30", "at_minutes": 4, "text": "现在都凌晨一点多了，你在干什么？"}
+  ],
+  "after_silence": {"advance_minutes": 180}
+}

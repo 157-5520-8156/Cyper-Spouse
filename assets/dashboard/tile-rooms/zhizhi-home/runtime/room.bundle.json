@@ -1,0 +1,817 @@
+{
+  "schemaVersion": 1,
+  "renderer": "tile-v1",
+  "id": "zhizhi-home-tile",
+  "label": "知栀的小屋 · 格驱动",
+  "canvas": {
+    "width": 1536,
+    "height": 1080
+  },
+  "projection": {
+    "tile": [
+      128,
+      64
+    ],
+    "height": 64,
+    "origin": [
+      760,
+      126
+    ]
+  },
+  "grid": {
+    "width": 12,
+    "depth": 10
+  },
+  "materials": {
+    "oak": {
+      "top": "#9a6947",
+      "left": "#754832",
+      "right": "#5d372c",
+      "detail": "#c69767",
+      "texture": "/assets/dashboard/tile-rooms/zhizhi-home/assets/oak-seamless-v1.png"
+    },
+    "cream": {
+      "top": "#e4cba5",
+      "left": "#c29d78",
+      "right": "#9f765d",
+      "detail": "#fff0ce"
+    },
+    "teal": {
+      "top": "#638b86",
+      "left": "#426967",
+      "right": "#315351",
+      "detail": "#a8d3c7"
+    },
+    "sage": {
+      "top": "#84977c",
+      "left": "#62765e",
+      "right": "#4c6051",
+      "detail": "#c6d5ad"
+    },
+    "pink": {
+      "top": "#d99a98",
+      "left": "#ac6e73",
+      "right": "#855460",
+      "detail": "#f0c2b9"
+    },
+    "tile": {
+      "top": "#b68f72",
+      "left": "#8b6754",
+      "right": "#725044",
+      "detail": "#d9b99a"
+    },
+    "linen": {
+      "top": "#ddd0b6",
+      "left": "#b8aa92",
+      "right": "#978774",
+      "detail": "#fff5d9"
+    },
+    "glass": {
+      "top": "#8eabb0",
+      "left": "#5e7d88",
+      "right": "#45616d",
+      "detail": "#c8f3e6"
+    }
+  },
+  "floor": {
+    "material": "oak"
+  },
+  "walls": [
+    {
+      "id": "north-wall",
+      "from": [
+        0,
+        0
+      ],
+      "to": [
+        12,
+        0
+      ],
+      "height": 2.7,
+      "material": "cream"
+    },
+    {
+      "id": "west-wall",
+      "from": [
+        0,
+        0
+      ],
+      "to": [
+        0,
+        10
+      ],
+      "height": 2.7,
+      "material": "cream"
+    }
+  ],
+  "objects": [
+    {
+      "id": "desk",
+      "kind": "desk",
+      "label": "书桌",
+      "transform": {
+        "x": 1,
+        "y": 2,
+        "z": 0,
+        "width": 2,
+        "depth": 1,
+        "height": 1.25
+      },
+      "material": "oak",
+      "collider": [
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "anchor": [
+        1,
+        3
+      ],
+      "effect": "focus"
+    },
+    {
+      "id": "bookcase",
+      "kind": "bookcase",
+      "label": "书架",
+      "transform": {
+        "x": 0,
+        "y": 3,
+        "z": 0,
+        "width": 1,
+        "depth": 2,
+        "height": 2.4
+      },
+      "material": "teal",
+      "collider": [
+        [
+          0,
+          3
+        ],
+        [
+          0,
+          4
+        ]
+      ]
+    },
+    {
+      "id": "kitchen-counter",
+      "kind": "counter",
+      "label": "料理台",
+      "transform": {
+        "x": 1,
+        "y": 0,
+        "z": 0,
+        "width": 3,
+        "depth": 1,
+        "height": 1.25
+      },
+      "material": "cream",
+      "collider": [
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "fridge",
+      "kind": "fridge",
+      "label": "冰箱",
+      "transform": {
+        "x": 4,
+        "y": 0,
+        "z": 0,
+        "width": 1,
+        "depth": 1,
+        "height": 2.25
+      },
+      "material": "teal",
+      "collider": [
+        [
+          4,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "dining",
+      "kind": "table",
+      "label": "餐桌",
+      "transform": {
+        "x": 4,
+        "y": 2,
+        "z": 0,
+        "width": 2,
+        "depth": 2,
+        "height": 0.78
+      },
+      "material": "oak",
+      "collider": [
+        [
+          4,
+          2
+        ],
+        [
+          5,
+          2
+        ],
+        [
+          4,
+          3
+        ],
+        [
+          5,
+          3
+        ]
+      ],
+      "anchor": [
+        4,
+        4
+      ],
+      "effect": "steam"
+    },
+    {
+      "id": "sofa",
+      "kind": "sofa",
+      "label": "沙发",
+      "transform": {
+        "x": 2,
+        "y": 6,
+        "z": 0,
+        "width": 3,
+        "depth": 1,
+        "height": 1.15
+      },
+      "material": "linen",
+      "collider": [
+        [
+          2,
+          6
+        ],
+        [
+          3,
+          6
+        ],
+        [
+          4,
+          6
+        ]
+      ],
+      "anchor": [
+        3,
+        7
+      ],
+      "effect": "social"
+    },
+    {
+      "id": "coffee-table",
+      "kind": "table",
+      "label": "茶几",
+      "transform": {
+        "x": 4,
+        "y": 7,
+        "z": 0,
+        "width": 2,
+        "depth": 1,
+        "height": 0.62
+      },
+      "material": "oak",
+      "collider": [
+        [
+          4,
+          7
+        ],
+        [
+          5,
+          7
+        ]
+      ]
+    },
+    {
+      "id": "bed",
+      "kind": "bed",
+      "label": "床",
+      "transform": {
+        "x": 8,
+        "y": 1,
+        "z": 0,
+        "width": 3,
+        "depth": 2,
+        "height": 0.8
+      },
+      "material": "pink",
+      "collider": [
+        [
+          8,
+          1
+        ],
+        [
+          9,
+          1
+        ],
+        [
+          10,
+          1
+        ],
+        [
+          8,
+          2
+        ],
+        [
+          9,
+          2
+        ],
+        [
+          10,
+          2
+        ]
+      ],
+      "anchor": [
+        8,
+        3
+      ],
+      "effect": "sleep"
+    },
+    {
+      "id": "divider",
+      "kind": "divider",
+      "label": "隔断",
+      "transform": {
+        "x": 7,
+        "y": 3,
+        "z": 0,
+        "width": 0.35,
+        "depth": 3,
+        "height": 2.25
+      },
+      "material": "teal",
+      "collider": [
+        [
+          7,
+          3
+        ],
+        [
+          7,
+          4
+        ],
+        [
+          7,
+          5
+        ]
+      ]
+    },
+    {
+      "id": "vanity",
+      "kind": "vanity",
+      "label": "洗手台",
+      "transform": {
+        "x": 10,
+        "y": 5,
+        "z": 0,
+        "width": 1,
+        "depth": 1,
+        "height": 1.2
+      },
+      "material": "glass",
+      "collider": [
+        [
+          10,
+          5
+        ]
+      ],
+      "anchor": [
+        10,
+        6
+      ],
+      "effect": "water"
+    },
+    {
+      "id": "wardrobe",
+      "kind": "wardrobe",
+      "label": "衣柜",
+      "transform": {
+        "x": 11,
+        "y": 1,
+        "z": 0,
+        "width": 1,
+        "depth": 2,
+        "height": 2.5
+      },
+      "material": "teal",
+      "collider": [
+        [
+          11,
+          1
+        ],
+        [
+          11,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "window-box",
+      "kind": "window",
+      "label": "窗边",
+      "transform": {
+        "x": 7,
+        "y": 0,
+        "z": 1.2,
+        "width": 2,
+        "depth": 0.15,
+        "height": 1.1
+      },
+      "material": "glass",
+      "occupancy": "decor",
+      "collider": []
+    },
+    {
+      "id": "plant",
+      "kind": "plant",
+      "label": "绿植",
+      "transform": {
+        "x": 6,
+        "y": 8,
+        "z": 0,
+        "width": 1,
+        "depth": 1,
+        "height": 1.6
+      },
+      "material": "sage",
+      "collider": [
+        [
+          6,
+          8
+        ]
+      ]
+    }
+  ],
+  "interactions": {
+    "study": {
+      "object": "desk",
+      "location": "desk",
+      "action": "study",
+      "approach": [
+        1,
+        3
+      ],
+      "facing": "upRight",
+      "pose": "sit"
+    },
+    "eat": {
+      "object": "dining",
+      "location": "kitchen",
+      "action": "eat",
+      "approach": [
+        4,
+        4
+      ],
+      "facing": "upRight",
+      "pose": "sit"
+    },
+    "relax": {
+      "object": "sofa",
+      "location": "sofa",
+      "action": "relax",
+      "approach": [
+        3,
+        7
+      ],
+      "facing": "upRight",
+      "pose": "sit"
+    },
+    "phone": {
+      "object": "sofa",
+      "location": "sofa",
+      "action": "read_phone",
+      "approach": [
+        3,
+        7
+      ],
+      "facing": "upRight",
+      "pose": "sit"
+    },
+    "sleep": {
+      "object": "bed",
+      "location": "bed",
+      "action": "sleep",
+      "approach": [
+        8,
+        3
+      ],
+      "facing": "upLeft",
+      "pose": "sleep"
+    },
+    "wash": {
+      "object": "vanity",
+      "location": "vanity",
+      "action": "wash",
+      "approach": [
+        10,
+        6
+      ],
+      "facing": "upLeft",
+      "pose": "idle"
+    },
+    "tidy": {
+      "object": "desk",
+      "location": "desk",
+      "action": "tidy",
+      "approach": [
+        2,
+        3
+      ],
+      "facing": "upRight",
+      "pose": "idle"
+    }
+  },
+  "anchors": {
+    "entry": [
+      6,
+      9
+    ],
+    "rug": [
+      6,
+      7
+    ],
+    "window": [
+      8,
+      1
+    ],
+    "desk": [
+      1,
+      3
+    ],
+    "kitchen": [
+      4,
+      4
+    ],
+    "sofa": [
+      3,
+      7
+    ],
+    "bed": [
+      8,
+      3
+    ],
+    "vanity": [
+      10,
+      6
+    ]
+  },
+  "routes": {
+    "tour": [
+      [
+        6,
+        9
+      ],
+      [
+        7,
+        9
+      ],
+      [
+        7,
+        8
+      ],
+      [
+        7,
+        7
+      ],
+      [
+        8,
+        7
+      ],
+      [
+        9,
+        7
+      ],
+      [
+        9,
+        6
+      ],
+      [
+        10,
+        6
+      ],
+      [
+        9,
+        6
+      ],
+      [
+        8,
+        6
+      ],
+      [
+        8,
+        5
+      ],
+      [
+        8,
+        4
+      ],
+      [
+        8,
+        3
+      ],
+      [
+        8,
+        4
+      ],
+      [
+        8,
+        5
+      ],
+      [
+        8,
+        6
+      ],
+      [
+        7,
+        6
+      ],
+      [
+        6,
+        6
+      ],
+      [
+        6,
+        5
+      ],
+      [
+        6,
+        4
+      ],
+      [
+        5,
+        4
+      ],
+      [
+        4,
+        4
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        1,
+        3
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        2,
+        5
+      ],
+      [
+        1,
+        5
+      ],
+      [
+        1,
+        6
+      ],
+      [
+        1,
+        7
+      ],
+      [
+        2,
+        7
+      ],
+      [
+        3,
+        7
+      ]
+    ]
+  },
+  "actions": {
+    "study": {
+      "interaction": "study",
+      "effect": "focus"
+    },
+    "eat": {
+      "interaction": "eat",
+      "effect": "steam"
+    },
+    "relax": {
+      "interaction": "relax",
+      "effect": "social"
+    },
+    "social": {
+      "interaction": "relax",
+      "effect": "social"
+    },
+    "read_phone": {
+      "interaction": "phone",
+      "effect": "phone"
+    },
+    "type_phone": {
+      "interaction": "phone",
+      "effect": "phone"
+    },
+    "notice_phone": {
+      "interaction": "phone",
+      "effect": "phone"
+    },
+    "glance_phone": {
+      "interaction": "phone",
+      "effect": "phone"
+    },
+    "sleep": {
+      "interaction": "sleep",
+      "effect": "sleep"
+    },
+    "wash": {
+      "interaction": "wash",
+      "effect": "water"
+    },
+    "tidy": {
+      "interaction": "tidy",
+      "effect": "sparkles"
+    }
+  },
+  "sprites": {
+    "walk": {
+      "url": "/assets/dashboard/zhizhi-iso-walk-v4.png",
+      "columns": {
+        "downRight": 0,
+        "downLeft": 1,
+        "upLeft": 2,
+        "upRight": 3
+      },
+      "frames": 4,
+      "display": [
+        112,
+        112
+      ],
+      "anchor": [
+        0.5,
+        0.94
+      ]
+    },
+    "poses": {
+      "sit": {
+        "url": "/assets/dashboard/tile-rooms/zhizhi-home/assets/zhizhi-iso-poses-v1.png",
+        "crop": [
+          282,
+          162,
+          299,
+          545
+        ],
+        "display": [
+          62,
+          112
+        ],
+        "anchor": [
+          0.5,
+          0.94
+        ]
+      },
+      "sleep": {
+        "url": "/assets/dashboard/tile-rooms/zhizhi-home/assets/zhizhi-iso-poses-v1.png",
+        "crop": [
+          915,
+          270,
+          660,
+          341
+        ],
+        "display": [
+          180,
+          93
+        ],
+        "anchor": [
+          0.5,
+          0.56
+        ]
+      }
+    }
+  }
+}

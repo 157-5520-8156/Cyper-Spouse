@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "orthographic-isometric-v1",
+  "coordinateSystem": {
+    "unit": "tile",
+    "screenAxes": {
+      "x": [85, 42],
+      "y": [-85, 42],
+      "z": [0, -84]
+    },
+    "camera": {
+      "projection": "orthographic",
+      "azimuthDegrees": 45,
+      "elevationDegrees": 30,
+      "rollDegrees": 0
+    },
+    "tilePixels": [170, 84],
+    "wallHeightPixels": 84
+  },
+  "furnitureContract": {
+    "dimensions": "Every furniture object declares width, depth and height in tile units. Dimensions describe the visual envelope; occupancy remains the smaller walk-collision footprint.",
+    "anchors": "Place an object's origin at its back-left floor corner. Supply a front layer whenever the visual envelope can cover the actor.",
+    "layers": ["shadow", "back", "body", "front", "light"]
+  },
+  "textureContracts": {
+    "floor": {
+      "sourceResolution": [256, 256],
+      "repeat": "seamless square material; the renderer maps it onto a diamond floor tile",
+      "prompt": "Use case: stylized-concept. Asset type: seamless material source for an orthographic isometric pixel room. Primary request: warm honey oak floorboards, straight parallel boards, no perspective. Style/medium: clean 2.5D pixel art at a consistent low pixel density. Composition/framing: a perfectly flat square top-down texture with edge-to-edge continuity. Lighting/mood: neutral even lighting only. Constraints: seamless on all four edges, no furniture, no wall, no cast shadow, no text, no border, no watermark. Avoid: diagonal camera view, room render, gradient lighting, individual loose objects."
+    },
+    "wall": {
+      "sourceResolution": [256, 128],
+      "repeat": "seamless vertical material; the renderer maps it onto an upright wall face",
+      "prompt": "Use case: stylized-concept. Asset type: seamless wall material source for an orthographic isometric pixel room. Primary request: warm off-white plaster with sparse hand-painted pixel texture, front-on and perfectly flat. Style/medium: clean 2.5D pixel art. Composition/framing: a rectangular, edge-to-edge repeat texture with no perspective. Lighting/mood: neutral even lighting only. Constraints: seamless left/right and top/bottom, no window, no baseboard, no furniture, no shadow, no text, no watermark. Avoid: a rendered room, angled wall, vanishing point, gradients."
+    }
+  },
+  "generationSequence": [
+    "Generate only a flat material or one furniture face against a removable chroma-key background; never generate a complete room.",
+    "Inspect the material at native resolution and test it in a 2x2 repeat before accepting it.",
+    "Generate furniture faces separately using the declared width/depth/height and named layer role.",
+    "Compile and inspect behind/front actor audits before promoting an asset from draft."
+  ]
+}

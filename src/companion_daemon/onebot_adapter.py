@@ -46,6 +46,46 @@ class OneBotReplyTarget:
         }
         return await _post(endpoint, payload, self.access_token)
 
+    async def send_face(self, face_id: str) -> dict[str, Any]:
+        """Send one standard OneBot ``face`` segment as a visible sticker beat."""
+
+        if not face_id or not face_id.isdigit():
+            raise ValueError("OneBot face id must be numeric")
+        return await self._send_message(
+            [{"type": "face", "data": {"id": face_id}}]
+        )
+
+    async def get_msg(self, message_id: str) -> dict[str, Any]:
+        """Fetch one previously sent/received message by its OneBot message id.
+
+        NapCat and most OneBot v11 implementations expose ``get_msg``.  A
+        successful response proves the platform durably persisted the message,
+        which is the strongest delivery evidence this API family offers.
+        """
+
+        if not message_id:
+            raise ValueError("OneBot get_msg requires a message id")
+        endpoint = f"{self.api_url.rstrip('/')}/get_msg"
+        return await _post(endpoint, {"message_id": message_id}, self.access_token)
+
+    async def set_input_status(self, *, event_type: int) -> dict[str, Any]:
+        """Set NapCat's private-chat input state for this target.
+
+        ``set_input_status`` is a NapCat extension rather than portable
+        OneBot.  Callers expose it only from the NapCat deployment profile.
+        """
+
+        if self.user_id is None:
+            raise ValueError("input status requires a private OneBot target")
+        if event_type not in {0, 1}:
+            raise ValueError("input status event type must be 0 or 1")
+        endpoint = f"{self.api_url.rstrip('/')}/set_input_status"
+        return await _post(
+            endpoint,
+            {"user_id": str(self.user_id), "event_type": event_type},
+            self.access_token,
+        )
+
     async def _send_message(self, message: str | list[dict[str, Any]]) -> dict[str, Any]:
         payload: dict[str, Any] = {"message": message}
         if self.group_id:
@@ -57,6 +97,60 @@ class OneBotReplyTarget:
         else:
             return {}
         return await _post(endpoint, payload, self.access_token)
+
+
+async def get_onebot_friend_msg_history(
+    api_url: str,
+    *,
+    user_id: str,
+    count: int = 30,
+    access_token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch the most recent private-chat history for one peer.
+
+    ``get_friend_msg_history`` is a NapCat extension (also implemented by
+    several other OneBot v11 forks).  ``message_seq`` 0 asks for the newest
+    messages.  Callers own filtering and idempotency; this helper only
+    returns the provider's raw message objects, newest last.
+    """
+
+    if not user_id:
+        raise ValueError("friend message history requires a peer user id")
+    if not 1 <= count <= 200:
+        raise ValueError("friend message history count must be between 1 and 200")
+    endpoint = f"{api_url.rstrip('/')}/get_friend_msg_history"
+    response = await _post(
+        endpoint,
+        {"user_id": user_id, "message_seq": 0, "count": count, "reverseOrder": False},
+        access_token,
+    )
+    data = response.get("data")
+    messages = data.get("messages") if isinstance(data, dict) else None
+    if not isinstance(messages, list):
+        return []
+    return [item for item in messages if isinstance(item, dict)]
+
+
+async def get_onebot_image(
+    api_url: str,
+    *,
+    file: str,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Resolve one received image segment through the OneBot ``get_image`` API.
+
+    NapCat (and most OneBot v11 forks) return a ``data`` object that may
+    carry a re-signed download ``url``, a provider-local ``file`` path, or a
+    ``base64`` body depending on the implementation.  The caller owns
+    choosing among them; this helper only performs the provider call.
+    """
+
+    if not file:
+        raise ValueError("OneBot get_image requires the segment file identifier")
+    endpoint = f"{api_url.rstrip('/')}/get_image"
+    response = await _post(endpoint, {"file": file}, access_token)
+    data = response.get("data")
+    return data if isinstance(data, dict) else {}
 
 
 async def send_onebot_emoji_like(

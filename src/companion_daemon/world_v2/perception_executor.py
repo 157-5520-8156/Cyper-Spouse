@@ -10,6 +10,7 @@ from typing import Protocol
 from .action_pump import ActionExecutor
 from .perception_authorization import require_perception_authorization
 from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
+from .perception_result_context import PerceptionResultContent
 
 
 def _digest(value: object) -> str:
@@ -37,6 +38,7 @@ class PerceptionTransport(Protocol):
     async def lookup(
         self, *, idempotency_key: str
     ) -> tuple[str, str, str, int, datetime] | None: ...
+    def read_exact(self, *, result_ref: str) -> PerceptionResultContent | None: ...
 
 
 class PerceptionActionExecutor(ActionExecutor):

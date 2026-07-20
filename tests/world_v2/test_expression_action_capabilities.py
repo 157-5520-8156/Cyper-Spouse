@@ -8,6 +8,8 @@ from companion_daemon.world_v2.expression_action_capabilities import (
     expression_action_capability,
     production_expression_action_kinds,
 )
+from companion_daemon.world_v2.http_capture_host import HttpCaptureTransport
+from companion_daemon.world_v2.platform_action_executor import PlatformDispatchRequest
 from companion_daemon.world_v2.production_proposal_grammar import (
     ProductionProposalGrammarError,
     production_proposal_grammar,
@@ -82,15 +84,19 @@ def _expression_with_adapter_only_reaction() -> DecisionProposal:
     )
 
 
-def test_expression_capability_status_is_not_inferred_from_matrix_vocabulary() -> None:
-    assert production_expression_action_kinds() == {"reply", "followup", "proactive_message"}
+def test_expression_capability_status_requires_the_complete_vertical_not_matrix_vocabulary() -> None:
+    assert production_expression_action_kinds() == {
+        "reply", "followup", "proactive_message", "reaction", "typing", "sticker"
+    }
     for action_kind in ("reaction", "typing", "sticker"):
         capability = expression_action_capability(action_kind)
-        assert capability.availability == "adapter_only"
-        assert set(capability.required_closure) == {"proposal_materializer", "concrete_transport"}
+        assert capability.availability == "production"
+        assert set(capability.required_closure) == {
+            "immutable_payload", "acceptance", "transport", "receipt_recovery"
+        }
 
 
-def test_production_chat_grammar_rejects_an_adapter_only_reaction_even_when_its_beat_is_well_bound() -> (
+def test_text_only_deployment_grammar_rejects_reaction_even_when_global_vertical_is_installed() -> (
     None
 ):
     # The envelope deliberately validates: typed payloads remain usable by a
@@ -98,4 +104,48 @@ def test_production_chat_grammar_rejects_an_adapter_only_reaction_even_when_its_
     proposal = _expression_with_adapter_only_reaction()
 
     with pytest.raises(ProductionProposalGrammarError, match="action_not_reachable"):
-        production_proposal_grammar("chat_reply").validate(proposal)
+        production_proposal_grammar(
+            "chat_reply",
+            expression_action_kinds=frozenset({"reply", "followup", "proactive_message"}),
+        ).validate(proposal)
+
+    production_proposal_grammar(
+        "chat_reply", expression_action_kinds=production_expression_action_kinds()
+    ).validate(proposal)
+
+
+@pytest.mark.asyncio
+async def test_http_capture_transport_records_nontext_expression_capability_failure() -> None:
+    body = '{"state":"composing","version":"expression-typing.1"}'
+    request = PlatformDispatchRequest(
+        action_id="action:http:typing:1",
+        kind="typing",
+        target="user:primary",
+        payload_ref="payload:http:typing:1",
+        payload_hash=_hash(body),
+        content_type="application/vnd.world-v2.typing+json",
+        body=body,
+        idempotency_key="idempotency:http:typing:1",
+    )
+
+    receipt = await HttpCaptureTransport().send(request)
+    assert receipt.status == "failed"
+    assert receipt.error_class == "http_capture_capability_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_http_capture_transport_delivers_scheduler_text_messages() -> None:
+    body = "我刚才又想了一下。"
+    request = PlatformDispatchRequest(
+        action_id="action:http:proactive:1",
+        kind="proactive_message",
+        target="user:primary",
+        payload_ref="payload:http:proactive:1",
+        payload_hash=_hash(body),
+        content_type="text/plain",
+        body=body,
+        idempotency_key="idempotency:http:proactive:1",
+    )
+
+    receipt = await HttpCaptureTransport().send(request)
+    assert receipt.status == "delivered"

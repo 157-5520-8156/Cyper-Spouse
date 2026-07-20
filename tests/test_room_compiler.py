@@ -7,6 +7,7 @@ import pytest
 from companion_daemon.room_compiler import (
     RoomCompileError,
     _normalize_independent_source,
+    _resolve_layer_source,
     compile_room,
 )
 
@@ -18,6 +19,9 @@ ROOM_MANIFEST = ROOT / "assets/dashboard/rooms/zhizhi-home/room.json"
 def editable_manifest(tmp_path: Path) -> tuple[dict, Path]:
     manifest = json.loads(ROOM_MANIFEST.read_text())
     manifest["inventory"] = str((ROOM_MANIFEST.parent / manifest["inventory"]).resolve())
+    manifest["projection"]["assetKit"] = str(
+        (ROOM_MANIFEST.parent / manifest["projection"]["assetKit"]).resolve()
+    )
     for image in manifest["images"].values():
         image["source"] = str((ROOM_MANIFEST.parent / image["source"]).resolve())
         if patch := image.get("compositePatch"):
@@ -31,6 +35,11 @@ def editable_manifest(tmp_path: Path) -> tuple[dict, Path]:
         for spec in specs:
             source_key = "source" if "source" in spec else "matte"
             spec[source_key] = str((ROOM_MANIFEST.parent / spec[source_key]).resolve())
+            alpha_mask = spec.get("sourceTransform", {}).get("alphaMask")
+            if alpha_mask and "source" in alpha_mask:
+                alpha_mask["source"] = str(
+                    (ROOM_MANIFEST.parent / alpha_mask["source"]).resolve()
+                )
     manifest_path = tmp_path / "room.json"
     return manifest, manifest_path
 
@@ -43,6 +52,11 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     bundle = json.loads(report.bundle_path.read_text())
     assert bundle["id"] == "zhizhi-home"
     assert bundle["images"]["room"] == "/assets/dashboard/zhizhi-room-isometric-v2.png"
+    assert bundle["projection"] == {
+        "assetKit": "../../asset-kits/orthographic-isometric-v1.json",
+        "camera": {"projection": "orthographic", "azimuthDegrees": 45, "elevationDegrees": 30},
+        "screenAxes": {"x": [85, 42], "y": [-85, 42], "z": [0, -84]},
+    }
     assert [item["id"] for item in bundle["objects"]] == [
         "desk",
         "bed",
@@ -56,6 +70,10 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "/assets/dashboard/rooms/zhizhi-home/runtime/layers/desk-front.png"
     )
     assert bundle["objects"][0]["layers"][0]["image"] == "deskFront0"
+    assert bundle["objects"][0]["dimensions"] == {"width": 2, "depth": 1, "height": 1.5}
+    assert bundle["sprites"]["poses"]["idle"] == {
+        "image": "sprite", "walkFrame": 0, "display": [132, 132],
+    }
     assert bundle["sprites"]["poses"]["sit"]["crop"] == [380, 620, 360, 470]
     assert bundle["interactions"]["dining"] == {
         "object": "dining", "location": "kitchen", "action": "eat",
@@ -122,12 +140,12 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     draft_stool = draft_by_id["teal-stool"]
     assert draft_stool["occupancy"] == {"kind": "none", "tiles": []}
     assert draft_stool["layers"] == [{
-        "role": "front", "image": "tealStoolFront0Draft", "origin": [626, 900], "depthBias": 500,
+        "role": "front", "image": "tealStoolFront0Draft", "origin": [600, 870], "depthBias": 500,
     }]
     assert draft_stool["provenance"] == {
-        "method": "imagegen-background-extraction",
+        "method": "master-pixels-with-ai-alpha-mask",
         "reference": "zhizhi-room-isometric-v2.png",
-        "source": "sources/teal-stool-chroma-v2.png",
+        "source": "../../zhizhi-room-isometric-v2.png",
     }
     desk_plant = draft_by_id["desk-floor-plant"]
     living_plant = draft_by_id["living-large-plant"]
@@ -320,6 +338,56 @@ def test_chroma_despill_uses_the_declared_key_channels() -> None:
     assert 0 < alpha < 252
     assert red <= green and blue <= green
     assert result.getpixel((2, 0))[3] == 255
+
+
+def test_compile_room_rejects_non_orthographic_or_dimensionless_furniture(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    manifest["projection"]["camera"]["projection"] = "perspective"
+    manifest["objects"][0].pop("dimensions")
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RoomCompileError) as raised:
+        compile_room(manifest_path, tmp_path / "runtime")
+
+    assert "room projection camera must be orthographic" in raised.value.errors
+    assert "furniture object 'desk' must define width/depth/height" in raised.value.errors
+
+
+def test_master_pixels_can_use_an_independent_alpha_mask(tmp_path: Path) -> None:
+    source = Image.new("RGBA", (4, 4), (20, 40, 60, 255))
+    source.save(tmp_path / "master-crop.png")
+    mask = Image.new("RGBA", (2, 2), (0, 0, 0, 0))
+    mask.putpixel((0, 0), (1, 2, 3, 255))
+    mask.putpixel((1, 1), (1, 2, 3, 128))
+    mask.save(tmp_path / "object-mask.png")
+
+    layer = _resolve_layer_source(tmp_path, {
+        "source": "master-crop.png",
+        "sourceTransform": {
+            "alphaMask": {
+                "source": "object-mask.png",
+                "origin": [1, 1],
+                "excludeRects": [[1, 1, 2, 2]],
+            },
+        },
+    }).image
+
+    assert layer.getpixel((0, 0)) == (20, 40, 60, 0)
+    assert layer.getpixel((1, 1)) == (20, 40, 60, 255)
+    assert layer.getpixel((2, 2)) == (20, 40, 60, 0)
+
+
+def test_compile_room_rejects_reference_bounds_drift(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    stool = next(item for item in manifest["artDraft"]["objects"] if item["id"] == "teal-stool")
+    stool["layers"][0]["calibration"] = {
+        "referenceBounds": [0, 0, 1, 1],
+        "maxDrift": 0,
+    }
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RoomCompileError, match="referenceBounds drift"):
+        compile_room(manifest_path, tmp_path / "runtime")
 
 
 def test_compile_room_rejects_invalid_geometry_before_writing_outputs(

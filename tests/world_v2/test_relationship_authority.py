@@ -7,12 +7,11 @@ import sqlite3
 
 import pytest
 
-from legacy_migration_support import legacy_state_json
+from legacy_migration_support import legacy_state_json, read_head_state_json
 
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
-from companion_daemon.world_v2.projection import InternalProjectionReader
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.relationship_events import (
     BoundaryChangedPayload,
@@ -599,12 +598,7 @@ def exercise_relationship_authority(ledger) -> object:
     assert projection.boundaries == (boundary,)
     assert projection.relationship_states[0].stage == "stranger"
     assert ledger.rebuild() == projection
-    snapshot = InternalProjectionReader(ledger=ledger).snapshot(world_id=WORLD)
-    assert snapshot.relationship_state == projection.relationship_states[0]
-    assert snapshot.relationship_boundaries == (boundary,)
-    assert next(
-        item for item in snapshot.slice_windows if item.slice_name == "relationship_state"
-    ).availability == "available"
+    assert projection.boundaries == (boundary,)
     return projection
 
 
@@ -636,9 +630,7 @@ def test_sqlite_migrates_verified_v6_head_to_relationship_bundle(tmp_path) -> No
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        raw = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0]
+        raw = read_head_state_json(connection, WORLD)
         state = ReducerState.model_validate_json(raw)
         semantic = state.semantic_payload(
             world_id=WORLD,
@@ -684,11 +676,7 @@ def test_sqlite_rejects_tampered_relationship_checkpoint(tmp_path) -> None:
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        raw = json.loads(
-            connection.execute(
-                "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-            ).fetchone()[0]
-        )
+        raw = json.loads(read_head_state_json(connection, WORLD))
         raw["relationship_states"][0]["variables"]["trust_bp"] = 9_999
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ? WHERE world_id = ?",

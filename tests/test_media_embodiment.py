@@ -251,6 +251,8 @@ def test_veiled_candidates_require_lover_and_explicit_private_wardrobe_evidence(
             "schema_version": "appearance-state-v1",
             "outfit_role": "restrained_lingerie",
             "coverage_mode": "private_apparel",
+            "outfit": "single camisole nightgown without outer layers",
+            "description": "a single camisole nightgown without outer layers",
         }
     )
     with_evidence = build_embodied_candidates(
@@ -270,6 +272,11 @@ def test_veiled_candidates_require_lover_and_explicit_private_wardrobe_evidence(
         "strategic_cover",
     }
     assert all(item.wardrobe_evidence_refs for item in veiled)
+    assert all(
+        "/character/appearance_state/outfit" in item.wardrobe_evidence_refs
+        and "/character/appearance_state/description" in item.wardrobe_evidence_refs
+        for item in veiled
+    )
 
 
 def test_full_catalog_can_represent_every_body_strategy_charge_and_coverage_axis() -> None:
@@ -333,6 +340,29 @@ def test_full_catalog_can_represent_every_body_strategy_charge_and_coverage_axis
         "private_apparel",
         "strategic_cover",
     }
+
+
+def test_charged_functional_bodywear_prompt_keeps_supported_natural_visibility() -> None:
+    candidate = next(
+        item
+        for item in build_embodied_candidates(
+            snapshot=_snapshot(),
+            opportunity_id="opportunity:charged-functional-visibility",
+            relationship_stage="lover",
+            sensual_charge_ceiling="charged",
+            limit=256,
+        )
+        if item.presentation.sensual_charge == "charged"
+        and item.presentation.coverage_mode == "functional_bodywear"
+        and {"shoulders", "arms", "waist", "legs"}.intersection(
+            item.presentation.allowed_regions
+        )
+    )
+
+    prompt = embodiment_prompt_block(candidate.presentation)
+
+    assert "charged functional-bodywear target" in prompt
+    assert "fully covered long-sleeve-and-long-pants silhouette" in prompt
 
 
 def test_recent_contract_is_hard_filtered_and_recent_axes_softly_change_order() -> None:

@@ -97,6 +97,11 @@ class MediaDeliveryRuntime:
         )
         if approval is None or latest != approval_revision or logical_time >= approval.expires_at:
             raise MediaDeliveryError("media delivery approval is missing, superseded, or expired")
+        expected_target = approval.delivery_target_ref or approval.recipient_ref
+        if target != expected_target:
+            raise MediaDeliveryError(
+                "media delivery target is not the operator-approved recipient address"
+            )
         inspection = next((item for item in projection.media_inspections if item.inspection_id == approval.inspection_id), None)
         artifact = next((item for item in projection.media_artifacts if item.artifact_id == approval.artifact_id), None)
         if inspection is None or artifact is None or not inspection.passed or artifact.artifact_hash != approval.artifact_hash:
@@ -148,7 +153,18 @@ class MediaDeliveryRuntime:
     ) -> WorldEvent:
         key = domain_idempotency_key(event_type=event_type, world_id=self._ledger.world_id, payload=payload)
         if key is None:
-            raise MediaDeliveryError(f"no identity contract for {event_type}")
+            # Generic lifecycle events (``BudgetReserved``/``ActionAuthorized``)
+            # have no public domain-id function; bind them to their exact
+            # payload bytes exactly like the media planning batch does.
+            import hashlib as _hashlib
+            import json as _json
+
+            key = "world-v2:media-delivery:" + _hashlib.sha256(
+                _json.dumps(
+                    {"event_type": event_type, "world_id": self._ledger.world_id, "payload": payload},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
         return WorldEvent.from_payload(
             schema_version="world-v2.1", event_id=_event_id(event_type, stable), event_type=event_type,
             world_id=self._ledger.world_id, logical_time=logical_time, created_at=logical_time,

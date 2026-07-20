@@ -1,0 +1,17 @@
+{
+  "scenario_id": "new-acquaintance-targeted-real-audit.v1",
+  "turns": [
+    {"id": "T01", "at_minutes": 0, "text": "你好，第一次见。"},
+    {"id": "T02", "at_minutes": 2, "text": "你叫什么名字？"},
+    {"id": "T03", "at_minutes": 4, "text": "你是我的助手吗？"},
+    {"id": "T04", "at_minutes": 6, "text": "我叫丁奥轩，英文名 Geoff。"},
+    {"id": "T05", "at_minutes": 8, "text": "那你现在怎么称呼我？"},
+    {"id": "T13", "at_minutes": 10, "text": "我平时最喜欢喝乌龙茶。"},
+    {"id": "T14", "at_minutes": 12, "text": "尤其是桂花乌龙。"},
+    {"id": "T27", "at_minutes": 14, "text": "你还记得我的中文名和我最喜欢喝什么吗？"},
+    {"id": "T28", "at_minutes": 16, "text": "你今天自己有什么印象深的事？"},
+    {"id": "T29", "at_minutes": 18, "text": "不是角色设定里的爱好，我问的是今天真的发生了什么。"},
+    {"id": "T30", "at_minutes": 20, "text": "现在都凌晨一点多了，你在干什么？"}
+  ],
+  "after_silence": {"advance_minutes": 180}
+}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -17,13 +17,22 @@ NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
 
 
 def _event(event_id: str) -> WorldEvent:
-    payload: dict[str, object] = {}
+    initial = event_id.endswith("first") or "seed" in event_id
+    event_type = "WorldStarted" if initial else "ClockAdvanced"
+    payload: dict[str, object] = (
+        {}
+        if initial
+        else {
+            "logical_time_from": NOW.isoformat(),
+            "logical_time_to": (NOW + timedelta(minutes=1)).isoformat(),
+        }
+    )
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
         event_id=event_id,
         world_id=WORLD_ID,
-        event_type="WorldStarted",
-        logical_time=NOW,
+        event_type=event_type,
+        logical_time=NOW if initial else NOW + timedelta(minutes=1),
         created_at=NOW,
         actor="system:test",
         source="test",
@@ -31,7 +40,7 @@ def _event(event_id: str) -> WorldEvent:
         causation_id=f"cause:{event_id}",
         correlation_id="correlation:full-cursor-cas",
         idempotency_key=domain_idempotency_key(
-            event_type="WorldStarted", world_id=WORLD_ID, payload=payload
+            event_type=event_type, world_id=WORLD_ID, payload=payload
         )
         or f"identity:{event_id}",
         payload=payload,

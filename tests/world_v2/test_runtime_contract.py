@@ -78,12 +78,12 @@ def bind_operator(access: ProjectionAuthority, request: ProjectionRequest) -> Pr
     ).bind(request, credential=TEST_CREDENTIAL)
 
 
-def observation() -> Observation:
+def observation(*, logical_time: datetime = NOW) -> Observation:
     return Observation(
         schema_version="world-v2.1",
         observation_id="obs-http-message-1",
         world_id="world-v2-test",
-        logical_time=NOW,
+        logical_time=logical_time,
         created_at=NOW,
         trace_id="trace-1",
         causation_id="http:message-1",
@@ -181,7 +181,7 @@ async def test_clock_advance_is_effect_once_and_rejects_time_reversal() -> None:
     )
 
     first = await runtime.advance(clock)
-    await runtime.ingest(observation())
+    await runtime.ingest(observation(logical_time=NOW.replace(hour=13)))
     delayed_duplicate = await runtime.advance(clock)
     assert first == delayed_duplicate
     assert first.committed_world_revision == 1

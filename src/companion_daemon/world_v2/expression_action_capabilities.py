@@ -70,26 +70,23 @@ EXPRESSION_ACTION_CAPABILITIES: tuple[ExpressionActionCapability, ...] = (
         availability="production",
         required_closure=("immutable_payload", "acceptance", "transport", "receipt_recovery"),
     ),
-    # PlatformActionExecutor can bind these opaque typed payloads to a
-    # receipt, but no production chat proposal materializer nor QQ C2C
-    # transport provides the matching end-to-end operation yet.
     ExpressionActionCapability(
         action_kind="reaction",
         content_type="application/vnd.world-v2.reaction+json",
-        availability="adapter_only",
-        required_closure=("proposal_materializer", "concrete_transport"),
+        availability="production",
+        required_closure=("immutable_payload", "acceptance", "transport", "receipt_recovery"),
     ),
     ExpressionActionCapability(
         action_kind="typing",
         content_type="application/vnd.world-v2.typing+json",
-        availability="adapter_only",
-        required_closure=("proposal_materializer", "concrete_transport"),
+        availability="production",
+        required_closure=("immutable_payload", "acceptance", "transport", "receipt_recovery"),
     ),
     ExpressionActionCapability(
         action_kind="sticker",
         content_type="application/vnd.world-v2.sticker+json",
-        availability="adapter_only",
-        required_closure=("proposal_materializer", "concrete_transport"),
+        availability="production",
+        required_closure=("immutable_payload", "acceptance", "transport", "receipt_recovery"),
     ),
 )
 

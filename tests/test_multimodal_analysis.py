@@ -13,6 +13,41 @@ from companion_daemon.multimodal_analysis import (
 )
 
 
+def test_openai_multimodal_analyzer_keeps_proxy_explicit(tmp_path, monkeypatch) -> None:
+    import companion_daemon.multimodal_analysis as multimodal_analysis
+
+    observed: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_async_client(**options):
+        observed.update(options)
+        return sentinel
+
+    monkeypatch.setattr(multimodal_analysis.httpx, "AsyncClient", fake_async_client)
+    analyzer = OpenAIMultimodalAnalyzer(
+        api_key="test-key",
+        base_url="https://api.example.test/v1",
+        vision_model="vision-test",
+        transcription_model="stt-test",
+        budget_gate=BudgetGate(
+            CompanionStore(tmp_path / "test.sqlite"),
+            monthly_budget_cny=80,
+            daily_budget_cny=3,
+            soft_daily_budget_cny=2,
+            monthly_image_limit=20,
+            monthly_vision_limit=120,
+            monthly_audio_limit=60,
+        ),
+        proxy_url="http://127.0.0.1:7897",
+    )
+
+    client = analyzer._client(timeout=1)
+
+    assert client is sentinel
+    assert observed["proxy"] == "http://127.0.0.1:7897"
+    assert observed["trust_env"] is False
+
+
 def test_looks_like_text_file() -> None:
     assert _looks_like_text_file(MessageAttachment(kind="file", filename="note.md"))
     assert _looks_like_text_file(MessageAttachment(kind="file", content_type="text/plain"))

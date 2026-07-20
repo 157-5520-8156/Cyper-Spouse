@@ -14,6 +14,8 @@ import sqlite3
 from threading import RLock
 from typing import Literal, Protocol
 
+from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
+
 
 ExpressionPayloadKind = Literal["referenced", "inline_encrypted"]
 ExpressionPayloadPrivacy = Literal["public", "shareable", "personal", "private", "withhold"]
@@ -77,29 +79,34 @@ class SQLiteImmutableExpressionPayloadStore:
             raise ValueError("expression payload SQLite store needs path and world id")
         self._world_id = world_id
         self._lock = RLock()
-        self._connection = sqlite3.connect(path, check_same_thread=False)
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS world_v2_expression_payload (
-                world_id TEXT NOT NULL,
-                payload_ref TEXT NOT NULL,
-                payload_hash TEXT NOT NULL,
-                content_type TEXT NOT NULL,
-                privacy_class TEXT NOT NULL,
-                payload_kind TEXT NOT NULL,
-                encoded_payload TEXT NOT NULL,
-                PRIMARY KEY (world_id, payload_ref)
+        self._database_write_lock = sqlite_write_lock(path)
+        # Autocommit; see SQLiteImmutableLifeContentStore for the WAL-pinning
+        # rationale shared by every sidecar on this file.
+        self._connection = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        with self._database_write_lock:
+            configure_shared_sqlite_connection(self._connection)
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS world_v2_expression_payload (
+                    world_id TEXT NOT NULL,
+                    payload_ref TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    privacy_class TEXT NOT NULL,
+                    payload_kind TEXT NOT NULL,
+                    encoded_payload TEXT NOT NULL,
+                    PRIMARY KEY (world_id, payload_ref)
+                )
+                """
             )
-            """
-        )
-        self._connection.commit()
+            self._connection.commit()
 
     def close(self) -> None:
         with self._lock:
             self._connection.close()
 
     def put_if_absent(self, record: StoredExpressionPayload) -> None:
-        with self._lock:
+        with self._database_write_lock, self._lock:
             row = self._connection.execute(
                 "SELECT payload_hash, content_type, privacy_class, payload_kind, encoded_payload "
                 "FROM world_v2_expression_payload WHERE world_id = ? AND payload_ref = ?",

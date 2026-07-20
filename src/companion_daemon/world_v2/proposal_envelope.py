@@ -24,6 +24,7 @@ ActionLayer = Literal[
     "external_action",
     "media_action",
     "read_only_tool",
+    "perception_tool",
 ]
 PROPOSAL_SCHEMA_REGISTRY_VERSION = "world-v2-proposals.1"
 _HASH_PATTERN = r"^sha256:[0-9a-f]{64}$"
@@ -71,6 +72,11 @@ CHANGE_TRANSITION_REGISTRY: dict[str, frozenset[str]] = {
     "private_impression_transition": frozenset(
         {"open", "support", "contradict", "expire", "revise"}
     ),
+    # A relationship-signal suggestion is deliberately not a relationship
+    # mutation.  The later relationship compiler alone may bind it to an
+    # accepted appraisal, derive identities, and decide whether it becomes a
+    # typed relationship proposal.
+    "relationship_signal": frozenset({"suggest"}),
     "relationship_adjustment": frozenset({"adjust", "compensate"}),
     "boundary_transition": frozenset({"open", "revise", "close"}),
     "thread_transition": frozenset({"open", "update", "resolve", "cancel", "expire"}),
@@ -98,6 +104,7 @@ CHANGE_TRANSITION_REGISTRY: dict[str, frozenset[str]] = {
     # Action.  The specialized compiler below the envelope resolves the
     # current enforcement grant and creates the only executable Action.
     "read_only_tool_request": frozenset({"request"}),
+    "perception_request": frozenset({"request"}),
     "grant_request": frozenset({"request", "grant", "revoke"}),
 }
 
@@ -244,6 +251,16 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "contradiction": (dict, type(None)),
         }
     ),
+    "relationship_signal": _PayloadContract(
+        {
+            "subject_ref": str,
+            "signal_code": str,
+            "confidence_bp": int,
+            "persistence": str,
+            "rationale_code": str,
+            "suggested_deltas": dict,
+        }
+    ),
     "relationship_adjustment": _PayloadContract(
         {
             "relationship_id": str,
@@ -337,6 +354,15 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "tool_name": str,
             "target": str,
             "query": str,
+            "budget_account_id": str,
+            "budget_limit": int,
+        }
+    ),
+    "perception_request": _PayloadContract(
+        {
+            "analysis_kind": str,
+            "attachment_ref": str,
+            "content_privacy_class": str,
             "budget_account_id": str,
             "budget_limit": int,
         }
@@ -685,6 +711,28 @@ class PrivateImpressionPayload(FrozenModel):
     contradiction: SourceBinding | None
 
 
+class RelationshipSuggestedDeltasPayload(FrozenModel):
+    """A bounded, non-authoritative six-axis relationship suggestion."""
+
+    trust_bp: int = Field(ge=-10_000, le=10_000)
+    closeness_bp: int = Field(ge=-10_000, le=10_000)
+    respect_bp: int = Field(ge=-10_000, le=10_000)
+    reliability_bp: int = Field(ge=-10_000, le=10_000)
+    mutuality_bp: int = Field(ge=-10_000, le=10_000)
+    repair_confidence_bp: int = Field(ge=-10_000, le=10_000)
+
+
+class RelationshipSignalPayload(FrozenModel):
+    """Generic model suggestion consumed only by the relationship compiler."""
+
+    subject_ref: BoundedRef
+    signal_code: BoundedLabel
+    confidence_bp: int = Field(ge=1, le=10_000)
+    persistence: Literal["session", "durable"]
+    rationale_code: BoundedLabel
+    suggested_deltas: RelationshipSuggestedDeltasPayload
+
+
 class RelationshipAdjustmentPayload(FrozenModel):
     relationship_id: BoundedRef
     variable_deltas: list[NamedFixedPoint] = Field(min_length=1, max_length=32)
@@ -766,12 +814,67 @@ class ExpressionBeatDraft(FrozenModel):
     merge_policy: BoundedLabel
 
 
+class EventShareClaimBinding(FrozenModel):
+    """Bind the complete visible event-share claim to one source and recipient."""
+
+    claim_text: str = Field(min_length=1, max_length=4_096)
+    recipient_ref: BoundedRef
+    source_event_ref: BoundedRef
+    source_payload_hash: str = Field(pattern=_HASH_PATTERN)
+    source_world_revision: int = Field(ge=1)
+
+
+class ProactiveExpressionSourceBinding(FrozenModel):
+    """Bind a complete visible proactive expression to its causal opportunity."""
+
+    source_kind: Literal[
+        "settled_world_event", "thread", "commitment", "spontaneous_contact", "response_gap"
+    ]
+    source_event_ref: BoundedRef
+    source_payload_hash: str = Field(pattern=_HASH_PATTERN)
+    source_world_revision: int = Field(ge=1)
+    response_payload_hash: str = Field(pattern=_HASH_PATTERN)
+    target_ref: BoundedRef
+
+
+class ProactiveOpportunityDecision(FrozenModel):
+    """Durable proof that a proactive opportunity was evaluated, including silence."""
+
+    source_kind: Literal[
+        "settled_world_event", "thread", "commitment", "spontaneous_contact", "response_gap"
+    ]
+    source_event_ref: BoundedRef
+    source_payload_hash: str = Field(pattern=_HASH_PATTERN)
+    source_world_revision: int = Field(ge=1)
+    disposition: Literal["engage_now", "engage_later", "silent_after_consideration"]
+    decision_origin: Literal["model", "local_failsafe"]
+
+
+class ResponseExpectationDraftPayload(FrozenModel):
+    """Model-proposed social expectation; acceptance supplies all authority coordinates."""
+
+    hoped_response: str = Field(min_length=1, max_length=128)
+    pressure_bp: int = Field(ge=0, le=10_000)
+    importance_bp: int = Field(ge=0, le=10_000)
+    wait_seconds: int = Field(ge=30, le=86_400)
+    expires_after_seconds: int = Field(ge=60, le=172_800)
+
+    @model_validator(mode="after")
+    def expiry_follows_wait(self) -> "ResponseExpectationDraftPayload":
+        if self.expires_after_seconds <= self.wait_seconds:
+            raise ValueError("response expectation expiry must follow its wait")
+        return self
+
+
 class ExpressionPlanPayload(FrozenModel):
     plan_id: BoundedRef
     overall_intent: str = Field(min_length=1, max_length=240)
     beat_drafts: list[ExpressionBeatDraft] = Field(min_length=1, max_length=32)
     ordering_policy: BoundedLabel
     terminal_policy: BoundedLabel
+    response_expectation: ResponseExpectationDraftPayload | None = None
+    event_share_claim: EventShareClaimBinding | None = None
+    proactive_source_binding: ProactiveExpressionSourceBinding | None = None
 
 
 class PhotoCandidatePayload(FrozenModel):
@@ -813,6 +916,16 @@ class ReadOnlyToolRequestPayload(FrozenModel):
     budget_limit: int = Field(ge=0, le=10_000_000)
 
 
+class PerceptionRequestPayload(FrozenModel):
+    """Model-selected attachment token; never attachment bytes or a grant."""
+
+    analysis_kind: Literal["vision", "transcription"]
+    attachment_ref: BoundedRef
+    content_privacy_class: Literal["public", "shareable", "personal", "private", "withhold"]
+    budget_account_id: BoundedRef
+    budget_limit: int = Field(ge=0, le=10_000_000)
+
+
 class GrantRequestPayload(FrozenModel):
     grant_kind: BoundedLabel
     actor: BoundedRef
@@ -837,6 +950,7 @@ PAYLOAD_MODEL_REGISTRY: dict[str, type[FrozenModel]] = {
     "appraisal_transition": AppraisalPayload,
     "affect_transition": AffectPayload,
     "private_impression_transition": PrivateImpressionPayload,
+    "relationship_signal": RelationshipSignalPayload,
     "relationship_adjustment": RelationshipAdjustmentPayload,
     "boundary_transition": BoundaryPayload,
     "thread_transition": ThreadPayload,
@@ -849,6 +963,7 @@ PAYLOAD_MODEL_REGISTRY: dict[str, type[FrozenModel]] = {
     "media_continuation": MediaContinuationPayload,
     "media_repair_transition": MediaRepairPayload,
     "read_only_tool_request": ReadOnlyToolRequestPayload,
+    "perception_request": PerceptionRequestPayload,
     "grant_request": GrantRequestPayload,
 }
 
@@ -996,7 +1111,7 @@ class ProposalEnvelope(FrozenModel):
     brief_rationale: str = Field(min_length=1, max_length=240)
 
     EXPRESSION_ACTION_KINDS: ClassVar[frozenset[str]] = frozenset(
-        {"reply", "followup", "proactive_message"}
+        {"reply", "followup", "proactive_message", "reaction", "typing", "sticker"}
     )
 
     @model_validator(mode="after")
@@ -1187,8 +1302,15 @@ class DecisionProposal(ProposalEnvelope):
     activity_transition: ReferencedSummary | None = None
     behavior_tendency: BoundedLabel
     variation_profile: VariationProfile | None = None
+    proactive_opportunity_decision: ProactiveOpportunityDecision | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     stance: BoundedLabel
     display_strategy: BoundedLabel
+    # Timing and modality are orthogonal model decisions.  The ordinary reply
+    # Acceptance consumes ``now``; deferred social Acceptance consumes
+    # ``later``; ``silent`` has no visible effect to authorize.
+    timing_choice: Literal["now", "later", "silent"] = "now"
     conversation_thread_changes: tuple[ReferencedSummary, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")
@@ -1356,6 +1478,7 @@ __all__ = [
     "CHANGE_TRANSITION_REGISTRY",
     "ContinuationProposal",
     "DecisionProposal",
+    "EventShareClaimBinding",
     "ExpressionBeatDraft",
     "MinimalProposal",
     "PROPOSAL_SCHEMA_REGISTRY_VERSION",

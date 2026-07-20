@@ -36,9 +36,7 @@ def test_action_intent_is_not_an_authorized_action() -> None:
     assert "action_id" not in intent.model_fields_set
     assert "state" not in intent.model_fields_set
     with pytest.raises(ValidationError):
-        ActionIntent.model_validate(
-            {**intent.model_dump(), "action_id": "action-not-authorized"}
-        )
+        ActionIntent.model_validate({**intent.model_dump(), "action_id": "action-not-authorized"})
 
     action = Action(
         schema_version="world-v2.1",
@@ -121,9 +119,7 @@ def test_replay_mode_forbids_live_models_randomness_and_side_effects() -> None:
         ReplayMode.model_validate({**mode.model_dump(), "side_effect_policy": "allowed"})
 
     with pytest.raises(ValidationError, match="to_revision"):
-        ReplayMode.model_validate(
-            {**mode.model_dump(), "from_revision": 10, "to_revision": 9}
-        )
+        ReplayMode.model_validate({**mode.model_dump(), "from_revision": 10, "to_revision": 9})
 
 
 def test_world_contracts_reject_timezone_naive_datetimes() -> None:

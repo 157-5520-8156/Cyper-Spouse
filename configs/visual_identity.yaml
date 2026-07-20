@@ -1,17 +1,22 @@
 name: 沈知栀 / Celia Shen
-reference_asset: assets/reference/celia-v2-reference-01-canonical.png
+reference_asset: assets/reference/08-cafe-phone-canonical.png
 reference_sets:
   everyday_selfie:
-    - assets/reference/celia-v2-reference-01-canonical.png
-    - assets/reference/celia-v2-reference-02-no-hairclip.png
-    - assets/reference/celia-v2-reference-03-angle-10deg.png
+    - assets/reference/08-cafe-phone-canonical.png
+    - assets/reference/01-headphones-candid.png
+    - assets/reference/04-night-walk-turn.png
+    - assets/reference/05-restaurant-seated.png
+    - assets/reference/06-night-street-seated.png
+    - assets/reference/07-lakeside-turn.png
+    - assets/reference/10-sidewalk-turn.png
   relationship_private:
-    - assets/reference/celia-v2-reference-01-canonical.png
-    - assets/reference/celia-v2-relationship-private/03-bedroom-selfie.jpg
+    - assets/reference/08-cafe-phone-canonical.png
+    - assets/reference/02-bedtime-close-selfie.png
+    - assets/reference/05-restaurant-seated.png
   relationship_private_bold:
-    - assets/reference/celia-v2-reference-01-canonical.png
-    - assets/reference/celia-v2-relationship-private/03-bedroom-selfie.jpg
-    - assets/reference/celia-v2-relationship-private/04-bedroom-fullbody.jpg
+    - assets/reference/08-cafe-phone-canonical.png
+    - assets/reference/03-tennis-selfie.png
+    - assets/reference/09-pool-selfie.png
 relationship_tiers:
   soft:
     reference_profile: relationship_private
@@ -39,21 +44,42 @@ relationship_tiers:
     negative_prompt: |
       Do not use a real person or celebrity likeness. No nudity, visible genitals, explicit sexual activity,
       pornographic or coercive pose, fetish framing, text, watermark, logo, malformed hands, or exploitative framing.
+media_capture_profiles:
+  handheld_selfie: |
+    Handheld front-camera phone photo, imperfect arm-length framing and a casual, immediate expression.
+  check_in_timer: |
+    A personal check-in photo made with a phone propped on a stable surface or a short timer. The camera is not held in hand;
+    she is not holding a phone and no arm reaches toward the camera. Use a medium or full-body frame with both hands naturally visible;
+    include enough setting to make the location and outfit feel like a real arrival or daily check-in.
+  check_in_helper: |
+    A personal check-in photo she explicitly asked a nearby passerby or venue staff member to take with the rear camera.
+    The helper stays outside the frame; use a normal requested-photo distance, a medium or full-body frame, and a subtly photo-aware pose.
+    She is not holding the phone and no arm reaches toward the camera. It should feel like a friendly proof-of-visit, not a fashion editorial or surveillance photo.
+  mirror: |
+    A natural mirror photo with a believable reflection, ordinary room or hallway lighting, and no impossible extra limbs.
+  candid_life: |
+    A candid life snapshot from a companion who is explicitly present in the current world context; relaxed, unposed, and never paparazzi-like.
+  unfiltered: |
+    A handheld front-camera phone selfie sent during a harmless everyday little mess or mildly embarrassing moment.
+    A natural, harmless imperfection is welcome: wind-tousled hair, a sleepy face, a blink, post-exercise flush, or an awkward but affectionate angle.
+    The character herself is holding the phone; retain believable arm-length framing and a warm 'I have to tell you this' immediacy.
+    Keep her recognizably herself, dignified, and not humiliating, grotesque, sickly, or physically malformed.
 anchor_prompt: |
   沈知栀是一个原创虚拟中国女大学生形象，20岁，气质温和、清淡、慢热。
-  她有自然黑色及肩发，刘海常用一枚低饱和青绿色小发夹别住。
-  五官清秀但不过度精致，眼神安静，有一点认真和不好意思。
-  穿搭偏校园日常：浅色针织衫、白衬衫、深色外套、帆布包、帆布鞋。
+  她有自然黑色中长发，发量蓬松、常有轻微碎发，刘海自然落在额前。
+  五官清秀但不过度精致，眼神安静、略带倦意或若有所思；右侧脸颊有一颗浅色小痣。
+  穿搭偏真实校园和城市日常：宽松卫衣、针织开衫、牛仔外套、帆布包、运动服或简洁泳衣；按事件决定，不固定一套衣服。
   整体不要像网红写真，也不要像明星脸；要像一个有生活感的原创虚拟角色。
 selfie_style: |
   手机前置摄像头或随手拍视角，自然光，构图轻微不完美。
-  表情克制，有时微笑，有时像刚结束自习或散步时顺手分享。
+  表情克制而有微变化：走神、回望、刚睡醒、压住笑意或顺手看镜头都成立；不固定微笑或同一侧耳朵。
   图片是虚拟生活照/角色图，不宣称为真实照片。
 negative_prompt: |
   不要复用真实公众人物或网红脸。
   不要夸张滤镜、重度磨皮、性感姿势、暴露穿着、商业写真感。
   不要文字、水印、logo、畸形手指、过度锐化、过度二次元。
 consistency_notes:
-  - 日常自拍优先使用 v2 主锚点、无发夹和轻微侧脸三张参考，以保留同一人的细微变化。
+  - 日常照片固定使用 08 主身份锚点，并按冻结机位从同一日常参考集中选择至多一张角度辅助图；参考图只定义身份，不复制其衣装、场景、头偏、表情或单侧露耳。
+  - 纯侧颜、强回头或场景/衣装负担很重的素材只能标为 `angle_support` 或 `scene_only`：绝不单独承担身份生成，也绝不作为身份验收的主样本。身份验收始终以 `canonical_identity` 的近正面五官结构为主，角度图只补充该机位下的轮廓可行性。
   - 亲密关系素材只在 lover 阶段的明确请求或角色自主决定的低频情境中使用；保持非露骨。
   - OpenAI 后端通过参考图编辑接口保持一致性；本地 ComfyUI 工作流可用 $PROMPT、$NEGATIVE_PROMPT、$LORA_PATH 和 $REFERENCE_IMAGE_N 占位符接入 LoRA / IP-Adapter。

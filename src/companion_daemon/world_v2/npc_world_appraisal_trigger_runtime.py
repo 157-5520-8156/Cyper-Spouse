@@ -8,6 +8,7 @@ import hashlib
 import json
 
 from .affect_trigger import affect_deliberation_trigger_events, affect_deliberation_trigger_id
+from .relationship_trigger import relationship_deliberation_trigger_events, relationship_deliberation_trigger_id
 from .appraisal_proposal_worker import AppraisalProposalWorker
 from .event_identity import domain_idempotency_key
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
@@ -32,6 +33,7 @@ class NpcWorldAppraisalTriggerRuntime:
         worker: AppraisalProposalWorker,
         owner_id: str,
         affect_owner_id: str | None = None,
+        relationship_owner_id: str | None = None,
         lease_seconds: int = 120,
         source: str = "world-v2:npc-world-appraisal-trigger-runtime",
     ) -> None:
@@ -41,11 +43,14 @@ class NpcWorldAppraisalTriggerRuntime:
             raise ValueError("NPC appraisal worker must own the exact ledger")
         if affect_owner_id is not None and not affect_owner_id:
             raise ValueError("affect owner must not be empty")
+        if relationship_owner_id is not None and not relationship_owner_id:
+            raise ValueError("relationship owner must not be empty")
         self._ledger = ledger
         self._turn = turn
         self._worker = worker
         self._owner_id = owner_id
         self._affect_owner_id = affect_owner_id
+        self._relationship_owner_id = relationship_owner_id
         self._lease_seconds = lease_seconds
         self._source = source
 
@@ -70,11 +75,20 @@ class NpcWorldAppraisalTriggerRuntime:
 
         current = await self._project()
         cursor = self._cursor(current)
+        # A decision proposal is actionable only at the exact world revision
+        # it evaluated (the Pinned Turn contract).  An audit left behind by a
+        # crashed or interleaved pass is therefore reusable only when the
+        # world has not moved since; otherwise it stays as inert history and
+        # this pass deliberates freshly at the current cursor.  Reusing it
+        # anyway wedged the scheduler: the authority reader rejects the stale
+        # proposal on every retry while the failed pass also stops the clock.
         audit = next(
             (
                 item
                 for item in current.proposal_audits
-                if item.proposal_kind == "decision" and item.trigger_ref == settlement.event_id
+                if item.proposal_kind == "decision"
+                and item.trigger_ref == settlement.event_id
+                and item.evaluated_world_revision == cursor.world_revision
             ),
             None,
         )
@@ -107,7 +121,15 @@ class NpcWorldAppraisalTriggerRuntime:
                 raise RuntimeError("NPC world appraisal audit event is unavailable")
             work_cursor = self._cursor_from_commit(stored[1])
             if work_cursor != cursor:
-                raise RuntimeError("NPC world appraisal audit cursor is stale")
+                # The audit and its settlement are immutable, but unrelated
+                # commits (an outbound receipt, another background lane) can
+                # land between the audit and this recovery pass.  Treating
+                # that as a hard failure wedged the world permanently: the
+                # failed pass prevented the clock from advancing, so the
+                # cursor could never catch up.  Re-pin the compile at the
+                # current head instead — the compiler re-projects there and
+                # its own commit CAS still rejects genuinely lost races.
+                work_cursor = cursor
 
         if self._ledger.blocks_event_loop:
             work = await asyncio.to_thread(
@@ -244,7 +266,7 @@ class NpcWorldAppraisalTriggerRuntime:
         )
 
     async def _open_affect_trigger(self, *, acceptance_event_ids: tuple[str, ...]) -> None:
-        if self._affect_owner_id is None:
+        if self._affect_owner_id is None and self._relationship_owner_id is None:
             return
         appraisal_event = next(
             (
@@ -258,18 +280,36 @@ class NpcWorldAppraisalTriggerRuntime:
         if appraisal_event is None:
             raise RuntimeError("accepted NPC appraisal has no durable mutation event")
         projection = await self._project()
-        trigger_id = affect_deliberation_trigger_id(
+        events = []
+        affect_id = affect_deliberation_trigger_id(
             world_id=self._ledger.world_id, appraisal_event_id=appraisal_event.event_id
         )
-        if any(item.trigger_id == trigger_id for item in projection.trigger_processes):
+        if self._affect_owner_id is not None and not any(
+            item.trigger_id == affect_id for item in projection.trigger_processes
+        ):
+            events.extend(
+                affect_deliberation_trigger_events(
+                    appraisal_event=appraisal_event, owner_id=self._affect_owner_id
+                )
+            )
+        relationship_id = relationship_deliberation_trigger_id(
+            world_id=self._ledger.world_id, appraisal_event_id=appraisal_event.event_id
+        )
+        if self._relationship_owner_id is not None and not any(
+            item.trigger_id == relationship_id for item in projection.trigger_processes
+        ):
+            events.extend(
+                relationship_deliberation_trigger_events(
+                    appraisal_event=appraisal_event, owner_id=self._relationship_owner_id
+                )
+            )
+        if not events:
             return
         await self._commit(
-            affect_deliberation_trigger_events(
-                appraisal_event=appraisal_event, owner_id=self._affect_owner_id
-            ),
+            tuple(events),
             world_revision=projection.world_revision,
             deliberation_revision=projection.deliberation_revision,
-            commit_id=f"commit:npc-world-appraisal:open-affect:{trigger_id}",
+            commit_id=f"commit:npc-world-appraisal:open-downstream:{affect_id}:{relationship_id}",
         )
 
     async def _project(self):

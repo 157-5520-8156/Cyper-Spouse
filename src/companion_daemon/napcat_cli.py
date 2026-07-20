@@ -21,6 +21,7 @@ import logging
 import os
 from pathlib import Path
 import time
+from typing import TYPE_CHECKING
 
 import uvicorn
 from fastapi import FastAPI, Header, Request
@@ -53,6 +54,10 @@ from companion_daemon.world import ConcurrencyConflict
 from companion_daemon.world_clock import WorldClockDriver
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from companion_daemon.world_v2.platform_action_executor import MediaProviderTransport
+    from companion_daemon.world_v2.production_turn_application import MediaPreviewDeployment
 
 NAPCAT_SCHEDULED_BUDGET = ResponseBudget(first_visible_by_ms=12_000, complete_by_ms=15_000)
 
@@ -211,6 +216,8 @@ def create_app(
     adapter: str = "napcat",
     use_fake_model: bool = False,
     world_v2_c2c: bool | None = None,
+    media_preview: MediaPreviewDeployment | None = None,
+    media_transport: MediaProviderTransport | None = None,
 ) -> FastAPI:
     settings = get_settings()
     validate_qq_outbound_configuration(
@@ -226,13 +233,13 @@ def create_app(
     else:
         raise ValueError(f"unsupported OneBot adapter: {adapter}")
     if world_v2_c2c is None:
-        # Direct programmatic construction retains the historical opt-in
-        # behavior.  The documented CLI entry point below calls
-        # ``resolve_cli_world_v2_c2c_selection`` to make a compatible C2C
-        # deployment V2-by-default without surprising embedded callers.
-        world_v2_c2c = _parse_optional_boolean(
-            os.getenv("WORLD_V2_QQ_C2C_ENABLED"), name="WORLD_V2_QQ_C2C_ENABLED"
-        ) or False
+        # Programmatic and CLI construction share one authority-selection
+        # contract.  A compatible private, single-recipient deployment is V2
+        # by default; archive remains an explicit argument/environment mode.
+        world_v2_c2c = resolve_cli_world_v2_c2c_selection(
+            settings=settings,
+            requested=None,
+        )
     if world_v2_c2c:
         # This is a separate, text-only v2 lane.  It intentionally returns
         # before building CompanionEngine, QQMessageCoalescer, or legacy
@@ -243,7 +250,12 @@ def create_app(
             adapter=adapter,
             settings=settings,
             use_fake_model=use_fake_model,
+            scheduler_interval_seconds=settings.qq_c2c_scheduler_interval_seconds,
+            media_preview=media_preview,
+            media_transport=media_transport,
         )
+    if media_preview is not None or media_transport is not None:
+        raise ValueError("World v2 media deployment requires the World v2 QQ C2C entry")
     allowed_private_ids = _parse_id_list(settings.napcat_allowed_private_user_ids)
 
     engine = build_companion_engine(use_fake_model=use_fake_model)

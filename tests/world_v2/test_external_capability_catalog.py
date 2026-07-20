@@ -13,14 +13,27 @@ from companion_daemon.world_v2.production_proposal_grammar import (
 )
 
 
-def test_remaining_capability_verticals_are_explicit_and_fail_closed() -> None:
+def test_external_capability_verticals_match_their_production_closure() -> None:
     assert_external_capability_catalog_coverage()
-    assert production_expression_capabilities() == {"reply", "followup", "proactive_message"}
+    assert production_expression_capabilities() == {
+        "reply",
+        "followup",
+        "proactive_message",
+        "reaction",
+        "typing",
+        "sticker",
+    }
 
     for action_kind in ("reaction", "typing", "sticker"):
         capability = external_capability(action_kind)
-        assert capability.availability == "adapter_only"
-        assert "concrete_transport" in capability.missing_closure
+        assert capability.availability == "production"
+        assert capability.missing_closure == ()
+        assert {
+            "immutable_payload",
+            "specialized_acceptance",
+            "concrete_transport",
+            "receipt_recovery",
+        } <= set(capability.installed_closure)
 
     for action_kind in ("vision", "transcription"):
         capability = external_capability(action_kind)

@@ -13,6 +13,7 @@ import json
 from typing import Protocol
 
 from .fact_reducers import INSTALLED_FACT_PREDICATE_CARDINALITY
+from .model_json import extract_json_object_text
 from .proposal_envelope_v2 import (
     FactCommitProposalDraftV2,
     FactCommitProposalEnvelopeV2,
@@ -36,7 +37,7 @@ def _digest(value: object) -> str:
 
 def _parse(raw: str) -> dict[str, object]:
     try:
-        value = json.loads(raw)
+        value = json.loads(extract_json_object_text(raw))
     except json.JSONDecodeError as exc:
         raise ValueError("FactDraft model did not return one JSON object") from exc
     if not isinstance(value, dict):
@@ -44,10 +45,41 @@ def _parse(raw: str) -> dict[str, object]:
     return value
 
 
+# One short model-facing gloss per installed predicate.  The extraction model
+# only ever sees these strings; authority stays with the reducer catalog.  A
+# test keeps this map exactly in sync with INSTALLED_FACT_PREDICATE_CARDINALITY.
+_PREDICATE_GUIDE: dict[str, str] = {
+    "location.current": "where the user is right now",
+    "profile.display_name": "the user's name or what they want to be called",
+    "profile.timezone": "the user's timezone",
+    "preference.likes": "a food, thing, or style the user says they like",
+    "preference.dislikes": "a food, thing, or style the user says they dislike",
+    "relationship.affiliation": "a group, school, company, or team the user belongs to",
+    "profile.occupation": "the user's job or professional identity",
+    "profile.education": "the user's study stage, school, or major",
+    "location.home": "the city or area where the user lives",
+    "location.hometown": "where the user is from",
+    "schedule.commitment": "a dated or upcoming plan, appointment, contest, exam, or trip the user states",
+    "situation.recent": "a recent life circumstance or notable thing that happened to the user",
+    "activity.current": "what the user says they are doing right now",
+    "relationship.person": "a family member, friend, or colleague in the user's life",
+    "health.condition": "a health condition, allergy, or injury the user states",
+    "routine.habit": "a recurring habit or sleep/wake routine the user states",
+    "interest.activity": "a hobby or activity the user does or practices",
+    "possession.item": "an item, device, or pet the user owns",
+}
+
+
 class FactObservationProposalAdapter:
     """Materialize at most one Fact-v2 proposal from an exact message event."""
 
-    VERSION = "fact-observation-draft.1"
+    # Version 2 (2026-07-20): the version-1 policy retained only explicit,
+    # formal self-assertions and, over a four-day production world, committed
+    # zero facts from 63 user message batches.  Version 2 retains any clearly
+    # stated personal fact (still never an inference) and teaches the model
+    # the expanded predicate catalog.  The proposal identity contract below is
+    # unchanged: the digest material and derivation are identical.
+    VERSION = "fact-observation-draft.2"
 
     def __init__(self, *, model: FactDraftChatModel, temperature: float = 0.1) -> None:
         if not 0 <= temperature <= 2:
@@ -63,32 +95,84 @@ class FactObservationProposalAdapter:
         source_world_revision: int,
         evaluated_world_revision: int | None = None,
     ) -> FactCommitProposalEnvelopeV2 | None:
-        raw = await self._model.complete(
-            self._messages(observation), temperature=self._temperature
-        )
-        return materialize_fact_observation_draft(
-            raw=raw,
-            observation=observation,
-            observation_event=observation_event,
-            source_world_revision=source_world_revision,
-            evaluated_world_revision=evaluated_world_revision,
+        messages = self._messages(observation)
+        raw = await self._complete(messages)
+        try:
+            return materialize_fact_observation_draft(
+                raw=raw,
+                observation=observation,
+                observation_event=observation_event,
+                source_world_revision=source_world_revision,
+                evaluated_world_revision=evaluated_world_revision,
+            )
+        except ValueError as violation:
+            # One bounded corrective pass.  A user identity fact stated once
+            # ("my name is ...") never restates itself, so silently consuming
+            # the trigger on a fixable format slip loses it forever.  The
+            # retry only restates the violated contract; every field is still
+            # strictly validated, and a second failure propagates unchanged.
+            retry_messages = [
+                *messages,
+                {"role": "assistant", "content": raw},
+                {
+                    "role": "user",
+                    "content": (
+                        "Your answer violated the contract: "
+                        + str(violation)
+                        + ". Return exactly one corrected JSON object now. Remember: value must "
+                        "be an exact non-empty substring copied from the message text, confidence "
+                        "is an integer 0..10000, and retain=false answers contain only "
+                        '{"retain":false}.'
+                    ),
+                },
+            ]
+            corrected = await self._complete(retry_messages)
+            return materialize_fact_observation_draft(
+                raw=corrected,
+                observation=observation,
+                observation_event=observation_event,
+                source_world_revision=source_world_revision,
+                evaluated_world_revision=evaluated_world_revision,
+            )
+
+    async def _complete(self, messages: list[dict[str, str]]) -> str:
+        complete_json = getattr(self._model, "complete_json", None)
+        return await (
+            complete_json(messages, temperature=self._temperature)
+            if callable(complete_json)
+            else self._model.complete(messages, temperature=self._temperature)
         )
 
     @staticmethod
     def _messages(observation: Observation) -> list[dict[str, str]]:
-        predicates = ", ".join(sorted(INSTALLED_FACT_PREDICATE_CARDINALITY))
+        predicates = "\n".join(
+            f"- {code} ({INSTALLED_FACT_PREDICATE_CARDINALITY[code]}): {_PREDICATE_GUIDE[code]}"
+            for code in sorted(INSTALLED_FACT_PREDICATE_CARDINALITY)
+        )
         return [
             {
                 "role": "system",
                 "content": (
-                    "Assess one verified user message for one durable factual assertion. "
-                    "Return exactly one JSON object. Use retain=false for ordinary chat, temporary "
-                    "feelings, speculation, or anything not explicitly stated. If retain=true return "
-                    "predicate_code, value, privacy_class, confidence, rationale. value must be an exact "
-                    "non-empty substring of the message, never a paraphrase. subject is fixed to the message "
-                    "author. Allowed predicates: "
+                    "You maintain the long-term user-fact memory of a companion character. Assess one "
+                    "verified user message for one personal fact about the user worth remembering. "
+                    "Return exactly one JSON object. Retain a fact when the message clearly states "
+                    "something about the user's life: their work or studies, schedule and commitments, "
+                    "recent circumstances, what they are doing, family and friends, health and routines, "
+                    "interests, possessions, or where they live. A casual sentence counts as clearly "
+                    "stated; it does not need to be a formal self-introduction (\"明天还得打国赛\" states a "
+                    "scheduled contest, \"在写代码\" states a current activity). Never infer, guess, or add "
+                    "anything beyond the words: greetings, questions to the companion, jokes, emoji, bare "
+                    "momentary feelings (\"有点紧张\"), and remarks about the companion are retain=false. "
+                    "If several facts appear, keep the most durable and informative one. "
+                    "Answer {\"retain\":false} when nothing qualifies. If retain=true return "
+                    "predicate_code, value, privacy_class, confidence, rationale. confidence must be an "
+                    "integer in basis points from 0 through 10000 (for example 9500, never 0.95). value must be an exact "
+                    "non-empty substring of the message, never a paraphrase; choose the shortest substring "
+                    "that still states the fact. subject is fixed to the message "
+                    "author. A direct-message Fact must use personal, private, or withhold privacy; never public "
+                    "or shareable. predicate_code must be one of:\n"
                     + predicates
-                    + ". Do not return ids, hashes, evidence refs, actions, memories, or world changes."
+                    + "\nDo not return ids, hashes, evidence refs, actions, memories, or world changes."
                 ),
             },
             {
@@ -141,6 +225,18 @@ def materialize_fact_observation_draft(
     confidence = draft.get("confidence")
     rationale = draft.get("rationale")
     if (
+        isinstance(confidence, float)
+        and not isinstance(confidence, bool)
+        and 0.0 <= confidence <= 1.0
+    ):
+        confidence = round(confidence * 10_000)
+    # A direct-message observation has a hard ``personal`` visibility floor
+    # in Fact authority.  The classifier may choose a stricter class, but a
+    # broad ``public``/``shareable`` suggestion is safely tightened here
+    # before it can create an audit that the reducer must reject.
+    if privacy in {"public", "shareable"}:
+        privacy = "personal"
+    if (
         not isinstance(predicate, str)
         or predicate not in INSTALLED_FACT_PREDICATE_CARDINALITY
         or not isinstance(value, str)
@@ -156,6 +252,10 @@ def materialize_fact_observation_draft(
         raise ValueError("FactDraft fields are invalid or not source-grounded")
     identity = _digest(
         {
+            # Deliberately still the version-1 contract label: the identity
+            # material and derivation are unchanged in adapter version 2, and
+            # keeping the label stable lets crash recovery join audits that
+            # were recorded before the extraction-policy upgrade.
             "contract": "fact-observation-draft.1",
             "world_id": observation.world_id,
             "event_id": observation_event.event_id,

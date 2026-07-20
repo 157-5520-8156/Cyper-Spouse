@@ -10,6 +10,7 @@ from companion_daemon.world_v2.deliberation import Deliberation, ModelOutput, Mo
 from companion_daemon.world_v2.ledger_context_resolver import context_capsule_compiler_from_ledger
 from companion_daemon.world_v2.outcome_acceptance_runtime import OutcomeAcceptanceRuntime
 from companion_daemon.world_v2.outcome_candidate_reader import OutcomeCandidateReader
+from companion_daemon.world_v2.outcome_draft_deliberation_adapter import OutcomeDraftDeliberationAdapter
 from companion_daemon.world_v2.outcome_deliberation_turn import OutcomeDeliberationTurn
 from companion_daemon.world_v2.outcome_proposal_compiler import OutcomeProposalCompiler
 from companion_daemon.world_v2.outcome_proposal_worker import OutcomeProposalWorker
@@ -88,6 +89,21 @@ class _SettlingOutcomeModel:
 
     async def recover(self, request, _failure: str) -> ModelOutput:
         return await self.propose(request)
+
+
+class _OutcomeSelectionModel:
+    model = "test-outcome-selection"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.2
+        self.calls += 1
+        candidate = __import__("json").loads(messages[1]["content"])["candidates"][0]
+        return __import__("json").dumps(
+            {"candidate_result_ref": candidate["candidate_result_ref"]}
+        )
 
 
 @pytest.mark.asyncio
@@ -169,6 +185,47 @@ async def test_outcome_worker_audits_compiles_accepts_and_opens_npc_follow_up() 
     assert outcome.status == "settled"
     assert any(item.process_kind == "npc_world_appraisal" and item.state == "open" for item in projection.trigger_processes)
     assert next(item for item in projection.trigger_processes if item.process_kind == "outcome_deliberation").state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_outcome_draft_adapter_selects_only_context_visible_sidecar_candidate() -> None:
+    """The production-shaped selector may choose, but cannot author, a result."""
+
+    ledger, store, _target, _claimed, _source_event, _source_commit = await _prepare_claimed_outcome()
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger._accepted_batch_issuer = issuer  # noqa: SLF001
+    reader = OutcomeCandidateReader(store=store)
+    model = _OutcomeSelectionModel()
+    adapter = OutcomeDraftDeliberationAdapter(ledger=ledger, candidate_reader=reader, model=model)
+    turn = OutcomeDeliberationTurn(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            policy=ContextCapsuleBudgetPolicy(
+                hard_max_characters=100_000,
+                current_situation=SliceBudget(max_items=1, max_fields=256, max_characters=20_000),
+            ),
+        ),
+        deliberation=Deliberation(router=_Router(), main_model=adapter, quick_recovery=adapter),
+        candidate_reader=reader,
+        companion_actor_ref="actor:companion",
+    )
+    worker = OutcomeProposalWorker(
+        compiler=OutcomeProposalCompiler(ledger=ledger, candidate_reader=reader),
+        acceptance=OutcomeAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:outcome",
+    )
+
+    result = await OutcomeTriggerRuntime(
+        ledger=ledger, turn=turn, worker=worker, owner_id="worker:outcome"
+    ).drain_one()
+
+    assert model.calls == 1
+    assert result.work_status == "accepted"
+    occurrence = next(
+        item for item in ledger.project().world_occurrences if item.occurrence_id == "occurrence:compiler-outcome"
+    )
+    assert occurrence.status == "settled"
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,9 @@ from .evaluation_artifacts import (
     ScenarioCorpusEntry,
 )
 from .mechanical_evaluation_scope import MechanicalEvaluationScope
+from .route_hints import RouteHints
+from .semantic_advisory_adapter import SemanticAdvisoryAdapter, SemanticAdvisoryModel
+from .semantic_compute_router import SemanticComputeRouter
 from .matrix_catalog import (
     CandidateDistribution,
     ClassificationCandidate,
@@ -93,11 +96,15 @@ __all__ = [
     "ProjectionGrant",
     "PlatformActionExecutor",
     "ReplayMode",
+    "RouteHints",
     "ReviewedRun",
     "RuntimeOutcome",
     "TriggerProcess",
     "ScenarioTurn",
     "ScenarioCorpusEntry",
+    "SemanticAdvisoryAdapter",
+    "SemanticAdvisoryModel",
+    "SemanticComputeRouter",
     "WorldProjection",
     "WorldRuntime",
     "default_matrix_catalog",

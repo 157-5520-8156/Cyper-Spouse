@@ -3,6 +3,1174 @@
 world_id: zhizhi-world-v1
 logical_at: "2026-07-11T09:00:00+08:00"
 materialize_current_schedule: true
+# Reviewed static possibility catalog for the World-v2 Life Author.  These are
+# reviewed possibilities only: a location/NPC may become a plan binding only
+# after its exact availability is checked and snapshotted at a committed clock
+# wake. No result or experience is asserted by selecting one; runtime history
+# remains ledger-owned.
+life_author_catalog:
+  # reviewed-life.4 widens the two low-intensity filler openings (quiet rest,
+  # digital browsing) so ordinary afternoons are lived rather than blank.
+  # reviewed-life.5 adds the future_openings section: activities she may
+  # commit to one to seven local days ahead, honored by the ordinary activity
+  # lifecycle when the day arrives.
+  # reviewed-life.6 adds the npc_initiated_events section: reviewed moments in
+  # which 范予安 may act first (borrow a book, pull her aside, disagree about
+  # the reading list).  base_chance_bp keeps each a rare texture; whether one
+  # happens is a recorded weighted draw plus a bounded model confirmation.
+  # reviewed-life.7 adds the aspiration_seeds section: reviewed low-stakes
+  # wishes (no due window, no lifecycle pipeline) she may quietly come to
+  # hold when recent lived material makes them plausible.
+  # reviewed-life.8 changes daily-quota attribution: an acceptance in the
+  # after-midnight tail of a wrapping window (bedtime at 00:01) counts
+  # against the previous local day, so it no longer freezes the whole next
+  # evening's life author.
+  # reviewed-life.9 adds the crystallization seam: an aspiration seed may
+  # name one reviewed future opening (crystallizes_into) that a supported,
+  # long-held wish can — rarely, via a recorded draw plus bounded model
+  # confirmation — turn into a concrete calendar plan.
+  # reviewed-life.10 adds the first shared_private future opening: a rare,
+  # relationship-gated invitation to do something together with the user.
+  # The invitation lane only plans-and-asks; the activity can start only on
+  # a real user answer (activity lifecycle shared_private contract), and an
+  # unanswered window is quietly abandoned.
+  # reviewed-life.11 widens the whole possibility space so her days stop
+  # cycling the same twelve moments: 22 new present openings across study
+  # (读书笔记/上课/赶论文/自习), creation (随笔/胶片/日记), errands and
+  # meals (洗衣/取快递/买水果/食堂/宿舍煮饭), body-and-mind (拉伸/发呆/
+  # 午睡/播客), social life (给家里打电话/室友夜聊/文学社事务) and going
+  # out (校园骑车/打印店/旧书摊); 5 new future openings (回嘉兴帮书店、和
+  # 范予安看展、二手书市、外滩夜拍、图书馆研讨间); a second reviewed NPC
+  # (室友林晚) with her own presence, one shared opening and two initiated
+  # events; 3 new 范予安 initiated events; and 4 new aspiration seeds, two
+  # of which may crystallize into the new future openings.  Weekday-only and
+  # weekend-only windows differentiate her workdays from her weekends.
+  # reviewed-life.12 registers the visual_evidence annex so the image machine
+  # stops starving: every settled shareable occurrence with a reviewed annex
+  # may (via a recorded draw) become one source-bound visual declaration.
+  # Ten public/shareable openings register concrete location/environment/
+  # object slices plus reviewed self-capture facts (selfie at walks/cycling/
+  # parcel runs/book stalls, timer+helper check-ins at the truly public 外滩
+  # and 旧书市); the three private hygiene/sleep transitions register the
+  # self-authored front-camera/mirror facts P3 needs.  Five thin shareable
+  # openings also gain one more picture-worthy outcome each.  The annex is
+  # configuration only: no photo, candidate or delivery is asserted here.
+  version: reviewed-life.12
+  locations:
+    - id: dorm-room
+      location_ref: location:ecnu-dorm-room
+      privacy: private
+      local_windows: ["00:00-23:59"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: dorm-building
+      location_ref: location:ecnu-dorm-building
+      privacy: personal
+      local_windows: ["07:00-23:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: campus-library
+      location_ref: location:ecnu-library
+      privacy: shareable
+      local_windows: ["07:30-22:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: campus-path
+      location_ref: location:ecnu-campus-path
+      privacy: shareable
+      local_windows: ["06:30-23:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: campus-teaching-building
+      location_ref: location:ecnu-teaching-building
+      privacy: shareable
+      local_windows: ["08:00-21:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: campus-canteen
+      location_ref: location:ecnu-canteen
+      privacy: shareable
+      local_windows: ["06:30-20:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: campus-services
+      location_ref: location:ecnu-campus-services
+      privacy: shareable
+      local_windows: ["08:00-21:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: old-book-market
+      location_ref: location:shanghai-old-book-market
+      privacy: shareable
+      local_windows: ["09:00-17:00"]
+      weekdays: [5, 6]
+    - id: the-bund
+      location_ref: location:shanghai-the-bund
+      privacy: shareable
+      local_windows: ["10:00-22:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: jiaxing-bookstore
+      location_ref: location:jiaxing-family-bookstore
+      privacy: personal
+      local_windows: ["09:00-20:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+  npcs:
+    - id: fan-yuan
+      npc_id: literature-fan
+      stable_identity_ref: reviewed-person:fan-yuan
+      known_trait_refs: [trait:literature-club]
+      privacy: personal
+      location_id: campus-library
+      local_windows: ["09:00-18:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: lin-wan
+      npc_id: roommate-lin
+      stable_identity_ref: reviewed-person:lin-wan
+      known_trait_refs: [trait:roommate]
+      privacy: personal
+      location_id: dorm-room
+      local_windows: ["18:30-23:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+  openings:
+    - id: settle-morning-routine
+      activity_kind: routine.morning_settle
+      source: routine
+      domain: hygiene_private
+      social_shape: alone
+      deviation: persist
+      visual_potential: private_transition
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["07:00-10:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 30
+      importance_bp: 3600
+      outcomes:
+        - {id: morning-steady, text: 收拾洗漱完，慢慢把早上的状态理顺了。, privacy: private}
+        - {id: morning-rushed, text: 早上的节奏有点乱，东西收好了，人还没完全清醒。, privacy: private}
+      visual_evidence:
+        activity_description: 早上洗漱整理后在宿舍慢慢收拾自己
+        location: {id: location:ecnu-dorm-room, kind: dorm_room, publicness: private, mirror_available: true}
+        environment: {light: morning light through the dorm curtain, structure: small lived-in dorm room}
+        self_capture: [character_front_camera, mirror]
+    - id: prepare-for-bed
+      activity_kind: sleep.prepare_for_bed
+      source: routine
+      domain: sleep_wake
+      social_shape: alone
+      deviation: persist
+      visual_potential: private_transition
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["22:30-00:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 35
+      importance_bp: 4200
+      outcomes:
+        - {id: bedtime-settled, text: 把睡前要做的事慢慢收好，关掉大灯准备休息了。, privacy: private}
+        - {id: bedtime-delayed, text: 本来已经准备睡了，又磨蹭着收了点东西，困意反而散了一会儿。, privacy: private}
+      visual_evidence:
+        activity_description: 睡前在宿舍收拾东西、放下头发准备休息
+        location: {id: location:ecnu-dorm-room, kind: dorm_room, publicness: private, mirror_available: true}
+        environment: {light: warm dim bedside lamp after the main light is off, structure: small lived-in dorm room}
+        self_capture: [character_front_camera, mirror]
+    - id: late-night-wind-down
+      activity_kind: sleep.late_wind_down
+      source: aftermath
+      domain: sleep_wake
+      social_shape: alone
+      deviation: delay
+      visual_potential: private_transition
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["00:30-04:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 40
+      importance_bp: 5000
+      outcomes:
+        - {id: late-night-finally-settled, text: 夜已经很深了，终于把手边的东西收住，慢慢安静下来准备睡。, privacy: private}
+        - {id: late-night-still-restless, text: 关掉屏幕后还是没立刻睡着，安静躺了一阵才觉得困意回来。, privacy: private}
+      visual_evidence:
+        activity_description: 深夜收拾好手边的东西，靠在床头安静下来
+        location: {id: location:ecnu-dorm-room, kind: dorm_room, publicness: private, mirror_available: true}
+        environment: {light: very dim late-night lamp glow, structure: small lived-in dorm room}
+        self_capture: [character_front_camera]
+    - id: early-morning-wake
+      activity_kind: sleep.early_morning_wake
+      source: routine
+      domain: sleep_wake
+      social_shape: alone
+      deviation: impulse
+      visual_potential: ambient
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["04:00-07:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 25
+      importance_bp: 3600
+      outcomes:
+        - {id: early-wake-dozed-again, text: 天还没亮透时醒了一下，看了眼时间，又慢慢睡了回去。, privacy: private}
+        - {id: early-wake-stayed-awake, text: 比平时早醒了一阵，躺着没再睡着，就安静等天一点点亮起来。, privacy: private}
+    - id: focused-reading
+      activity_kind: study.focused_reading
+      source: intentional_goal
+      domain: study_class
+      social_shape: alone
+      deviation: persist
+      visual_potential: object
+      privacy: personal
+      location_id: campus-library
+      local_windows: ["09:00-12:30", "13:30-17:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 55
+      importance_bp: 6100
+      outcomes:
+        - {id: reading-absorbed, text: 在图书馆读得很投入，顺手记下了几段想法。, privacy: personal}
+        - {id: reading-distracted, text: 书翻了不少页，但注意力断断续续，只整理出一点笔记。, privacy: personal}
+    - id: make-a-drink
+      activity_kind: meal.make_drink
+      source: routine
+      domain: meal_drink
+      social_shape: alone
+      deviation: impulse
+      visual_potential: food
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["08:00-11:30", "14:00-20:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 15
+      importance_bp: 2800
+      max_per_local_day: 2
+      outcomes:
+        - {id: drink-comforting, text: 给自己弄了杯热饮，味道刚好，整个人松了一点。, privacy: private}
+        - {id: drink-too-strong, text: 饮料做得稍微浓了点，喝了两口才慢慢习惯。, privacy: private}
+    - id: edit-photo-notes
+      activity_kind: creative.edit_photo_notes
+      source: intentional_goal
+      domain: creative_photo_writing
+      social_shape: alone
+      deviation: persist
+      visual_potential: activity
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["13:00-19:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 60
+      importance_bp: 5700
+      outcomes:
+        - {id: edit-found-tone, text: 修图时终于找到合适的色调，也补了几句拍摄笔记。, privacy: private}
+        - {id: edit-stuck, text: 对着几张照片改了又改，还是觉得差一点意思。, privacy: private}
+    - id: short-walk
+      activity_kind: commute.short_walk
+      source: environmental_opportunity
+      domain: commute_walk
+      social_shape: alone
+      deviation: impulse
+      visual_potential: place
+      privacy: shareable
+      location_id: campus-path
+      local_windows: ["16:30-21:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 35
+      importance_bp: 3900
+      outcomes:
+        - {id: walk-found-light, text: 沿校园走了一圈，碰到一段很好看的傍晚光线。, privacy: shareable}
+        - {id: walk-cut-short, text: 走到一半风变大了，就提前绕回来了。, privacy: shareable}
+        - {id: walk-bench-sunset, text: 在长椅上坐了五分钟，看晚霞把教学楼的玻璃一点点染成橘色。, privacy: shareable}
+      visual_evidence:
+        activity_description: 傍晚沿校园林荫道慢慢散步
+        location: {id: location:ecnu-campus-path, kind: campus_path, city: 上海, publicness: public}
+        environment: {light: soft late-afternoon and dusk light, structure: tree-lined campus walkway}
+        self_capture: [character_front_camera]
+    - id: tidy-small-things
+      activity_kind: household.tidy_small_things
+      source: routine
+      domain: errand_household
+      social_shape: alone
+      deviation: avoid
+      visual_potential: object
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["18:00-22:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 25
+      importance_bp: 3300
+      outcomes:
+        - {id: tidy-cleared-space, text: 把桌边零碎的东西归了位，空出来一小块舒服的地方。, privacy: private}
+        - {id: tidy-halfway, text: 收到一半翻出旧东西看了会儿，最后只整理完一部分。, privacy: private}
+    - id: quiet-recovery
+      activity_kind: recovery.quiet_rest
+      source: aftermath
+      domain: rest_recovery
+      social_shape: alone
+      deviation: delay
+      visual_potential: ambient
+      privacy: private
+      location_id: dorm-room
+      # Rest is the natural filler between structured activities, so it may
+      # legitimately happen twice in a day (an afternoon and an evening one).
+      local_windows: ["12:00-16:30", "20:00-23:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 40
+      importance_bp: 4500
+      max_per_local_day: 2
+      outcomes:
+        - {id: rest-restored, text: 安静歇了一阵，脑子里的噪声总算淡下去了。, privacy: private}
+        - {id: rest-restless, text: 本来想休息，躺了一会儿还是没完全静下来。, privacy: private}
+    - id: unhurried-digital-leisure
+      activity_kind: leisure.digital_browse
+      source: routine
+      domain: digital_leisure
+      social_shape: alone
+      deviation: impulse
+      visual_potential: none
+      privacy: private
+      location_id: dorm-room
+      # Phone-browsing realistically happens in small daytime pockets too,
+      # which keeps ordinary afternoons from being an unexplained blank.
+      local_windows: ["12:30-15:30", "21:00-00:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 35
+      importance_bp: 2500
+      max_per_local_day: 2
+      outcomes:
+        - {id: browse-found-interest, text: 随手浏览时看到几样有意思的东西，记下了一个以后想看的主题。, privacy: private}
+        - {id: browse-empty, text: 刷了一阵没看到真正想看的，觉得有点空就停了。, privacy: private}
+    - id: literature-club-reading-list
+      activity_kind: social.literature_reading_list
+      source: social
+      domain: family_roommate_friend
+      social_shape: npc
+      npc_id: fan-yuan
+      location_id: campus-library
+      deviation: persist
+      visual_potential: social
+      privacy: personal
+      local_windows: ["10:00-12:00", "14:00-18:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 45
+      importance_bp: 5400
+      outcomes:
+        - id: reading-list-warm
+          text: 和范予安把读书会书单顺了一遍，聊得比预想中轻松。
+          privacy: personal
+        - id: reading-list-friction
+          text: 和范予安核对书单时有点分歧，不过最后还是整理清楚了。
+          privacy: personal
+    # ---- reviewed-life.11 study ----
+    - id: write-reading-notes
+      activity_kind: study.reading_notes
+      source: intentional_goal
+      domain: study_class
+      social_shape: alone
+      deviation: persist
+      visual_potential: object
+      privacy: personal
+      location_id: campus-library
+      local_windows: ["09:30-12:00", "14:00-17:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 50
+      importance_bp: 5900
+      outcomes:
+        - {id: notes-threaded, text: 把这周读的几段散文串成了一页读书笔记，写到最后一句时忽然觉得通了。, privacy: personal}
+        - {id: notes-scattered, text: 笔记写得断断续续，摘了不少句子，自己的话却只挤出两三行。, privacy: personal}
+        - {id: notes-sidetracked, text: 写笔记写到一半去查一个词的出处，结果顺着注释多读了半章别的。, privacy: personal}
+    - id: attend-lecture
+      activity_kind: study.attend_class
+      source: routine
+      domain: study_class
+      social_shape: alone
+      deviation: persist
+      visual_potential: ambient
+      privacy: personal
+      location_id: campus-teaching-building
+      local_windows: ["08:00-11:30", "13:30-16:30"]
+      weekdays: [0, 1, 2, 3, 4]
+      duration_minutes: 95
+      importance_bp: 6600
+      outcomes:
+        - {id: lecture-engaged, text: 这节课老师讲到一个她正好疑惑的问题，笔记边上画了三个星号。, privacy: personal}
+        - {id: lecture-drowsy, text: 教室后排有点闷，撑着听完了课，重点抄了，例子得回去再补。, privacy: personal}
+        - {id: lecture-question, text: 下课时鼓起勇气去讲台问了个问题，老师多讲的那两句比整节课都值。, privacy: personal}
+    - id: essay-deadline-push
+      activity_kind: study.essay_writing
+      source: intentional_goal
+      domain: study_class
+      social_shape: alone
+      deviation: persist
+      visual_potential: object
+      privacy: personal
+      location_id: campus-library
+      local_windows: ["18:30-21:45"]
+      weekdays: [0, 1, 2, 3, 4]
+      duration_minutes: 100
+      importance_bp: 6800
+      outcomes:
+        - {id: essay-broke-through, text: 论文卡了几天的那一段今晚终于写顺了，保存时字数一下多了八百。, privacy: personal}
+        - {id: essay-ground-out, text: 对着文献一点点磨，进度不算好看，但至少提纲下面不再是空的。, privacy: personal}
+        - {id: essay-rewrote, text: 把昨天写的半页推翻重写了，删的时候心疼，写完新的又觉得删得对。, privacy: personal}
+    - id: library-self-study
+      activity_kind: study.evening_self_study
+      source: routine
+      domain: study_class
+      social_shape: alone
+      deviation: persist
+      visual_potential: ambient
+      privacy: personal
+      location_id: campus-library
+      local_windows: ["18:30-21:30"]
+      weekdays: [0, 1, 2, 3, 4]
+      duration_minutes: 75
+      importance_bp: 5300
+      outcomes:
+        - {id: selfstudy-steady, text: 在三楼靠窗的老位置自习，进度稳稳推完，走的时候顺手把椅子摆正了。, privacy: personal}
+        - {id: selfstudy-noisy, text: 旁边一直有人小声讲电话，换了两次位置才静下心，任务只完成了一半。, privacy: personal}
+    # ---- reviewed-life.11 creation ----
+    - id: write-short-essay
+      activity_kind: creative.write_essay
+      source: intentional_goal
+      domain: creative_photo_writing
+      social_shape: alone
+      deviation: persist
+      visual_potential: object
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["20:00-23:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 45
+      importance_bp: 5200
+      outcomes:
+        - {id: essay-caught-tone, text: 写了一段关于傍晚校门口的随笔，找到了那个想要的、慢半拍的语气。, privacy: private}
+        - {id: essay-stalled, text: 随笔开了三个头都不满意，最后只留下一句觉得还行的比喻。, privacy: private}
+        - {id: essay-overflowed, text: 本来只想写两百字，越写越多，停笔时发现快十一点了。, privacy: private}
+    - id: scan-film-photos
+      activity_kind: creative.film_scan_sort
+      source: intentional_goal
+      domain: creative_photo_writing
+      social_shape: alone
+      deviation: persist
+      visual_potential: activity
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["10:00-16:00"]
+      weekdays: [5, 6]
+      duration_minutes: 70
+      importance_bp: 5500
+      outcomes:
+        - {id: film-one-keeper, text: 翻扫上个月的胶片，大半都虚了，但有一张路灯下的猫意外地好。, privacy: private}
+        - {id: film-color-drift, text: 这卷胶片偏色偏得厉害，修了几张放弃了，反而觉得那种绿也挺有味道。, privacy: private}
+    - id: write-diary
+      activity_kind: creative.write_diary
+      source: routine
+      domain: creative_photo_writing
+      social_shape: alone
+      deviation: impulse
+      visual_potential: none
+      privacy: withhold
+      location_id: dorm-room
+      local_windows: ["22:00-23:55"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 20
+      importance_bp: 4000
+      outcomes:
+        - {id: diary-honest, text: 写日记的时候把白天没跟任何人说的那件小事写了下来，写完轻了一点。, privacy: withhold}
+        - {id: diary-three-lines, text: 今天的日记只有三行，最后一行画了个小小的月亮。, privacy: withhold}
+    # ---- reviewed-life.11 errands & meals ----
+    - id: do-laundry
+      activity_kind: household.do_laundry
+      source: routine
+      domain: errand_household
+      social_shape: alone
+      deviation: avoid
+      visual_potential: none
+      privacy: personal
+      location_id: dorm-building
+      local_windows: ["09:00-21:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 40
+      importance_bp: 3400
+      outcomes:
+        - {id: laundry-smooth, text: 攒了几天的衣服一次洗完，晾好的时候楼道正好有太阳味的风。, privacy: personal}
+        - {id: laundry-queued, text: 洗衣机全被占了，抱着篮子等了一刻钟，顺便把手机里囤的文章读了一篇。, privacy: personal}
+    - id: pick-up-parcel
+      activity_kind: errand.pick_up_parcel
+      source: environmental_opportunity
+      domain: errand_household
+      social_shape: alone
+      deviation: impulse
+      visual_potential: object
+      privacy: shareable
+      location_id: campus-services
+      local_windows: ["10:00-19:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 20
+      importance_bp: 3000
+      outcomes:
+        - {id: parcel-awaited-book, text: 取到了等了一周的那本书，拆开在路上就先翻了目录。, privacy: shareable}
+        - {id: parcel-wrong-size, text: 快递取回来发现买的收纳盒尺寸不对，站在驿站门口纠结要不要退。, privacy: shareable}
+        - {id: parcel-from-home, text: 快递盒上贴着手写的"易碎"，拆开是妈妈寄来的一罐桂花糖。, privacy: shareable}
+      visual_evidence:
+        activity_description: 在校园快递驿站取包裹
+        location: {id: location:ecnu-campus-services, kind: campus_service_point, city: 上海, publicness: semi_public}
+        environment: {structure: parcel lockers and service counter}
+        objects:
+          - {id: object:picked-up-parcel, kind: parcel, description: 一件刚取到、还没完全拆开的快递包裹}
+        self_capture: [character_front_camera]
+    - id: buy-fruit-snacks
+      activity_kind: errand.buy_fruit
+      source: routine
+      domain: errand_household
+      social_shape: alone
+      deviation: impulse
+      visual_potential: food
+      privacy: shareable
+      location_id: campus-services
+      local_windows: ["16:00-20:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 25
+      importance_bp: 2900
+      outcomes:
+        - {id: fruit-good-peaches, text: 水果店进了新的水蜜桃，挑了三个，老板娘多送了一个有疤的。, privacy: shareable}
+        - {id: fruit-settled-yogurt, text: 想买的葡萄太贵了，最后拎了无糖酸奶和两根香蕉回去。, privacy: shareable}
+        - {id: fruit-first-bayberry, text: 买到了今夏第一盒杨梅，纸盒一角被汁水洇出一小片深红。, privacy: shareable}
+      visual_evidence:
+        activity_description: 在校园小店挑水果和零食
+        location: {id: location:ecnu-campus-services, kind: campus_service_point, city: 上海, publicness: semi_public}
+        environment: {structure: small campus grocery shelves and fruit crates}
+        objects:
+          - {id: object:fresh-fruit, kind: food, description: 刚买的当季水果，装在纸盒或小袋子里}
+    - id: canteen-meal
+      activity_kind: meal.canteen_meal
+      source: routine
+      domain: meal_drink
+      social_shape: alone
+      deviation: persist
+      visual_potential: food
+      privacy: shareable
+      location_id: campus-canteen
+      local_windows: ["11:00-12:45", "17:00-19:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 35
+      importance_bp: 3600
+      max_per_local_day: 2
+      outcomes:
+        - {id: canteen-new-window, text: 试了食堂新开的那个窗口，糖醋小排出乎意料，决定下次带室友来。, privacy: shareable}
+        - {id: canteen-usual, text: 还是打了老三样，靠窗坐着慢慢吃完，看楼下人来人往。, privacy: shareable}
+        - {id: canteen-crowded, text: 饭点人太多，端着餐盘转了两圈才找到位置，汤都有点凉了。, privacy: shareable}
+        - {id: canteen-fried-lotus, text: 二楼窗口新出的椒盐藕盒炸得金黄，端着餐盘找位置时香味一路跟着。, privacy: shareable}
+      visual_evidence:
+        activity_description: 在学校食堂打饭、找位置吃饭
+        location: {id: location:ecnu-canteen, kind: canteen, city: 上海, publicness: semi_public}
+        environment: {structure: busy university canteen with window seats}
+        objects:
+          - {id: object:canteen-tray, kind: food, description: 食堂餐盘上打好的几样饭菜}
+    - id: dorm-cooking-experiment
+      activity_kind: meal.dorm_cooking
+      source: intentional_goal
+      domain: meal_drink
+      social_shape: alone
+      deviation: impulse
+      visual_potential: food
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["17:00-19:30"]
+      weekdays: [5, 6]
+      duration_minutes: 50
+      importance_bp: 4300
+      outcomes:
+        - {id: cooking-passable, text: 用小锅试了菜谱里那个番茄鸡蛋乌冬，卖相一般，味道及格偏上。, privacy: private}
+        - {id: cooking-rescue, text: 火候没掌握好差点糊锅，紧急加水救回来，最后变成了一锅说不上名字的东西。, privacy: private}
+    # ---- reviewed-life.11 body & mind ----
+    - id: evening-stretch
+      activity_kind: recovery.evening_stretch
+      source: routine
+      domain: rest_recovery
+      social_shape: alone
+      deviation: persist
+      visual_potential: none
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["21:30-23:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 20
+      importance_bp: 3200
+      outcomes:
+        - {id: stretch-loosened, text: 对着视频拉伸了二十分钟，肩颈咔一声松开的瞬间舒服得叹气。, privacy: private}
+        - {id: stretch-lazy, text: 拉伸做到一半瘫在瑜伽垫上不想动，最后变成躺着听完了那首歌。, privacy: private}
+    - id: listen-podcast
+      activity_kind: leisure.podcast_listen
+      source: routine
+      domain: digital_leisure
+      social_shape: alone
+      deviation: impulse
+      visual_potential: none
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["12:30-14:00", "21:00-23:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 30
+      importance_bp: 2700
+      outcomes:
+        - {id: podcast-noted, text: 听了一期讲城市街道的播客，有句话让她按了暂停，记进了备忘录。, privacy: private}
+        - {id: podcast-background, text: 播客开着当背景音，其实一半在发呆，听到笑声才回过神。, privacy: private}
+    - id: window-daydream
+      activity_kind: recovery.window_daydream
+      source: aftermath
+      domain: rest_recovery
+      social_shape: alone
+      deviation: delay
+      visual_potential: ambient
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["15:00-18:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 15
+      importance_bp: 2600
+      outcomes:
+        - {id: daydream-clouds, text: 靠在窗边发了会儿呆，看云被风推着走，什么都没想，也挺好。, privacy: private}
+        - {id: daydream-untangled, text: 对着窗外发呆的时候，忽然把心里绕了几天的一个小疙瘩想通了。, privacy: private}
+    - id: afternoon-nap
+      activity_kind: sleep.afternoon_nap
+      source: routine
+      domain: sleep_wake
+      social_shape: alone
+      deviation: delay
+      visual_potential: none
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["12:45-14:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 40
+      importance_bp: 3500
+      outcomes:
+        - {id: nap-refreshed, text: 午睡睡得刚刚好，醒来窗帘缝里一道光，人也清楚了。, privacy: private}
+        - {id: nap-groggy, text: 午觉睡过了头，醒来半天分不清几点，灌了半杯水才缓过来。, privacy: private}
+    # ---- reviewed-life.11 social ----
+    - id: call-home-bookstore
+      activity_kind: social.family_call
+      source: routine
+      domain: family_roommate_friend
+      social_shape: alone
+      deviation: persist
+      visual_potential: none
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["19:30-21:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 25
+      importance_bp: 5000
+      outcomes:
+        - {id: call-store-news, text: 给家里打电话，妈妈说书店新到了一批旧书，爸爸在背景音里喊让她别熬夜。, privacy: private}
+        - {id: call-short-warm, text: 电话只打了十分钟，家里在忙店里的事，挂掉前妈妈忽然问了句最近吃得好不好。, privacy: private}
+        - {id: call-worried, text: 电话里听出妈妈有点累，问了两句没多说，挂了以后心里搁了点事。, privacy: private}
+    - id: roommate-evening-chat
+      activity_kind: social.roommate_chat
+      source: social
+      domain: family_roommate_friend
+      social_shape: npc
+      npc_id: lin-wan
+      location_id: dorm-room
+      deviation: impulse
+      visual_potential: none
+      privacy: private
+      local_windows: ["19:00-23:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 30
+      importance_bp: 4400
+      outcomes:
+        - {id: roommate-chat-easy, text: 和林晚窝在各自床上有一搭没一搭地聊，从晚饭聊到小时候的事。, privacy: private}
+        - {id: roommate-chat-advice, text: 林晚吐槽实习的事，她听着听着也说了点自己的犹豫，说完两个人都轻松了些。, privacy: private}
+        - {id: roommate-chat-cut, text: 正聊到兴头上林晚接了个电话，话头断了，她顺势回去看自己的书。, privacy: private}
+    - id: literature-club-admin
+      activity_kind: social.literature_club_admin
+      source: social
+      domain: family_roommate_friend
+      social_shape: npc
+      npc_id: fan-yuan
+      location_id: campus-library
+      deviation: persist
+      visual_potential: social
+      privacy: personal
+      local_windows: ["14:00-17:30"]
+      weekdays: [0, 1, 2, 3, 4]
+      duration_minutes: 40
+      importance_bp: 5100
+      outcomes:
+        - {id: club-admin-done, text: 和范予安把读书会的通知、场地和名单一口气理完，效率高得两个人都意外。, privacy: personal}
+        - {id: club-admin-pushback, text: 社团活动的分工她多领了一块，回头想想有点后悔，但话已经说出去了。, privacy: personal}
+    # ---- reviewed-life.11 out & about ----
+    - id: campus-cycling
+      activity_kind: commute.campus_cycling
+      source: environmental_opportunity
+      domain: commute_walk
+      social_shape: alone
+      deviation: impulse
+      visual_potential: place
+      privacy: shareable
+      location_id: campus-path
+      local_windows: ["07:30-09:00", "16:00-18:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 25
+      importance_bp: 3700
+      outcomes:
+        - {id: cycling-wind, text: 骑车绕了半个校园，傍晚的风从袖口灌进来，把一天的闷都吹散了。, privacy: shareable}
+        - {id: cycling-detour, text: 常走的那条路在修，绕了新路线，路过一排没注意过的老梧桐。, privacy: shareable}
+        - {id: cycling-lake-pause, text: 骑到丽娃河边停了一会儿，水面的光斑晃得人不太想走。, privacy: shareable}
+      visual_evidence:
+        activity_description: 在校园里骑车，偶尔停在路边休息
+        location: {id: location:ecnu-campus-path, kind: campus_path, city: 上海, publicness: public}
+        environment: {light: open outdoor daylight, structure: campus road lined with old plane trees}
+        self_capture: [character_front_camera]
+    - id: print-shop-run
+      activity_kind: errand.print_shop
+      source: intentional_goal
+      domain: errand_household
+      social_shape: alone
+      deviation: persist
+      visual_potential: object
+      privacy: shareable
+      location_id: campus-services
+      local_windows: ["09:00-18:00"]
+      weekdays: [0, 1, 2, 3, 4]
+      duration_minutes: 20
+      importance_bp: 3300
+      outcomes:
+        - {id: print-quick, text: 去打印店把课程材料装订好，店里的老猫照旧趴在裁纸机旁边。, privacy: shareable}
+        - {id: print-reprint, text: 打印出来才发现页码设置错了，重排重印，多花了十分钟。, privacy: shareable}
+        - {id: print-cat-step, text: 等装订的时候，打印店的老猫跳上柜台踩了两下她的讲义，被老板笑着抱走。, privacy: shareable}
+      visual_evidence:
+        activity_description: 在校园打印店打印装订课程材料
+        location: {id: location:ecnu-campus-services, kind: print_shop, city: 上海, publicness: semi_public}
+        environment: {structure: small copy shop counter with paper stacks}
+        objects:
+          - {id: object:bound-handout, kind: printed_material, description: 刚装订好的一沓课程讲义}
+    - id: browse-old-book-stall
+      activity_kind: leisure.browse_book_stall
+      source: environmental_opportunity
+      domain: commute_walk
+      social_shape: alone
+      deviation: impulse
+      visual_potential: object
+      privacy: shareable
+      location_id: old-book-market
+      local_windows: ["09:30-16:30"]
+      weekdays: [5, 6]
+      duration_minutes: 60
+      importance_bp: 4600
+      outcomes:
+        - {id: stall-found-gem, text: 在旧书摊翻到一本扉页有铅笔批注的散文集，五块钱，像捡到宝。, privacy: shareable}
+        - {id: stall-empty-handed, text: 逛了一圈没遇到想带走的书，倒是记住了一个摊主推荐的作者名字。, privacy: shareable}
+        - {id: stall-overspent, text: 本来说好只看不买，结果抱了三本回来，安慰自己旧书不算花钱。, privacy: shareable}
+      visual_evidence:
+        activity_description: 周末在露天旧书摊之间慢慢翻书
+        location: {id: location:shanghai-old-book-market, kind: open_air_book_market, city: 上海, publicness: public}
+        environment: {light: open-air daylight between stalls, structure: rows of second-hand book stalls}
+        objects:
+          - {id: object:old-books, kind: book, description: 摊位上成摞的旧书和手里翻开的一本}
+        self_capture: [character_front_camera, requested_helper]
+  # NPC-initiated events are the reviewed ways 范予安 may enter her day
+  # uninvited.  Each carries a warm and a strained outcome; the settled one
+  # becomes an ordinary Committed Experience with a mandatory appraisal, so a
+  # borrowed book can genuinely leave a feeling behind.  Windows must lie
+  # inside the NPC's reviewed weekly presence (validated at load).
+  npc_initiated_events:
+    - id: npc-fan-yuan-borrow-book
+      initiative_kind: small_favor
+      npc_id: fan-yuan
+      location_id: campus-library
+      summary: 范予安忽然来找她借一本读书会提到的书，几分钟的小事。
+      privacy: personal
+      local_windows: ["09:30-18:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 10
+      base_chance_bp: 1200
+      outcomes:
+        - id: borrow-book-easy
+          text: 范予安忽然来找她借书，顺带聊了两句最近在读什么，气氛意外地轻松。
+          privacy: personal
+        - id: borrow-book-reluctant
+          text: 范予安来借的那本她自己还没读完，犹豫了一下还是借了，心里有点小舍不得。
+          privacy: personal
+    - id: npc-fan-yuan-impromptu-reading-list
+      initiative_kind: shared_time
+      npc_id: fan-yuan
+      location_id: campus-library
+      summary: 范予安临时拉她一起过一遍读书会书单，大约半小时。
+      privacy: personal
+      local_windows: ["10:00-12:00", "14:00-18:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 30
+      base_chance_bp: 900
+      outcomes:
+        - id: impromptu-list-flowed
+          text: 被范予安临时拉去对书单，本来有点被打断的烦，聊开之后反而顺得出乎意料。
+          privacy: personal
+        - id: impromptu-list-drained
+          text: 临时陪范予安看书单，把自己原本的安排挤掉了，聊完人有点耗神。
+          privacy: personal
+    - id: npc-fan-yuan-reading-list-disagreement
+      initiative_kind: friction
+      npc_id: fan-yuan
+      location_id: campus-library
+      summary: 为一本书要不要进读书会书单，和范予安起了点小分歧。
+      privacy: personal
+      local_windows: ["10:00-18:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 25
+      base_chance_bp: 600
+      outcomes:
+        - id: disagreement-cleared
+          text: 和范予安为书单选择争了几句，各退了一步，反而把选书的标准聊清楚了。
+          privacy: personal
+        - id: disagreement-shelved
+          text: 为一本要不要进书单的书和范予安意见相左，谁都没说服谁，先搁下了。
+          privacy: personal
+    # ---- reviewed-life.11 new NPC-initiated moments ----
+    - id: npc-fan-yuan-share-manuscript
+      initiative_kind: small_favor
+      npc_id: fan-yuan
+      location_id: campus-library
+      summary: 范予安拿自己新写的稿子来，想请她帮忙看看提点意见。
+      privacy: personal
+      local_windows: ["10:00-17:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 20
+      base_chance_bp: 800
+      outcomes:
+        - id: manuscript-honest-notes
+          text: 帮范予安看了新写的稿子，指出两处啰嗦的地方，对方居然真的听进去了。
+          privacy: personal
+        - id: manuscript-hard-to-say
+          text: 范予安的稿子写得一般，她斟酌了半天措辞，最后只圈了一个真心喜欢的句子。
+          privacy: personal
+    - id: npc-fan-yuan-lecture-pull
+      initiative_kind: shared_time
+      npc_id: fan-yuan
+      location_id: campus-library
+      summary: 范予安临时发现一个校园讲座，拉她一起去听。
+      privacy: personal
+      local_windows: ["14:00-17:00"]
+      weekdays: [0, 1, 2, 3, 4]
+      duration_minutes: 60
+      base_chance_bp: 700
+      outcomes:
+        - id: lecture-pull-worth-it
+          text: 被范予安临时拉去听讲座，主讲人讲到城市记忆那段时，她悄悄记了满满一页。
+          privacy: personal
+        - id: lecture-pull-dull
+          text: 陪范予安听的讲座比预期无聊，两个人在后排交换了一个忍笑的眼神。
+          privacy: personal
+    - id: npc-fan-yuan-book-recommend
+      initiative_kind: small_favor
+      npc_id: fan-yuan
+      location_id: campus-library
+      summary: 范予安在书架间叫住她，塞过来一本书说“你应该会喜欢”。
+      privacy: personal
+      local_windows: ["09:30-18:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 10
+      base_chance_bp: 500
+      outcomes:
+        - id: recommend-hit
+          text: 范予安推荐的那本书翻了两页就被吸住了，有种被人看穿口味的微妙感觉。
+          privacy: personal
+        - id: recommend-miss
+          text: 收下了范予安热情推荐的书，翻了翻不太是自己的路子，还是道了谢收进包里。
+          privacy: personal
+    - id: npc-lin-wan-late-snack
+      initiative_kind: shared_time
+      npc_id: lin-wan
+      location_id: dorm-room
+      summary: 林晚晚上忽然提议一起泡面或点奶茶，边吃边闲聊。
+      privacy: private
+      local_windows: ["21:00-23:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 25
+      base_chance_bp: 900
+      outcomes:
+        - id: late-snack-cozy
+          text: 和林晚分了一桶泡面加两根火腿肠，深夜的宿舍有种偷来的松快。
+          privacy: private
+        - id: late-snack-guilty
+          text: 跟着林晚点了杯奶茶，喝到一半想起在减糖，两个人互相指责了一番又都笑了。
+          privacy: private
+    - id: npc-lin-wan-borrow-charger
+      initiative_kind: small_favor
+      npc_id: lin-wan
+      location_id: dorm-room
+      summary: 林晚的充电线坏了，回来找她救急借一根。
+      privacy: private
+      local_windows: ["19:00-22:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 10
+      base_chance_bp: 600
+      outcomes:
+        - id: charger-plus-chat
+          text: 借充电线给林晚，顺势聊了两句，才知道她这周实习面试过了。
+          privacy: private
+        - id: charger-only
+          text: 把备用充电线递给林晚，对方忙着回消息，她也就回去继续做自己的事。
+          privacy: private
+  # Aspiration seeds are the reviewed wishes she may quietly come to hold.
+  # Planting one asserts no plan and no deadline: it only enters her private
+  # expression context ("我一直想…") and may later fade, be reinforced by
+  # related lived material, or — rarely — crystallize into a real plan.
+  # requires_recent_activity_kinds is the anti-fabrication witness: the wish
+  # can only sprout while such material actually appeared in her recent life.
+  aspiration_seeds:
+    - id: aspire-japan-trip
+      text: 明年毕业想去日本玩一趟，把喜欢的街和小书店都走一遍。
+      privacy: personal
+      base_chance_bp: 700
+      requires_recent_activity_kinds: [commute.short_walk, leisure.digital_browse]
+    - id: aspire-liwa-four-seasons
+      text: 想把丽娃河的四季拍全，凑成一组自己的小相册。
+      privacy: shareable
+      base_chance_bp: 800
+      requires_recent_activity_kinds: [commute.lakeside_walk, commute.short_walk, creative.edit_photo_notes]
+      crystallizes_into: future-lakeside-walk
+    - id: aspire-finish-reading-list
+      text: 想把读书会那份书单从头到尾真正读完一遍。
+      privacy: personal
+      base_chance_bp: 600
+      requires_recent_activity_kinds: [social.literature_reading_list, study.focused_reading]
+    # ---- reviewed-life.11 new aspiration seeds ----
+    - id: aspire-bund-night-series
+      text: 想认真拍一组外滩的夜景，从蓝调时刻一直拍到灯全亮。
+      privacy: shareable
+      base_chance_bp: 700
+      requires_recent_activity_kinds: [commute.short_walk, creative.edit_photo_notes]
+      crystallizes_into: future-bund-night-photo
+    - id: aspire-help-bookstore-weekend
+      text: 想找个周末回嘉兴，帮爸妈看一天店，把新到的旧书理上架。
+      privacy: personal
+      base_chance_bp: 650
+      requires_recent_activity_kinds: [social.family_call]
+      crystallizes_into: future-jiaxing-bookstore-help
+    - id: aspire-learn-film-develop
+      text: 想学会自己冲黑白胶卷，哪怕先从最便宜的显影罐开始。
+      privacy: personal
+      base_chance_bp: 550
+      requires_recent_activity_kinds: [creative.film_scan_sort]
+    - id: aspire-read-wangzengqi-through
+      text: 想把汪曾祺的散文按集子顺序完整读一遍，做一册自己的批注。
+      privacy: personal
+      base_chance_bp: 600
+      requires_recent_activity_kinds: [study.focused_reading, study.reading_notes]
+  # Future openings are commitments she may write into her own calendar one
+  # to seven local days ahead.  Selecting one asserts only a Plan; the day
+  # itself is lived (or missed) by the ordinary activity lifecycle.
+  future_openings:
+    - id: future-literature-club-meetup
+      activity_kind: social.literature_club_meetup
+      source: social
+      domain: family_roommate_friend
+      social_shape: npc
+      npc_id: fan-yuan
+      location_id: campus-library
+      deviation: persist
+      visual_potential: social
+      privacy: personal
+      local_windows: ["14:00-17:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 60
+      importance_bp: 6200
+      advance_days_min: 1
+      advance_days_max: 4
+      outcomes:
+        - id: meetup-went-well
+          text: 和范予安按约碰了面，把文学社接下来的安排理出了个大概。
+          privacy: personal
+        - id: meetup-ran-long
+          text: 和范予安的碰头聊得比预计久，事情定下来了，人有点耗神。
+          privacy: personal
+    - id: future-lakeside-walk
+      activity_kind: commute.lakeside_walk
+      source: intentional_goal
+      domain: commute_walk
+      social_shape: alone
+      deviation: persist
+      visual_potential: place
+      privacy: shareable
+      location_id: campus-path
+      local_windows: ["16:30-20:30"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 50
+      importance_bp: 4800
+      advance_days_min: 1
+      advance_days_max: 5
+      outcomes:
+        - {id: lakeside-walk-clearing, text: 按之前想好的去丽娃河边走了一段，风一吹脑子清楚了不少。, privacy: shareable}
+        - {id: lakeside-walk-crowded, text: 河边人比想象中多，走得断断续续，不过还是出来透了口气。, privacy: shareable}
+      visual_evidence:
+        activity_description: 傍晚在丽娃河边散步
+        location: {id: location:ecnu-campus-path, kind: riverside_path, city: 上海, publicness: public}
+        environment: {light: low warm light over the water, structure: riverside walkway with willows}
+        self_capture: [character_front_camera]
+    - id: future-shared-movie-call
+      activity_kind: shared.movie_call
+      source: social
+      domain: digital_leisure
+      social_shape: shared_private
+      deviation: persist
+      visual_potential: none
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["20:00-23:00"]
+      weekdays: [4, 5]
+      duration_minutes: 120
+      importance_bp: 5200
+      advance_days_min: 1
+      advance_days_max: 4
+      requires_relationship_closeness_bp: 5500
+      outcomes:
+        - id: movie-call-happened
+          text: 和你连了麦，一起看完了一部片子，片尾聊了好一会儿。
+          privacy: private
+        - id: movie-call-cut-short
+          text: 连麦看片看到一半有事断了，约好下次接着看。
+          privacy: private
+    - id: future-photo-batch-sort
+      activity_kind: creative.photo_batch_organize
+      source: intentional_goal
+      domain: creative_photo_writing
+      social_shape: alone
+      deviation: persist
+      visual_potential: activity
+      privacy: private
+      location_id: dorm-room
+      local_windows: ["13:00-17:00"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      duration_minutes: 90
+      importance_bp: 5600
+      advance_days_min: 2
+      advance_days_max: 7
+      outcomes:
+        - {id: photo-batch-cleared, text: 把攒了一阵的照片集中整理完了，挑出几张真正想留的。, privacy: private}
+        - {id: photo-batch-halfway, text: 照片整理到一半发现比预想多，先按日期粗分了一遍。, privacy: private}
+    # ---- reviewed-life.11 new future openings ----
+    - id: future-jiaxing-bookstore-help
+      activity_kind: family.bookstore_help
+      source: intentional_goal
+      domain: family_roommate_friend
+      social_shape: alone
+      deviation: persist
+      visual_potential: place
+      privacy: personal
+      location_id: jiaxing-bookstore
+      local_windows: ["10:30-17:30"]
+      weekdays: [5, 6]
+      duration_minutes: 240
+      importance_bp: 7200
+      advance_days_min: 2
+      advance_days_max: 7
+      outcomes:
+        - id: bookstore-help-full-day
+          text: 回嘉兴帮店里理了一下午新收的旧书，妈妈留她吃了饭，走时爸爸往包里塞了两本样书。
+          privacy: personal
+        - id: bookstore-help-quiet
+          text: 店里客人不多，她守着收银台把作业写了大半，偶尔起来帮客人找书，像回到高中的周末。
+          privacy: personal
+        - id: bookstore-help-tiring
+          text: 帮店里搬书搬得腰酸，回程的车上一路睡到上海，醒来手机里是妈妈发的"到了说一声"。
+          privacy: personal
+    - id: future-fanyuan-exhibition
+      activity_kind: social.exhibition_outing
+      source: social
+      domain: family_roommate_friend
+      social_shape: npc
+      npc_id: fan-yuan
+      deviation: persist
+      visual_potential: social
+      privacy: personal
+      local_windows: ["13:30-17:00"]
+      weekdays: [5, 6]
+      duration_minutes: 150
+      importance_bp: 6400
+      advance_days_min: 2
+      advance_days_max: 6
+      outcomes:
+        - id: exhibition-good-talk
+          text: 和范予安看完展在美术馆台阶上聊了很久，从一幅画聊到各自最近在写的东西。
+          privacy: personal
+        - id: exhibition-different-taste
+          text: 展览她喜欢的那几件范予安都无感，两个人口味完全岔开，反而聊得很有意思。
+          privacy: personal
+    - id: future-bund-night-photo
+      activity_kind: creative.bund_night_shoot
+      source: intentional_goal
+      domain: creative_photo_writing
+      social_shape: alone
+      deviation: persist
+      visual_potential: place
+      privacy: shareable
+      location_id: the-bund
+      local_windows: ["18:30-21:30"]
+      weekdays: [4, 5, 6]
+      duration_minutes: 150
+      importance_bp: 6000
+      advance_days_min: 2
+      advance_days_max: 7
+      outcomes:
+        - id: bund-blue-hour
+          text: 赶上了外滩的蓝调时刻，风很大，取景器里的江面和灯一点点亮起来，拍到手都冻僵也舍不得走。
+          privacy: shareable
+        - id: bund-too-crowded
+          text: 外滩人多得架不开脚架，只好手持着抓拍，回程地铁上翻照片，居然是最随手那张最好。
+          privacy: shareable
+      visual_evidence:
+        activity_description: 晚上在外滩沿江拍夜景
+        location: {id: location:shanghai-the-bund, kind: riverside_promenade, city: 上海, publicness: public}
+        environment: {light: blue hour fading into city night lights, structure: riverside promenade facing lit skyline}
+        objects:
+          - {id: object:camera-kit, kind: camera, description: 随身带的相机和小脚架}
+        self_capture: [character_front_camera, timer_fixed, requested_helper]
+        share_chance_bp: 6500
+    - id: future-library-seminar-room
+      activity_kind: study.seminar_room_session
+      source: intentional_goal
+      domain: study_class
+      social_shape: alone
+      deviation: persist
+      visual_potential: ambient
+      privacy: personal
+      location_id: campus-library
+      local_windows: ["13:00-16:00"]
+      weekdays: [1, 3]
+      duration_minutes: 90
+      importance_bp: 5800
+      advance_days_min: 1
+      advance_days_max: 5
+      outcomes:
+        - id: seminar-room-focused
+          text: 预约的研讨间只有她一个人，把课程展示的思路在白板上画了满满一面，拍照存档时挺有成就感。
+          privacy: personal
+        - id: seminar-room-interrupted
+          text: 研讨间隔壁小组讨论声太大，她干脆把大纲带回老位置继续，预约算是浪费了一半。
+          privacy: personal
+    - id: future-book-market-hunt
+      activity_kind: leisure.book_market_hunt
+      source: intentional_goal
+      domain: commute_walk
+      social_shape: alone
+      deviation: persist
+      visual_potential: object
+      privacy: shareable
+      location_id: old-book-market
+      local_windows: ["10:00-15:00"]
+      weekdays: [5, 6]
+      duration_minutes: 120
+      importance_bp: 5400
+      advance_days_min: 2
+      advance_days_max: 7
+      outcomes:
+        - id: market-hunt-found
+          text: 按清单去二手书市找那本绝版的城市随笔，最后在最角落的摊上翻到了，比网上便宜一半。
+          privacy: shareable
+        - id: market-hunt-substitute
+          text: 想找的书没找到，倒是收了同一位作者的另一本，摊主还送了张旧藏书票。
+          privacy: shareable
+      visual_evidence:
+        activity_description: 带着书单在二手书市里逐摊淘书
+        location: {id: location:shanghai-old-book-market, kind: open_air_book_market, city: 上海, publicness: public}
+        environment: {light: open-air daylight between stalls, structure: rows of second-hand book stalls}
+        objects:
+          - {id: object:hunted-books, kind: book, description: 按清单找到或替代收下的旧书}
+        self_capture: [character_front_camera, requested_helper]
+        share_chance_bp: 5000
 protagonist:
   id: zhizhi
   name: 沈知栀

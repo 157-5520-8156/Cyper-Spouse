@@ -315,7 +315,16 @@ class SocialInitiativeCompiler:
             if self._ledger.blocks_event_loop
             else self._random.draw(**draw_kwargs)
         )
-        if draw.selected_candidate_ref == "hold":
+        # The recorded draw is a real, mood-weighted impulse gate: ``hold``
+        # means this stretch of quiet does not produce a check-in *under the
+        # current inner state*.  It is not a scripted personality switch
+        # because the attempt identity binds the compiled profile — when her
+        # affect, relationship, activity, or the daypart shifts enough to
+        # change that profile, a fresh draw happens and the inclination can
+        # genuinely change.  The same profile always replays the same draw,
+        # so scheduler retries cannot re-roll their way past a held impulse,
+        # and the world-health diagnostics read exactly this ``act`` evidence.
+        if draw.selected_candidate_ref != "act":
             return None
         # A response expectation is the stronger and more specific authority.
         # Do not also manufacture a generic idle opportunity for that expression.

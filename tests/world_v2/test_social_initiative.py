@@ -180,6 +180,45 @@ async def test_unchanged_context_reuses_one_act_hold_draw_across_scheduler_ticks
 
 
 @pytest.mark.asyncio
+async def test_held_draw_gates_the_spontaneous_opportunity_without_erasing_evidence() -> None:
+    """``hold`` now really means no check-in impulse under this inner state."""
+
+    compiler, projection, committed = _compiler_fixture(receptive=True)
+    draws: list[dict[str, object]] = []
+
+    def draw(**kwargs):  # type: ignore[no-untyped-def]
+        draws.append(kwargs)
+        return SimpleNamespace(selected_candidate_ref="hold", draw_id="draw:test-hold")
+
+    compiler._random = SimpleNamespace(draw=draw)  # noqa: SLF001 - deterministic seam
+
+    opportunity = await compiler.next_opportunity(projection)
+
+    assert opportunity is None
+    # The inclination itself is still durable replay evidence, and its
+    # identity binds the compiled mood/relationship profile: a changed inner
+    # state produces a different attempt id and therefore a genuine re-draw.
+    assert draws and draws[0]["candidate_refs"] == ("act", "hold")
+    assert str(draws[0]["attempt_id"]).startswith("social-initiative:")
+    del committed
+
+
+@pytest.mark.asyncio
+async def test_acting_draw_still_yields_the_source_bound_opportunity() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    compiler._random = SimpleNamespace(  # noqa: SLF001 - deterministic seam
+        draw=lambda **kwargs: SimpleNamespace(
+            selected_candidate_ref="act", draw_id="draw:test-act"
+        )
+    )
+
+    opportunity = await compiler.next_opportunity(projection)
+
+    assert opportunity is not None
+    assert opportunity.source_kind == "spontaneous_contact"
+
+
+@pytest.mark.asyncio
 async def test_unrelated_later_inbound_does_not_cancel_response_gap_opportunity() -> None:
     """A new message is not semantic proof that the earlier thought is finished."""
 

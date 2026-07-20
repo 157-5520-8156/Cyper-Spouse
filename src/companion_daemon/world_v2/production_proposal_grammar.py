@@ -20,6 +20,9 @@ from typing import Callable, Literal, Mapping
 from .affect_acceptance_manifest import AffectAcceptanceManifest
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
 from .affect_proposal_compiler import AffectProposalCompiler
+from .relationship_acceptance_manifest import RelationshipAcceptanceManifest
+from .relationship_acceptance_runtime import RelationshipAcceptanceRuntime
+from .relationship_proposal_compiler import RelationshipProposalCompiler
 from .appraisal_acceptance_manifest import AppraisalAcceptanceManifest
 from .appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
 from .appraisal_proposal_compiler import AppraisalProposalCompiler
@@ -50,9 +53,14 @@ ProductionProposalLaneId = Literal[
     "chat_reply",
     "interaction_appraisal",
     "settled_world_appraisal",
+    "silence_appraisal",
+    "plan_disruption_appraisal",
     "affect",
+    "relationship",
     "outcome",
     "interaction_bid",
+    "proactive",
+    "quick_reaction",
 ]
 
 
@@ -112,6 +120,9 @@ class ProductionProposalGrammar:
             if not self.allows_no_change_decision or proposal.action_intents:
                 raise ProductionProposalGrammarError("no_change_not_reachable")
             return
+        if self.lane_id == "interaction_appraisal":
+            self._validate_interaction_appraisal(proposal)
+            return
         if len(proposal.proposed_changes) != 1:
             raise ProductionProposalGrammarError("change_count_not_reachable")
 
@@ -137,6 +148,38 @@ class ProductionProposalGrammar:
                 raise ProductionProposalGrammarError("action_not_reachable")
         elif proposal.action_intents:
             raise ProductionProposalGrammarError("action_not_reachable")
+
+    @staticmethod
+    def _validate_interaction_appraisal(proposal: DecisionProposal) -> None:
+        """Close the only production composite to appraisal plus its derived affect."""
+
+        appraisals = []
+        affects = []
+        for change in proposal.proposed_changes:
+            if change.kind == "appraisal_transition" and change.transition == "activate":
+                appraisals.append(change)
+            elif change.kind == "affect_transition" and change.transition == "open":
+                affects.append(change)
+            else:
+                raise ProductionProposalGrammarError("interaction_change_not_reachable")
+
+        if len(appraisals) != 1:
+            raise ProductionProposalGrammarError("interaction_appraisal_count_invalid")
+        if len(affects) > 1:
+            raise ProductionProposalGrammarError("interaction_affect_count_invalid")
+        if proposal.action_intents:
+            raise ProductionProposalGrammarError("action_not_reachable")
+
+        if not affects:
+            if proposal.affect_decision != "no_change":
+                raise ProductionProposalGrammarError("interaction_affect_decision_invalid")
+            return
+
+        if proposal.affect_decision != "propose":
+            raise ProductionProposalGrammarError("interaction_affect_decision_invalid")
+        appraisal_refs = affects[0].payload.value().get("appraisal_change_refs")
+        if appraisal_refs != [appraisals[0].change_id]:
+            raise ProductionProposalGrammarError("interaction_affect_appraisal_binding_invalid")
 
 
 _EXPRESSION = SpecializedProposalCapability(
@@ -165,6 +208,13 @@ _AFFECT = SpecializedProposalCapability(
     compiler_ref="affect-proposal-compiler.1",
     manifest_ref="affect-acceptance-manifest.1",
     reverse_verifier_ref="affect-acceptance-runtime.1",
+)
+_RELATIONSHIP_SIGNAL = SpecializedProposalCapability(
+    change_kind="relationship_signal",
+    transition="suggest",
+    compiler_ref="relationship-proposal-compiler.1",
+    manifest_ref="relationship-acceptance-manifest.1",
+    reverse_verifier_ref="relationship-acceptance-runtime.1",
 )
 _OUTCOME = SpecializedProposalCapability(
     change_kind="outcome_settlement",
@@ -224,6 +274,17 @@ _SPECIALIZED_AUTHORITY_SEAMS: Mapping[tuple[str, str, str], SpecializedAuthority
                     reverse_verifier=AffectAcceptanceRuntime.accept_runtime_owned,
                 )
             ),
+            (
+                _RELATIONSHIP_SIGNAL.compiler_ref,
+                _RELATIONSHIP_SIGNAL.manifest_ref,
+                _RELATIONSHIP_SIGNAL.reverse_verifier_ref,
+            ): (
+                SpecializedAuthoritySeam(
+                    compiler=RelationshipProposalCompiler,
+                    manifest=RelationshipAcceptanceManifest,
+                    reverse_verifier=RelationshipAcceptanceRuntime.accept_runtime_owned,
+                )
+            ),
             (_OUTCOME.compiler_ref, _OUTCOME.manifest_ref, _OUTCOME.reverse_verifier_ref): (
                 SpecializedAuthoritySeam(
                     compiler=OutcomeProposalCompiler,
@@ -269,7 +330,7 @@ _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS: Mapping[
         ),
         "interaction_appraisal": ProductionProposalGrammar(
             lane_id="interaction_appraisal",
-            capabilities=(_APPRAISAL,),
+            capabilities=(_APPRAISAL, _AFFECT),
             allows_no_change_decision=True,
         ),
         "settled_world_appraisal": ProductionProposalGrammar(
@@ -277,8 +338,27 @@ _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS: Mapping[
             capabilities=(_APPRAISAL,),
             allows_no_change_decision=True,
         ),
+        # A silence appraisal shares the settled-world discipline: one typed
+        # appraisal at most, never an action or a direct affect authoring.
+        "silence_appraisal": ProductionProposalGrammar(
+            lane_id="silence_appraisal",
+            capabilities=(_APPRAISAL,),
+            allows_no_change_decision=True,
+        ),
+        # A plan-disruption appraisal shares the same discipline: one typed
+        # appraisal at most, never an action or a direct affect authoring.
+        "plan_disruption_appraisal": ProductionProposalGrammar(
+            lane_id="plan_disruption_appraisal",
+            capabilities=(_APPRAISAL,),
+            allows_no_change_decision=True,
+        ),
         "affect": ProductionProposalGrammar(
             lane_id="affect", capabilities=(_AFFECT,), allows_no_change_decision=True
+        ),
+        "relationship": ProductionProposalGrammar(
+            lane_id="relationship",
+            capabilities=(_RELATIONSHIP_SIGNAL,),
+            allows_no_change_decision=True,
         ),
         "outcome": ProductionProposalGrammar(
             lane_id="outcome", capabilities=(_OUTCOME,), allows_no_change_decision=False
@@ -294,6 +374,40 @@ _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS: Mapping[
                 _INTERACTION_BID,
                 _MEDIA_DELIVERY_THREAD,
                 _MEDIA_DELIVERY_THREAD_UPDATE,
+            ),
+            allows_no_change_decision=True,
+        ),
+        "proactive": ProductionProposalGrammar(
+            lane_id="proactive",
+            capabilities=(
+                SpecializedProposalCapability(
+                    change_kind=_EXPRESSION.change_kind,
+                    transition=_EXPRESSION.transition,
+                    compiler_ref=_EXPRESSION.compiler_ref,
+                    manifest_ref=_EXPRESSION.manifest_ref,
+                    reverse_verifier_ref=_EXPRESSION.reverse_verifier_ref,
+                    allows_actions=True,
+                    action_kinds=frozenset({"proactive_message", "followup"}),
+                ),
+            ),
+            allows_no_change_decision=True,
+        ),
+        # The same-turn quick reaction lane may authorize exactly one platform
+        # ``reaction`` on the triggering message and nothing else.  Its
+        # no-change form is the ordinary outcome: the recorded act/hold draw
+        # or the local semantic gate declining leaves the lane inert.
+        "quick_reaction": ProductionProposalGrammar(
+            lane_id="quick_reaction",
+            capabilities=(
+                SpecializedProposalCapability(
+                    change_kind=_EXPRESSION.change_kind,
+                    transition=_EXPRESSION.transition,
+                    compiler_ref=_EXPRESSION.compiler_ref,
+                    manifest_ref=_EXPRESSION.manifest_ref,
+                    reverse_verifier_ref=_EXPRESSION.reverse_verifier_ref,
+                    allows_actions=True,
+                    action_kinds=frozenset({"reaction"}),
+                ),
             ),
             allows_no_change_decision=True,
         ),
@@ -320,9 +434,14 @@ def assert_production_proposal_grammar_coverage() -> None:
         "chat_reply",
         "interaction_appraisal",
         "settled_world_appraisal",
+        "silence_appraisal",
+        "plan_disruption_appraisal",
         "affect",
+        "relationship",
         "outcome",
         "interaction_bid",
+        "proactive",
+        "quick_reaction",
     }:
         raise RuntimeError("production proposal grammar lane coverage changed")
     for lane_id, grammar in expected.items():
@@ -358,13 +477,44 @@ def assert_production_proposal_grammar_coverage() -> None:
             raise RuntimeError("minimal reply is only reachable in chat")
 
 
-def production_proposal_grammar(lane_id: ProductionProposalLaneId) -> ProductionProposalGrammar:
+def production_proposal_grammar(
+    lane_id: ProductionProposalLaneId,
+    *,
+    expression_action_kinds: frozenset[str] | None = None,
+) -> ProductionProposalGrammar:
     assert_production_proposal_grammar_coverage()
-    return _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS[lane_id]
+    grammar = _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS[lane_id]
+    if lane_id != "chat_reply" or expression_action_kinds is None:
+        return grammar
+    installed = production_expression_action_kinds()
+    if not expression_action_kinds or not expression_action_kinds.issubset(installed):
+        raise ValueError("chat expression actions exceed installed production capabilities")
+    capability = SpecializedProposalCapability(
+        change_kind=_EXPRESSION.change_kind,
+        transition=_EXPRESSION.transition,
+        compiler_ref=_EXPRESSION.compiler_ref,
+        manifest_ref=_EXPRESSION.manifest_ref,
+        reverse_verifier_ref=_EXPRESSION.reverse_verifier_ref,
+        allows_actions=True,
+        action_kinds=expression_action_kinds,
+    )
+    return ProductionProposalGrammar(
+        lane_id="chat_reply",
+        capabilities=(capability,),
+        allows_no_change_decision=True,
+        allows_minimal_reply=True,
+    )
 
 
 def compose_production_deliberation(
-    *, lane_id: ProductionProposalLaneId, router: object, main_model: object, quick_recovery: object
+    *,
+    lane_id: ProductionProposalLaneId,
+    router: object,
+    main_model: object,
+    quick_recovery: object,
+    expression_action_kinds: frozenset[str] | None = None,
+    main_timeout_seconds: float = 6.0,
+    quick_timeout_seconds: float = 2.5,
 ):
     """Create the only Deliberation shape permitted by production composition.
 
@@ -379,7 +529,32 @@ def compose_production_deliberation(
         router=router,  # type: ignore[arg-type]
         main_model=main_model,  # type: ignore[arg-type]
         quick_recovery=quick_recovery,  # type: ignore[arg-type]
-        proposal_grammar=production_proposal_grammar(lane_id),
+        main_timeout_seconds=main_timeout_seconds,
+        quick_timeout_seconds=quick_timeout_seconds,
+        proposal_grammar=production_proposal_grammar(
+            lane_id, expression_action_kinds=expression_action_kinds
+        ),
+        # Chat recovery may legitimately return the typed ``silent``
+        # DecisionProposal after both provider attempts fail.  The grammar
+        # already allows an empty no-change decision and keeps it inert.
+        # Every appraisal lane's recovery likewise fails closed with a typed
+        # no-change appraisal proposal — never a visible MinimalReply — so it
+        # must be validated by its lane grammar; under ``minimal_only`` that
+        # honest recovery was rejected on shape alone and the whole appraisal
+        # turn failed even though nothing needed to change.
+        recovery_mode=(
+            "proposal_grammar"
+            if lane_id
+            in {
+                "proactive",
+                "chat_reply",
+                "interaction_appraisal",
+                "settled_world_appraisal",
+                "silence_appraisal",
+                "plan_disruption_appraisal",
+            }
+            else "minimal_only"
+        ),
     )
 
 

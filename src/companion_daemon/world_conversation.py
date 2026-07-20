@@ -67,7 +67,9 @@ _USER_TIME = re.compile(r"(?:我|我的).{0,8}(?:昨天|今天|上午|下午|上
 _COMPANION_CURRENT = re.compile(
     r"(?:你|知栀).{0,5}(?:现在|这会儿|此刻|在哪|在做什么|干嘛|忙吗|方便说话)"
 )
-_IMPLICIT_CURRENT = re.compile(r"(?:现在|这会儿|此刻)?.{0,3}(?:在哪|在做什么|在干嘛|干嘛|忙吗|方便说话)")
+_IMPLICIT_CURRENT = re.compile(
+    r"(?:现在|这会儿|此刻)?.{0,3}(?:在哪|在做什么|在干嘛|干嘛|忙吗|方便说话)"
+)
 _COMPANION_EXPERIENCE = re.compile(
     r"(?:你|知栀).{0,6}(?:昨天|今天|上午|下午|上次).{0,12}"
     r"(?:做|干|去|忙|经历|发生|过得|完成|见|聊|看)"
@@ -85,9 +87,7 @@ _META_AGENCY = re.compile(
     r"(?:关心|回复|说的话).{0,10}(?:真心|角色卡|设定|教的)"
     r"|(?:真心|角色卡|设定).{0,10}(?:关心|表达|教的)"
 )
-_EMOTIONAL_PERMISSION = re.compile(
-    r"(?:不舒服|介意|不高兴|难受).{0,12}(?:直接说|告诉我|可以说)"
-)
+_EMOTIONAL_PERMISSION = re.compile(r"(?:不舒服|介意|不高兴|难受).{0,12}(?:直接说|告诉我|可以说)")
 _EPISTEMIC_INSTRUCTION = re.compile(
     r"(?:别|不要|不许)[^。！？]{0,6}(?:猜|乱说)[^。！？]{0,16}"
     r"(?:依据|明确|告诉我|直说)"
@@ -109,17 +109,14 @@ def classify_world_query(text: str) -> WorldQueryScope:
     elif "上次" in normalized:
         time_reference = "上次"
     day_part = "上午" if "上午" in normalized else "下午" if "下午" in normalized else None
-    is_first_person_statement = (
-        bool(re.search(r"(?:^|[，。！])我", normalized))
-        and not normalized.endswith(("?", "？"))
-    )
+    is_first_person_statement = bool(
+        re.search(r"(?:^|[，。！])我", normalized)
+    ) and not normalized.endswith(("?", "？"))
 
     if _META_AGENCY.search(normalized):
         return WorldQueryScope(target="conversation", asks_meta_agency=True)
     if _EPISTEMIC_INSTRUCTION.search(normalized):
-        return WorldQueryScope(
-            target="conversation", asks_epistemic_honesty=True
-        )
+        return WorldQueryScope(target="conversation", asks_epistemic_honesty=True)
     if _EMOTIONAL_PERMISSION.search(normalized):
         return WorldQueryScope(target="conversation", offers_emotional_permission=True)
     if _RELATIONSHIP_STATUS.search(normalized):
@@ -167,7 +164,9 @@ def classify_world_query(text: str) -> WorldQueryScope:
             asks_single_experience=bool(_COMPANION_MEMORABLE.search(normalized)),
         )
     return WorldQueryScope(
-        target="conversation" if any(marker in normalized for marker in ("刚才", "之前", "还记得")) else "unknown",
+        target="conversation"
+        if any(marker in normalized for marker in ("刚才", "之前", "还记得"))
+        else "unknown",
         time_reference=time_reference,
         day_part=day_part,
         is_first_person_statement=is_first_person_statement,
@@ -192,16 +191,43 @@ def build_safe_failure_candidate(
     source or claim that was not already present in ``grounded``.
     """
     asks_for_missing_detail = asks_for_source_detail(user_text)
+    # A fallback may have to discard the grounded wording because the current
+    # speech act is opinion/repair/boundary rather than a factual recall.  It
+    # must still carry the already-validated provenance and Action handles so
+    # downstream settlement cannot silently lose the source contract.
+    grounded_provenance: dict[str, object] = {
+        "mentioned_event_ids": list(grounded.get("mentioned_event_ids", []))
+        if isinstance(grounded, dict) and isinstance(grounded.get("mentioned_event_ids", []), list)
+        else [],
+        "proposed_action_ids": list(grounded.get("proposed_action_ids", []))
+        if isinstance(grounded, dict) and isinstance(grounded.get("proposed_action_ids", []), list)
+        else [],
+        "claims": list(grounded.get("claims", []))
+        if isinstance(grounded, dict) and isinstance(grounded.get("claims", []), list)
+        else [],
+    }
+    # A failed reply must not resurrect an unrelated user quotation merely
+    # because it was present in the retrieval pool.  User-sourced provenance
+    # is retained only when it also carries an outstanding Action handle: the
+    # latter is an operational dependency that must survive fallback, while a
+    # bare old message is conversational context and should be dropped.
+    if (
+        isinstance(grounded, dict)
+        and grounded.get("_user_sourced")
+        and not grounded_provenance["proposed_action_ids"]
+    ):
+        grounded_provenance = {
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [],
+            "claims": [],
+        }
     if speech_act in {"opinion", "epistemic", "meta_agency", "emotional_permission"}:
         grounded = None
     if grounded:
         source_text = str(grounded.get("reply_text") or "").strip()
         if _normalized_echo(source_text) == _normalized_echo(user_text):
             grounded = None
-        elif (
-            not asks_for_memory_recall(user_text)
-            and not asks_for_source_detail(user_text)
-        ):
+        elif not asks_for_memory_recall(user_text) and not asks_for_source_detail(user_text):
             grounded = None
         elif source_text and (
             bool(grounded.get("_user_sourced"))
@@ -220,8 +246,8 @@ def build_safe_failure_candidate(
                 grounded = {**grounded, "reply_text": f"我记得你之前分别提过：{joined}"}
             else:
                 grounded = {
-                **grounded,
-                "reply_text": f"我记得你之前提过：“{source_text}”",
+                    **grounded,
+                    "reply_text": f"我记得你之前提过：“{source_text}”",
                 }
     if grounded:
         source_text = str(grounded.get("reply_text") or "").strip()
@@ -258,12 +284,16 @@ def build_safe_failure_candidate(
         ).strip("。！？!?")[:64]
         if current:
             base_text = f"你提到“{current}”。这句话我接到了，也不会替你把程度说重。"
-    return _express_safe_skeleton({
-        "reply_text": base_text,
-        "mentioned_event_ids": [],
-        "proposed_action_ids": [],
-        "claims": [],
-    }, relationship, affect, selected_stance, resolved_speech_act)
+    return _express_safe_skeleton(
+        {
+            "reply_text": base_text,
+            **grounded_provenance,
+        },
+        relationship,
+        affect,
+        selected_stance,
+        resolved_speech_act,
+    )
 
 
 _SAFE_SPEECH_ACT_SKELETONS = {
@@ -372,7 +402,9 @@ def _express_safe_skeleton(
     elif unresolved and hurt > 0 and speech_act not in {"source_recall", "epistemic"}:
         suffix = "我还没完全缓过来，所以会说得短一点；这不是在惩罚你。"
     elif stage in {"close_friend", "ambiguous", "lover"} and speech_act in {
-        "health_disclosure", "sleep_disclosure", "vulnerable_disclosure"
+        "health_disclosure",
+        "sleep_disclosure",
+        "vulnerable_disclosure",
     }:
         suffix = "我会在这儿陪你把眼前这段过掉。"
     return {**skeleton, "reply_text": " ".join(part for part in (base, suffix) if part)}
@@ -395,9 +427,7 @@ def asks_for_source_detail(user_text: str) -> bool:
 
 
 def asks_for_memory_recall(user_text: str) -> bool:
-    return bool(
-        re.search(r"(?:还记得|记得|之前|上次|以前|记录|说过|提过|刚才.*说)", user_text)
-    )
+    return bool(re.search(r"(?:还记得|记得|之前|上次|以前|记录|说过|提过|刚才.*说)", user_text))
 
 
 def conversation_fact_candidate(user_text: str) -> str | None:
@@ -411,8 +441,24 @@ def conversation_fact_candidate(user_text: str) -> str | None:
     ):
         return None
     high_signal = (
-        "因为", "所以", "项目", "工作", "赶工", "加班", "睡", "失眠", "熬夜",
-        "胃", "医院", "生病", "难过", "焦虑", "明天", "后天", "今晚", "计划",
+        "因为",
+        "所以",
+        "项目",
+        "工作",
+        "赶工",
+        "加班",
+        "睡",
+        "失眠",
+        "熬夜",
+        "胃",
+        "医院",
+        "生病",
+        "难过",
+        "焦虑",
+        "明天",
+        "后天",
+        "今晚",
+        "计划",
     )
     return text if any(marker in text for marker in high_signal) else None
 
@@ -433,9 +479,7 @@ def only_repeats_claimed_sources(user_text: str, candidate: dict[str, object]) -
     return bool(quoted) and reply_text in {"".join(quoted), "。".join(quoted)}
 
 
-def only_recites_irrelevant_sources(
-    user_text: str, candidate: dict[str, object]
-) -> bool:
+def only_recites_irrelevant_sources(user_text: str, candidate: dict[str, object]) -> bool:
     """Catch a grounded fact dump that does not answer the current speech act."""
     claims = candidate.get("claims")
     if not isinstance(claims, list) or not claims:
@@ -449,8 +493,18 @@ def only_recites_irrelevant_sources(
     if not reply or not claimed or len(claimed) / len(reply) < 0.65:
         return False
     speech_act_markers = (
-        "你觉得", "怎么看", "陪我", "吐槽", "担心", "害怕", "如果", "是不是",
-        "安慰", "别劝", "不用讲道理", "怎么告诉",
+        "你觉得",
+        "怎么看",
+        "陪我",
+        "吐槽",
+        "担心",
+        "害怕",
+        "如果",
+        "是不是",
+        "安慰",
+        "别劝",
+        "不用讲道理",
+        "怎么告诉",
     )
     if any(marker in user_text for marker in speech_act_markers):
         return True
@@ -500,8 +554,16 @@ def human_reply_contract_violation(
         for marker in ("别只劝", "别劝", "不用讲道理", "不要讲道理", "陪我吐槽", "先吐槽")
     )
     advice_markers = (
-        "你应该", "建议你", "你得", "不如先", "先休息", "早点休息",
-        "喝点温水", "缓一缓", "别硬撑", "慢慢处理",
+        "你应该",
+        "建议你",
+        "你得",
+        "不如先",
+        "先休息",
+        "早点休息",
+        "喝点温水",
+        "缓一缓",
+        "别硬撑",
+        "慢慢处理",
     )
     advice_allowed_stances = {"disagree_gently", "refuse_to_affirm", "care_override"}
     if (
@@ -513,14 +575,16 @@ def human_reply_contract_violation(
     if (
         asks_for_presence_not_advice
         and reply.endswith(("?", "？"))
-        and not any(marker in reply for marker in ("确实", "真够", "离谱", "烦", "窝火", "折磨", "不劝"))
+        and not any(
+            marker in reply for marker in ("确实", "真够", "离谱", "烦", "窝火", "折磨", "不劝")
+        )
     ):
         return "question_dodges_requested_shared_reaction"
 
-    vulnerable_now = (
-        any(marker in user_text for marker in ("担心", "害怕", "焦虑", "撑不住", "没人味", "没有人味", "不像人"))
-        and not any(marker in user_text for marker in ("胃", "咖啡", "睡", "休息"))
-    )
+    vulnerable_now = any(
+        marker in user_text
+        for marker in ("担心", "害怕", "焦虑", "撑不住", "没人味", "没有人味", "不像人")
+    ) and not any(marker in user_text for marker in ("胃", "咖啡", "睡", "休息"))
     if vulnerable_now and any(marker in reply for marker in ("胃", "咖啡", "先休息", "早点睡")):
         return "old_health_topic_hijacks_current_vulnerability"
 
@@ -528,9 +592,11 @@ def human_reply_contract_violation(
         normalized_user = _normalized_echo(user_text)
         normalized_reply = _normalized_echo(reply)
         if len(normalized_user) >= 12:
-            longest = SequenceMatcher(
-                None, normalized_user, normalized_reply, autojunk=False
-            ).find_longest_match().size
+            longest = (
+                SequenceMatcher(None, normalized_user, normalized_reply, autojunk=False)
+                .find_longest_match()
+                .size
+            )
             if longest >= 7 and longest / len(normalized_user) >= 0.4:
                 return "urgent_reply_restates_user_before_helping"
 
@@ -598,16 +664,12 @@ def human_reply_contract_violation(
         return "uncommitted_accumulated_personal_experience"
 
     if current_first_person_statement and isinstance(claims, list) and claims:
-        ignored = set(
-            "你我他她的是了在有还就也说觉得吗呢啊这那一个今天昨天刚才"
-        )
+        ignored = set("你我他她的是了在有还就也说觉得吗呢啊这那一个今天昨天刚才")
         current_chars = set(_normalized_echo(user_text)) - ignored
         for raw_claim in claims:
             if not isinstance(raw_claim, dict):
                 continue
-            claim_text = str(
-                raw_claim.get("assertion") or raw_claim.get("text") or ""
-            )
+            claim_text = str(raw_claim.get("assertion") or raw_claim.get("text") or "")
             claim_chars = set(_normalized_echo(claim_text)) - ignored
             if current_chars and not current_chars.intersection(claim_chars):
                 return "old_claim_is_unrelated_to_current_first_person_statement"
@@ -636,8 +698,10 @@ def human_reply_contract_violation(
         }
         normalized_reply = _normalized_echo(reply)
         opinion_markers = ("我觉得", "我认为", "在我看来", "不等于", "当然", "不是", "是的")
-        if source_texts and normalized_reply in source_texts and not any(
-            marker in reply for marker in opinion_markers
+        if (
+            source_texts
+            and normalized_reply in source_texts
+            and not any(marker in reply for marker in opinion_markers)
         ):
             return "opinion_question_answered_only_by_source_quote"
 
@@ -647,19 +711,27 @@ def human_reply_contract_violation(
     ):
         return "sleep_degree_escalated_beyond_user_statement"
 
-    if meta_agency_query and not has_grounded_claim and re.search(
-        r"(?:我感觉得到|我看得出来|这说明|因为).{0,10}你(?:也|其实|一直)?"
-        r"(?:很|挺)?(?:真诚|在乎|认真(?:在听)?)"
-        r"|你(?:对我)?(?:也|其实|一直)?(?:很|挺)?(?:真诚|在乎|认真(?:在听)?).{0,10}"
-        r"(?:我感觉得到|我看得出来)",
-        reply,
+    if (
+        meta_agency_query
+        and not has_grounded_claim
+        and re.search(
+            r"(?:我感觉得到|我看得出来|这说明|因为).{0,10}你(?:也|其实|一直)?"
+            r"(?:很|挺)?(?:真诚|在乎|认真(?:在听)?)"
+            r"|你(?:对我)?(?:也|其实|一直)?(?:很|挺)?(?:真诚|在乎|认真(?:在听)?).{0,10}"
+            r"(?:我感觉得到|我看得出来)",
+            reply,
+        )
     ):
         return "unsupported_user_sincerity_inference"
 
-    if meta_agency_query and not has_grounded_claim and re.search(
-        r"你(?:是不是)?[^。！？]{0,16}(?:被[^。！？]{0,8}(?:搞烦|敷衍)|"
-        r"区分得出来|分得出来|认真在听)",
-        reply,
+    if (
+        meta_agency_query
+        and not has_grounded_claim
+        and re.search(
+            r"你(?:是不是)?[^。！？]{0,16}(?:被[^。！？]{0,8}(?:搞烦|敷衍)|"
+            r"区分得出来|分得出来|认真在听)",
+            reply,
+        )
     ):
         return "unsupported_user_history_or_ability_inference"
 
@@ -672,11 +744,15 @@ def human_reply_contract_violation(
             for value in (relationship or {}).values()
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         ]
-        early_relationship = not numeric_relationship or sum(numeric_relationship) / len(numeric_relationship) < 60
+        early_relationship = (
+            not numeric_relationship or sum(numeric_relationship) / len(numeric_relationship) < 60
+        )
     premature_intimacy = ("宝宝", "宝贝", "老婆", "永远爱你", "只属于你", "离不开你")
     quoted_or_rejected_address = bool(
         re.search(r"(?:别|不要|不许)叫[^。！？]{0,6}(?:宝宝|宝贝|老婆|亲爱的)", reply)
-        or re.search(r"(?:宝宝|宝贝|老婆|亲爱的)[^。！？]{0,12}(?:没认|不认|只是你叫|是你先叫)", reply)
+        or re.search(
+            r"(?:宝宝|宝贝|老婆|亲爱的)[^。！？]{0,12}(?:没认|不认|只是你叫|是你先叫)", reply
+        )
     )
     if (
         early_relationship
@@ -701,8 +777,7 @@ def best_matching_grounded_source(
     """
     normalized_query = _normalized_echo(query)
     ignored = set(
-        "你我她他的是真的确实已经发生完成还是而不是计划这件事刚才"
-        "吗呢啊说怎么记得还提过问"
+        "你我她他的是真的确实已经发生完成还是而不是计划这件事刚才吗呢啊说怎么记得还提过问"
     )
     query_chars = set(normalized_query) - ignored
     ranked: list[tuple[int, float, int, dict[str, object]]] = []

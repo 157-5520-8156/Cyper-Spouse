@@ -15,6 +15,11 @@ from companion_daemon.world_v2.media_selection_proposal import (
     media_candidate_authority_hash,
     media_selection_proposed_change_hash,
 )
+from companion_daemon.world_v2.media_selection_attempt import (
+    MediaSelectionCandidateRevision,
+    MediaSelectionAttemptRecordedPayload,
+    media_selection_attempt_id,
+)
 from companion_daemon.world_v2.media_v2 import (
     MediaEvidenceSource,
     CharacterMediaCandidateContract,
@@ -32,7 +37,10 @@ WORLD = "world:media-selection-proposal"
 SOURCE = "event:source:media-selection"
 
 
-def _event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
+def _event(
+    event_id: str, event_type: str, payload: dict[str, object],
+    *, causation_id: str | None = None,
+) -> WorldEvent:
     identity = domain_idempotency_key(event_type=event_type, world_id=WORLD, payload=payload)
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
@@ -44,7 +52,7 @@ def _event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldE
         actor="worker:media-selection",
         source="test:media-selection",
         trace_id="trace:media-selection",
-        causation_id="cause:" + event_id,
+        causation_id=causation_id or "cause:" + event_id,
         correlation_id="correlation:media-selection",
         idempotency_key=identity or "identity:" + event_id,
         payload=payload,
@@ -133,6 +141,74 @@ def test_p1_selection_proposal_pins_one_available_candidate_and_its_event_bytes(
     assert reduced.proposal_ids == (proposal.proposal_id,)
     assert reduced.proposal_revisions[0].proposal_event_ref == "event:selection-proposal:1"
     assert reduced.proposal_revisions[0].selection_hash == proposal.selection_hash
+
+
+def test_media_selection_decline_is_a_deliberation_fact_for_current_candidates() -> None:
+    state = _opened_state()
+    candidate = state.photo_candidates[0]
+    draw_event_id = "event:random-draw:draw:test-decline"
+    state = state.model_copy(update={
+        "committed_world_event_refs": (
+            *state.committed_world_event_refs,
+            CommittedWorldEventRef(
+                event_id=draw_event_id, event_type="RandomDrawRecorded",
+                world_revision=len(state.committed_world_event_refs) + 1,
+                payload_hash="9" * 64, logical_time=NOW,
+            ),
+        )
+    })
+    candidates = (
+        MediaSelectionCandidateRevision(
+            candidate_id=candidate.candidate_id,
+            entity_revision=candidate.entity_revision,
+        ),
+    )
+    payload = MediaSelectionAttemptRecordedPayload(
+        attempt_id=media_selection_attempt_id(
+            world_id=WORLD, logical_time=NOW, candidates=candidates,
+        ),
+        candidates=candidates,
+        outcome="declined", model="test-flash",
+        raw_output_hash="sha256:" + "e" * 64,
+        normalized_output_hash="sha256:" + "f" * 64,
+    )
+
+    reduced = reduce_event(
+        state,
+        _event(
+            "event:media-selection-attempt:" + payload.attempt_id,
+            "MediaSelectionAttemptRecorded",
+            payload.model_dump(mode="json"),
+            causation_id=draw_event_id,
+        ),
+    )
+
+    assert reduced.photo_candidates == state.photo_candidates
+
+
+def test_media_selection_terminal_attempt_rejects_an_unbound_attempt_identity() -> None:
+    state = _opened_state()
+    candidate = state.photo_candidates[0]
+    payload = MediaSelectionAttemptRecordedPayload(
+        attempt_id="media-selection:" + "d" * 64,
+        candidates=(MediaSelectionCandidateRevision(
+            candidate_id=candidate.candidate_id,
+            entity_revision=candidate.entity_revision,
+        ),),
+        outcome="invalid", model="test-flash",
+        raw_output_hash="sha256:" + "e" * 64,
+        failure_code="media_selection.model_not_json",
+    )
+
+    with pytest.raises(ValueError, match="candidate set is not current"):
+        reduce_event(
+            state,
+            _event(
+                "event:media-selection-attempt:forged",
+                "MediaSelectionAttemptRecorded",
+                payload.model_dump(mode="json"),
+            ),
+        )
 
 
 def test_p1_selection_proposal_rejects_a_candidate_revision_replayed_after_selection() -> None:

@@ -8,7 +8,7 @@ import sqlite3
 from nacl.signing import SigningKey
 import pytest
 
-from legacy_migration_support import legacy_state_json
+from legacy_migration_support import legacy_state_json, read_head_state_json
 
 from companion_daemon.world_v2.actor_authority_events import (
     ROOT_KEYSET_DIGEST,
@@ -1217,11 +1217,7 @@ def test_sqlite_roundtrip_and_verified_v8_to_v9_migration(monkeypatch, tmp_path)
     assert reopened.rebuild() == expected
     reopened.close()
     with sqlite3.connect(path) as connection:
-        raw = json.loads(
-            connection.execute(
-                "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-            ).fetchone()[0]
-        )
+        raw = json.loads(read_head_state_json(connection, WORLD))
         raw["capability_grants"][0]["values"]["actor_ref"] = "companion:tampered"
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ? WHERE world_id = ?",
@@ -1255,9 +1251,7 @@ def test_sqlite_roundtrip_and_verified_v8_to_v9_migration(monkeypatch, tmp_path)
     old_expected = old.project()
     old.close()
     with sqlite3.connect(migration_path) as connection:
-        raw_state = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0]
+        raw_state = read_head_state_json(connection, WORLD)
         state = ReducerState.model_validate_json(raw_state)
         semantic = state.semantic_payload(
             world_id=WORLD,
@@ -1301,9 +1295,7 @@ def test_sqlite_rejects_tampered_v8_authorization_migration_head(tmp_path) -> No
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
     ledger.close()
     with sqlite3.connect(path) as connection:
-        raw_state = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0]
+        raw_state = read_head_state_json(connection, WORLD)
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?",
             (legacy_state_json(raw_state), "0" * 64, "world-v2-reducers.8"),

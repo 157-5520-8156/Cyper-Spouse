@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,6 +45,22 @@ class _FakeApplication:
     async def drain_background_once(self) -> str:
         self.calls.append(("background", None))
         return "affect-idle"
+
+    async def drain_media_preview_once(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(("media_preview", kwargs))
+        return {"status": "planned"}
+
+    async def drain_media_planning_once(self):  # type: ignore[no-untyped-def]
+        self.calls.append(("media_planning", None))
+        return SimpleNamespace(status="idle")
+
+    async def drain_media_results_once(self, *, logical_time: datetime):  # type: ignore[no-untyped-def]
+        self.calls.append(("media_results", logical_time))
+        return None
+
+    async def current_logical_time(self) -> datetime:
+        self.calls.append(("logical_time", None))
+        return NOW
 
     def close(self) -> None:
         self.closed = True
@@ -110,6 +127,9 @@ async def test_platform_host_drains_fake_transport_and_delegates_only_applicatio
     assert await host.drain_inbound_once(transport) is None
     assert await host.drain_actions_once() == "action-settled"
     assert await host.drain_background_once() == "affect-idle"
+    assert await host.drain_media_preview_once(
+        trace_id="trace:media-preview", correlation_id="correlation:media-preview",
+    ) == {"status": "planned"}
 
     operation, inbound = application.calls[0]
     assert operation == "inbound"
@@ -127,6 +147,245 @@ async def test_platform_host_drains_fake_transport_and_delegates_only_applicatio
         "inbound",
         "actions",
         "background",
+        "media_preview",
+    ]
+    assert application.calls[-1] == (
+        "media_preview",
+        {"trace_id": "trace:media-preview", "correlation_id": "correlation:media-preview"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_platform_scheduler_zero_budgets_do_not_enter_any_media_or_background_worker() -> None:
+    application = _FakeApplication()
+    host = WorldV2PlatformHost(application=application)  # type: ignore[arg-type]
+
+    result = await host.drain_scheduled_work(
+        max_action_units=0,
+        max_background_units=0,
+        media_preview_trace_id="trace:zero-budget",
+        media_preview_correlation_id="correlation:zero-budget",
+    )
+
+    assert result.action_units_used == 0
+    assert result.background_units_used == 0
+    assert result.action_statuses == ()
+    assert result.background_statuses == ()
+    assert application.calls == []
+
+
+@pytest.mark.asyncio
+async def test_platform_scheduler_zero_action_budget_allows_only_non_media_background() -> None:
+    class _BackgroundOnlyApplication(_FakeApplication):
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("background", None))
+            return SimpleNamespace(work_status="accepted")
+
+        async def drain_media_preview_once(self, **_kwargs: object):  # type: ignore[no-untyped-def]
+            raise AssertionError("zero action budget must not enter media preview")
+
+        async def drain_media_planning_once(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("zero action budget must not enter media planning")
+
+        async def drain_media_results_once(self, *, logical_time: datetime):  # type: ignore[no-untyped-def]
+            raise AssertionError(f"zero action budget materialized media at {logical_time}")
+
+    application = _BackgroundOnlyApplication()
+    host = WorldV2PlatformHost(application=application)  # type: ignore[arg-type]
+
+    result = await host.drain_scheduled_work(
+        max_action_units=0,
+        max_background_units=1,
+        media_preview_trace_id="trace:background-only",
+        media_preview_correlation_id="correlation:background-only",
+    )
+
+    assert result.action_units_used == 0
+    assert result.background_units_used == 1
+    assert result.background_statuses == ("accepted",)
+    assert result.background_statuses == ("accepted",)
+    assert application.calls == [("background", None)]
+
+
+@pytest.mark.asyncio
+async def test_platform_scheduler_shares_each_budget_across_all_worker_classes() -> None:
+    class _BudgetedApplication(_FakeApplication):
+        def __init__(self) -> None:
+            super().__init__()
+            self._actions = [SimpleNamespace(status="settled"), SimpleNamespace(status="idle")]
+            self._planning = [SimpleNamespace(status="planned")]
+
+        async def drain_actions_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("actions", None))
+            return self._actions.pop(0)
+
+        async def drain_media_preview_once(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            self.calls.append(("media_preview", kwargs))
+            return SimpleNamespace(
+                status="planned",
+                reason_code=None,
+                selection=SimpleNamespace(status="proposed"),
+                planning=SimpleNamespace(status="planned"),
+            )
+
+        async def drain_media_planning_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("media_planning", None))
+            return self._planning.pop(0)
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("background", None))
+            return SimpleNamespace(work_status="accepted")
+
+        async def drain_media_results_once(self, *, logical_time: datetime):  # type: ignore[no-untyped-def]
+            raise AssertionError(f"action budget was exceeded at {logical_time.isoformat()}")
+
+    application = _BudgetedApplication()
+    host = WorldV2PlatformHost(application=application)  # type: ignore[arg-type]
+
+    result = await host.drain_scheduled_work(
+        max_action_units=3,
+        max_background_units=2,
+        media_preview_trace_id="trace:shared-budget",
+        media_preview_correlation_id="correlation:shared-budget",
+    )
+
+    assert result.action_units_used == 3
+    assert result.background_units_used == 2
+    assert result.action_statuses == ("settled",)
+    assert result.background_statuses == (
+        "media-preview:planned",
+        "media-plan:planned",
+        "accepted",
+    )
+    assert [operation for operation, _ in application.calls] == [
+        "actions",
+        "actions",
+        "media_preview",
+        "media_planning",
+        "background",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_platform_scheduler_reserves_dispatch_capacity_for_action_authorized_by_background() -> None:
+    class _InitiativeApplication(_FakeApplication):
+        def __init__(self) -> None:
+            super().__init__()
+            self.background_ran = False
+            self.proactive_dispatched = False
+
+        async def drain_actions_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("actions", None))
+            if not self.background_ran:
+                return SimpleNamespace(status="unknown")
+            if not self.proactive_dispatched:
+                self.proactive_dispatched = True
+                return SimpleNamespace(status="delivered")
+            return SimpleNamespace(status="idle")
+
+        async def drain_media_preview_once(self, **_kwargs: object):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                status="blocked", reason_code="media_preview.conductor_unavailable",
+                selection=None, planning=None,
+            )
+
+        async def drain_media_planning_once(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(status="idle")
+
+        async def drain_media_continuation_once(self, **_kwargs: object):  # type: ignore[no-untyped-def]
+            return None
+
+        async def drain_media_results_once(self, *, logical_time: datetime):  # type: ignore[no-untyped-def]
+            del logical_time
+            return None
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("background", None))
+            self.background_ran = True
+            return SimpleNamespace(work_status="proactive:authorized")
+
+    application = _InitiativeApplication()
+    result = await WorldV2PlatformHost(
+        application=application  # type: ignore[arg-type]
+    ).drain_scheduled_work(
+        max_action_units=2,
+        max_background_units=1,
+        media_preview_trace_id="trace:initiative-reserve",
+        media_preview_correlation_id="correlation:initiative-reserve",
+    )
+
+    assert result.action_units_used == 2
+    assert result.action_statuses == ("unknown", "delivered")
+    assert application.proactive_dispatched is True
+
+
+@pytest.mark.asyncio
+async def test_platform_scheduler_does_not_charge_unavailable_preview_against_other_work() -> None:
+    class _UnavailablePreviewApplication(_FakeApplication):
+        async def drain_actions_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("actions", None))
+            return None
+
+        async def drain_media_preview_once(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            self.calls.append(("media_preview", kwargs))
+            return SimpleNamespace(
+                status="blocked",
+                reason_code="media_preview.conductor_unavailable",
+                selection=None,
+                planning=None,
+            )
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("background", None))
+            return SimpleNamespace(work_status="accepted")
+
+    application = _UnavailablePreviewApplication()
+    host = WorldV2PlatformHost(application=application)  # type: ignore[arg-type]
+
+    result = await host.drain_scheduled_work(
+        max_action_units=1,
+        max_background_units=1,
+        media_preview_trace_id="trace:unavailable-preview",
+        media_preview_correlation_id="correlation:unavailable-preview",
+    )
+
+    assert result.action_units_used == 0
+    assert result.background_units_used == 1
+
+
+@pytest.mark.asyncio
+async def test_platform_scheduler_advances_media_continuation_as_one_action_unit() -> None:
+    class _ContinuationApplication(_FakeApplication):
+        async def drain_actions_once(self):  # type: ignore[no-untyped-def]
+            return None
+
+        async def drain_media_preview_once(self, **_kwargs: object):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                status="blocked", reason_code="media_preview.conductor_unavailable",
+                selection=None, planning=None,
+            )
+
+        async def drain_media_continuation_once(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            self.calls.append(("media_continuation", kwargs))
+            return "action:media-render:test"
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            return None
+
+    application = _ContinuationApplication()
+    result = await WorldV2PlatformHost(
+        application=application  # type: ignore[arg-type]
+    ).drain_scheduled_work(
+        max_action_units=1, max_background_units=0,
+        media_preview_trace_id="trace:continuation",
+        media_preview_correlation_id="correlation:continuation",
+    )
+    assert result.action_units_used == 1
+    assert result.background_statuses == (
+        "media-continuation:action:media-render:test",
+    )
+    assert [item[0] for item in application.calls] == [
+        "media_planning", "logical_time", "media_continuation",
     ]
 
 
@@ -288,8 +547,9 @@ def test_platform_host_is_clean_application_adapter_without_legacy_or_ledger_imp
         "datetime",
         "schemas",
         "typing",
-        "production_turn_application",
-    }
+            "production_turn_application",
+            "production_latency_trace",
+        }
     source = path.read_text(encoding="utf-8")
     forbidden = (
         "companion_daemon.engine",

@@ -124,3 +124,32 @@ async def test_adapter_does_not_call_a_model_or_offer_a_fallback_when_catalog_is
     assert draft.decision == "no_op"
     assert draft.opening_token is None
     assert model.calls == []
+
+
+def test_worker_mood_summary_renders_only_active_accepted_feelings() -> None:
+    from types import SimpleNamespace
+
+    from companion_daemon.world_v2.activity_lifecycle_worker import _mood_summary
+
+    episodes = (
+        SimpleNamespace(
+            status="active",
+            components=(
+                SimpleNamespace(dimension="sadness", intensity_bp=6_500),
+                SimpleNamespace(dimension="loneliness", intensity_bp=2_500),
+                SimpleNamespace(dimension="joy", intensity_bp=1_000),  # below floor
+            ),
+        ),
+        SimpleNamespace(
+            status="resolved",
+            components=(SimpleNamespace(dimension="anger", intensity_bp=9_000),),
+        ),
+    )
+
+    summary = _mood_summary(episodes)
+
+    assert "低落(强)" in summary
+    assert "孤独(轻)" in summary
+    assert "生气" not in summary  # resolved episodes are not current feelings
+    assert "愉快" not in summary  # sub-threshold intensity stays out
+    assert _mood_summary(()) == ""

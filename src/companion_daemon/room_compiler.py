@@ -14,7 +14,7 @@ import shutil
 import tempfile
 from typing import Any
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageChops, ImageFilter
 
 
 class RoomCompileError(ValueError):
@@ -42,6 +42,7 @@ OCCUPANCY_KINDS = {"footprint", "wall", "none"}
 LAYER_ROLES = {"shadow", "back", "body", "front", "light"}
 ROLE_DEPTH_BIAS = {"shadow": -300, "back": -200, "body": 0, "front": 500, "light": 1000}
 LAYER_BLEND_MODES = {"source-over", "screen", "lighter", "multiply"}
+DIMENSION_KEYS = ("width", "depth", "height")
 
 
 def _legacy_layer_specs(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -115,10 +116,49 @@ def _normalize_objects(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             },
             "audit": source["audit"],
             "auditPose": source.get("auditPose", {}),
+            "dimensions": source.get("dimensions"),
         })
     if errors:
         raise RoomCompileError(errors)
     return normalized
+
+
+def _validate_orthographic_asset_contract(manifest: dict[str, Any]) -> None:
+    """Validate the source-of-truth geometry used by generated tile assets."""
+
+    errors: list[str] = []
+    projection = manifest.get("projection")
+    if not isinstance(projection, dict):
+        errors.append("room must define an orthographic projection")
+    else:
+        camera = projection.get("camera", {})
+        if camera.get("projection") != "orthographic":
+            errors.append("room projection camera must be orthographic")
+        axes = projection.get("screenAxes", {})
+        expected_axes = {
+            "x": [manifest["tile"]["width"], manifest["tile"]["height"]],
+            "y": [-manifest["tile"]["width"], manifest["tile"]["height"]],
+            "z": [0, -manifest["tile"]["height"] * 2],
+        }
+        if axes != expected_axes:
+            errors.append("room projection screenAxes must match the declared tile geometry")
+        asset_kit = projection.get("assetKit")
+        if not isinstance(asset_kit, str) or not _source_path(Path(manifest["_manifestDir"]), asset_kit).is_file():
+            errors.append("room projection assetKit does not exist")
+
+    for item in manifest["objects"]:
+        if item.get("category", "furniture") != "furniture":
+            continue
+        dimensions = item.get("dimensions")
+        if not isinstance(dimensions, dict):
+            errors.append(f"furniture object {item['id']!r} must define width/depth/height")
+            continue
+        for name in DIMENSION_KEYS:
+            value = dimensions.get(name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+                errors.append(f"furniture object {item['id']!r} has invalid {name} dimension")
+    if errors:
+        raise RoomCompileError(errors)
 
 
 def _image_key(object_id: str, role: str, index: int) -> str:
@@ -251,13 +291,66 @@ def _resolve_layer_source(
     if "source" in spec:
         path = _source_path(manifest_dir, spec["source"])
         image = Image.open(path).convert("RGBA")
-        image = _normalize_independent_source(image, spec.get("sourceTransform"))
+        transform = spec.get("sourceTransform")
+        image = _normalize_independent_source(image, transform)
+        if alpha_mask := (transform or {}).get("alphaMask"):
+            image = _apply_alpha_mask(image, manifest_dir, alpha_mask)
         return LayerSource("independent", path, image)
     path = _source_path(manifest_dir, spec["matte"])
     image = Image.open(path).convert("RGBA")
     if crop := spec.get("matteCrop"):
         image = image.crop(tuple(crop))
     return LayerSource("master-matte", path, image)
+
+
+def _apply_alpha_mask(
+    image: Image.Image, manifest_dir: Path, spec: object
+) -> Image.Image:
+    """Apply an independently-generated alpha silhouette to source RGB pixels."""
+
+    if not isinstance(spec, dict) or not isinstance(spec.get("source"), str):
+        raise RoomCompileError(["sourceTransform alphaMask must define a source"])
+    origin = spec.get("origin")
+    if (
+        not isinstance(origin, list)
+        or len(origin) != 2
+        or any(not isinstance(value, int) for value in origin)
+    ):
+        raise RoomCompileError(["sourceTransform alphaMask origin must contain two integers"])
+    mask_path = _source_path(manifest_dir, spec["source"])
+    if not mask_path.is_file():
+        raise RoomCompileError(["sourceTransform alphaMask source does not exist"])
+    mask_image = Image.open(mask_path).convert("RGBA")
+    mask_image = _normalize_independent_source(mask_image, spec.get("sourceTransform"))
+    exclusions = spec.get("excludeRects", [])
+    if not isinstance(exclusions, list):
+        raise RoomCompileError(["sourceTransform alphaMask excludeRects must be a list"])
+    mask_alpha = mask_image.getchannel("A")
+    for rect in exclusions:
+        if (
+            not isinstance(rect, list)
+            or len(rect) != 4
+            or any(not isinstance(value, int) for value in rect)
+        ):
+            raise RoomCompileError([
+                "sourceTransform alphaMask excludeRects entries must contain four integers"
+            ])
+        left_rect, top_rect, right_rect, bottom_rect = rect
+        if not (
+            0 <= left_rect < right_rect <= mask_image.width
+            and 0 <= top_rect < bottom_rect <= mask_image.height
+        ):
+            raise RoomCompileError([
+                "sourceTransform alphaMask excludeRect exceeds its source mask"
+            ])
+        mask_alpha.paste(0, tuple(rect))
+    left, top = origin
+    if left < 0 or top < 0 or left + mask_image.width > image.width or top + mask_image.height > image.height:
+        raise RoomCompileError(["sourceTransform alphaMask exceeds its source layer"])
+    mask = Image.new("L", image.size)
+    mask.paste(mask_alpha, tuple(origin))
+    image.putalpha(ImageChops.multiply(image.getchannel("A"), mask))
+    return image
 
 
 def _source_layer(
@@ -317,8 +410,47 @@ def _validate_layers(
                 errors.append(
                     f"{role} {spec['output']!r} exceeds the visual master bounds"
                 )
+            calibration = spec.get("calibration")
+            if calibration:
+                errors.extend(_calibration_errors(layer, spec, calibration))
     if errors:
         raise RoomCompileError(errors)
+
+
+def _calibration_errors(
+    layer: Image.Image, spec: dict[str, Any], calibration: object
+) -> list[str]:
+    """Validate a declared source-pixel layer against master-coordinate bounds."""
+
+    output = spec["output"]
+    if not isinstance(calibration, dict):
+        return [f"layer {output!r} calibration must be an object"]
+    bounds = calibration.get("referenceBounds")
+    if (
+        not isinstance(bounds, list)
+        or len(bounds) != 4
+        or any(not isinstance(value, int) for value in bounds)
+        or bounds[0] >= bounds[2]
+        or bounds[1] >= bounds[3]
+    ):
+        return [f"layer {output!r} calibration referenceBounds must be four ordered integers"]
+    maximum = calibration.get("maxDrift", 0)
+    if not isinstance(maximum, (int, float)) or isinstance(maximum, bool) or maximum < 0:
+        return [f"layer {output!r} calibration maxDrift must be non-negative"]
+    alpha_bounds = layer.getchannel("A").getbbox()
+    if alpha_bounds is None:
+        return [f"layer {output!r} calibration source has no visible pixels"]
+    left, top = spec["origin"]
+    actual = [
+        left + alpha_bounds[0], top + alpha_bounds[1],
+        left + alpha_bounds[2], top + alpha_bounds[3],
+    ]
+    if any(abs(actual_value - expected) > maximum for actual_value, expected in zip(actual, bounds)):
+        return [
+            f"layer {output!r} referenceBounds drift: actual {actual} "
+            f"!= expected {bounds} (maxDrift {maximum})"
+        ]
+    return []
 
 
 def _validate_identity(objects: list[dict[str, Any]]) -> None:
@@ -460,6 +592,17 @@ def _validate_sources_and_grid(
         image_spec = image_specs.get(pose["image"])
         if image_spec is None:
             errors.append(f"pose {name!r} references an unknown image")
+            continue
+        if "walkFrame" in pose:
+            frame = pose["walkFrame"]
+            if pose["image"] != sprite_specs["walk"]["image"]:
+                errors.append(f"pose {name!r} walkFrame must use the walk sprite image")
+            elif (
+                not isinstance(frame, int)
+                or isinstance(frame, bool)
+                or not 0 <= frame < sprite_specs["walk"]["frames"]
+            ):
+                errors.append(f"pose {name!r} walkFrame is outside the walk sprite frames")
             continue
         image_path = _source_path(manifest_dir, image_spec["source"])
         if not image_path.is_file():
@@ -649,6 +792,8 @@ def _emit_runtime(
                 "audit": source_object.get("audit", {}),
                 "auditPose": source_object.get("auditPose", {}),
             }
+            if dimensions := source_object.get("dimensions"):
+                runtime_object["dimensions"] = dimensions
             if attached_to := source_object.get("attachedTo"):
                 runtime_object["attachedTo"] = attached_to
             for index, source_layer in enumerate(source_object["layers"]):
@@ -696,6 +841,7 @@ def _emit_runtime(
         "canvas": manifest["canvas"],
         "grid": manifest["grid"],
         "tile": manifest["tile"],
+        "projection": manifest["projection"],
         "images": runtime_images,
         "sprites": manifest["sprites"],
         "movement": manifest["movement"],
@@ -746,6 +892,7 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
     output_dir = Path(output_dir).resolve()
     manifest = json.loads(manifest_path.read_text())
     manifest_dir = manifest_path.parent
+    manifest["_manifestDir"] = str(manifest_dir)
 
     manifest = {**manifest, "objects": _normalize_objects(manifest)}
     if art_draft := manifest.get("artDraft"):
@@ -754,6 +901,7 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
         )
         manifest = {**manifest, "_draftObjects": draft_objects}
     _validate_identity(manifest["objects"])
+    _validate_orthographic_asset_contract(manifest)
     _validate_attachments(manifest["objects"])
     if manifest.get("_draftObjects"):
         _validate_identity(manifest["_draftObjects"])

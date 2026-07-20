@@ -24,6 +24,7 @@ from .proposal_envelope import (
     ProposalInput,
     validate_proposal_envelope,
 )
+from .route_hints import RouteHints, derive_route_hints
 
 
 MAX_MODEL_OUTPUT_BYTES = 512_000
@@ -115,13 +116,20 @@ def _checked_output(value: object) -> ModelOutput:
 
     if isinstance(value, ModelOutput):
         raw = getattr(value, "raw_proposal", None)
+        usage = getattr(value, "usage", None)
         material: object = {
             "model_id": getattr(value, "model_id", None),
             "model_version": getattr(value, "model_version", None),
             "raw_proposal": raw,
             "input_tokens": getattr(value, "input_tokens", None),
             "output_tokens": getattr(value, "output_tokens", None),
-            "usage": getattr(value, "usage", None),
+            # A validated provenance model is still untrusted adapter output at
+            # this boundary.  Convert it to bounded primitives before the
+            # hostile-shape walk; otherwise every metered production response
+            # is rejected merely because it contains a Pydantic object.
+            "usage": usage.model_dump(mode="python")
+            if isinstance(usage, ModelUsageProvenance)
+            else usage,
         }
     else:
         material = value
@@ -153,6 +161,16 @@ class RouteRequest(_FrozenModel):
     capsule_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     trigger_ref: str = Field(min_length=1, max_length=256)
     model_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    route_hints: RouteHints = Field(default_factory=RouteHints)
+
+    @model_validator(mode="after")
+    def hints_belong_to_capsule(self) -> RouteRequest:
+        if (
+            self.route_hints.source_capsule_id is not None
+            and self.route_hints.source_capsule_id != self.capsule_id
+        ):
+            raise ValueError("route hints do not belong to the requested capsule")
+        return self
 
 
 class TriggerMessage(_FrozenModel):
@@ -172,7 +190,25 @@ class TriggerMessage(_FrozenModel):
     actor: str = Field(min_length=1, max_length=256)
     channel: str = Field(min_length=1, max_length=256)
     reply_target: str = Field(min_length=1, max_length=256)
-    text: str = Field(min_length=1, max_length=12_000)
+    # Provider identity is derived from the committed Observation and is used
+    # only to bind operations such as reacting to that exact inbound message.
+    # A model can choose a reaction token but cannot choose or redirect this ID.
+    platform_message_id: str | None = Field(default=None, min_length=1, max_length=256)
+    text: str | None = Field(default=None, min_length=1, max_length=12_000)
+    attachment_refs: tuple[str, ...] = Field(default=(), max_length=16)
+    attachment_media_types: tuple[
+        Literal["image", "audio", "video", "file", "unknown"], ...
+    ] = Field(default=(), max_length=16)
+
+    @model_validator(mode="after")
+    def bounded_content_shape(self) -> TriggerMessage:
+        if self.text is None and not self.attachment_refs:
+            raise ValueError("trigger message needs text or attachment evidence")
+        if len(self.attachment_refs) != len(self.attachment_media_types):
+            raise ValueError("attachment media metadata does not align with opaque refs")
+        if any(not item or len(item) > 512 for item in self.attachment_refs):
+            raise ValueError("attachment refs must be bounded opaque tokens")
+        return self
 
 
 class ModelInput(_FrozenModel):
@@ -394,9 +430,15 @@ class Deliberation:
         router: ModelRouterAdapter,
         main_model: DeliberationModelAdapter,
         quick_recovery: QuickRecoveryAdapter,
-        main_timeout_seconds: float = 8.0,
-        quick_timeout_seconds: float = 3.0,
+        # Interactive expression is deliberately latency-bounded.  A slow
+        # provider must not hold a human conversation open while the host
+        # still retains the full audit/recovery path.  Six seconds leaves
+        # room for normal JSON generation; recovery gets a separate compact
+        # two-and-a-half-second budget.
+        main_timeout_seconds: float = 6.0,
+        quick_timeout_seconds: float = 2.5,
         proposal_grammar: ProposalGrammar | None = None,
+        recovery_mode: Literal["minimal_only", "proposal_grammar"] = "minimal_only",
     ) -> None:
         if not 0 < main_timeout_seconds <= 120:
             raise ValueError("main model timeout is out of bounds")
@@ -408,6 +450,7 @@ class Deliberation:
         self._main_timeout = main_timeout_seconds
         self._quick_timeout = quick_timeout_seconds
         self._proposal_grammar = proposal_grammar
+        self._recovery_mode = recovery_mode
         self._provider_tasks: set[asyncio.Task[object]] = set()
         self._quick_provider_tasks: set[asyncio.Task[object]] = set()
 
@@ -458,11 +501,13 @@ class Deliberation:
             ):
                 raise ValueError("trigger message is not bound to observed-message evidence")
         content_hash = _digest(json.loads(trusted.model_content_json))
+        route_hints = derive_route_hints(capsule_handle)
         route = await self._route(
             RouteRequest(
                 capsule_id=trusted.capsule_id,
                 trigger_ref=trusted.trigger_ref,
                 model_content_hash=content_hash,
+                route_hints=route_hints,
             )
         )
         call_identity = {
@@ -503,12 +548,26 @@ class Deliberation:
         except TimeoutError:
             failure_code = "main_timeout"
             recovered_status = "main_timeout_recovered"
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
             failure_code = "main_invalid_output"
             recovered_status = "main_invalid_recovered"
-        except Exception:
+            _LOG.warning(
+                "deliberation main attempt invalid call=%s trigger=%s error=%s: %s",
+                call_id,
+                trusted.trigger_ref,
+                type(exc).__name__,
+                str(exc)[:500],
+            )
+        except Exception as exc:
             failure_code = "main_exception"
             recovered_status = "main_exception_recovered"
+            _LOG.warning(
+                "deliberation main attempt raised call=%s trigger=%s error=%s: %s",
+                call_id,
+                trusted.trigger_ref,
+                type(exc).__name__,
+                str(exc)[:500],
+            )
 
         if recovered_status is not None:
             main_status: AuditStatus = {
@@ -541,17 +600,31 @@ class Deliberation:
                 proposal = self._validated_proposal(
                     quick_output,
                     trusted,
-                    minimal_only=True,
+                    minimal_only=self._recovery_mode == "minimal_only",
                     trigger_evidence=trigger_evidence,
                 )
                 proposal = self._bind_minimal_model_result(proposal, quick_call_id, quick_output)
                 status = recovered_status
             except TimeoutError:
                 quick_failure = "quick_timeout"
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as exc:
                 quick_failure = "quick_invalid_output"
-            except Exception:
+                _LOG.warning(
+                    "deliberation quick recovery invalid call=%s trigger=%s error=%s: %s",
+                    quick_call_id,
+                    trusted.trigger_ref,
+                    type(exc).__name__,
+                    str(exc)[:500],
+                )
+            except Exception as exc:
                 quick_failure = "quick_exception"
+                _LOG.warning(
+                    "deliberation quick recovery raised call=%s trigger=%s error=%s: %s",
+                    quick_call_id,
+                    trusted.trigger_ref,
+                    type(exc).__name__,
+                    str(exc)[:500],
+                )
             else:
                 final_audit = self._audit(
                     model_call_id=quick_call_id,
@@ -598,6 +671,31 @@ class Deliberation:
             proposal=proposal,
             audit=final_audit,
             attempt_audits=(final_audit,),
+        )
+
+    def main_has_precomputed_advisory(
+        self,
+        *,
+        trigger_ref: str,
+        observation_ref: str,
+        event_payload_hash: str,
+    ) -> bool:
+        """Report whether main already incorporated this trigger's advice.
+
+        This is a read-only performance hint, never proposal or acceptance
+        authority.  Adapters without a paired prepass simply return False.
+        """
+
+        checker = getattr(self._main, "has_precomputed_semantic_advisory", None)
+        if not callable(checker):
+            checker = getattr(self._main, "has_precomputed_advisory", None)
+        return bool(
+            callable(checker)
+            and checker(
+                trigger_ref=trigger_ref,
+                observation_ref=observation_ref,
+                event_payload_hash=event_payload_hash,
+            )
         )
 
     async def _route(self, request: RouteRequest) -> ModelRoute:

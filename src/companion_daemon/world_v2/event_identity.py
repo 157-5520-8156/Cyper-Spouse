@@ -10,6 +10,10 @@ from .schemas import WorldEvent
 from .typed_proposal_families import family_for_mutation, family_for_record
 from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .affect_acceptance_manifest import AFFECT_ACCEPTANCE_MANIFEST_VERSION
+from .relationship_acceptance_manifest import RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
+from .relationship_adjustment_acceptance_manifest import (
+    RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
+)
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .expression_plan_manifest import EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
@@ -17,6 +21,10 @@ from .interaction_bid_acceptance_manifest import INTERACTION_BID_ACCEPTANCE_MANI
 from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
 from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
 from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
+from .media_continuation_acceptance_manifest import (
+    MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+)
+from .social_action_acceptance import SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
 
 
 def domain_idempotency_key(
@@ -64,12 +72,16 @@ def _life_identity_components(
             MINIMAL_REPLY_MANIFEST_VERSION,
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+            MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
+            SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -89,6 +101,23 @@ def _life_identity_components(
         )
     if event_type == "NpcRegistered":
         return world_id, _nested(payload, "npc", "npc_id")
+    if event_type == "AspirationPlanted":
+        return (
+            world_id,
+            _nested(payload, "aspiration", "aspiration_id"),
+            payload.get("transition_id"),
+        )
+    if event_type in {
+        "AspirationReinforced",
+        "AspirationFaded",
+        "AspirationCrystallized",
+    }:
+        return (
+            world_id,
+            payload.get("aspiration_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
     if event_type == "PhotoCandidateOpened":
         return world_id, _nested(payload, "candidate", "candidate_id")
     if event_type == "PhotoCandidateUnrenderable":
@@ -107,6 +136,12 @@ def _life_identity_components(
         )
     if event_type == "ImageEvidenceDeclared":
         return world_id, payload.get("source_event_ref"), payload.get("source_event_payload_hash")
+    if event_type == "VisualFactRecorded":
+        return (
+            world_id,
+            payload.get("visual_fact_id"),
+            payload.get("content_payload_hash"),
+        )
     if event_type == "AppearanceStateRecorded":
         return (
             world_id,
@@ -121,6 +156,17 @@ def _life_identity_components(
         )
     if event_type == "RandomDrawRecorded":
         return world_id, payload.get("draw_id")
+    if event_type == "AdvisoryAcceptanceRejected":
+        return (
+            world_id,
+            payload.get("proposal_id"),
+            payload.get("stage"),
+            payload.get("failure_fingerprint"),
+        )
+    if event_type == "LifeAuthorDecisionRecorded":
+        return world_id, payload.get("decision_id")
+    if event_type == "MediaSelectionAttemptRecorded":
+        return world_id, payload.get("attempt_id")
     if event_type == "MediaSelectionProposalRecorded":
         return world_id, payload.get("proposal_id")
     if event_type == "MediaOpportunityFrozen":
@@ -237,11 +283,21 @@ def _life_identity_components(
         and payload.get("audit_contract") == "proposal-envelope-audit.1"
     ):
         return world_id, payload.get("trigger_ref"), payload.get("proposal_id")
+    if (
+        event_type == "ProposalRecorded"
+        and payload.get("proposal_kind") == "continuation"
+    ):
+        return world_id, payload.get("trigger_ref"), payload.get("proposal_id")
     if event_type == "FactCommitProposalRecorded":
         return world_id, payload.get("proposal_id"), payload.get("proposal_hash")
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == "acceptance-manifest.2"
+    ):
+        return world_id, payload.get("manifest_version"), payload.get("acceptance_id")
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION
     ):
         return world_id, payload.get("manifest_version"), payload.get("acceptance_id")
     if (
@@ -276,6 +332,16 @@ def _life_identity_components(
         )
     if (
         event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
     ):
         return (
@@ -287,6 +353,27 @@ def _life_identity_components(
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version")
+        == RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION
     ):
         return (
             world_id,
@@ -352,12 +439,28 @@ def _life_identity_components(
             payload.get("receipt_id"),
             payload.get("terminal_action_state"),
         )
+    if event_type == "ExpressionBeatTerminated":
+        return (
+            world_id,
+            payload.get("beat_id"),
+            payload.get("action_id"),
+            payload.get("disposition"),
+            payload.get("source_event_ref"),
+        )
     if event_type == "ExpressionPlanCompleted":
         return (
             world_id,
             payload.get("plan_id"),
             payload.get("receipt_id"),
             payload.get("terminal_beat_id"),
+        )
+    if event_type == "ExpressionPlanTerminated":
+        return (
+            world_id,
+            payload.get("plan_id"),
+            payload.get("terminal_beat_id"),
+            payload.get("disposition"),
+            payload.get("source_event_ref"),
         )
     if event_type == "FactCommittedV2":
         return (
@@ -422,14 +525,20 @@ def _life_identity_components(
         if isinstance(process, dict) and process.get("process_kind") in {
             "npc_world_appraisal",
             "interaction_appraisal",
+            "silence_appraisal",
+            "plan_disruption_appraisal",
             "interaction_fact",
+            "private_impression_deliberation",
             "affect_deliberation",
             "relationship_deliberation",
+            "relationship_adjustment",
             "outcome_deliberation",
             "media_delivery_interaction",
             "expression_reconsideration",
             "external_result_deliberation",
             "life_ecology",
+            "social_action_deliberation",
+            "memory_candidate_review",
         }:
             attempts = process.get("attempt_ids")
             attempt_id = attempts[-1] if isinstance(attempts, list) and attempts else None

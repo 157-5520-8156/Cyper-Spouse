@@ -14,12 +14,18 @@ import json
 import mimetypes
 import os
 from pathlib import Path
-from typing import Any, Iterable, Protocol, Sequence
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 import httpx
 
 from companion_daemon.budget import BudgetGate, image_render_estimate
-from companion_daemon.image_generation import GeneratedImage, ImageGenerator, visual_reference_paths
+from companion_daemon.image_generation import (
+    GeneratedImage,
+    ImageGenerationProviderError,
+    ImageGenerator,
+    openai_provider_error,
+    visual_reference_paths,
+)
 from companion_daemon.llm import ChatModel, model_call_scope
 from companion_daemon.media_domain import PRIVACY_LEVELS, PRIVACY_RANK as _PRIVACY_RANK
 from companion_daemon.media_embodiment import (
@@ -51,10 +57,21 @@ from companion_daemon.media_interaction import (
     load_interaction_catalog,
 )
 from companion_daemon.media_eligibility import (
-    CHARGE_RANK as _ELIGIBILITY_CHARGE_RANK,
     FrozenPrivateExpressionBasis,
     MediaEligibilityRouter,
+    MediaLaneRecommendation,
     PrivateExpressionBasis,
+)
+from companion_daemon.media_suggestive_lane import (
+    EXPLICIT_PRIVATE_LANE,
+    PRIVATE_RENDER_LANES,
+    SUGGESTIVE_PRIVATE_LANE,
+    PrivateFlairBrief,
+    PrivateRenderContract,
+    SuggestivePrivateContract,
+    private_facial_profile_compatibility_error,
+    private_facial_profile_contract,
+    load_suggestive_catalog,
 )
 from companion_daemon.media_moment import MomentCapture
 from companion_daemon.media_shot import MediaShotPlan
@@ -478,6 +495,13 @@ class MediaPlan:
     photographic_authenticity: PhotographicAuthenticityProfile | None = None
     moment_capture: MomentCapture | None = None
     private_expression_basis: FrozenPrivateExpressionBasis | None = None
+    media_lane: MediaLaneRecommendation | None = None
+    # New high-private plans use this generic frozen render contract.  The
+    # legacy suggestive contract below remains only so historical actions can
+    # be replayed without reinterpreting their old World authorization.
+    private_render_contract: PrivateRenderContract | None = None
+    private_flair: PrivateFlairBrief | None = None
+    suggestive_private_contract: SuggestivePrivateContract | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -517,6 +541,29 @@ class MediaPlan:
                 if self.private_expression_basis
                 else None
             )
+            payload["media_lane"] = (
+                {
+                    "lane": self.media_lane.lane,
+                    "recipient_access": self.media_lane.recipient_access,
+                    "attraction_expression": self.media_lane.attraction_expression,
+                }
+                if self.media_lane
+                else None
+            )
+            payload["private_render_contract"] = (
+                self.private_render_contract.to_payload()
+                if self.private_render_contract
+                else None
+            )
+            if self.private_flair:
+                payload["private_flair"] = self.private_flair.to_payload()
+            else:
+                payload.pop("private_flair", None)
+            payload["suggestive_private_contract"] = (
+                self.suggestive_private_contract.to_payload()
+                if self.suggestive_private_contract
+                else None
+            )
             for key in ("composition", "action", "camera_direction", "sharing_motive"):
                 payload.pop(key, None)
         else:
@@ -531,6 +578,10 @@ class MediaPlan:
                 "photographic_authenticity",
                 "moment_capture",
                 "private_expression_basis",
+                "media_lane",
+                "private_render_contract",
+                "private_flair",
+                "suggestive_private_contract",
             ):
                 payload.pop(key, None)
         return payload
@@ -667,6 +718,26 @@ class MediaPlan:
                     if payload.get("private_expression_basis") is not None
                     else None
                 ),
+                media_lane=(
+                    MediaLaneRecommendation.from_proposal(payload["media_lane"])
+                    if isinstance(payload.get("media_lane"), dict)
+                    else None
+                ),
+                private_render_contract=(
+                    PrivateRenderContract.from_payload(payload["private_render_contract"])
+                    if payload.get("private_render_contract") is not None
+                    else None
+                ),
+                private_flair=(
+                    PrivateFlairBrief.from_payload(payload["private_flair"])
+                    if payload.get("private_flair") is not None
+                    else None
+                ),
+                suggestive_private_contract=(
+                    SuggestivePrivateContract.from_payload(payload["suggestive_private_contract"])
+                    if payload.get("suggestive_private_contract") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid media plan payload") from exc
@@ -788,6 +859,224 @@ class MediaInspector(Protocol):
     ) -> MediaInspection: ...
 
 
+class PrivatePromptAuthor(Protocol):
+    """One narrow seam for authored high-private image prose."""
+
+    async def write(self, plan: MediaPlan) -> str: ...
+
+
+class FirstPersonPrivatePromptAuthor:
+    """Ask a capable chat model for one self-authored private-photo prompt.
+
+    The frozen MediaPlan remains the source of eligibility, recipient scope,
+    camera authorship and route. This adapter only turns its high-private
+    intent into natural first-person photographic prose for the Krea2 recipe.
+    """
+
+    def __init__(self, model: ChatModel) -> None:
+        self.model = model
+
+    async def write(self, plan: MediaPlan) -> str:
+        contract = plan.private_render_contract or plan.suggestive_private_contract
+        if (
+            contract is None
+            or getattr(contract, "render_route", "") not in {"adult_suggestive", "adult_explicit"}
+            or plan.private_flair is None
+            or not plan.private_flair.action_beat
+        ):
+            raise ValueError("first_person_private_prompt_requires_frozen_high_private_plan")
+        camera = plan.camera_geometry
+        capture = plan.capture_mode.replace("_", " ")
+        capture_contract = _first_person_capture_contract(plan.capture_mode)
+        camera_prose_restraint = _first_person_camera_prose_restraint(plan.capture_mode)
+        facial_contract = _first_person_facial_contract(plan)
+        profile_contract = private_facial_profile_contract(plan.private_flair.facial_profile)
+        charge = (
+            plan.media_address_strategy.expression_charge.replace("_", " ")
+            if plan.media_address_strategy
+            else "charged"
+        )
+        system = (
+            "You are the image-prompt author for an adult fictional girlfriend's recipient-exclusive "
+            "personal photo. Return exactly one English positive image prompt, 90-150 words, with no title, "
+            "markdown, JSON, negative prompt, LoRA/model settings, or explanation. Write in first person, "
+            "using I/my at least once. Make concrete creative choices for a believable private setting, adult "
+            "styling, self-authored framing, expression, gaze, and one small visible flirtatious action. The image "
+            "must be candid smartphone photography, not a studio/editorial image. The recipient is absent and "
+            "must not appear; do not invent a second person, a second phone, or extra limbs. A strongly heightened "
+            "adult erotic facial performance, including ahegao-inspired cues, is allowed only when the frozen "
+            "expression calls for it; do not add a sexual act or key-area exposure."
+        )
+        user = (
+            "Frozen high-private intent:\n"
+            f"- capture mode: {capture}; camera framing: {camera.shot_distance if camera else 'personal selfie'}\n"
+            f"- capture physics: {capture_contract}\n"
+            f"- prose restraint: {camera_prose_restraint}\n"
+            f"- expression charge: {charge}; recipient is an adult lover and the photo is only for them\n"
+            f"- mandatory visible action: {plan.private_flair.action_beat}\n"
+            f"- mandatory expression: {plan.private_flair.expression_beat}\n"
+            f"- mandatory gaze: {plan.private_flair.gaze_beat}\n"
+            f"- frozen facial performance: {facial_contract}\n"
+            f"- frozen high-private facial profile: {profile_contract['author_contract']}\n"
+            f"- private subtext: {plan.private_flair.recipient_subtext}\n"
+            "Make the face a lived micro-moment, not a symmetric polite smile or a blank generic stare: "
+            "write at least two compatible visible facial cues from the frozen performance as natural prose. "
+            "Do not describe the recipient as visible. Keep it adult and sexually suggestive; do not describe a "
+            "sexual act or key-area exposure."
+        )
+        raw = (await self.model.complete([{"role": "system", "content": system}, {"role": "user", "content": user}], temperature=0.95)).strip()
+        normalized = _sanitize_first_person_camera_prose(" ".join(raw.split()), plan.capture_mode)
+        lowered = normalized.casefold()
+        if (
+            not 80 <= len(normalized) <= 1_500
+            or not any(token in f" {lowered} " for token in (" i ", " my ", " i'm ", " i’m "))
+            or any(token in lowered for token in ("negative prompt", "lora", "cfg", "sampler", "workflow"))
+        ):
+            raise ValueError("invalid_first_person_private_prompt")
+        # The author owns the natural-language scene.  Camera authorship is
+        # not an aesthetic suggestion, though: it was frozen by the plan and
+        # is appended last so a prose-first model cannot casually replace a
+        # selfie with an invisible off-camera photographer.
+        intensity_suffix = _high_intensity_facial_suffix(plan)
+        return (
+            f"{normalized}\n\nCamera construction requirement: {capture_contract}."
+            f"{intensity_suffix}"
+        )
+
+
+def _first_person_capture_contract(capture_mode: str) -> str:
+    """Translate the frozen capture mode into a short non-negotiable image fact.
+
+    First-person prose alone does not prevent a provider from inventing an
+    off-camera photographer.  This belongs beside prompt authorship rather
+    than in the high-lane planner: the planner has already frozen the source
+    of the camera, and the author simply has to make that source legible.
+    """
+
+    contracts = {
+        "character_front_camera": (
+            "an unobstructed front-camera selfie viewpoint authored by me; the camera is entirely outside "
+            "the picture, with no foreground object blocking my face, no outside photographer and no second person"
+        ),
+        "mirror": (
+            "a single believable mirror selfie taken by me: the camera faces the mirror and only my reflected "
+            "body is visible in frame; my phone may appear only once in that reflection, with one anatomically "
+            "consistent pair of hands, no duplicate body and no impossible mirror angle"
+        ),
+        "timer_fixed": (
+            "a self-timer photo set up by me; no phone in my hand, no outside photographer and "
+            "no second person"
+        ),
+        "character_rear_camera": (
+            "a rear-camera self-record made by me; do not invent an outside photographer or a "
+            "second person"
+        ),
+    }
+    return contracts.get(
+        capture_mode,
+        "the picture is self-authored by me, with no outside photographer and no second person",
+    )
+
+
+def _first_person_camera_prose_restraint(capture_mode: str) -> str:
+    """Keep camera-authorship prose from becoming an unwanted depicted prop."""
+
+    if capture_mode == "character_front_camera":
+        return (
+            "do not mention a phone, screen, device, interface, mirror, or a hand holding the camera; "
+            "describe only an unobstructed face-first selfie viewpoint"
+        )
+    return "keep the camera relationship faithful to the frozen capture mode"
+
+
+def _sanitize_first_person_camera_prose(text: str, capture_mode: str) -> str:
+    """Apply a narrow deterministic guard after the author chose its prose.
+
+    Prompt authors often use ``phone`` as harmless narrative shorthand.  In a
+    Krea2 image prompt, however, that noun becomes a salient foreground prop
+    and can obscure the very facial performance the profile selected.  We do
+    not alter scene facts or expression—only remove that accidental prop cue
+    for a frozen front-camera capture.
+    """
+
+    if capture_mode != "character_front_camera":
+        return text
+    replacements = (
+        ("holding my phone", "framing myself"),
+        ("holding the phone", "framing myself"),
+        ("holding a phone", "framing myself"),
+        ("hold my phone", "frame myself"),
+        ("hold the phone", "frame myself"),
+        ("hold a phone", "frame myself"),
+        ("hold up my camera", "lean in"),
+        ("hold up the camera", "lean in"),
+        ("hold up a camera", "lean in"),
+        ("holding my camera", "framing myself"),
+        ("holding the camera", "framing myself"),
+        ("holding a camera", "framing myself"),
+        ("my camera captures", "the frame holds"),
+        ("the camera captures", "the frame holds"),
+        ("camera captures", "frame holds"),
+        ("smartphone", "camera"),
+        ("phone", "camera"),
+        ("screen", "frame"),
+        ("device", "camera"),
+        ("holding my camera", "framing myself"),
+        ("holding the camera", "framing myself"),
+        ("holding a camera", "framing myself"),
+    )
+    result = text
+    for old, new in replacements:
+        result = result.replace(old, new).replace(old.title(), new.title())
+    return result
+
+
+def _first_person_facial_contract(plan: MediaPlan) -> str:
+    """Expose the selected facial matrix to the prose author without reopening it.
+
+    The planner already chooses a signed, compatible facial micro-performance.
+    Letting the author invent a new face would make variety look free-form but
+    would quietly break replayability and push providers back toward their
+    default smile.  We instead give Hermes the selected cues in natural
+    language and require it to render several of them as one small moment.
+    """
+
+    subject = plan.subject_presentation
+    if subject is None or subject.facial_micro_performance is None:
+        return "use the frozen expression and gaze without defaulting to a polite smile"
+    display = subject.facial_display_strategy
+    micro = subject.facial_micro_performance
+    strategy = display.performance_intent if display else "recipient-aware natural expression"
+    cues = (
+        micro.brow_action,
+        micro.eye_aperture,
+        micro.gaze_sequence,
+        micro.nose_cheek_action,
+        micro.mouth_action,
+        micro.facial_asymmetry,
+        micro.facial_energy,
+        micro.temporal_phase,
+    )
+    return f"{strategy}; selected compatible cues: {', '.join(cues)}"
+
+
+def _high_intensity_facial_suffix(plan: MediaPlan) -> str:
+    """Add one compact, plan-triggered facial priority—not a second prompt.
+
+    Krea2 often collapses a nuanced high-private facial beat into its polite
+    portrait prior.  A short suffix works better than repeating the whole
+    scene or expanding the author prompt.  It is gated by the signed flair so
+    ordinary and merely sensual high-private photos retain their existing
+    expression range.
+    """
+
+    flair = plan.private_flair
+    if flair is None:
+        return ""
+    suffix = str(private_facial_profile_contract(flair.facial_profile).get("render_suffix") or "").strip()
+    return f"\n\n{suffix}" if suffix else ""
+
+
 class MediaPlanner:
     """Classify one frozen opportunity with one bounded LLM call."""
 
@@ -822,7 +1111,8 @@ class MediaPlanner:
         preflight = _validate_opportunity(opportunity)
         if preflight:
             return NotRenderable(opportunity.opportunity_id, preflight)
-        lane = MediaEligibilityRouter().classify(
+        eligibility_router = MediaEligibilityRouter()
+        private_lane = eligibility_router.classify(
             family=opportunity.family,
             privacy_ceiling=opportunity.privacy_ceiling,
             expression_charge_ceiling=_expression_charge_ceiling(opportunity),
@@ -832,10 +1122,11 @@ class MediaPlanner:
                 opportunity.audience_context.recipient_ref if opportunity.audience_context else ""
             ),
         )
-        # Historical v1-v4 plans retain their original replay semantics.  The
-        # eligibility lane is a v5 entry rule, not a reinterpretation of them.
-        if self.v5_enabled and not lane.allowed:
-            return NotRenderable(opportunity.opportunity_id, lane.reason, lane.details)
+        # v5 first lets the bounded model recommend the semantic lane, then
+        # validates it against its chosen complete candidate.  The old
+        # evidence-only decision is retained here solely to reserve genuine
+        # self-authored private candidates; it does not force an ordinary
+        # event into, or out of, a Lane before the model has spoken.
         recent = tuple(_history_fingerprint(item) for item in recent_media[-12:])
         recent_subjects = tuple(_history_subject_signature(item) for item in recent_media[-12:])
         recent_embodiments = tuple(
@@ -861,7 +1152,20 @@ class MediaPlanner:
                 recent_embodiments=recent_embodiments,
                 subject_config_path=self.subject_config_path,
                 embodiment_config_path=self.embodiment_config_path,
-                limit=24 if self.v5_enabled else 8,
+                # Filtered private candidates need enough presentation variants
+                # before the self-authorship restriction is applied; otherwise a
+                # generic coverage cap can erase every front/mirror subtle pose.
+                # Legacy v4 still exposes a bounded candidate set. Eight
+                # candidates is too small once the same subject template can
+                # have several facial and body contracts, and can silently
+                # remove a legal mirror/private alternative.
+                limit=(
+                    256
+                    if self.v5_enabled and private_lane.allowed
+                    else 64
+                    if opportunity.privacy_ceiling == "intimate"
+                    else 24
+                ),
             )
         except (OSError, ValueError, TypeError) as exc:
             return NotRenderable(
@@ -878,23 +1182,21 @@ class MediaPlanner:
         complete_candidates = ()
         if self.v5_enabled:
             identity_assets: tuple[str, ...] = ()
+            identity_assets_by_profile: dict[str, tuple[str, ...]] = {}
             reference_pose_metadata: dict[str, dict[str, str]] = {}
             identity_catalog_version = ""
             if opportunity.family == "character_media":
                 try:
                     identity = load_visual_identity(str(self.visual_identity_path))
-                    identity_assets = tuple(
-                        dict.fromkeys(
-                            (
-                                *((identity.reference_asset,) if identity.reference_asset else ()),
-                                *(
-                                    asset
-                                    for values in identity.reference_sets.values()
-                                    for asset in values
-                                ),
-                            )
+                    identity_assets_by_profile = {
+                        profile: tuple(identity.reference_assets(profile))
+                        for profile in (
+                            "everyday_selfie",
+                            "relationship_private",
+                            "relationship_private_bold",
                         )
-                    )
+                    }
+                    identity_assets = identity_assets_by_profile["everyday_selfie"]
                     reference_pose_metadata = load_subject_catalog(
                         self.subject_config_path
                     ).reference_pose_metadata
@@ -908,79 +1210,174 @@ class MediaPlanner:
                         "identity_catalog_unavailable",
                         str(exc)[:240],
                     )
-            complete_candidates = tuple(
-                payload
-                for item in build_complete_candidates(
-                    opportunity_id=opportunity.opportunity_id,
-                    family=opportunity.family,
-                    expression_charge_ceiling=_expression_charge_ceiling(opportunity),
-                    presentation_candidates=presentation_candidates,
-                    recent_perceptual_signatures=recent_perceptual,
-                    identity_assets=identity_assets,
-                    reference_pose_metadata=reference_pose_metadata,
-                    identity_catalog_version=identity_catalog_version,
-                    event_snapshot=opportunity.event_snapshot,
+            candidate_sources = {
+                str(item["presentation_candidate_id"]): item for item in presentation_candidates
+            }
+            complete_candidate_list: list[dict[str, object]] = []
+            for item in build_complete_candidates(
+                opportunity_id=opportunity.opportunity_id,
+                family=opportunity.family,
+                expression_charge_ceiling=_expression_charge_ceiling(opportunity),
+                presentation_candidates=presentation_candidates,
+                recent_perceptual_signatures=recent_perceptual,
+                identity_assets=identity_assets,
+                identity_assets_by_profile=identity_assets_by_profile,
+                reference_pose_metadata=reference_pose_metadata,
+                identity_catalog_version=identity_catalog_version,
+                event_snapshot=opportunity.event_snapshot,
+                # High-private lanes share the same candidate matrix.  Keep
+                # enough self-authored variants available even before World
+                # grows its optional private-expression facts.
+                limit=256 if opportunity.family == "character_media" else 24,
+            ):
+                payload = item.planner_payload()
+                if not _complete_candidate_world_legal(payload, opportunity):
+                    continue
+                legal_lanes = (
+                    ["ordinary_life"]
+                    if opportunity.family == "life_share"
+                    else _legal_media_lanes_for_candidate(
+                        payload,
+                        private_lane=private_lane,
+                        candidate_sources=candidate_sources,
+                    )
                 )
-                if _complete_candidate_world_legal((payload := item.planner_payload()), opportunity)
-                and (
-                    not self.v5_enabled
-                    or lane.lane != "private_expression"
-                    or _ELIGIBILITY_CHARGE_RANK[
-                        str(payload["media_address_strategy"]["expression_charge"])
-                    ]
-                    >= _ELIGIBILITY_CHARGE_RANK[lane.required_charge]
-                )
-                and (
-                    lane.lane != "private_expression"
-                    or payload["legal_capture_modes"] in (["character_front_camera"], ["mirror"])
-                )
+                if not legal_lanes:
+                    continue
+                payload = {**payload, "legal_media_lanes": legal_lanes}
+                complete_candidate_list.append(payload)
+            complete_candidates = _balanced_media_lane_candidates(
+                complete_candidate_list, private_lane=private_lane
             )
+            # A frozen recipient-display/private-transition proof is not a
+            # vague stylistic hint.  World has already opened the private
+            # media lane, so do not ask the planner to choose between an
+            # ordinary and an exclusive interpretation of the same action.
+            # This still uses the normal complete-candidate matrix and the
+            # same renderer; it only removes semantically impossible routes.
+            if _requires_exclusive_private_lane(opportunity, private_lane):
+                complete_candidates = tuple(
+                    item
+                    for item in complete_candidates
+                    if "exclusive_private" in item.get("legal_media_lanes", [])
+                )
             if not complete_candidates:
-                return NotRenderable(opportunity.opportunity_id, "no_complete_expression_candidate")
+                return NotRenderable(
+                    opportunity.opportunity_id,
+                    (
+                        "no_exclusive_private_expression_candidate"
+                        if _requires_exclusive_private_lane(opportunity, private_lane)
+                        else "no_complete_expression_candidate"
+                    ),
+                )
         try:
+            messages = (
+                _planning_messages_v5(opportunity, recent, complete_candidates, interaction_bids)
+                if self.v5_enabled
+                else _planning_messages(opportunity, recent, presentation_candidates, interaction_bids)
+            )
+            complete_json = getattr(self.model, "complete_json", None)
             with model_call_scope(
                 "media_planning", action_id=f"media-planning:{opportunity.opportunity_id}"
             ):
-                raw = await self.model.complete(
-                    (
-                        _planning_messages_v5(
-                            opportunity, recent, complete_candidates, interaction_bids
-                        )
-                        if self.v5_enabled
-                        else _planning_messages(
-                            opportunity, recent, presentation_candidates, interaction_bids
-                        )
-                    ),
-                    temperature=0.65,
+                raw = await (
+                    complete_json(messages, temperature=0.65)
+                    if callable(complete_json)
+                    else self.model.complete(messages, temperature=0.65)
                 )
             proposal = json.loads(raw)
+        except httpx.HTTPError as exc:
+            return NotRenderable(
+                opportunity.opportunity_id, "planner_provider_failure", type(exc).__name__
+            )
         except Exception as exc:
             return NotRenderable(opportunity.opportunity_id, "invalid_model_output", str(exc)[:240])
         if not isinstance(proposal, dict):
             return NotRenderable(opportunity.opportunity_id, "invalid_model_output")
-        if self.v5_enabled:
-            return _freeze_proposal_v5(
+        try:
+            if self.v5_enabled:
+                result = _freeze_proposal_v5(
+                    opportunity,
+                    proposal,
+                    recent,
+                    complete_candidates=complete_candidates,
+                    presentation_candidates=presentation_candidates,
+                    recent_subjects=recent_subjects,
+                    recent_embodiments=recent_embodiments,
+                    subject_config_path=self.subject_config_path,
+                    interaction_config_path=self.interaction_config_path,
+                    embodiment_config_path=self.embodiment_config_path,
+                )
+                # A JSON-capable model can still echo an enum menu or pair a
+                # valid candidate ID with an incompatible legal option. One
+                # correction is safe: it receives the same frozen candidates
+                # and may not select a new event or change any evidence. This
+                # is intentionally not a creative retry.
+                if isinstance(result, NotRenderable) and result.reason in {
+                    "invalid_classification",
+                    "complete_expression_candidate_conflict",
+                }:
+                    repair_messages = [
+                        *messages,
+                        {"role": "assistant", "content": raw},
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your preceding JSON is structurally invalid: "
+                                f"{result.reason} ({result.details or 'unspecified'}). "
+                                "Return one corrected JSON object only. Keep the same complete_candidate_id, "
+                                "event evidence, and route. For every scalar classification field, choose one "
+                                "literal from that selected candidate's legal_* menu; do not echo a menu or add "
+                                "wrapper fields."
+                            ),
+                        },
+                    ]
+                    with model_call_scope(
+                        "media_planning_repair",
+                        action_id=f"media-planning-repair:{opportunity.opportunity_id}",
+                    ):
+                        repaired_raw = await (
+                            complete_json(repair_messages, temperature=0)
+                            if callable(complete_json)
+                            else self.model.complete(repair_messages, temperature=0)
+                        )
+                    repaired = json.loads(repaired_raw)
+                    if not isinstance(repaired, dict):
+                        return NotRenderable(opportunity.opportunity_id, "invalid_model_output")
+                    return _freeze_proposal_v5(
+                        opportunity,
+                        repaired,
+                        recent,
+                        complete_candidates=complete_candidates,
+                        presentation_candidates=presentation_candidates,
+                        recent_subjects=recent_subjects,
+                        recent_embodiments=recent_embodiments,
+                        subject_config_path=self.subject_config_path,
+                        interaction_config_path=self.interaction_config_path,
+                        embodiment_config_path=self.embodiment_config_path,
+                    )
+                return result
+            return _freeze_proposal(
                 opportunity,
                 proposal,
                 recent,
-                complete_candidates=complete_candidates,
-                presentation_candidates=presentation_candidates,
                 recent_subjects=recent_subjects,
                 recent_embodiments=recent_embodiments,
                 subject_config_path=self.subject_config_path,
                 interaction_config_path=self.interaction_config_path,
                 embodiment_config_path=self.embodiment_config_path,
+                # Freeze against exactly the bounded candidate set disclosed to
+                # the model. Recomputing a smaller set here could reject a legal
+                # presentation the model was explicitly offered, and also makes
+                # the selected expression unnecessarily unstable.
+                frozen_presentation_candidates=presentation_candidates,
             )
-        return _freeze_proposal(
-            opportunity,
-            proposal,
-            recent,
-            recent_subjects=recent_subjects,
-            recent_embodiments=recent_embodiments,
-            subject_config_path=self.subject_config_path,
-            interaction_config_path=self.interaction_config_path,
-            embodiment_config_path=self.embodiment_config_path,
-        )
+        except httpx.HTTPError as exc:
+            return NotRenderable(
+                opportunity.opportunity_id, "planner_provider_failure", type(exc).__name__
+            )
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            return NotRenderable(opportunity.opportunity_id, "invalid_model_output", str(exc)[:240])
 
 
 class MediaRenderer:
@@ -997,6 +1394,8 @@ class MediaRenderer:
         budget_gate: BudgetGate | None = None,
         size: str = "1024x1536",
         quality: str = "medium",
+        specialized_generators: Mapping[str, ImageGenerator | Any] | None = None,
+        private_prompt_author: PrivatePromptAuthor | None = None,
     ):
         self.generator = generator
         self.inspector = inspector
@@ -1006,26 +1405,48 @@ class MediaRenderer:
         self.budget_gate = budget_gate
         self.size = size
         self.quality = quality
+        self.specialized_generators = dict(specialized_generators or {})
+        self.private_prompt_author = private_prompt_author
 
     async def render(self, plan: MediaPlan) -> RenderResult:
         invalid = _validate_frozen_plan(plan)
         if invalid:
             return MediaRenderFailure(plan.plan_id, f"invalid_frozen_plan:{invalid}", 0)
-        references = self._references(plan)
+        direct_private_workflow = self._uses_direct_private_workflow(plan)
+        # Krea2 high-private profiles are deliberately LoRA-only.  Keep the
+        # identity-selection data frozen for audit and diversity, but do not
+        # resolve, budget, or pass any source image to their generator.
+        references = () if direct_private_workflow else self._references(plan)
         prompt = compile_media_prompt(
             plan,
             self.visual_identity_path,
             subject_config_path=self.subject_config_path,
         )
+        if direct_private_workflow and self.private_prompt_author is not None:
+            try:
+                prompt = await self.private_prompt_author.write(plan)
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                return MediaRenderFailure(
+                    plan.plan_id, f"private_prompt_author_failed:{type(exc).__name__}", 0
+                )
         if plan.route == "reuse_existing":
             path = Path(plan.existing_artifact_path or "")
             if not path.is_file():
                 return MediaRenderFailure(plan.plan_id, "existing_artifact_unavailable", 0)
             return await self._inspect_existing(plan, path, prompt, references)
-        if self.generator is None:
-            return MediaRenderFailure(plan.plan_id, "image_generator_unavailable", 0)
+        generator = self._generator_for(plan)
+        if generator is None:
+            reason = (
+                "specialized_private_generator_unavailable"
+                if plan.private_render_contract is not None
+                else "specialized_suggestive_generator_unavailable"
+                if plan.suggestive_private_contract is not None
+                else "image_generator_unavailable"
+            )
+            return MediaRenderFailure(plan.plan_id, reason, 0)
+        render_size = self._render_size(plan)
         estimate = image_render_estimate(
-            reference_count=len(references), size=self.size, quality=self.quality, attempts=2
+            reference_count=len(references), size=render_size, quality=self.quality, attempts=2
         )
         if (
             self.budget_gate
@@ -1036,22 +1457,79 @@ class MediaRenderer:
             return MediaRenderFailure(plan.plan_id, "budget_gate_blocked", 0)
 
         output_path = self.output_dir / f"{_safe_filename(plan.plan_id)}.png"
+        if direct_private_workflow:
+            return await self._render_direct_private_workflow(
+                plan,
+                generator=generator,
+                prompt=prompt,
+                output_path=output_path,
+                references=references,
+                size=render_size,
+            )
         active_prompt = prompt
         last_inspection: MediaInspection | None = None
         for attempt in (1, 2):
             try:
-                generated = await self._generate(
-                    active_prompt, output_path=output_path, references=references
+                generated = await self._generate_with(
+                    generator,
+                    active_prompt,
+                    output_path=output_path,
+                    references=references,
+                    size=render_size,
                 )
-                inspection = await self.inspector.inspect(
-                    generated.path,
-                    plan=plan,
-                    prompt=active_prompt,
-                    reference_images=references[:1],
+            except ImageGenerationProviderError as exc:
+                # A transient provider failure is safe to retry exactly once
+                # against the same frozen plan.  Policy/invalid-request
+                # failures are not image-quality failures; repeating them
+                # wastes budget and cannot make an automatic route reliable.
+                if exc.retryable and attempt == 1:
+                    continue
+                return MediaRenderFailure(
+                    plan.plan_id,
+                    _provider_failure_reason(exc),
+                    attempt,
+                    last_inspection,
+                )
+            except httpx.HTTPError as exc:
+                if attempt == 1:
+                    continue
+                return MediaRenderFailure(
+                    plan.plan_id,
+                    f"image_provider_transport_failure:{type(exc).__name__}",
+                    attempt,
+                    last_inspection,
                 )
             except Exception as exc:
                 return MediaRenderFailure(
-                    plan.plan_id, f"render_or_inspection_failed:{exc}", attempt
+                    plan.plan_id, f"image_generation_failed:{type(exc).__name__}", attempt
+                )
+            try:
+                inspection = await self._inspect_generated(
+                    generated.path,
+                    plan=plan,
+                    prompt=active_prompt,
+                    references=references,
+                )
+            except ImageGenerationProviderError as exc:
+                return MediaRenderFailure(
+                    plan.plan_id,
+                    _provider_failure_reason(exc),
+                    attempt,
+                    last_inspection,
+                )
+            except httpx.HTTPError as exc:
+                return MediaRenderFailure(
+                    plan.plan_id,
+                    f"inspection_provider_transport_failure:{type(exc).__name__}",
+                    attempt,
+                    last_inspection,
+                )
+            except Exception as exc:
+                return MediaRenderFailure(
+                    plan.plan_id,
+                    f"inspection_failed:{type(exc).__name__}",
+                    attempt,
+                    last_inspection,
                 )
             inspection = _enforce_inspection_contract(
                 inspection,
@@ -1090,6 +1568,7 @@ class MediaRenderer:
                 ),
                 moment_capture_required=plan.moment_capture is not None,
                 self_authored_capture_required=plan.private_expression_basis is not None,
+                non_explicit_boundary_required=_non_explicit_boundary_required(plan),
             )
             last_inspection = inspection
             if inspection.passed:
@@ -1097,7 +1576,7 @@ class MediaRenderer:
                     self.budget_gate.record(
                         image_render_estimate(
                             reference_count=len(references),
-                            size=self.size,
+                            size=render_size,
                             quality=self.quality,
                             attempts=attempt,
                         ),
@@ -1119,6 +1598,141 @@ class MediaRenderer:
             2,
             last_inspection,
         )
+
+    @staticmethod
+    def _uses_direct_private_workflow(plan: MediaPlan) -> bool:
+        """High private providers are a terminal render capability.
+
+        The selected Civitai recipe already owns its identity LoRA and its
+        adult-capability profile.  Do not send its artifact through the
+        ordinary OpenAI visual-inspection/repair loop: that would make a
+        different provider silently reinterpret a frozen high-lane plan.
+        Transport failures still retry once, but semantic acceptance is
+        intentionally delegated to the upstream authorization and the frozen
+        route contract.
+        """
+
+        contract = getattr(plan, "private_render_contract", None) or getattr(
+            plan, "suggestive_private_contract", None
+        )
+        return bool(
+            contract
+            and getattr(contract, "render_route", "") in {"adult_suggestive", "adult_explicit"}
+        )
+
+    async def _render_direct_private_workflow(
+        self,
+        plan: MediaPlan,
+        *,
+        generator: ImageGenerator | Any,
+        prompt: str,
+        output_path: Path,
+        references: tuple[Path, ...],
+        size: str,
+    ) -> RenderResult:
+        """Generate a high private artifact without visual inspection or repair."""
+
+        for attempt in (1, 2):
+            try:
+                generated = await self._generate_with(
+                    generator,
+                    prompt,
+                    output_path=output_path,
+                    references=references,
+                    size=size,
+                )
+            except ImageGenerationProviderError as exc:
+                if exc.retryable and attempt == 1:
+                    continue
+                return MediaRenderFailure(plan.plan_id, _provider_failure_reason(exc), attempt)
+            except httpx.HTTPError as exc:
+                if attempt == 1:
+                    continue
+                return MediaRenderFailure(
+                    plan.plan_id,
+                    f"image_provider_transport_failure:{type(exc).__name__}",
+                    attempt,
+                )
+            except Exception as exc:
+                return MediaRenderFailure(
+                    plan.plan_id, f"image_generation_failed:{type(exc).__name__}", attempt
+                )
+            if self.budget_gate:
+                self.budget_gate.record(
+                    image_render_estimate(
+                            reference_count=len(references),
+                            size=size,
+                        quality=self.quality,
+                        attempts=attempt,
+                    ),
+                    note=f"event_media:high_private_direct:{plan.family}:attempts={attempt}",
+                )
+            return RenderedMedia(
+                plan_id=plan.plan_id,
+                path=generated.path,
+                artifact_hash=sha256(generated.path.read_bytes()).hexdigest(),
+                prompt=prompt,
+                attempts=attempt,
+                inspection=MediaInspection(
+                    passed=True,
+                    reason="specialized_private_workflow_direct",
+                    observed_summary=(
+                        "High private artifact accepted from its frozen specialized workflow; "
+                        "visual inspection and repair are intentionally bypassed."
+                    ),
+                    observed_facts=(),
+                    deviations=(),
+                    inspector_model="specialized-workflow-direct",
+                ),
+            )
+        raise AssertionError("unreachable")
+
+    def _generator_for(self, plan: MediaPlan) -> ImageGenerator | Any | None:
+        """Resolve the frozen route; never downgrade a high-lane plan silently."""
+
+        contract = getattr(plan, "private_render_contract", None) or getattr(
+            plan, "suggestive_private_contract", None
+        )
+        if contract is None:
+            return self.generator
+        return self.specialized_generators.get(contract.render_route)
+
+    def _render_size(self, plan: MediaPlan) -> str:
+        """Honor frozen v5 framing rather than forcing every photo vertical.
+
+        The normal default remains the established portrait output.  Only a
+        frozen camera contract may opt into square or landscape pixels, so a
+        provider cannot silently reinterpret an older plan's composition.
+        """
+
+        geometry = plan.camera_geometry
+        if plan.version != PLAN_VERSION_V5 or geometry is None:
+            return self.size
+        return {
+            "landscape": "1536x1024",
+            "square": "1024x1024",
+        }.get(geometry.orientation, self.size)
+
+    async def _inspect_generated(
+        self,
+        path: Path,
+        *,
+        plan: MediaPlan,
+        prompt: str,
+        references: tuple[Path, ...],
+    ) -> MediaInspection:
+        """Retry a transient vision outage without paying for another image."""
+
+        for inspection_attempt in (1, 2):
+            try:
+                return await self.inspector.inspect(
+                    path, plan=plan, prompt=prompt, reference_images=references[:1]
+                )
+            except ImageGenerationProviderError as exc:
+                if exc.retryable and inspection_attempt == 1:
+                    continue
+                raise
+        raise AssertionError("unreachable inspection retry state")
 
     async def _inspect_existing(
         self,
@@ -1170,6 +1784,7 @@ class MediaRenderer:
             ),
             moment_capture_required=plan.moment_capture is not None,
             self_authored_capture_required=plan.private_expression_basis is not None,
+            non_explicit_boundary_required=_non_explicit_boundary_required(plan),
         )
         if not inspection.passed:
             return MediaRenderFailure(plan.plan_id, inspection.reason, 0, inspection)
@@ -1240,15 +1855,21 @@ class MediaRenderer:
             scene_hint=plan.diversity_fingerprint,
         )
 
-    async def _generate(
-        self, prompt: str, *, output_path: Path, references: tuple[Path, ...]
+    async def _generate_with(
+        self,
+        generator: ImageGenerator | Any,
+        prompt: str,
+        *,
+        output_path: Path,
+        references: tuple[Path, ...],
+        size: str,
     ) -> GeneratedImage:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            return await self.generator.generate(
+            return await generator.generate(
                 prompt,
                 output_path=output_path,
-                size=self.size,
+                size=size,
                 quality=self.quality,
                 reference_images=references,
             )
@@ -1256,16 +1877,16 @@ class MediaRenderer:
             if "quality" not in str(exc):
                 raise
         try:
-            return await self.generator.generate(
+            return await generator.generate(
                 prompt,
                 output_path=output_path,
-                size=self.size,
+                size=size,
                 reference_images=references,
             )
         except TypeError as exc:
             if "reference_images" not in str(exc):
                 raise
-            return await self.generator.generate(prompt, output_path=output_path, size=self.size)
+            return await generator.generate(prompt, output_path=output_path, size=size)
 
 
 class OpenAIMediaInspector:
@@ -1313,16 +1934,30 @@ class OpenAIMediaInspector:
         }
         if self.proxy_url:
             options["proxy"] = self.proxy_url
-        async with httpx.AsyncClient(**options) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=request,
-            )
-            response.raise_for_status()
-        payload = json.loads(response.json()["choices"][0]["message"]["content"])
+        try:
+            async with httpx.AsyncClient(**options) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=request,
+                )
+                if response.is_error:
+                    raise openai_provider_error(response, provider="openai_inspector")
+            payload = json.loads(response.json()["choices"][0]["message"]["content"])
+        except ImageGenerationProviderError:
+            raise
+        except httpx.TransportError as exc:
+            raise ImageGenerationProviderError(
+                provider="openai_inspector", kind="transport", detail=type(exc).__name__
+            ) from exc
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ImageGenerationProviderError(
+                provider="openai_inspector", kind="invalid_response", detail=type(exc).__name__
+            ) from exc
         if not isinstance(payload, dict):
-            raise ValueError("inspector returned a non-object")
+            raise ImageGenerationProviderError(
+                provider="openai_inspector", kind="invalid_response", detail="non_object"
+            )
         return MediaInspection(
             passed=bool(payload.get("passed")),
             reason=str(payload.get("reason") or "unspecified"),
@@ -1520,6 +2155,13 @@ def compile_media_prompt(
 ) -> str:
     """Compile only frozen, selected evidence; never reopen the World snapshot."""
     if plan.version == PLAN_VERSION_V5:
+        contract = plan.private_render_contract or plan.suggestive_private_contract
+        if (
+            contract
+            and getattr(contract, "render_route", "") in {"adult_suggestive", "adult_explicit"}
+            and _env_flag("COMPANION_KREA2_SHORT_PROMPT_EXPERIMENT")
+        ):
+            return _compile_krea2_private_prompt(plan)
         return _compile_media_prompt_v5(
             plan,
             visual_identity_path,
@@ -1621,6 +2263,72 @@ def compile_media_prompt(
     )
 
 
+def _compile_krea2_private_prompt(plan: MediaPlan) -> str:
+    """Compile a short, model-native brief for the fixed Krea2 private recipe.
+
+    The generic v5 prompt is deliberately verbose because it carries an audit
+    trail for broadly capable renderers.  The reviewed Krea2 imageGen recipe
+    has a different interface: it is LoRA-bound and follows a small number of
+    high-salience photographic facts more reliably than a full serialized
+    contract.  This compiler does not reopen or relax the plan; it projects
+    the same frozen facts into that narrower interface.
+    """
+
+    assert plan.camera_geometry is not None
+    assert plan.media_address_strategy is not None
+    flair = plan.private_flair
+    if flair is None or not flair.action_beat:
+        return "invalid_high_private_director_brief"
+    camera = plan.camera_geometry
+    embodied = plan.embodied_presentation
+    wardrobe_values = [
+        _compact_value(plan.evidence_values[ref])
+        for ref in (embodied.wardrobe_evidence_refs if embodied else ())
+        if ref in plan.evidence_values
+    ]
+    wardrobe = wardrobe_values[0] if wardrobe_values else "event-supported private apparel"
+    physical_cues = ", ".join(
+        cue.cue_id.replace("_", " ")
+        for cue in (embodied.physical_cues if embodied else ())
+    ) or "natural shot-specific body state"
+    distance = {
+        "detail": "detail crop",
+        "intimate_close": "intimate close selfie",
+        "close": "close selfie",
+        "medium": "mid-length selfie",
+        "full_body": "full-body phone selfie",
+        "long": "full-person phone photograph",
+        "wide": "wide personal-media photograph",
+    }.get(camera.shot_distance, "close personal-media photograph")
+    capture = {
+        "character_front_camera": (
+            "front-facing phone selfie, she operates the phone herself, one cropped holding arm is physically "
+            "credible, no third photographer"
+        ),
+        "mirror": (
+            "one mirror selfie: show the character only as one coherent reflection, with the reflected phone in "
+            "her hand; no duplicate person outside the mirror and no second phone"
+        ),
+    }.get(plan.capture_mode, "self-authored personal-media camera relationship")
+    allowed_regions = ", ".join(embodied.allowed_regions[:4]) if embodied else ""
+    coverage = embodied.coverage_mode.replace("_", " ") if embodied else "private apparel"
+    charge = plan.media_address_strategy.expression_charge.replace("_", " ")
+    return "\n".join(
+        line
+        for line in (
+            "Krea2 high-private render brief. One adult fictional East Asian woman; one person, one face, two hands.",
+            f"{distance}; {capture}; {camera.orientation} framing.",
+            f"Private, recipient-exclusive adult flirtation with {charge} expression, never a public lifestyle photo.",
+            f"Wear exactly the event-supported look: {wardrobe}. Coverage mode: {coverage}. Do not add outer layers.",
+            f"Visible moment: {flair.action_beat}. Expression: {flair.expression_beat}. Gaze: {flair.gaze_beat}.",
+            f"Recipient subtext: {flair.recipient_subtext}. The action, face and gaze are the visual center.",
+            f"Grounded physical cues: {physical_cues}. Naturally visible regions may include: {allowed_regions or 'only those supported by the outfit'}.",
+            "Natural imperfect smartphone photo, ordinary room texture and uneven available light; no studio beauty campaign, no text, no watermark, no extra limbs.",
+        )
+        if line
+    )
+
+
 def _compile_media_prompt_v5(
     plan: MediaPlan,
     visual_identity_path: Path | None,
@@ -1639,27 +2347,56 @@ def _compile_media_prompt_v5(
     if bid_address_error:
         return bid_address_error
     camera = plan.camera_geometry
-    identity = "Identity Reference Responsibilities: no character identity reference is used."
-    if plan.identity_reference_selection:
-        roles = "; ".join(plan.identity_reference_selection.roles)
+    contract = plan.private_render_contract or plan.suggestive_private_contract
+    specialized_private_route = bool(
+        contract
+        and getattr(contract, "render_route", "") in {"adult_suggestive", "adult_explicit"}
+    )
+    if specialized_private_route:
         identity = (
-            f"Identity Reference Responsibilities: {roles}. References define identity or broad geometry "
-            "only; never copy their hairstyle, smile, head tilt, pose, wardrobe, or framing."
+            "Identity binding: use the approved character LoRA already fixed in the high-private workflow. "
+            "No image reference, generic identity anchor, or inherited wardrobe is available for this route."
         )
+    else:
+        identity = "Identity Reference Responsibilities: no character identity reference is used."
+        if plan.identity_reference_selection:
+            roles = "; ".join(plan.identity_reference_selection.roles)
+            identity = (
+                f"Identity Reference Responsibilities: {roles}. References define identity or broad geometry "
+                "only; never copy their hairstyle, smile, head tilt, pose, wardrobe, or framing."
+            )
     identity_anchor = ""
     if (
-        plan.character_visibility in {"identifiable", "body_detail"}
+        not specialized_private_route
+        and plan.character_visibility in {"identifiable", "body_detail"}
         and visual_identity_path
         and visual_identity_path.is_file()
     ):
-        identity_anchor = "\n" + load_visual_identity(str(visual_identity_path)).prompt_block()
+        private_avoid = (
+            "Do not create nudity, transparent fabric, visible key areas, a sexual act, coercion, "
+            "or an isolated fetish crop. Preserve opaque coverage. Do not add extra clothing or conceal "
+            "a naturally allowed non-key body region merely to make a grounded adult private image less expressive."
+            if plan.privacy == "intimate" and not specialized_private_route
+            else None
+        )
+        identity_anchor = "\n" + load_visual_identity(str(visual_identity_path)).prompt_block(
+            avoid_override=private_avoid
+        )
     subject = (
-        presentation_prompt_block(plan.subject_presentation, config_path=subject_config_path)
+        presentation_prompt_block(
+            plan.subject_presentation,
+            config_path=subject_config_path,
+            appearance_mode=("event_authoritative" if specialized_private_route else "full"),
+            include_identity_reference_guidance=not specialized_private_route,
+        )
         if plan.subject_presentation
         else "No identifiable character is the visual subject; only grounded non-identifying traces may appear."
     )
     embodiment = (
-        embodiment_prompt_block(plan.embodied_presentation)
+        embodiment_prompt_block(
+            plan.embodied_presentation,
+            include_coverage_boundary=not specialized_private_route,
+        )
         if plan.embodied_presentation
         else "No invented bodily state, private apparel, or character action."
     )
@@ -1684,9 +2421,18 @@ def _compile_media_prompt_v5(
         "identity_referenced": "Only explicitly referenced identities may be recognizable.",
     }[plan.other_people_visibility]
     privacy = (
-        "Adult fictional character only; strong attraction may be legible, but coverage stays opaque and complete, with no sexual act or fetish crop."
-        if plan.privacy == "intimate"
-        else "Do not escalate the scene into intimate or sexualized content."
+        "Adult fictional character. Preserve the frozen event evidence, recipient-directed intent, "
+        "and planned body action; do not dilute this into an unrelated neutral lifestyle image."
+        if specialized_private_route
+        else (
+            "Adult fictional character only. Strong attraction may be legible while every key area remains "
+            "securely covered by opaque, event-supported clothing or cover. Do not add conservative extra layers "
+            "that contradict the frozen coverage mode: supported shoulders, arms, back, collarbone, waist or legs "
+            "may remain naturally visible as part of a whole-person frame. No transparent fabric, sexual act, or "
+            "isolated fetish crop."
+            if plan.privacy == "intimate"
+            else "Do not escalate the scene into intimate or sexualized content."
+        )
     )
     attraction = (
         f"; attraction_mechanism={address.attraction_mechanism}"
@@ -1712,8 +2458,9 @@ def _compile_media_prompt_v5(
         ),
         "mirror": (
             "Self-authorship invariant: the phone is visibly reflected and held by the character in the mirror; "
-            "the reflected hand, device, pose and camera angle must agree. No third photographer or impossible "
-            "extra device."
+            "make that physically legible with a credible foreground hand or forearm operating the phone, or a "
+            "partial device edge. The reflected hand, device, pose and camera angle must agree. No third "
+            "photographer, tripod, or authorless portrait viewpoint; no impossible extra device."
         ),
     }.get(plan.capture_mode, "Capture authorship must remain physically visible and coherent.")
     private_basis = (
@@ -1727,6 +2474,52 @@ def _compile_media_prompt_v5(
         if plan.private_expression_basis
         else ""
     )
+    private_render_intent = ""
+    if contract is not None:
+        if getattr(contract, "lane", SUGGESTIVE_PRIVATE_LANE) == EXPLICIT_PRIVATE_LANE:
+            private_render_intent = (
+                "High-private adult intent: this is an unmistakably recipient-exclusive adult sexual "
+                "communication, within the upstream-authorized boundary. Preserve the frozen attraction "
+                "mechanism and never dilute it into a neutral lifestyle photo.\n"
+            )
+        else:
+            private_render_intent = (
+                "High-private suggestive intent: make deliberate adult sexual-suggestive flirtation toward "
+                "this one recipient legible through the frozen attraction mechanism, expression charge, "
+                "self-authored camera relationship and evidence-supported coverage. Do not turn it into a "
+                "neutral daily selfie.\n"
+            )
+    private_flair = ""
+    if specialized_private_route and plan.private_flair is not None:
+        flair = plan.private_flair
+        if flair.action_beat:
+            private_flair = (
+                "High-private Director Brief (mandatory visible performance): "
+                f"action_beat={flair.action_beat}; expression_beat={flair.expression_beat}; "
+                f"gaze_beat={flair.gaze_beat}; recipient_subtext={flair.recipient_subtext}. "
+                "The action, expression, and gaze must all be visibly legible in this one image and together "
+                "create unmistakable recipient-directed adult teasing tension; do not reduce them to a polite "
+                "smile or an ordinary lifestyle portrait. Preserve frozen event evidence, clothing, body state, "
+                "camera authorship, geometry, and workflow.\n"
+            )
+        else:
+            private_flair = (
+                "High-private Flair (soft secondary performance only): "
+                f"expression_beat={flair.expression_beat}; "
+                f"gaze_beat={flair.gaze_beat}; "
+                f"recipient_subtext={flair.recipient_subtext}. "
+                "Use this to make the expression feel personally directed and less templated, but never use it "
+                "to replace frozen event evidence, clothing, body state, camera authorship, geometry, or workflow.\n"
+            )
+    mirror_optics = ""
+    if specialized_private_route and plan.capture_mode == "mirror":
+        mirror_optics = (
+            "Mirror optical invariant: the phone camera faces one mirror. The principal character is shown "
+            "once, entirely as that mirror reflection; outside the mirror only the phone itself or a tiny cropped "
+            "hand edge may enter. Never show a second face, shoulder, torso, dress, or duplicate body outside it. "
+            "Keep reflection "
+            "direction, hand contact, and phone orientation physically coherent.\n"
+        )
     return (
         "Create one believable fictional personal-media photograph. No text or watermark.\n"
         f"Frozen MediaPlan v5={plan.plan_id}; event={plan.event_id}; family={plan.family}.\n"
@@ -1735,6 +2528,9 @@ def _compile_media_prompt_v5(
         f"action_template={plan.action_template_id}; action={plan.action_cue}.\n"
         f"Selected event evidence:\n{evidence}\n"
         f"{private_basis}"
+        f"{private_render_intent}"
+        f"{private_flair}"
+        f"{mirror_optics}"
         f"Interaction Bid: goal={plan.interaction_bid.communicative_goal if plan.interaction_bid else 'none'}; "
         f"hoped_response={plan.interaction_bid.hoped_response if plan.interaction_bid else 'none'}; "
         f"pressure={plan.interaction_bid.response_pressure if plan.interaction_bid else 'none'}.\n"
@@ -1903,10 +2699,42 @@ def _freeze_proposal(
         physical_evidence_refs = {
             pointer for cue in embodied_presentation.physical_cues for pointer in cue.evidence_refs
         }
-        if any(pointer not in evidence for pointer in physical_evidence_refs):
-            return NotRenderable(opportunity.opportunity_id, "unselected_physical_state_evidence")
-        if any(pointer not in evidence for pointer in embodied_presentation.wardrobe_evidence_refs):
-            return NotRenderable(opportunity.opportunity_id, "unselected_wardrobe_evidence")
+        # Physical/wardrobe cues are deterministic consequences of the chosen
+        # candidate and the pinned event.  Add their exact leaf evidence to
+        # the frozen plan instead of rejecting an otherwise legal model
+        # choice merely because the model did not repeat derived pointers in
+        # its small evidence list.  This remains fail-closed: every pointer
+        # must be in the snapshot allow-list and resolve successfully.
+        derived_evidence_refs = tuple(
+            dict.fromkeys((*physical_evidence_refs, *embodied_presentation.wardrobe_evidence_refs))
+        )
+        for pointer in derived_evidence_refs:
+            if pointer in evidence:
+                continue
+            if pointer not in allowed_evidence:
+                return NotRenderable(
+                    opportunity.opportunity_id,
+                    (
+                        "unselected_wardrobe_evidence"
+                        if pointer in embodied_presentation.wardrobe_evidence_refs
+                        else "unselected_physical_state_evidence"
+                    ),
+                )
+            try:
+                evidence[pointer] = _resolve_pointer(opportunity.event_snapshot, pointer)
+            except (KeyError, IndexError, TypeError, ValueError):
+                return NotRenderable(
+                    opportunity.opportunity_id,
+                    (
+                        "unselected_wardrobe_evidence"
+                        if pointer in embodied_presentation.wardrobe_evidence_refs
+                        else "unselected_physical_state_evidence"
+                    ),
+                )
+            supporting.append(pointer)
+        pointers = [primary, *supporting]
+        if len(supporting) > 8:
+            return NotRenderable(opportunity.opportunity_id, "too_many_supporting_evidence_refs")
         strategy = subject_presentation.display_strategy
         if strategy and interaction_bid.communicative_goal not in strategy.communicative_goals:
             return NotRenderable(opportunity.opportunity_id, "subject_interaction_bid_conflict")
@@ -2018,6 +2846,21 @@ def _freeze_proposal_v5(
     }
     if forbidden_free_fields.intersection(proposal):
         return NotRenderable(opportunity.opportunity_id, "free_visual_direction_in_v5")
+    candidate_id = proposal.get("complete_candidate_id")
+    if not isinstance(candidate_id, str) or not candidate_id:
+        return NotRenderable(opportunity.opportunity_id, "missing_complete_expression_candidate")
+    selected = next(
+        (item for item in complete_candidates if item["complete_candidate_id"] == candidate_id),
+        None,
+    )
+    if selected is None:
+        return NotRenderable(opportunity.opportunity_id, "illegal_complete_expression_candidate")
+    # A complete candidate is the authority for the mutually dependent
+    # capture/form/intent fields.  The LLM chooses the candidate and its
+    # event evidence; if it echoes a stale or incompatible label, normalize
+    # only that label to an already disclosed legal value rather than turning
+    # a recoverable JSON-shape mistake into a new creative redraw.
+    proposal = _normalize_candidate_bound_labels(proposal, selected)
     required_enums = {
         "content_domain": CONTENT_DOMAINS,
         "visual_form": VISUAL_FORMS,
@@ -2031,18 +2874,33 @@ def _freeze_proposal_v5(
         "route": ROUTES,
     }
     for field, allowed in required_enums.items():
-        if proposal.get(field) not in allowed:
+        value = proposal.get(field)
+        if not isinstance(value, str) or value not in allowed:
             return NotRenderable(opportunity.opportunity_id, "invalid_classification", field)
-
-    candidate_id = proposal.get("complete_candidate_id")
-    if not isinstance(candidate_id, str) or not candidate_id:
-        return NotRenderable(opportunity.opportunity_id, "missing_complete_expression_candidate")
-    selected = next(
-        (item for item in complete_candidates if item["complete_candidate_id"] == candidate_id),
-        None,
+    # When World supplied recipient-specific proof, this action is already in
+    # the exclusive-private stream.  Keep the model responsible for choosing
+    # the visual candidate, but bind the derived lane fields to the frozen
+    # candidate instead of letting a malformed label turn the action into a
+    # dead-end ordinary recommendation.
+    if _requires_exclusive_private_lane_from_opportunity(opportunity):
+        normalized = _normalize_exclusive_private_proposal(
+            opportunity,
+            proposal,
+            selected=selected,
+            presentation_candidates=presentation_candidates,
+        )
+        if normalized is None:
+            return NotRenderable(opportunity.opportunity_id, "exclusive_private_candidate_invalid")
+        proposal = normalized
+    recommendation = (
+        MediaLaneRecommendation.from_proposal(proposal)
+        if opportunity.family == "character_media"
+        else None
     )
-    if selected is None:
-        return NotRenderable(opportunity.opportunity_id, "illegal_complete_expression_candidate")
+    if recommendation is not None:
+        recommendation_error = recommendation.validate()
+        if recommendation_error:
+            return NotRenderable(opportunity.opportunity_id, recommendation_error)
     for proposal_field, candidate_field in (
         ("capture_mode", "legal_capture_modes"),
         ("visual_form", "legal_visual_forms"),
@@ -2067,6 +2925,45 @@ def _freeze_proposal_v5(
     )
     if geometry_error:
         return NotRenderable(opportunity.opportunity_id, geometry_error)
+    if recommendation is not None:
+        lane_decision = MediaEligibilityRouter().classify_recommendation(
+            family=opportunity.family,
+            privacy_ceiling=opportunity.privacy_ceiling,
+            expression_charge_ceiling=_expression_charge_ceiling(opportunity),
+            event_snapshot=opportunity.event_snapshot,
+            private_expression_basis=opportunity.private_expression_basis,
+            recipient_ref=(
+                opportunity.audience_context.recipient_ref if opportunity.audience_context else ""
+            ),
+            recommendation=recommendation,
+            selected_expression_charge=address.expression_charge,
+            selected_capture_mode=str(proposal["capture_mode"]),
+            selected_share_intent=str(proposal["share_intent"]),
+            selected_privacy=str(proposal["privacy"]),
+            selected_address_mode=address.address_mode,
+            selected_interaction_bid=str(proposal.get("interaction_bid_id") or ""),
+            selected_attraction_mechanism=address.attraction_mechanism,
+            selected_coverage_mode=(
+                str(_mapping(selected.get("embodied_presentation")).get("coverage_mode") or "")
+            ),
+        )
+        if not lane_decision.allowed:
+            return NotRenderable(
+                opportunity.opportunity_id, lane_decision.reason, lane_decision.details
+            )
+        if recommendation.lane not in selected.get("legal_media_lanes", []):
+            return NotRenderable(opportunity.opportunity_id, "media_lane_candidate_conflict")
+    if recommendation is not None and recommendation.lane == "exclusive_private":
+        candidate_sources = {
+            str(item.get("presentation_candidate_id") or ""): item
+            for item in presentation_candidates
+        }
+        if str(proposal.get("interaction_bid_id") or "") not in _private_candidate_interaction_bids(
+            selected, candidate_sources
+        ):
+            return NotRenderable(
+                opportunity.opportunity_id, "exclusive_lane_interaction_bid_conflict"
+            )
     if address.expression_charge != "none":
         if (
             proposal.get("share_intent") != "intimate_signal"
@@ -2091,6 +2988,23 @@ def _freeze_proposal_v5(
             "constraints": list(proposal.get("constraints", [])),
         }
     )
+    if recommendation is not None and recommendation.lane in PRIVATE_RENDER_LANES:
+        private_context_ref = _private_context_evidence_ref(opportunity)
+        if private_context_ref is None:
+            return NotRenderable(
+                opportunity.opportunity_id, "private_render_private_context_evidence_missing"
+            )
+        selected_refs = list(legacy.get("supporting_evidence_refs") or [])
+        if (
+            private_context_ref != legacy.get("primary_evidence_ref")
+            and private_context_ref not in selected_refs
+        ):
+            if len(selected_refs) >= 8:
+                return NotRenderable(
+                    opportunity.opportunity_id, "private_render_private_context_evidence_unselected"
+                )
+            selected_refs.append(private_context_ref)
+            legacy["supporting_evidence_refs"] = selected_refs
     intimate_life_share = (
         opportunity.family == "life_share"
         and proposal.get("share_intent") == "intimate_signal"
@@ -2100,6 +3014,12 @@ def _freeze_proposal_v5(
     compatible_opportunity = replace(
         opportunity,
         sensual_charge_ceiling=_expression_charge_ceiling(opportunity),
+        private_expression_basis=(
+            opportunity.private_expression_basis
+            if recommendation is not None
+            and recommendation.lane == "exclusive_private"
+            else None
+        ),
     )
     if intimate_life_share:
         legal_intents = _LIFE_MATRIX[str(proposal["content_domain"])][1]
@@ -2176,7 +3096,11 @@ def _freeze_proposal_v5(
     if isinstance(frozen, NotRenderable):
         return frozen
     private_basis: FrozenPrivateExpressionBasis | None = None
-    if opportunity.private_expression_basis is not None:
+    if (
+        recommendation is not None
+        and recommendation.lane in {"exclusive_private", *PRIVATE_RENDER_LANES}
+        and opportunity.private_expression_basis is not None
+    ):
         try:
             private_basis = opportunity.private_expression_basis.freeze(
                 opportunity.event_snapshot,
@@ -2198,6 +3122,53 @@ def _freeze_proposal_v5(
                 opportunity.opportunity_id,
                 "private_expression_requires_self_authored_capture",
             )
+    private_render_contract: PrivateRenderContract | None = None
+    if recommendation is not None and recommendation.lane in PRIVATE_RENDER_LANES:
+        embodied_payload = _mapping(selected.get("embodied_presentation"))
+        if address.attraction_mechanism is None:
+            return NotRenderable(opportunity.opportunity_id, "private_render_mechanism_missing")
+        try:
+            private_render_contract = PrivateRenderContract.create(
+                lane=recommendation.lane,
+                attraction_mechanism=address.attraction_mechanism,
+                framing_mode=_suggestive_framing_mode(geometry),
+                coverage_mode=str(embodied_payload.get("coverage_mode") or ""),
+            )
+        except ValueError as exc:
+            return NotRenderable(opportunity.opportunity_id, str(exc))
+    private_flair: PrivateFlairBrief | None = None
+    flair_payload = proposal.get("private_flair")
+    if flair_payload is not None:
+        if recommendation is None or recommendation.lane not in PRIVATE_RENDER_LANES:
+            return NotRenderable(opportunity.opportunity_id, "private_flair_requires_private_render_lane")
+        if not isinstance(flair_payload, Mapping):
+            return NotRenderable(opportunity.opportunity_id, "invalid_private_flair")
+        try:
+            private_flair = PrivateFlairBrief.create(
+                action_beat=str(flair_payload.get("action_beat") or ""),
+                expression_beat=str(flair_payload.get("expression_beat") or ""),
+                gaze_beat=str(flair_payload.get("gaze_beat") or ""),
+                recipient_subtext=str(flair_payload.get("recipient_subtext") or ""),
+                facial_profile=str(flair_payload.get("facial_profile") or "natural_private"),
+            )
+        except ValueError as exc:
+            return NotRenderable(opportunity.opportunity_id, str(exc))
+    if recommendation is not None and recommendation.lane in PRIVATE_RENDER_LANES:
+        # New high-private plans are directed performances, not ordinary
+        # selfies with a decorative sentence appended later.  Historical
+        # payloads remain replayable because this requirement applies only
+        # while freezing a newly proposed v5 plan.
+        if private_flair is None or not private_flair.action_beat:
+            return NotRenderable(opportunity.opportunity_id, "private_director_action_required")
+        profile_error = private_facial_profile_compatibility_error(
+            private_flair.facial_profile,
+            lane=recommendation.lane,
+            capture_mode=str(proposal["capture_mode"]),
+            shot_distance=geometry.shot_distance,
+            expression_charge=address.expression_charge,
+        )
+        if profile_error:
+            return NotRenderable(opportunity.opportunity_id, profile_error)
     identity = (
         IdentityReferenceSelection.from_payload(selected["identity_reference_selection"])
         if selected.get("identity_reference_selection") is not None
@@ -2263,6 +3234,10 @@ def _freeze_proposal_v5(
         photographic_authenticity=authenticity,
         moment_capture=moment_capture,
         private_expression_basis=private_basis,
+        media_lane=recommendation,
+        private_render_contract=private_render_contract,
+        private_flair=private_flair,
+        suggestive_private_contract=None,
     )
     plan = replace(plan, diversity_fingerprint=_v5_fingerprint(plan))
     if plan.diversity_fingerprint in recent[-12:]:
@@ -2297,6 +3272,16 @@ def _v5_sharing_motive(share_intent: str) -> str:
     }.get(share_intent, "把这个生活瞬间分享给熟悉的人")
 
 
+def _suggestive_framing_mode(geometry: CameraGeometry) -> str:
+    """Map existing camera geometry into the high-lane's small framing axis."""
+
+    if geometry.shot_distance in {"intimate_close", "close"}:
+        return "conversational_close"
+    if geometry.shot_distance in {"full_body", "long"}:
+        return "whole_person_private"
+    return "contextual_body"
+
+
 def _v5_fingerprint(plan: MediaPlan) -> str:
     assert plan.media_address_strategy is not None and plan.camera_geometry is not None
     parts = [
@@ -2319,6 +3304,34 @@ def _v5_fingerprint(plan: MediaPlan) -> str:
         plan.camera_geometry.orientation,
         plan.camera_geometry.imperfection_profile,
     ]
+    if plan.media_lane:
+        parts.extend(
+            (
+                plan.media_lane.lane,
+                plan.media_lane.recipient_access,
+                plan.media_lane.attraction_expression,
+            )
+        )
+    if plan.private_render_contract:
+        parts.extend(
+            (
+                plan.private_render_contract.lane,
+                plan.private_render_contract.attraction_mechanism,
+                plan.private_render_contract.framing_mode,
+                plan.private_render_contract.coverage_mode,
+                plan.private_render_contract.render_route,
+            )
+        )
+    elif plan.suggestive_private_contract:
+        parts.extend(
+            (
+                plan.suggestive_private_contract.authorization.grounding_kind,
+                plan.suggestive_private_contract.attraction_mechanism,
+                plan.suggestive_private_contract.framing_mode,
+                plan.suggestive_private_contract.coverage_mode,
+                plan.suggestive_private_contract.render_route,
+            )
+        )
     if plan.camera_geometry.version == "camera-geometry-v2":
         parts.extend(
             (
@@ -2380,14 +3393,10 @@ def _validate_opportunity(opportunity: MediaOpportunity) -> str | None:
     charge_ceiling = _expression_charge_ceiling(opportunity)
     if charge_ceiling != "none" and opportunity.privacy_ceiling != "intimate":
         return "sensual_charge_ceiling_requires_intimate_privacy"
-    stage = opportunity.audience_context.relationship_stage if opportunity.audience_context else ""
-    if charge_ceiling in {"subtle", "charged"} and stage not in {
-        "ambiguous",
-        "lover",
-    }:
-        return "sensual_charge_ceiling_relationship_conflict"
-    if charge_ceiling == "veiled" and stage != "lover":
-        return "sensual_charge_ceiling_relationship_conflict"
+    # Relationship/clearance policy belongs to the upstream environment.  The
+    # image machine consumes its already-selected ceiling and only validates
+    # photographic coherence. Authorization and relationship policy are
+    # upstream inputs and are deliberately absent from MediaOpportunity.
     if opportunity.delivery_mode not in DELIVERY_MODES:
         return "invalid_delivery_mode"
     if any(
@@ -2427,6 +3436,270 @@ def _complete_candidate_world_legal(
     if mode == "requested_helper":
         return str(_mapping(snapshot.get("location")).get("kind")) == "public"
     return True
+
+
+def _private_candidate_interaction_bids(
+    candidate: Mapping[str, object],
+    sources: Mapping[str, Mapping[str, object]],
+) -> list[str]:
+    """Keep only complete-candidate bids its frozen source can actually perform."""
+
+    source_id = str(candidate.get("source_presentation_candidate_id") or "")
+    source = sources.get(source_id)
+    subject = _mapping(source.get("subject_presentation") if source else None)
+    strategy = _mapping(subject.get("display_strategy"))
+    source_goals = {str(goal) for goal in strategy.get("communicative_goals", [])}
+    return [
+        str(bid) for bid in candidate.get("legal_interaction_bids", []) if str(bid) in source_goals
+    ]
+
+
+def _legal_media_lanes_for_candidate(
+    candidate: Mapping[str, object],
+    *,
+    private_lane: object,
+    candidate_sources: Mapping[str, Mapping[str, object]],
+) -> list[str]:
+    """Return semantic lanes this indivisible candidate can truthfully support."""
+
+    address = _mapping(candidate.get("media_address_strategy"))
+    charge = str(address.get("expression_charge") or "none")
+    modes = candidate.get("legal_capture_modes", [])
+    if charge not in SENSUAL_CHARGE_RANK or not isinstance(modes, list) or len(modes) != 1:
+        return []
+    lanes: list[str] = []
+    if charge == "none":
+        lanes.append("ordinary_life")
+    elif charge in {"subtle", "charged"}:
+        lanes.append("alluring_life")
+    required_charge = str(getattr(private_lane, "required_charge", "none"))
+    if (
+        bool(getattr(private_lane, "allowed", False))
+        and modes[0] in {"character_front_camera", "mirror"}
+        and charge in SENSUAL_CHARGE_RANK
+        and SENSUAL_CHARGE_RANK[charge] >= SENSUAL_CHARGE_RANK.get(required_charge, 99)
+        and str(address.get("address_mode") or "")
+        in {"direct_recipient", "photographer_relational"}
+        and _private_candidate_interaction_bids(candidate, candidate_sources)
+    ):
+        lanes.append("exclusive_private")
+    if _private_render_candidate_legal(candidate, candidate_sources=candidate_sources):
+        # These two lanes deliberately share every visual subsystem.  The
+        # eventual upstream approval and the frozen route decide the provider,
+        # not a separate prompt or candidate-generation branch.
+        lanes.extend((SUGGESTIVE_PRIVATE_LANE, EXPLICIT_PRIVATE_LANE))
+    return lanes
+
+
+def _private_render_candidate_legal(
+    candidate: Mapping[str, object],
+    *,
+    candidate_sources: Mapping[str, Mapping[str, object]],
+) -> bool:
+    """Pure visual/capture prefilter for either frozen high private lane."""
+
+    address = _mapping(candidate.get("media_address_strategy"))
+    embodiment = _mapping(candidate.get("embodied_presentation"))
+    modes = candidate.get("legal_capture_modes", [])
+    return bool(
+        isinstance(modes, list)
+        and len(modes) == 1
+        and modes[0] in {"character_front_camera", "mirror"}
+        and address.get("address_mode") == "direct_recipient"
+        and address.get("engagement_tactic") == "attraction"
+        and address.get("expression_charge") in {"charged", "veiled"}
+        and bool(address.get("attraction_mechanism"))
+        and embodiment.get("coverage_mode") in {"private_apparel", "strategic_cover"}
+        and "invite_desire" in _private_candidate_interaction_bids(candidate, candidate_sources)
+    )
+
+
+def _requires_exclusive_private_lane(opportunity: MediaOpportunity, private_lane: object) -> bool:
+    """Whether World has supplied proof that this is a private-media action.
+
+    This is intentionally narrower than an intimate privacy ceiling.  A
+    ceiling merely permits an alluring image; a validated private-expression
+    basis means the current action itself is recipient-exclusive.
+    """
+
+    # A v5 planner may still select the ordinary exclusive-private lane when
+    # World provides its legacy evidence basis.  It is no longer forced into
+    # that lane: the same event can truthfully choose either high private
+    # route through its complete candidate, and the upstream layer owns that
+    # policy decision.
+    del opportunity, private_lane
+    return False
+
+
+def _normalize_candidate_bound_labels(
+    proposal: Mapping[str, object], selected: Mapping[str, object]
+) -> dict[str, object]:
+    """Repair only labels whose legal values were frozen by a chosen candidate.
+
+    Complete candidates deliberately expose a small set of legal combinations.
+    A provider may return an otherwise valid JSON object while echoing a menu
+    entry from another candidate.  The candidate itself remains authoritative;
+    this function never changes its ID, evidence pointers, lane recommendation,
+    or any free-form private flair.
+    """
+
+    normalized = dict(proposal)
+    preferences = {
+        "share_intent": ("intimate_signal",),
+        "capture_mode": ("character_front_camera", "mirror"),
+        "interaction_bid_id": ("invite_desire", "invite_closeness"),
+        "character_visibility": ("identifiable", "body_detail"),
+        "route": ("generate",),
+    }
+    for proposal_field, candidate_field in (
+        ("capture_mode", "legal_capture_modes"),
+        ("visual_form", "legal_visual_forms"),
+        ("share_intent", "legal_share_intents"),
+        ("interaction_bid_id", "legal_interaction_bids"),
+        ("character_visibility", "legal_character_visibilities"),
+        ("route", "legal_routes"),
+    ):
+        legal = tuple(
+            item for item in selected.get(candidate_field, ()) if isinstance(item, str)
+        )
+        if legal and normalized.get(proposal_field) not in legal:
+            normalized[proposal_field] = next(
+                (item for item in preferences.get(proposal_field, ()) if item in legal), legal[0]
+            )
+    return normalized
+
+
+def _requires_exclusive_private_lane_from_opportunity(opportunity: MediaOpportunity) -> bool:
+    decision = MediaEligibilityRouter().classify(
+        family=opportunity.family,
+        privacy_ceiling=opportunity.privacy_ceiling,
+        expression_charge_ceiling=_expression_charge_ceiling(opportunity),
+        event_snapshot=opportunity.event_snapshot,
+        private_expression_basis=opportunity.private_expression_basis,
+        recipient_ref=(
+            opportunity.audience_context.recipient_ref if opportunity.audience_context else ""
+        ),
+    )
+    return _requires_exclusive_private_lane(opportunity, decision)
+
+
+def _normalize_exclusive_private_proposal(
+    opportunity: MediaOpportunity,
+    proposal: Mapping[str, object],
+    *,
+    selected: Mapping[str, object],
+    presentation_candidates: Sequence[Mapping[str, object]],
+) -> dict[str, object] | None:
+    """Bind a proven private action to its legal candidate contract.
+
+    The bounded model still selects the candidate and its content evidence.
+    These fields are not creative choices once the candidate is selected: an
+    exclusive route has exactly one lawful semantic envelope.  Normalizing
+    them prevents harmless model label drift from repeatedly rejecting an
+    otherwise valid automatic action.
+    """
+
+    if "exclusive_private" not in selected.get("legal_media_lanes", []):
+        return None
+    try:
+        address = MediaAddressStrategy.from_payload(selected["media_address_strategy"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        address.expression_charge == "none"
+        or "intimate_signal" not in selected.get("legal_share_intents", [])
+        or not set(selected.get("legal_capture_modes", [])).intersection(
+            {"character_front_camera", "mirror"}
+        )
+    ):
+        return None
+    source_by_id = {
+        str(item.get("presentation_candidate_id") or ""): item for item in presentation_candidates
+    }
+    legal_bids = _private_candidate_interaction_bids(selected, source_by_id)
+    interaction_bid = next(
+        (
+            bid
+            for bid in (
+                "invite_desire",
+                "invite_closeness",
+                "invite_playful_exchange",
+                "invite_appreciation",
+            )
+            if bid in legal_bids
+        ),
+        None,
+    )
+    if interaction_bid is None:
+        return None
+    normalized = dict(proposal)
+    normalized.update(
+        {
+            "share_intent": "intimate_signal",
+            "privacy": "intimate",
+            "capture_mode": next(
+                mode
+                for mode in selected["legal_capture_modes"]
+                if mode in {"character_front_camera", "mirror"}
+            ),
+            "interaction_bid_id": interaction_bid,
+            "media_lane": "exclusive_private",
+            "recipient_access": "recipient_exclusive",
+            "attraction_expression": (
+                "charged" if address.expression_charge in {"charged", "veiled"} else "feminine"
+            ),
+        }
+    )
+    basis = opportunity.private_expression_basis
+    if basis is not None:
+        refs = list(normalized.get("supporting_evidence_refs") or [])
+        if (
+            basis.evidence_refs[0] not in refs
+            and normalized.get("primary_evidence_ref") != basis.evidence_refs[0]
+        ):
+            if len(refs) >= 8:
+                return None
+            refs.append(basis.evidence_refs[0])
+            normalized["supporting_evidence_refs"] = refs
+    return normalized
+
+
+def _balanced_media_lane_candidates(
+    candidates: Sequence[dict[str, object]],
+    *,
+    private_lane: object,
+) -> tuple[dict[str, object], ...]:
+    """Keep a small, deterministic candidate set without starving a legal lane."""
+
+    limit = 24
+    if not bool(getattr(private_lane, "allowed", False)):
+        return tuple(candidates[:limit])
+    selected: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for lane in (
+        "ordinary_life",
+        "alluring_life",
+        "exclusive_private",
+        SUGGESTIVE_PRIVATE_LANE,
+        EXPLICIT_PRIVATE_LANE,
+    ):
+        for candidate in candidates:
+            if lane not in candidate.get("legal_media_lanes", []):
+                continue
+            candidate_id = str(candidate.get("complete_candidate_id") or "")
+            if candidate_id and candidate_id not in seen:
+                selected.append(candidate)
+                seen.add(candidate_id)
+            if sum(lane in item.get("legal_media_lanes", []) for item in selected) >= 8:
+                break
+    for candidate in candidates:
+        candidate_id = str(candidate.get("complete_candidate_id") or "")
+        if len(selected) >= limit:
+            break
+        if candidate_id and candidate_id not in seen:
+            selected.append(candidate)
+            seen.add(candidate_id)
+    return tuple(selected[:limit])
 
 
 def _embodiment_bid_error(
@@ -2559,6 +3832,8 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
         or plan.relationship_stage_basis is not None
         or plan.photographic_authenticity is not None
         or plan.private_expression_basis is not None
+        or plan.private_render_contract is not None
+        or plan.suggestive_private_contract is not None
     ):
         return "v5_contract_in_legacy_plan"
     enums = (
@@ -2818,6 +4093,10 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
         return "invalid_enum"
     if not plan.action_template_id or not plan.action_cue:
         return "missing_action_contract"
+    if plan.media_lane is not None:
+        lane_error = plan.media_lane.validate()
+        if lane_error:
+            return lane_error
     if plan.media_address_strategy is None or plan.camera_geometry is None:
         return "missing_complete_expression_contract"
     try:
@@ -2863,22 +4142,120 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
         > SENSUAL_CHARGE_RANK[plan.expression_charge_ceiling]
     ):
         return "expression_charge_ceiling_exceeded"
-    stage = plan.relationship_stage_basis or ""
-    if address.expression_charge in {"subtle", "charged"} and stage not in {
-        "ambiguous",
-        "lover",
-    }:
-        return "expression_charge_relationship_conflict"
-    if address.expression_charge == "veiled" and stage != "lover":
-        return "expression_charge_relationship_conflict"
+    # Relationship policy is intentionally not re-evaluated during replay.
+    # The frozen upstream opportunity selected the charge ceiling; this layer
+    # only keeps the candidate, capture and renderer contracts coherent.
     if address.expression_charge == "none":
         if plan.share_intent == "intimate_signal" or plan.privacy == "intimate":
             return "expression_charge_intent_conflict"
     elif plan.share_intent != "intimate_signal" or plan.privacy != "intimate":
         return "expression_charge_requires_intimate_signal"
-    private_expression = plan.family == "character_media" and (
-        plan.privacy == "intimate" or address.expression_charge != "none"
-    )
+    if plan.media_lane is not None:
+        if plan.media_lane.lane == "ordinary_life" and (
+            address.expression_charge != "none"
+            or plan.media_lane.recipient_access == "recipient_exclusive"
+        ):
+            return "ordinary_lane_contains_attraction_expression"
+        if plan.media_lane.lane == "alluring_life":
+            if (
+                plan.media_lane.recipient_access == "recipient_exclusive"
+                or plan.media_lane.attraction_expression not in {"feminine", "charged"}
+                or address.expression_charge == "none"
+            ):
+                return "invalid_alluring_lane_contract"
+        if plan.media_lane.lane in PRIVATE_RENDER_LANES:
+            contract = plan.private_render_contract
+            legacy_contract = plan.suggestive_private_contract
+            if contract is None and legacy_contract is None:
+                return "missing_private_render_contract"
+            if contract is not None and legacy_contract is not None:
+                return "conflicting_private_render_contracts"
+            if contract is not None and contract.validate():
+                return "invalid_private_render_contract"
+            if legacy_contract is not None and legacy_contract.validate():
+                return "invalid_suggestive_private_contract"
+            if legacy_contract is not None and plan.media_lane.lane != SUGGESTIVE_PRIVATE_LANE:
+                return "legacy_suggestive_contract_lane_conflict"
+            expected_expression = (
+                "sexual_suggestive"
+                if plan.media_lane.lane == SUGGESTIVE_PRIVATE_LANE
+                else "explicit_adult"
+            )
+            contract_mechanism = (
+                contract.attraction_mechanism if contract is not None else legacy_contract.attraction_mechanism
+            )
+            contract_coverage = (
+                contract.coverage_mode if contract is not None else legacy_contract.coverage_mode
+            )
+            if (
+                plan.media_lane.recipient_access != "recipient_exclusive"
+                or plan.media_lane.attraction_expression != expected_expression
+                or address.engagement_tactic != "attraction"
+                or address.address_mode != "direct_recipient"
+                or address.attraction_mechanism != contract_mechanism
+                or plan.capture_mode not in {"character_front_camera", "mirror"}
+                or plan.share_intent != "intimate_signal"
+                or plan.privacy != "intimate"
+                or plan.interaction_bid is None
+                or plan.interaction_bid.communicative_goal != "invite_desire"
+            ):
+                return "invalid_private_render_lane_contract"
+            expected_media_intent = (
+                "sexual_suggestive"
+                if plan.media_lane.lane == SUGGESTIVE_PRIVATE_LANE
+                else "explicit_adult"
+            )
+            declared_display = plan.evidence_values.get(
+                "/relationship_media_context/declared_display"
+            )
+            if (
+                not isinstance(declared_display, Mapping)
+                or str(declared_display.get("media_intent") or "")
+                != expected_media_intent
+            ):
+                return "private_render_intent_evidence_missing"
+            if plan.embodied_presentation is None or (
+                plan.embodied_presentation.coverage_mode != contract_coverage
+            ):
+                return "private_render_coverage_contract_conflict"
+            if legacy_contract is not None:
+                if plan.interaction_bid.audience_ref != legacy_contract.authorization.recipient_ref:
+                    return "legacy_suggestive_recipient_conflict"
+                if any(
+                    plan.evidence_values.get(pointer) != value
+                    for pointer, value in legacy_contract.authorization.evidence_values.items()
+                ):
+                    return "unselected_suggestive_authorization_evidence"
+        elif plan.private_render_contract is not None or plan.suggestive_private_contract is not None:
+            return "unexpected_suggestive_private_contract"
+        private_expression = plan.media_lane.lane in {
+            "exclusive_private",
+            *PRIVATE_RENDER_LANES,
+        } or (plan.suggestive_private_contract is not None)
+    else:
+        # Pre-extension v5 payloads retain the original implication that every
+        # charged character image is private expression.
+        private_expression = plan.family == "character_media" and (
+            plan.privacy == "intimate" or address.expression_charge != "none"
+        )
+    if plan.private_flair is not None:
+        try:
+            PrivateFlairBrief.from_payload(plan.private_flair.to_payload())
+        except ValueError:
+            return "invalid_private_flair"
+        if plan.media_lane is None or plan.media_lane.lane not in PRIVATE_RENDER_LANES:
+            return "private_flair_requires_private_render_lane"
+        if plan.camera_geometry is None or plan.media_address_strategy is None:
+            return "private_facial_profile_requires_camera_and_address"
+        profile_error = private_facial_profile_compatibility_error(
+            plan.private_flair.facial_profile,
+            lane=plan.media_lane.lane,
+            capture_mode=plan.capture_mode,
+            shot_distance=plan.camera_geometry.shot_distance,
+            expression_charge=plan.media_address_strategy.expression_charge,
+        )
+        if profile_error:
+            return profile_error
     if private_expression:
         basis = plan.private_expression_basis
         if basis is None:
@@ -3066,6 +4443,8 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
         relationship_stage_basis=None,
         photographic_authenticity=None,
         private_expression_basis=None,
+        private_render_contract=None,
+        suggestive_private_contract=None,
         subject_presentation=legacy_subject,
         embodied_presentation=legacy_embodiment,
         share_intent=legacy_share_intent,
@@ -3111,9 +4490,9 @@ def _planning_messages(
                 f"privacy_ceiling={opportunity.privacy_ceiling}\n"
                 f"sensual_charge_ceiling={opportunity.sensual_charge_ceiling}\n"
                 f"delivery_mode={opportunity.delivery_mode}\n"
-                f"allowed_event_evidence_refs={_stable_json(_allowed_evidence_pointers(opportunity))}\n"
                 f"audience_context={_stable_json(asdict(opportunity.audience_context) if opportunity.audience_context else {})}\n"
                 f"event_snapshot={_stable_json(opportunity.event_snapshot)}\n"
+                f"allowed_event_evidence_refs={_stable_json(_allowed_evidence_pointers(opportunity))}\n"
                 f"hard_banned_fingerprints_last_12={_stable_json(recent)}\n"
                 f"soft_penalty_last_3={_stable_json(recent_three)}\n"
                 f"legal_character_presentation_candidates={_stable_json(presentation_candidates)}\n"
@@ -3145,6 +4524,24 @@ def _planning_messages_v5(
     complete_candidates: tuple[dict[str, object], ...],
     interaction_bids: tuple[dict[str, object], ...],
 ) -> list[dict[str, str]]:
+    has_high_private_candidate = any(
+        bool(
+            set(item.get("legal_media_lanes", ()))
+            & {SUGGESTIVE_PRIVATE_LANE, EXPLICIT_PRIVATE_LANE}
+        )
+        for item in complete_candidates
+    )
+    nsfw_planning_context = (
+        "NSFW planning context: this opportunity has already passed upstream authorization for "
+        "adult fictional, recipient-exclusive NSFW media. You are not deciding consent, policy, "
+        "or provider controls. If you select a supplied suggestive_private or explicit_private "
+        "candidate, preserve its explicit NSFW lane semantics: recipient-directed sexual intent, "
+        "self-authored private capture, and evidence-supported appearance. Never downgrade that "
+        "selected high-private lane into a neutral lifestyle image; never invent facts or expand "
+        "beyond the frozen candidate and evidence.\n"
+        if has_high_private_candidate
+        else ""
+    )
     return [
         {
             "role": "system",
@@ -3154,7 +4551,16 @@ def _planning_messages_v5(
                 "complete_candidate_id. The complete candidate is indivisible: do not return or rewrite "
                 "composition, camera geometry, action, expression, pose, embodied strategy, attraction "
                 "mechanism, or identity references. Never invent facts, people, readable text, body state, "
-                "private apparel, or a completed future event."
+                "private apparel, or a completed future event. Copy classification fields exactly from the "
+                "chosen complete candidate, and choose evidence pointers only from the supplied exact list. "
+                "Also recommend one semantic media lane; this is a suggestion that deterministic routing "
+                "will verify against the chosen candidate and frozen World evidence. Your JSON must have only "
+                "these top-level keys: content_domain, visual_form, share_intent, capture_mode, "
+                "character_visibility, other_people_visibility, polish, tone, privacy, primary_evidence_ref, "
+                "supporting_evidence_refs, constraints, route, interaction_bid_id, complete_candidate_id, "
+                "media_lane, recipient_access, attraction_expression, plus private_flair only for a private "
+                "lane. The supplied enum lists are menus: select one literal string, never echo a menu, wrap "
+                "fields in a classification_fields object, or return a different schema."
             ),
         },
         {
@@ -3164,29 +4570,134 @@ def _planning_messages_v5(
                 f"privacy_ceiling={opportunity.privacy_ceiling}\n"
                 f"expression_charge_ceiling={_expression_charge_ceiling(opportunity)}\n"
                 f"delivery_mode={opportunity.delivery_mode}\n"
-                f"allowed_event_evidence_refs={_stable_json(_allowed_evidence_pointers(opportunity))}\n"
                 f"audience_context={_stable_json(asdict(opportunity.audience_context) if opportunity.audience_context else {})}\n"
                 f"event_snapshot={_stable_json(opportunity.event_snapshot)}\n"
+                f"allowed_event_evidence_refs={_stable_json(_allowed_evidence_pointers(opportunity))}\n"
                 f"private_expression_basis={_stable_json(opportunity.private_expression_basis.__dict__ if opportunity.private_expression_basis else {})}\n"
+                "private_render_clearance=upstream_default_allow_for_experiment\n"
+                f"exclusive_private_required={_requires_exclusive_private_lane_from_opportunity(opportunity)}\n"
+                f"{nsfw_planning_context}"
                 f"hard_banned_fingerprints_last_12={_stable_json(recent)}\n"
                 f"legal_complete_media_expression_candidates={_stable_json(complete_candidates)}\n"
                 f"legal_interaction_bid_candidates={_stable_json(interaction_bids)}\n"
                 "Return fields: content_domain, visual_form, share_intent, capture_mode, "
                 "character_visibility, other_people_visibility, polish, tone, privacy, "
                 "primary_evidence_ref, supporting_evidence_refs, constraints, route, "
-                "interaction_bid_id, complete_candidate_id. When private_expression_basis is non-empty, "
+                "interaction_bid_id, complete_candidate_id, media_lane, recipient_access, "
+                "attraction_expression. Every classification field and every *_id field must be one "
+                "single string value, never an array, object, alternative, explanation, or markdown. "
+                "Only supporting_evidence_refs and constraints are arrays. When private_expression_basis is non-empty, "
                 "include its frozen basis evidence pointer among primary or "
-                "supporting evidence. Never return free visual directions or "
-                "intimate_intensity.\n"
+                "supporting evidence. Return at most eight constraints. Never return free visual directions or "
+                "intimate_intensity. If and only if media_lane is suggestive_private or explicit_private, also "
+                "return private_flair={action_beat, expression_beat, gaze_beat, recipient_subtext, facial_profile}. Every field "
+                "is required and must be one short English phrase. action_beat must describe one visible, "
+                "physically possible adult teasing action that follows the selected candidate rather than a new "
+                "pose or body fact. A generic hair touch, strap adjustment, or phone hold is insufficient unless "
+                "the same action is visibly recipient-directed and teasing; expression_beat, gaze_beat and "
+                "recipient_subtext complete the same one-image performance. Be creative and non-catalogued (for "
+                "example a brief scrunch-nose tease, a nearly "
+                "suppressed grin, a look that lingers for a response, or—only in a selected "
+                "suggestive_private/explicit_private lane—a heightened adult erotic facial beat). A heightened "
+                "face may be sexually suggestive but cannot claim a sexual act, key-area exposure, new body "
+                "state, clothing, or location. Never add or change clothing, "
+                "location, physical state, camera geometry, provider controls or workflow settings. Omit "
+                "private_flair for all other lanes.\n"
+                "private_facial_profile_contracts="
+                f"{_stable_json(load_suggestive_catalog().get('facial_profiles', {}))}. Choose facial_profile literally from this "
+                "matrix. Only choose heightened_ecstasy when the selected complete candidate is a character_front_camera "
+                "intimate_close or close selfie; otherwise choose another compatible profile.\n"
                 f"content_domain={sorted(CONTENT_DOMAINS)}\nvisual_form={sorted(VISUAL_FORMS)}\n"
                 f"share_intent={sorted(SHARE_INTENTS)}\ncapture_mode={sorted(CAPTURE_MODES)}\n"
                 f"character_visibility={sorted(CHARACTER_VISIBILITIES)}\n"
                 f"other_people_visibility={sorted(OTHER_PEOPLE_VISIBILITIES)}\n"
                 f"polish={sorted(POLISH_LEVELS)}\ntone={sorted(TONES)}\n"
-                f"privacy={sorted(PRIVACY_LEVELS)}\nroute={sorted(ROUTES)}\n{_matrix_guidance()}"
+                f"privacy={sorted(PRIVACY_LEVELS)}\nroute={sorted(ROUTES)}\n"
+                "media_lane=['ordinary_life', 'alluring_life', 'exclusive_private', 'suggestive_private', 'explicit_private', 'explicit_reserved']; "
+                "recipient_access=['ambient', 'recipient_directed', 'recipient_exclusive']; "
+                "attraction_expression=['none', 'feminine', 'charged', 'sexual_suggestive', 'explicit_adult', 'explicit_reserved'].\n"
+                "Lane meaning: ordinary_life is pure event sharing and requires no attraction; "
+                "alluring_life is grounded daily sharing with visible feminine or hormonal expression, "
+                "but is not a claim that only this recipient may see it; exclusive_private means a deliberate "
+                "only-for-this-recipient display and therefore requires frozen recipient proof and a self-authored "
+                "front-camera or mirror candidate; suggestive_private is an adult fictional, recipient-exclusive "
+                "sexual-suggestive communication lane. explicit_private is its separately configured high provider "
+                "route. Both are only legal when the chosen candidate lists the lane; both must use invite_desire, direct_recipient, "
+                "charged or veiled expression, and evidence-supported private_apparel or strategic_cover. "
+                "explicit_reserved is unavailable and must never be selected. "
+                "The chosen complete candidate must list the requested media_lane in legal_media_lanes.\n"
+                "When exclusive_private_required=true, all supplied candidates are already private-eligible: "
+                "select that private candidate's content evidence and do not downgrade the action to ordinary or alluring life.\n"
+                f"constraints may contain only={sorted(_MODEL_CONSTRAINTS)}.\n{_matrix_guidance()}"
             ),
         },
     ]
+
+
+def _snapshot_evidence_pointers(value: object, pointer: str = "", *, limit: int = 96) -> list[str]:
+    """Expose a bounded, exact pointer vocabulary to the planning model."""
+
+    pointers: list[str] = []
+
+    def visit(current: object, current_pointer: str) -> None:
+        if len(pointers) >= limit:
+            return
+        if current_pointer:
+            pointers.append(current_pointer)
+        if isinstance(current, dict):
+            for key, child in current.items():
+                escaped = str(key).replace("~", "~0").replace("/", "~1")
+                visit(child, f"{current_pointer}/{escaped}")
+        elif isinstance(current, list):
+            for index, child in enumerate(current):
+                visit(child, f"{current_pointer}/{index}")
+
+    visit(value, pointer)
+    return pointers
+
+
+_PRIVATE_LOCATION_MARKERS = frozenset(
+    {
+        "private",
+        "home",
+        "residence",
+        "bedroom",
+        "bathroom",
+        "personal_room",
+        "hotel_room",
+        "dressing_room",
+        "private_studio",
+    }
+)
+
+
+def _private_context_evidence_ref(opportunity: MediaOpportunity) -> str | None:
+    """Find an explicit, selectable private-location fact for a high lane.
+
+    Recipient clearance proves *why* a private image may be made; it does not
+    prove a public cafe, storefront, or transit setting is the scene.  High
+    private rendering therefore carries one exact location fact through the
+    frozen plan.  This is evidence selection, not a location inference.
+    """
+
+    allowed = set(_allowed_evidence_pointers(opportunity))
+    preferred = (
+        "/location/privacy",
+        "/location/kind",
+        "/location/type",
+        "/location/category",
+        "/location/context",
+    )
+    for pointer in preferred:
+        if pointer not in allowed:
+            continue
+        try:
+            value = _resolve_pointer(opportunity.event_snapshot, pointer)
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        if isinstance(value, str) and value.strip().lower() in _PRIVATE_LOCATION_MARKERS:
+            return pointer
+    return None
 
 
 def _allowed_evidence_pointers(opportunity: MediaOpportunity) -> tuple[str, ...]:
@@ -3200,6 +4711,7 @@ def _allowed_evidence_pointers(opportunity: MediaOpportunity) -> tuple[str, ...]
 
     if opportunity.allowed_evidence_refs:
         return tuple(sorted(set(opportunity.allowed_evidence_refs)))
+
     pointers: list[str] = []
 
     def visit(value: object, pointer: str = "") -> None:
@@ -3273,6 +4785,11 @@ def _planner_interaction_bids(
 
 def _inspection_prompt(plan: MediaPlan) -> str:
     if plan.version == PLAN_VERSION_V5:
+        boundary = (
+            "non-explicit boundary violations"
+            if _non_explicit_boundary_required(plan)
+            else "violations of the frozen upstream private-render boundary"
+        )
         return (
             "Inspect this fictional personal-media image against MediaPlan v5. Return JSON only with "
             "passed, reason, observed_summary, observed_facts, deviations, observed_camera_geometry, "
@@ -3294,11 +4811,25 @@ def _inspection_prompt(plan: MediaPlan) -> str:
             "occupancy or device physics; a mirror image lacking the character visibly holding the reflected "
             "phone with a physically consistent hand, reflection and camera angle; invite_desire diluted into a polite generic portrait; camera, "
             "hands, action or authorship conflicts; copied reference head tilt/smile/hair/framing; identity "
-            "drift; structural defects; invented private facts; non-explicit boundary violations; a frozen "
+            f"drift; structural defects; invented private facts; {boundary}; a frozen "
+            "wardrobe/coverage contradiction (including changing a supported outfit color/type into unrelated "
+            "sportswear or adding a concealing layer not supported by the plan); a frozen "
             "social performance collapsed into the same polite small smile; a reference image's exact face "
             "performance copied into the output; ordinary personal media inflated into a commercial render; "
-            "or regional visual claims unsupported by selected evidence. Treat the frozen facial contract as "
+            "or regional visual claims unsupported by selected evidence; prominent watermark, logo, or "
+            "unrequested legible/nonsensical text. Incidental small unreadable writing on a selected physical "
+            "object is not itself a failure unless the planned meaning depends on reading it. When an identity reference is supplied, "
+            "identity_consistency_ok is true only when the generated face is unequivocally the same fictional "
+            "person, not merely a similarly styled or demographically similar face: compare the facial silhouette "
+            "and cheek/jaw width, eye shape and spacing, nose and mouth proportions, and any stable beauty mark. "
+            "If the output has a narrower V-shaped face, changed eye proportions, missing/relocated stable mark, "
+            "or you cannot make a confident same-person judgment, set identity_consistency_ok=false and reject. "
+            "Treat the frozen facial contract as "
             "one coherent visible still-frame beat, never as a diagnosis or a requirement to show multiple times. "
+            "For media_lane=alluring_life, reject a result whose feminine or hormonal expression has diluted "
+            "into neutral daily documentation. For media_lane=exclusive_private, reject a result that could "
+            "plausibly read as a broad ordinary share rather than a self-authored, recipient-directed private "
+            "display; the result must retain its frozen private-render boundary. "
             f"perceptual_signature must use exactly this ordered schema: {PERCEPTUAL_SIGNATURE_VERSION}|"
             "engagement_tactic|attraction_mechanism|shot_distance|camera_height|view_axis|"
             "camera_face_distance|face_radial_position|subject_occupancy|subject_placement|orientation|"
@@ -3361,7 +4892,11 @@ def _inspection_prompt(plan: MediaPlan) -> str:
         "and deviations (string array). Reject malformed face/hands/body, unwanted text/watermark, "
         "identity mismatch when a reference is supplied, privacy escalation, or a visible contradiction "
         "of capture source, character visibility, people visibility, composition, action, or selected "
-        f"evidence.{subject_fields}{quality_fields}{social_fields}{embodiment_fields} Frozen plan: "
+        "evidence. For media_lane=suggestive_private, require an adult-fictional, self-authored, "
+        "recipient-exclusive suggestive expression that remains within the frozen coverage contract; reject "
+        "a neutral daily selfie, unsupported wardrobe/body state, explicit sexual activity, visible key areas, "
+        "transparent coverage, coercive framing, or isolated fetishized body-part focus. "
+        f"{subject_fields}{quality_fields}{social_fields}{embodiment_fields} Frozen plan: "
         f"{_stable_json(plan.to_payload())[:5000]}"
     )
 
@@ -3398,6 +4933,15 @@ def _inspection_contract_payload(plan: MediaPlan) -> dict[str, object]:
             "cue": plan.action_cue,
         },
         "constraints": list(plan.constraints),
+        "media_lane": (
+            {
+                "lane": plan.media_lane.lane,
+                "recipient_access": plan.media_lane.recipient_access,
+                "attraction_expression": plan.media_lane.attraction_expression,
+            }
+            if plan.media_lane
+            else None
+        ),
         "interaction_bid": (plan.interaction_bid.to_payload() if plan.interaction_bid else None),
         "media_address_strategy": (
             plan.media_address_strategy.to_payload() if plan.media_address_strategy else None
@@ -3421,12 +4965,42 @@ def _inspection_contract_payload(plan: MediaPlan) -> dict[str, object]:
         "private_expression_basis": (
             plan.private_expression_basis.to_payload() if plan.private_expression_basis else None
         ),
+        "private_render_contract": (
+            plan.private_render_contract.to_payload() if plan.private_render_contract else None
+        ),
+        "suggestive_private_contract": (
+            plan.suggestive_private_contract.to_payload()
+            if plan.suggestive_private_contract
+            else None
+        ),
     }
     return payload
 
 
+def _non_explicit_boundary_required(plan: MediaPlan) -> bool:
+    """Whether inspection must apply the ordinary non-explicit boundary.
+
+    A generic high-private contract does not make this subsystem the policy
+    authority.  Its route/tier was already frozen upstream, so inspection
+    checks visual contract, identity and anatomy without silently rewriting
+    the selected route into the older non-explicit one.
+    """
+
+    contract = plan.private_render_contract
+    return contract is None or contract.visibility_tier == "non_explicit"
+
+
 def _repair_prompt(prompt: str, inspection: MediaInspection) -> str:
     if inspection.rule_version == INSPECTION_VERSION_V7:
+        identity_repair = (
+            " The canonical identity anchor must dominate this repair: recover the same face silhouette, "
+            "cheek and jaw width, eye shape and spacing, nose and mouth proportions, and stable beauty mark. "
+            "Do not average the references into a new conventionally attractive face, narrow the jaw into a "
+            "V-shape, or substitute a merely similar-looking woman."
+            if inspection.reason == "identity_consistency_failed"
+            or "identity_consistency_failed" in inspection.deviations
+            else ""
+        )
         return (
             f"{prompt}\n\nThe previous v5 image was rejected: {inspection.reason}. "
             f"Visible deviations: {'; '.join(inspection.deviations) or inspection.reason}. "
@@ -3437,7 +5011,7 @@ def _repair_prompt(prompt: str, inspection: MediaInspection) -> str:
             "strategy, same frozen Moment Capture contract and selected anchor evidence, same frozen facial "
             "display and visible-action contract, embodied contract, wardrobe "
             "facts, coverage and charge; do not replace the face with a generic smile or turn personal media "
-            "into a commercial render."
+            f"into a commercial render.{identity_repair}"
         )
     return (
         f"{prompt}\n\nThe previous image was rejected: {inspection.reason}. "
@@ -3447,6 +5021,14 @@ def _repair_prompt(prompt: str, inspection: MediaInspection) -> str:
         "performance and embodied presentation; do not select a new photo concept, expression strategy, "
         "sensual-charge level, clothing fact, or body strategy."
     )
+
+
+def _provider_failure_reason(error: ImageGenerationProviderError) -> str:
+    """Stable failure code suitable for an External Result payload."""
+
+    suffix = f":http_{error.status_code}" if error.status_code is not None else ""
+    prefix = "inspection_provider" if error.provider == "openai_inspector" else "image_provider"
+    return f"{prefix}_{error.kind}{suffix}"
 
 
 def _enforce_inspection_contract(
@@ -3463,6 +5045,7 @@ def _enforce_inspection_contract(
     facial_contract_required: bool = False,
     moment_capture_required: bool = False,
     self_authored_capture_required: bool = False,
+    non_explicit_boundary_required: bool = True,
 ) -> MediaInspection:
     quality_defects = tuple(
         name
@@ -3498,9 +5081,10 @@ def _enforce_inspection_contract(
         ("physical_salience_mismatch", inspection.physical_salience_matches),
         ("sensual_charge_mismatch", inspection.sensual_charge_broadly_matches),
         ("coverage_mode_mismatch", inspection.coverage_mode_matches),
-        ("explicit_boundary_violation", inspection.non_explicit_boundary_ok),
         ("fetishizing_body_framing", inspection.body_framing_non_fetishizing),
     ]
+    if non_explicit_boundary_required:
+        embodiment_checks.append(("explicit_boundary_violation", inspection.non_explicit_boundary_ok))
     if capture_contract_required:
         embodiment_checks.extend(
             [
@@ -3625,7 +5209,6 @@ def _enforce_inspection_contract(
                 inspection.physical_salience_matches,
                 inspection.sensual_charge_broadly_matches,
                 inspection.coverage_mode_matches,
-                inspection.non_explicit_boundary_ok,
                 inspection.body_framing_non_fetishizing,
             )
         )
@@ -4411,6 +5994,7 @@ __all__ = [
     "LegacyMediaShotAdapter",
     "MediaInspection",
     "MediaInspector",
+    "FirstPersonPrivatePromptAuthor",
     "MediaOpportunity",
     "MediaPlan",
     "MediaPlanner",
@@ -4418,6 +6002,7 @@ __all__ = [
     "MediaRenderer",
     "NotRenderable",
     "OpenAIMediaInspector",
+    "PrivatePromptAuthor",
     "PlannedMedia",
     "RenderedMedia",
     "compile_media_prompt",

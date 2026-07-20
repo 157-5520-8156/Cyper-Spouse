@@ -208,6 +208,7 @@ class CompanionStore:
                 create table if not exists model_usage_events (
                   id integer primary key autoincrement,
                   purpose text not null,
+                  provider text not null default '',
                   model text not null,
                   status text not null,
                   latency_ms integer not null,
@@ -451,6 +452,7 @@ class CompanionStore:
             self._ensure_column(conn, "social_tasks", "reason_code", "text")
             self._ensure_column(conn, "social_tasks", "resolution", "text")
             self._ensure_column(conn, "model_usage_events", "world_id", "text not null default ''")
+            self._ensure_column(conn, "model_usage_events", "provider", "text not null default ''")
             self._ensure_column(conn, "model_usage_events", "turn_id", "text not null default ''")
             self._ensure_column(conn, "model_usage_events", "action_id", "text not null default ''")
             self._ensure_column(conn, "model_usage_events", "cadence", "text not null default ''")
@@ -2574,6 +2576,7 @@ class CompanionStore:
         model: str,
         status: str,
         latency_ms: int,
+        provider: str = "",
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         reasoning_tokens: int = 0,
@@ -2608,16 +2611,17 @@ class CompanionStore:
             conn.execute(
                 """
                 insert into model_usage_events (
-                  purpose, model, status, latency_ms, prompt_tokens,
+                  purpose, provider, model, status, latency_ms, prompt_tokens,
                   completion_tokens, reasoning_tokens, cache_hit_tokens,
                   cache_miss_tokens, total_tokens, error, world_id, turn_id,
                   action_id, cadence, attempt, pricing_version,
                   estimated_cost_usd, budget_reservation_id, thinking_enabled,
                   reasoning_effort, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     purpose[:80],
+                    provider[:80],
                     model[:120],
                     status[:40],
                     max(0, int(latency_ms)),

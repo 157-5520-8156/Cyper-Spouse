@@ -11,6 +11,7 @@ from .relationship_events import (
     RelationshipSignalAcceptedPayload,
     RelationshipSlowVariableAdjustedPayload,
 )
+from .schema_core import FrozenModel
 from .schemas import (
     BoundaryProjection,
     RelationshipAdjustmentProjection,
@@ -51,6 +52,133 @@ def relationship_policy_digest() -> str:
 
 
 RELATIONSHIP_POLICY_DIGEST = relationship_policy_digest()
+
+
+class RelationshipAdjustmentPreview(FrozenModel):
+    """Reducer-equivalent state material for one ordinary adjustment.
+
+    This is intentionally an *input-to-proposal* value, not authority.  The
+    adjustment compiler can use it to materialize an explicit typed mutation,
+    while :func:`adjust_relationship_slow_variables` remains the sole reducer
+    that accepts that mutation into relationship state.
+    """
+
+    relationship_id: str
+    subject_ref: str
+    expected_entity_revision: int
+    variables_before: RelationshipVariablesProjection
+    variables_after: RelationshipVariablesProjection
+    stage_before: str
+    stage_after: str
+    hysteresis_before: RelationshipHysteresisProjection
+    hysteresis_after: RelationshipHysteresisProjection
+    commitment_refs: tuple[str, ...]
+    policy_version: str
+    policy_digest: str
+
+
+def relationship_primary_id(*, subject_ref: str) -> str:
+    """Derive the sole World v2 primary relationship identity for a subject."""
+
+    if not subject_ref:
+        raise ValueError("relationship subject is required")
+    identity = hashlib.sha256(
+        json.dumps({"subject_ref": subject_ref}, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return f"relationship:primary:{identity}"
+
+
+def preview_relationship_slow_variable_adjustment(
+    *,
+    states: tuple[RelationshipStateProjection, ...],
+    history: tuple[RelationshipAdjustmentProjection, ...],
+    signals: tuple[RelationshipSignalProjection, ...],
+    subject_ref: str,
+    signal_refs: tuple[str, ...],
+    proposed_deltas: RelationshipVariableDeltas,
+    accepted_deltas: RelationshipVariableDeltas,
+    logical_time: datetime,
+) -> RelationshipAdjustmentPreview:
+    """Preview the exact reducer material for one ordinary adjustment.
+
+    The preview deliberately owns no aggregation policy: callers must provide
+    the already-selected signals and bounded deltas.  It does own every
+    ordinary-adjustment invariant which can be decided before a typed payload
+    exists, so a payload built from this result reduces without a divergent
+    second calculation.
+    """
+
+    _require_aware(logical_time)
+    if not subject_ref:
+        raise ValueError("relationship adjustment subject is required")
+    if not signal_refs or len(signal_refs) != len(set(signal_refs)):
+        raise ValueError("relationship adjustment requires unique signal refs")
+    resolved_signals = []
+    for signal_ref in signal_refs:
+        matches = [item for item in signals if item.signal_id == signal_ref]
+        if len(matches) != 1 or matches[0].subject_ref != subject_ref:
+            raise ValueError("relationship adjustment signal does not resolve")
+        resolved_signals.append(matches[0])
+    consumed_refs = {
+        signal_ref
+        for item in history
+        if item.operation == "adjust"
+        for signal_ref in item.signal_refs
+    }
+    if any(signal_ref in consumed_refs for signal_ref in signal_refs):
+        raise ValueError("relationship adjustment requires all signals to be unconsumed")
+    _validate_adjustment_deltas(proposed_deltas=proposed_deltas, accepted_deltas=accepted_deltas)
+
+    if len(states) > 1:
+        raise ValueError("world v2.1 permits one primary relationship state")
+    if states:
+        current = states[0]
+        if current.subject_ref != subject_ref:
+            raise ValueError("relationship identity changed subject")
+        if (
+            current.policy_version != _POLICY["policy_version"]
+            or current.policy_digest != RELATIONSHIP_POLICY_DIGEST
+        ):
+            raise ValueError("relationship state references an uninstalled policy")
+        if current.last_adjusted_at is not None and logical_time < current.last_adjusted_at:
+            raise ValueError("relationship adjustment precedes current state")
+        relationship_id = current.relationship_id
+        revision = current.entity_revision
+        before = current.variables
+        stage = current.stage
+        hysteresis = current.hysteresis
+        commitment_refs = current.commitment_refs
+    else:
+        relationship_id = relationship_primary_id(subject_ref=subject_ref)
+        revision = 0
+        before = RelationshipVariablesProjection()
+        stage = "stranger"
+        hysteresis = RelationshipHysteresisProjection()
+        commitment_refs = ()
+    if hysteresis.candidate_since is not None and hysteresis.candidate_since > logical_time:
+        raise ValueError("relationship hysteresis candidate starts in the future")
+    if stage in {"ambiguous", "lover"}:
+        raise ValueError("relationship stage requires an installed commitment protocol")
+    after = _apply_deltas(before, accepted_deltas)
+    stage_after, hysteresis_after = _derive_stage(stage, after, hysteresis, logical_time)
+    if after == before and stage_after == stage and hysteresis_after == hysteresis:
+        raise ValueError("relationship adjustment is a semantic no-op")
+    return RelationshipAdjustmentPreview(
+        relationship_id=relationship_id,
+        subject_ref=subject_ref,
+        expected_entity_revision=revision,
+        variables_before=before,
+        variables_after=after,
+        stage_before=stage,
+        stage_after=stage_after,
+        hysteresis_before=hysteresis,
+        hysteresis_after=hysteresis_after,
+        commitment_refs=commitment_refs,
+        policy_version=_POLICY["policy_version"],
+        policy_digest=RELATIONSHIP_POLICY_DIGEST,
+    )
 
 
 def accept_relationship_signal(
@@ -111,17 +239,9 @@ def adjust_relationship_slow_variables(
         for item in resolved_signals
     ):
         raise ValueError("relationship contradiction group has no supporting signal")
-    for name in _VARIABLE_NAMES:
-        proposed = getattr(payload.proposed_deltas, name)
-        accepted = getattr(payload.accepted_deltas, name)
-        if abs(accepted) > _POLICY["delta_cap_bp"]:
-            raise ValueError("relationship delta exceeds policy cap")
-        if accepted and (
-            not proposed
-            or (accepted > 0) != (proposed > 0)
-            or abs(accepted) > abs(proposed)
-        ):
-            raise ValueError("accepted relationship delta does not refine proposal")
+    _validate_adjustment_deltas(
+        proposed_deltas=payload.proposed_deltas, accepted_deltas=payload.accepted_deltas
+    )
     matches = [
         (index, item)
         for index, item in enumerate(states)
@@ -308,6 +428,24 @@ def _apply_deltas(
             for name in _VARIABLE_NAMES
         }
     )
+
+
+def _validate_adjustment_deltas(
+    *,
+    proposed_deltas: RelationshipVariableDeltas,
+    accepted_deltas: RelationshipVariableDeltas,
+) -> None:
+    for name in _VARIABLE_NAMES:
+        proposed = getattr(proposed_deltas, name)
+        accepted = getattr(accepted_deltas, name)
+        if abs(accepted) > _POLICY["delta_cap_bp"]:
+            raise ValueError("relationship delta exceeds policy cap")
+        if accepted and (
+            not proposed
+            or (accepted > 0) != (proposed > 0)
+            or abs(accepted) > abs(proposed)
+        ):
+            raise ValueError("accepted relationship delta does not refine proposal")
 
 
 def _derive_stage(

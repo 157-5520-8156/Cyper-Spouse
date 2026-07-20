@@ -43,6 +43,7 @@ from .media_v2 import (
     media_payload_hash,
     planning_request_id as expected_planning_request_id,
 )
+from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
 
 
 _OPPORTUNITY_CONTENT_TYPE = "application/vnd.world-v2.media-opportunity+json"
@@ -89,19 +90,27 @@ class SQLiteEventMediaPlanningResultStore:
             raise ValueError("event-media planning result store needs path and world id")
         self._world_id = world_id
         self._lock = RLock()
-        self._connection = sqlite3.connect(path, check_same_thread=False)
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS world_v2_event_media_planning_result (
-                world_id TEXT NOT NULL,
-                planning_request_id TEXT NOT NULL,
-                result_hash TEXT NOT NULL,
-                result_json TEXT NOT NULL,
-                PRIMARY KEY (world_id, planning_request_id)
+        self._database_write_lock = sqlite_write_lock(path)
+        # Autocommit: the default isolation level opens an implicit
+        # transaction on any DML and keeps it (and its WAL read snapshot)
+        # open until an explicit commit.  The idempotent-replay path below
+        # (INSERT OR IGNORE with rowcount 0) used to return without one,
+        # permanently pinning the shared WAL's checkpoint/reset point.
+        self._connection = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        with self._database_write_lock:
+            configure_shared_sqlite_connection(self._connection)
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS world_v2_event_media_planning_result (
+                    world_id TEXT NOT NULL,
+                    planning_request_id TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    PRIMARY KEY (world_id, planning_request_id)
+                )
+                """
             )
-            """
-        )
-        self._connection.commit()
+            self._connection.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -134,7 +143,7 @@ class SQLiteEventMediaPlanningResultStore:
             raise ValueError("planning request id is required")
         encoded = _encode_result(planning_request_id=planning_request_id, result=result)
         result_hash = media_payload_hash(encoded)
-        with self._lock:
+        with self._database_write_lock, self._lock:
             inserted = self._connection.execute(
                 """
                 INSERT OR IGNORE INTO world_v2_event_media_planning_result

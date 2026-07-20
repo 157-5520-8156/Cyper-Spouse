@@ -12,10 +12,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
-from typing import Literal, Mapping, Protocol
+from typing import Callable, Literal, Mapping, Protocol
 
 from .dashboard_projection_adapter import DashboardPublicProjectionDTO, DashboardRoomProjectionDTO
 from .production_turn_application import WorldV2TurnApplication
+from .production_latency_trace import ProductionLatencySample
 from .schemas import ProjectionRequest
 
 
@@ -163,6 +164,22 @@ class PlatformReceiptTransport(Protocol):
     async def receive_receipt(self) -> PlatformReceipt | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class PlatformScheduledDrainResult:
+    """One bounded scheduler pass shared by every platform adapter.
+
+    ``action_units_used`` counts non-idle Action/planning/result work.
+    ``background_units_used`` counts preview selection and cognitive background
+    work.  A preview pass may consume one of each because its deep Interface can
+    both deliberate and advance one already-authorized planning Action.
+    """
+
+    action_statuses: tuple[str, ...] = ()
+    background_statuses: tuple[str, ...] = ()
+    action_units_used: int = 0
+    background_units_used: int = 0
+
+
 class DashboardProjectionCapture(Protocol):
     """A transport-free dashboard snapshot capability owned by composition."""
 
@@ -288,6 +305,16 @@ class WorldV2PlatformHost:
 
         return await self._application.drain_media_results_once(logical_time=logical_time)
 
+    async def drain_media_continuation_once(
+        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+    ) -> str | None:
+        drain = getattr(self._application, "drain_media_continuation_once", None)
+        if drain is None:
+            return None
+        return await drain(
+            logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id,
+        )
+
     async def drain_media_planning_once(self):
         """Advance one frozen media-planning Action through the v2 scheduler.
 
@@ -297,15 +324,237 @@ class WorldV2PlatformHost:
 
         return await self._application.drain_media_planning_once()
 
+    async def drain_media_preview_once(self, *, trace_id: str, correlation_id: str):
+        """Advance one fully composed candidate-to-preview-plan attempt.
+
+        The platform supplies trace coordinates only.  Candidate selection,
+        grant/budget acceptance and durable planning remain inside the
+        application composition; an incomplete media composition reports a
+        fail-closed result rather than falling back to a legacy image path.
+        """
+
+        return await self._application.drain_media_preview_once(
+            trace_id=trace_id, correlation_id=correlation_id,
+        )
+
     async def drain_background_once(self):
         """Advance one separately scheduled, non-visible World v2 work unit."""
 
         return await self._application.drain_background_once()
 
+    def media_preview_operator(self):
+        """Expose the application-owned read-only media observation service."""
+
+        return self._application.media_preview_operator()
+
+    async def drain_media_auto_delivery_once(self, *, trace_id: str, correlation_id: str):
+        """Advance the composed world-owned delivery policy once, if installed."""
+
+        drain = getattr(self._application, "drain_media_auto_delivery_once", None)
+        if drain is None:
+            return None
+        return await drain(trace_id=trace_id, correlation_id=correlation_id)
+
+    async def maintain_wal_once(self):
+        """Run one bounded passive WAL checkpoint on the scheduler lane."""
+
+        maintain = getattr(self._application, "maintain_wal_once", None)
+        if maintain is None:
+            return None
+        return await maintain()
+
+    async def drain_scheduled_work(
+        self,
+        *,
+        max_action_units: int,
+        max_background_units: int,
+        media_preview_trace_id: str,
+        media_preview_correlation_id: str,
+        should_preempt: Callable[[], bool] | None = None,
+    ) -> PlatformScheduledDrainResult:
+        """Run one platform-neutral, strictly budgeted scheduler pass.
+
+        Action dispatch, media planning, and receipt-bound media result
+        materialization share one action budget instead of each receiving the
+        full caller limit.  Preview selection and ordinary cognitive work share
+        one background budget.  With no action budget the conductor is not
+        entered, so selection cannot create an Acceptance batch or invoke a
+        planner as an unaccounted side effect.
+
+        ``should_preempt`` lets the composing adapter end the pass between
+        durable work units when latency-critical visible work (a user reply)
+        is in flight.  Preemption never interrupts a unit mid-commit: every
+        unit that started still completes its own transaction, and skipped
+        work simply remains claimed-or-due for the next scheduler pass.
+        """
+
+        if not 0 <= max_action_units <= 64 or not 0 <= max_background_units <= 64:
+            raise ValueError("platform scheduler limits must be between 0 and 64")
+        _require_nonempty(
+            media_preview_trace_id=media_preview_trace_id,
+            media_preview_correlation_id=media_preview_correlation_id,
+        )
+
+        def preempted() -> bool:
+            return should_preempt is not None and bool(should_preempt())
+
+        action_statuses: list[str] = []
+        background_statuses: list[str] = []
+        action_units_used = 0
+        background_units_used = 0
+
+        # If the recovery queue can consume the whole pass, keep one unit for
+        # an Action that background initiative may authorize below.  Release
+        # the reservation when the initial queue naturally reports idle.
+        initial_action_limit = (
+            max_action_units - 1
+            if max_action_units > 0 and max_background_units > 0
+            else max_action_units
+        )
+        initial_queue_saturated = False
+        while action_units_used < initial_action_limit and not preempted():
+            result = await self.drain_actions_once()
+            if result is None or getattr(result, "status", None) == "idle":
+                break
+            action_units_used += 1
+            action_statuses.append(str(result.status))
+        else:
+            initial_queue_saturated = initial_action_limit < max_action_units
+        pre_background_action_limit = (
+            initial_action_limit if initial_queue_saturated else max_action_units
+        )
+
+        # The conductor can cross both scheduling classes in one bounded call:
+        # it may deliberate over one candidate and may advance one planning
+        # Action.  Require capacity in both classes before entering it, then
+        # charge only the work its structured result says actually occurred.
+        if (
+            action_units_used < pre_background_action_limit
+            and background_units_used < max_background_units
+            and not preempted()
+        ):
+            preview = await self.drain_media_preview_once(
+                trace_id=media_preview_trace_id,
+                correlation_id=media_preview_correlation_id,
+            )
+            selection = getattr(preview, "selection", None)
+            planning = getattr(preview, "planning", None)
+            if selection is not None:
+                background_units_used += 1
+            if planning is not None or getattr(preview, "status", None) in {
+                "planned",
+                "not_renderable",
+                "in_progress",
+            }:
+                action_units_used += 1
+            if not (
+                getattr(preview, "status", None) == "idle"
+                or getattr(preview, "reason_code", None)
+                == "media_preview.conductor_unavailable"
+            ):
+                background_statuses.append("media-preview:" + str(preview.status))
+
+        while action_units_used < pre_background_action_limit and not preempted():
+            result = await self.drain_media_planning_once()
+            if result.status == "idle":
+                break
+            action_units_used += 1
+            background_statuses.append("media-plan:" + result.status)
+            if result.status in {"unavailable", "in_progress"}:
+                break
+
+        if action_units_used < pre_background_action_limit and not preempted():
+            logical_time = await self.current_logical_time()
+            if logical_time is not None:
+                continuation = await self.drain_media_continuation_once(
+                    logical_time=logical_time,
+                    trace_id=media_preview_trace_id,
+                    correlation_id=media_preview_correlation_id,
+                )
+                if continuation is not None:
+                    action_units_used += 1
+                    background_statuses.append("media-continuation:" + continuation)
+
+        if action_units_used < pre_background_action_limit and not preempted():
+            logical_time = await self.current_logical_time()
+            if logical_time is not None:
+                while action_units_used < pre_background_action_limit and not preempted():
+                    result = await self.drain_media_results_once(logical_time=logical_time)
+                    if result is None:
+                        break
+                    action_units_used += 1
+                    background_statuses.append("media:" + result)
+                    if action_units_used < pre_background_action_limit:
+                        continuation = await self.drain_media_continuation_once(
+                            logical_time=logical_time,
+                            trace_id=media_preview_trace_id,
+                            correlation_id=media_preview_correlation_id,
+                        )
+                        if continuation is not None:
+                            action_units_used += 1
+                            background_statuses.append(
+                                "media-continuation:" + continuation
+                            )
+
+        # World-owned delivery of an inspection-passed preview.  The send
+        # decision already happened at media-selection Acceptance; this step
+        # only applies the composed guardrails and drives the delivery
+        # Action, so it shares the action budget.
+        if action_units_used < pre_background_action_limit and not preempted():
+            auto_delivery = await self.drain_media_auto_delivery_once(
+                trace_id=media_preview_trace_id,
+                correlation_id=media_preview_correlation_id,
+            )
+            if auto_delivery is not None and auto_delivery.status not in {
+                "idle", "unavailable",
+            }:
+                action_units_used += 1
+                background_statuses.append("media-delivery:" + auto_delivery.status)
+
+        while background_units_used < max_background_units and not preempted():
+            result = await self.drain_background_once()
+            if result is None:
+                break
+            background_units_used += 1
+            background_statuses.append(str(getattr(result, "work_status", "processed")))
+
+        # Background deliberation may authorize a proactive/follow-up Action.
+        # Give that newly-created effect the caller's still-unused action
+        # budget in the same scheduler pass; otherwise every initiative pays
+        # an artificial extra scheduler interval after the decision is done.
+        while action_units_used < max_action_units and not preempted():
+            result = await self.drain_actions_once()
+            if result is None or getattr(result, "status", None) == "idle":
+                break
+            action_units_used += 1
+            action_statuses.append(str(result.status))
+
+        return PlatformScheduledDrainResult(
+            action_statuses=tuple(action_statuses),
+            background_statuses=tuple(background_statuses),
+            action_units_used=action_units_used,
+            background_units_used=background_units_used,
+        )
+
     async def current_logical_time(self) -> datetime | None:
         """Read the one scheduler scalar needed to continue a durable clock."""
 
         return await self._application.current_logical_time()
+
+    async def world_health_diagnostics(self) -> dict[str, object]:
+        """Read World liveness diagnostics without advancing any worker."""
+
+        return await self._application.world_health_diagnostics()
+
+    def latency_samples(self) -> tuple[ProductionLatencySample, ...]:
+        """Expose read-only process timing evidence without domain authority."""
+
+        return self._application.latency_samples()
+
+    def visible_mood(self) -> str:
+        """Expose the application-owned affect-to-response presentation map."""
+
+        return self._application.visible_mood()
 
     def capture_dashboard_room(self, request: ProjectionRequest) -> DashboardRoomProjectionDTO:
         """Capture one authorized viewer DTO; HTTP/WebSocket remains outside this host."""
@@ -335,5 +584,6 @@ __all__ = [
     "PlatformInboundTransport",
     "PlatformReceipt",
     "PlatformReceiptTransport",
+    "PlatformScheduledDrainResult",
     "WorldV2PlatformHost",
 ]

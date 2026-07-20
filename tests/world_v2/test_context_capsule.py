@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from types import SimpleNamespace
@@ -10,6 +10,7 @@ import pytest
 from companion_daemon.world_v2.context_capsule import (
     ContextCapsuleBudgetPolicy,
     ContextCapsuleRequest,
+    InnerAdvisoryCandidate,
     InnerAdvisoryProjection,
     MAX_INPUT_ITEMS_PER_SLICE,
     RESOLUTION_POLICY_DIGEST,
@@ -23,6 +24,14 @@ from companion_daemon.world_v2.context_capsule import (
     _compile_resolved_context,
     resolved_result_set_hash,
     source_bindings_hash,
+)
+from companion_daemon.world_v2.memory_retrieval import (
+    MemoryRetrievalItem,
+    MemorySourceExcerpt,
+)
+from companion_daemon.world_v2.recent_dialogue import (
+    DialogueSourceClaim,
+    RecentDialogueItem,
 )
 from companion_daemon.world_v2.schemas import (
     AffectEpisodeProjection,
@@ -88,6 +97,7 @@ def _item_ref(value) -> str:
     if isinstance(value, BudgetAccount):
         return f"{value.account_id}:{value.window_id}"
     for field in (
+        "dialogue_id",
         "advisory_id",
         "candidate_id",
         "episode_id",
@@ -99,6 +109,46 @@ def _item_ref(value) -> str:
         if hasattr(value, field):
             return str(getattr(value, field))
     raise AssertionError(f"test fixture has no Capsule identity: {value!r}")
+
+
+def _typed_bound(value, *, slice_name: str, source_refs_by_item: tuple[tuple[str, ...], ...]):
+    items = value if isinstance(value, tuple) else (value,)
+    metadata = []
+    for item, refs in zip(items, source_refs_by_item, strict=True):
+        bindings = tuple(
+            ResolvedSourceBinding(
+                source_kind="committed_event",
+                authority_type="ObservationRecorded",
+                ref=ref,
+                source_world_revision=7,
+                immutable_hash=hashlib.sha256(ref.encode()).hexdigest(),
+            )
+            for ref in refs
+        )
+        metadata.append(ResolvedItemMetadata(
+            item_ref=_item_ref(item), rank_score_bp=5_000, privacy_class="private",
+            source_bindings=bindings, source_hash=source_bindings_hash(bindings),
+            value_hash=canonical_value_hash(item),
+        ))
+    metadata_tuple = tuple(metadata)
+    authority_refs = tuple(sorted({ref for refs in source_refs_by_item for ref in refs}))
+    return ResolvedSlice.model_construct(
+        world_id="world:capsule", snapshot_id="snapshot:7", snapshot_hash=HASH_A,
+        pinned_world_revision=7, value=items,
+        resolver_proof=ResolverProof(
+            resolver_id="context-capsule-resolver",
+            resolver_version="context-capsule-resolver.1",
+            policy_digest=RESOLUTION_POLICY_DIGEST,
+            world_id="world:capsule", snapshot_id="snapshot:7", snapshot_hash=HASH_A,
+            pinned_world_revision=7, slice_name=slice_name, query_ref="query:test",
+            window_ref="window:test", policy_version="context-capsule-resolution-policy.1",
+            completeness="complete", privacy_floor="private",
+            explicit_authority_refs=authority_refs,
+            authority_refs_digest=authority_refs_digest(authority_refs),
+            result_set_hash=resolved_result_set_hash(slice_name, metadata_tuple),
+        ),
+        item_metadata=metadata_tuple,
+    )
 
 
 def _bound(
@@ -309,6 +359,25 @@ def test_required_situation_is_never_reduced_to_a_partial_typed_claim() -> None:
         compile_context_capsule(_request(), policy=policy)
 
 
+def test_proactive_model_view_compacts_proof_but_keeps_whole_situation_authority() -> None:
+    capsule = _compile_resolved_context(
+        _request(), model_content_profile="proactive_decision"
+    )
+
+    full_value = json.loads(capsule.current_situation.items[0].payload_json)
+    model_slice = json.loads(capsule.current_situation.model_content_json)
+    model_item = model_slice["items"][0]
+    assert "source_revisions" in full_value
+    assert "internal_semantic_hash" in full_value
+    assert "source_revisions" not in model_item["value"]
+    assert "internal_semantic_hash" not in model_item["value"]
+    assert "source_bindings" not in model_item
+    assert "activity_slices" in model_item["value"]
+    assert capsule.current_situation.items[0].value_hash == canonical_value_hash(
+        _situation()
+    )
+
+
 def test_optional_typed_item_is_wholly_omitted_when_its_envelope_does_not_fit() -> None:
     account = BudgetAccount(
         account_id="budget:chat", category="chat", window_id="window:1", limit=100
@@ -377,6 +446,164 @@ def test_global_hard_cap_is_enforced_across_available_slices() -> None:
         and entry.omitted_count == 1
         for entry in capsule.budget.truncation_log
     )
+
+
+def test_global_budget_retains_the_single_requested_advisory_matrix() -> None:
+    account = BudgetAccount(
+        account_id="budget:chat",
+        category="chat",
+        window_id="window:1",
+        limit=100,
+    )
+    advisory = InnerAdvisoryProjection(
+        advisory_id="advisory:proactive:1",
+        kind="proactive_opportunity",
+        source_refs=("event:observation:1",),
+        candidate_refs=("spontaneous_contact:observation:1",),
+        candidates=(
+            InnerAdvisoryCandidate(
+                candidate_ref="spontaneous_contact:observation:1",
+                value="The latest inbound message left a live conversational opening.",
+                weight_bp=10_000,
+                confidence_bp=10_000,
+            ),
+        ),
+        confidence_bp=10_000,
+        expiry=NOW + timedelta(minutes=1),
+        producer_version="test-proactive-matrix.1",
+    )
+    policy = ContextCapsuleBudgetPolicy(hard_max_characters=7_000)
+
+    capsule = compile_context_capsule(
+        _request(
+            action_budget=_bound((account,)),
+            advisories=_bound((advisory,), source_ref="event:observation:1"),
+        ),
+        policy=policy,
+    )
+
+    assert capsule.budget.used_characters <= policy.hard_max_characters
+    assert [item.item_ref for item in capsule.advisories.items] == [advisory.advisory_id]
+    assert capsule.action_budget.items == ()
+
+
+def test_advisory_pressure_retains_the_exact_proactive_source_binding() -> None:
+    trigger_ref = "event:observation:proactive-trigger"
+    proactive = InnerAdvisoryProjection(
+        advisory_id="advisory:zz-proactive",
+        kind="proactive_opportunity",
+        source_refs=(trigger_ref,),
+        candidate_refs=("spontaneous_contact:observation:trigger",),
+        candidates=(
+            InnerAdvisoryCandidate(
+                candidate_ref="spontaneous_contact:observation:trigger",
+                value="Verified latest inbound message before the idle gap.",
+                weight_bp=10_000,
+                confidence_bp=10_000,
+            ),
+        ),
+        confidence_bp=100,
+        expiry=NOW + timedelta(minutes=1),
+        producer_version="test-proactive-matrix.1",
+    )
+    optional = tuple(
+        InnerAdvisoryProjection(
+            advisory_id=f"advisory:{index:02d}-optional",
+            kind="appraisal_candidate",
+            source_refs=(trigger_ref,),
+            candidate_refs=(f"candidate:optional:{index}",),
+            confidence_bp=10_000,
+            expiry=NOW + timedelta(minutes=1),
+            producer_version="test-optional-matrix.1",
+        )
+        for index in range(8)
+    )
+    policy = ContextCapsuleBudgetPolicy(
+        advisories=SliceBudget(max_items=3, max_fields=96, max_characters=8_000)
+    )
+
+    capsule = compile_context_capsule(
+        _request(
+            advisories=_bound(
+                (*optional, proactive),
+                source_ref=trigger_ref,
+                ranks=(*((10_000,) * len(optional)), 100),
+            )
+        ),
+        policy=policy,
+    )
+
+    retained = next(
+        item for item in capsule.advisories.items if item.item_ref == proactive.advisory_id
+    )
+    assert [binding.ref for binding in retained.source_bindings] == [trigger_ref]
+
+
+def test_verified_dialogue_proof_does_not_evict_two_active_memory_excerpts() -> None:
+    dialogue: list[RecentDialogueItem] = []
+    dialogue_refs: list[tuple[str, ...]] = []
+    for index in range(8):
+        refs = tuple(f"event:dialogue:{index}:{claim}" for claim in range(4))
+        dialogue_refs.append(refs)
+        dialogue.append(RecentDialogueItem(
+            dialogue_id=f"dialogue:{index}",
+            speaker="counterpart" if index % 2 == 0 else "companion",
+            text=f"第 {index + 1} 条已经核验送达的近期对话。",
+            occurred_at=NOW,
+            delivery_state="observed" if index % 2 == 0 else "delivered",
+            sequence=index + 1,
+            source_claims=tuple(
+                DialogueSourceClaim(
+                    authority_event_ref=ref,
+                    authority_world_revision=7,
+                    authority_payload_hash=hashlib.sha256(ref.encode()).hexdigest(),
+                )
+                for ref in refs
+            ),
+        ))
+    memories: list[MemoryRetrievalItem] = []
+    memory_refs: list[tuple[str, ...]] = []
+    for index, text in enumerate(("我叫丁奥轩。", "我最喜欢喝乌龙茶。")):
+        ref = f"event:memory-source:{index}"
+        digest = hashlib.sha256(ref.encode()).hexdigest()
+        memory_refs.append((ref,))
+        memories.append(MemoryRetrievalItem(
+            candidate_id=f"memory:{index}", cue_kind="future_utility",
+            retention_rationales=("future_utility",), privacy_ceiling="personal",
+            retrieval_strength_bp=5_000,
+            source_excerpts=(MemorySourceExcerpt(
+                source_kind="fact", source_id=f"fact:{index}", source_entity_revision=1,
+                authority_event_ref=ref, authority_world_revision=7,
+                authority_payload_hash=digest, source_values_hash=HASH_A,
+                excerpt_ref=f"observation:{index}",
+                excerpt_payload_hash=hashlib.sha256(text.encode()).hexdigest(),
+                text=text, truncated=False,
+            ),),
+            truncated=False,
+        ))
+
+    capsule = compile_context_capsule(
+        _request(
+            recent_dialogue=_typed_bound(
+                tuple(dialogue), slice_name="recent_dialogue",
+                source_refs_by_item=tuple(dialogue_refs),
+            ),
+            active_memory_candidates=_typed_bound(
+                tuple(memories), slice_name="active_memory_candidates",
+                source_refs_by_item=tuple(memory_refs),
+            ),
+        ),
+        policy=ContextCapsuleBudgetPolicy(hard_max_characters=15_000),
+    )
+
+    model_context = json.loads(capsule.model_content_json)
+    assert len(capsule.recent_dialogue.items) == 8
+    assert len(capsule.active_memory_candidates.items) == 2
+    assert "source_claims" not in capsule.recent_dialogue.model_content_json
+    assert "sidecar_hash" not in capsule.recent_dialogue.model_content_json
+    memory_text = capsule.active_memory_candidates.model_content_json
+    assert "丁奥轩" in memory_text and "乌龙茶" in memory_text
+    assert model_context["slices"]["recent_dialogue"]["source_ref_count"] == 32
 
 
 def test_collection_order_does_not_change_capsule_and_items_are_identity_sorted() -> None:

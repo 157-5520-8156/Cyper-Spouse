@@ -222,11 +222,13 @@ def test_action_cannot_be_authorized_without_its_budget_reservation() -> None:
 
     with pytest.raises(ValueError, match="budget reservation"):
         ledger.commit(
-            [action_event(
-                event_id="event-action-without-budget",
-                event_type="ActionAuthorized",
-                payload={"action": action().model_dump(mode="json")},
-            )],
+            [
+                action_event(
+                    event_id="event-action-without-budget",
+                    event_type="ActionAuthorized",
+                    payload={"action": action().model_dump(mode="json")},
+                )
+            ],
             expected_world_revision=0,
             expected_deliberation_revision=0,
         )
@@ -265,11 +267,13 @@ def test_two_actions_cannot_share_one_external_effect_identity() -> None:
 
     with pytest.raises(ValueError, match="idempotency_key"):
         ledger.commit(
-            [action_event(
-                event_id="event-action-authorized-2",
-                event_type="ActionAuthorized",
-                payload={"action": duplicate_effect.model_dump(mode="json")},
-            )],
+            [
+                action_event(
+                    event_id="event-action-authorized-2",
+                    event_type="ActionAuthorized",
+                    payload={"action": duplicate_effect.model_dump(mode="json")},
+                )
+            ],
             expected_world_revision=3,
             expected_deliberation_revision=0,
         )
@@ -307,11 +311,13 @@ def test_action_claim_requires_a_finite_lease_atomically() -> None:
     reserve_and_authorize(ledger, prefix="event-action-claim-no-lease")
     before = ledger.project()
     ledger.commit(
-        [action_event(
-            event_id="event-action-scheduled-no-lease",
-            event_type="ActionScheduled",
-            payload={"action_id": "action-reply-1"},
-        )],
+        [
+            action_event(
+                event_id="event-action-scheduled-no-lease",
+                event_type="ActionScheduled",
+                payload={"action_id": "action-reply-1"},
+            )
+        ],
         expected_world_revision=before.world_revision,
         expected_deliberation_revision=before.deliberation_revision,
     )
@@ -319,11 +325,13 @@ def test_action_claim_requires_a_finite_lease_atomically() -> None:
 
     with pytest.raises(ValueError, match="claim_lease"):
         ledger.commit(
-            [action_event(
-                event_id="event-action-claim-missing-lease",
-                event_type="ActionClaimed",
-                payload={"action_id": "action-reply-1"},
-            )],
+            [
+                action_event(
+                    event_id="event-action-claim-missing-lease",
+                    event_type="ActionClaimed",
+                    payload={"action_id": "action-reply-1"},
+                )
+            ],
             expected_world_revision=before_claim.world_revision,
             expected_deliberation_revision=before_claim.deliberation_revision,
         )
@@ -336,11 +344,13 @@ def test_action_claim_acquisition_must_match_its_frozen_event_time() -> None:
     reserve_and_authorize(ledger, prefix="event-action-claim-time")
     before = ledger.project()
     ledger.commit(
-        [action_event(
-            event_id="event-action-claim-time-scheduled",
-            event_type="ActionScheduled",
-            payload={"action_id": "action-reply-1"},
-        )],
+        [
+            action_event(
+                event_id="event-action-claim-time-scheduled",
+                event_type="ActionScheduled",
+                payload={"action_id": "action-reply-1"},
+            )
+        ],
         expected_world_revision=before.world_revision,
         expected_deliberation_revision=before.deliberation_revision,
     )
@@ -348,11 +358,13 @@ def test_action_claim_acquisition_must_match_its_frozen_event_time() -> None:
 
     with pytest.raises(ValueError, match="event created_at"):
         ledger.commit(
-            [action_event(
-                event_id="event-action-claim-time-future",
-                event_type="ActionClaimed",
-                payload=claim_payload(acquired_at=NOW + timedelta(seconds=1)),
-            )],
+            [
+                action_event(
+                    event_id="event-action-claim-time-future",
+                    event_type="ActionClaimed",
+                    payload=claim_payload(acquired_at=NOW + timedelta(seconds=1)),
+                )
+            ],
             expected_world_revision=scheduled.world_revision,
             expected_deliberation_revision=scheduled.deliberation_revision,
         )
@@ -377,12 +389,14 @@ def test_only_the_active_claim_owner_can_begin_dispatch() -> None:
 
     with pytest.raises(ValueError, match="active claim lease"):
         ledger.commit(
-            [action_event(
-                event_id="event-action-owner-wrong-dispatcher",
-                event_type="ActionDispatchStarted",
-                payload=dispatch_payload(owner_id="action-pump:other"),
-                logical_time=CLAIMED_AT,
-            )],
+            [
+                action_event(
+                    event_id="event-action-owner-wrong-dispatcher",
+                    event_type="ActionDispatchStarted",
+                    payload=dispatch_payload(owner_id="action-pump:other"),
+                    logical_time=CLAIMED_AT,
+                )
+            ],
             expected_world_revision=claimed.world_revision,
             expected_deliberation_revision=claimed.deliberation_revision,
         )
@@ -412,13 +426,15 @@ def test_expired_action_claim_can_be_reclaimed_before_dispatch() -> None:
     )
     before = ledger.project()
     ledger.commit(
-        [action_event(
-            event_id="event-action-reclaimed",
-            event_type="ActionReclaimed",
-            payload=reclaimed_payload,
-            logical_time=reclaimed_at,
-            created_at=reclaimed_at,
-        )],
+        [
+            action_event(
+                event_id="event-action-reclaimed",
+                event_type="ActionReclaimed",
+                payload=reclaimed_payload,
+                logical_time=reclaimed_at,
+                created_at=reclaimed_at,
+            )
+        ],
         expected_world_revision=before.world_revision,
         expected_deliberation_revision=before.deliberation_revision,
     )
@@ -447,18 +463,20 @@ def test_action_claim_cannot_be_stolen_before_lease_expiry() -> None:
 
     with pytest.raises(ValueError, match="has not expired"):
         ledger.commit(
-            [action_event(
-                event_id="event-action-premature-reclaimed",
-                event_type="ActionReclaimed",
-                payload=claim_payload(
-                    owner_id="action-pump:other",
-                    attempt_id="attempt-action-2",
-                    acquired_at=CLAIMED_AT + timedelta(seconds=1),
-                    expires_at=CLAIM_EXPIRES_AT + timedelta(minutes=1),
-                ),
-                logical_time=CLAIMED_AT + timedelta(seconds=1),
-                created_at=CLAIMED_AT + timedelta(seconds=1),
-            )],
+            [
+                action_event(
+                    event_id="event-action-premature-reclaimed",
+                    event_type="ActionReclaimed",
+                    payload=claim_payload(
+                        owner_id="action-pump:other",
+                        attempt_id="attempt-action-2",
+                        acquired_at=CLAIMED_AT + timedelta(seconds=1),
+                        expires_at=CLAIM_EXPIRES_AT + timedelta(minutes=1),
+                    ),
+                    logical_time=CLAIMED_AT + timedelta(seconds=1),
+                    created_at=CLAIMED_AT + timedelta(seconds=1),
+                )
+            ],
             expected_world_revision=claimed.world_revision,
             expected_deliberation_revision=claimed.deliberation_revision,
         )
@@ -483,12 +501,14 @@ def test_dispatch_cannot_start_after_the_claim_lease_expires() -> None:
 
     with pytest.raises(ValueError, match="expired"):
         ledger.commit(
-            [action_event(
-                event_id="event-action-expired-dispatch-start",
-                event_type="ActionDispatchStarted",
-                payload=dispatch_payload(started_at=CLAIM_EXPIRES_AT),
-                created_at=CLAIM_EXPIRES_AT,
-            )],
+            [
+                action_event(
+                    event_id="event-action-expired-dispatch-start",
+                    event_type="ActionDispatchStarted",
+                    payload=dispatch_payload(started_at=CLAIM_EXPIRES_AT),
+                    created_at=CLAIM_EXPIRES_AT,
+                )
+            ],
             expected_world_revision=claimed.world_revision,
             expected_deliberation_revision=claimed.deliberation_revision,
         )
@@ -651,9 +671,7 @@ async def test_unknown_is_terminal_and_a_later_delivery_cannot_reopen_the_action
     assert conflict.status == "deferred"
     assert ledger.project().actions[0].state == "unknown"
     assert ledger.project().reconciliations[-1].reason == "terminal_conflict"
-    assert ledger.project().budget_settlements[-1].settlement_kind == (
-        "reconciliation_adjustment"
-    )
+    assert ledger.project().budget_settlements[-1].settlement_kind == ("reconciliation_adjustment")
     assert [item.cost_delta for item in ledger.project().budget_settlements] == [0, 7]
     assert ledger.project().budget_accounts[-1].spent == 7
 
@@ -751,11 +769,13 @@ async def test_atomic_settlement_survives_sqlite_restart(tmp_path) -> None:
     for index, (event_type, payload) in enumerate(event_types):
         before = ledger.project()
         ledger.commit(
-            [action_event(
-                event_id=f"event-sqlite-action-{index}",
-                event_type=event_type,
-                payload=payload,
-            )],
+            [
+                action_event(
+                    event_id=f"event-sqlite-action-{index}",
+                    event_type=event_type,
+                    payload=payload,
+                )
+            ],
             expected_world_revision=before.world_revision,
             expected_deliberation_revision=before.deliberation_revision,
         )

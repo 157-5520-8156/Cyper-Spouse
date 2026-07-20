@@ -18,7 +18,7 @@ from companion_daemon.world_v2.life_ecology_contract import (
     life_ecology_trigger_id,
     life_ecology_trigger_ref,
 )
-from companion_daemon.world_v2.schemas import ClaimLease, TriggerProcess
+from companion_daemon.world_v2.schemas import ClaimLease, MessageObservationRef, TriggerProcess
 
 from test_life_ecology_activity import NOW, OWNER, WAKE_REF, _plan, _projection
 
@@ -130,3 +130,39 @@ def test_compiler_fails_closed_when_the_token_is_replayed_at_a_revised_plan() ->
             ecology_trigger_id=revised_trigger_id,
             draft=draft,
         )
+
+
+def test_interruption_opening_carries_the_exact_message_authority_into_the_proposal() -> None:
+    projection, trigger_id = _claimed_projection(revision=2)
+    observation = MessageObservationRef(
+        observation_id="observation:user:interrupt",
+        source="test", source_event_id="message:interrupt",
+        content_payload_hash="b" * 64, event_payload_hash="c" * 64,
+        world_revision=8, actor="user:geoff", channel="direct",
+        payload_ref="payload:interrupt",
+    )
+    active = projection.plans[0].model_copy(update={
+        "status": "active",
+        "authority_origin": type("Origin", (), {
+            "accepted_world_revision": 7,
+        })(),
+    })
+    projection = projection.model_copy(update={
+        "plans": (active,), "message_observations": (observation,),
+    })
+    draft = _selected_draft(projection=projection)
+
+    proposal = ActivityLifecycleProposalCompiler(
+        catalog=_catalog(), ecology_catalog_version=ECOLOGY_CATALOG_VERSION
+    ).compile(
+        projection=projection, wake_event_ref=WAKE_REF,
+        ecology_trigger_id=trigger_id, draft=draft,
+    )
+
+    assert proposal is not None
+    assert proposal.opening_kind == "interruption"
+    assert tuple(item.evidence_type for item in proposal.evidence_refs) == (
+        "active_plan", "committed_world_event", "observed_message",
+    )
+    assert proposal.evidence_refs[-1].ref_id == observation.observation_id
+    assert proposal.evidence_refs[-1].immutable_hash == observation.event_payload_hash

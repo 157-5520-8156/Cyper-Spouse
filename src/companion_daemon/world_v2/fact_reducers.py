@@ -15,14 +15,61 @@ from .schemas import (
 
 
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
+# Catalog version 2 (2026-07-20).  Version 1 was the six-predicate identity
+# baseline.  ``reduce_fact`` validates every replayed committed Fact against
+# this mapping, so the catalog is strictly append-only: an entry, once
+# released, may never be removed or change cardinality without breaking
+# replay of history that used it.  Version 2 adds the everyday-life predicates
+# (work/study, schedule, recent circumstances, people, health, routine,
+# interests, possessions, residence) because a four-day production world with
+# 63 user message batches produced zero committed facts: ordinary personal
+# statements had no installed landing slot.
+#
+# Cardinality semantics (mirrors the version-1 entries):
+#   single - one active value per (subject, predicate) slot; a later different
+#            value needs a correct/withdraw transition, a conflicting second
+#            commit is rejected by ``_reject_active_conflict``.
+#   set    - multiple concurrently active values; only an identical value
+#            (same value_hash) is rejected as a duplicate.
+INSTALLED_FACT_PREDICATE_CATALOG_VERSION = "fact-predicate-catalog.2"
 INSTALLED_FACT_PREDICATE_CARDINALITY = MappingProxyType(
     {
+        # -- catalog version 1 (frozen; replay-load-bearing) ------------------
         "location.current": "single",
         "profile.display_name": "single",
         "profile.timezone": "single",
         "preference.likes": "set",
         "preference.dislikes": "set",
         "relationship.affiliation": "set",
+        # -- catalog version 2 additions (append-only) ------------------------
+        # Work / study identity: one current occupation and one current
+        # study stage per subject; changes are corrections, not accumulation.
+        "profile.occupation": "single",
+        "profile.education": "single",
+        # Residence is distinct from the transient ``location.current``.
+        "location.home": "single",
+        "location.hometown": "single",
+        # Dated or scheduled commitments (a contest tomorrow, a train on the
+        # 21st).  Several can be pending at once, so they accumulate.
+        "schedule.commitment": "set",
+        # Recent life circumstances ("最近在备赛", "被快递员吵醒").  Overlapping
+        # circumstances coexist; retrieval ranks recency, authority does not.
+        "situation.recent": "set",
+        # What the user is doing right now ("在写代码").  Deliberately a set:
+        # the commit-only trigger runtime cannot correct a single slot, and
+        # successive activities must not conflict-poison the lane.
+        "activity.current": "set",
+        # Named people in the user's life (family, friends, colleagues).
+        "relationship.person": "set",
+        # Health facts: conditions, allergies, injuries.
+        "health.condition": "set",
+        # Sleep/wake and other recurring habits ("一般两点睡").
+        "routine.habit": "set",
+        # Hobbies and recurring activities ("打网球").  ``preference.likes``
+        # stays for taste-style likes; this slot is for practiced activities.
+        "interest.activity": "set",
+        # Possessions incl. devices and pets ("我有只猫").
+        "possession.item": "set",
     }
 )
 

@@ -20,9 +20,7 @@ _ALLOWED_TRANSITIONS: dict[ActionState, frozenset[ActionState]] = {
     "authorized": frozenset({"scheduled", "cancelled", "expired"}),
     "scheduled": frozenset({"claimed", "cancelled", "expired"}),
     "claimed": frozenset({"dispatch_started", "cancelled", "expired"}),
-    "dispatch_started": frozenset(
-        {"provider_accepted", "delivered", "failed", "unknown"}
-    ),
+    "dispatch_started": frozenset({"provider_accepted", "delivered", "failed", "unknown"}),
     "provider_accepted": frozenset({"delivered", "failed", "unknown"}),
     "delivered": frozenset(),
     "failed": frozenset(),

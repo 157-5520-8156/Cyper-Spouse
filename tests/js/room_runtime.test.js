@@ -37,6 +37,33 @@ test('runtime loader bypasses stale generated bundle caches', async () => {
   }
 });
 
+test('orthographic projection comes from the compiled scene instead of hard-coded camera math', () => {
+  const configuredBundle = structuredClone(bundle);
+  configuredBundle.projection = {
+    screenAxes:{x:[10, 5], y:[-10, 5], z:[0, -10]}
+  };
+  configuredBundle.tile.origin = [100, 50];
+  const runtime = new DashboardRoomRuntime(fakeCanvas(), configuredBundle, {});
+
+  assert.deepEqual(runtime.project([2, 3, 1]), [90, 65]);
+});
+
+test('idle holds a direction-matched isometric walk frame instead of a flat sprite crop', () => {
+  const calls = [];
+  const context = new Proxy({drawImage:(...args) => calls.push(args)}, {get:(target, key) => target[key] || (() => {})});
+  const configuredBundle = structuredClone(bundle);
+  configuredBundle.sprites.poses.idle = {image:'sprite', walkFrame:0, display:[132, 132]};
+  const runtime = new DashboardRoomRuntime({width:1000, height:760, dataset:{}, getContext:() => context}, configuredBundle, {});
+  runtime.images.sprite = {width:400, height:400};
+  runtime.actor.action = 'idle';
+  runtime.actor.pose = 'idle';
+  runtime.actor.facing = 'upLeft';
+
+  runtime.drawActor(0);
+
+  assert.deepEqual(calls[0].slice(1, 5), [200, 0, 100, 100]);
+});
+
 test('draw exposes deterministic browser audit readiness metadata', () => {
   const canvas = fakeCanvas();
   const runtime = new DashboardRoomRuntime(canvas, bundle, {});

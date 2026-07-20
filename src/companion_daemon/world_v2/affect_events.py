@@ -76,7 +76,7 @@ class AffectEpisodeOpenedPayload(AffectAuthorizedMutationPayload):
 
 class AffectComponentUpdate(FrozenModel):
     component_id: str = Field(min_length=1)
-    operation: Literal["stimulus", "materialize"] = "stimulus"
+    operation: Literal["stimulus", "materialize", "open_component"] = "stimulus"
     before_intensity_bp: int = Field(ge=0, le=10_000)
     proposed_delta_bp: int = Field(ge=-10_000, le=10_000)
     accepted_delta_bp: int = Field(ge=-10_000, le=10_000)
@@ -86,8 +86,10 @@ class AffectComponentUpdate(FrozenModel):
 
     @model_validator(mode="after")
     def delta_matches_updated_component(self) -> AffectComponentUpdate:
-        if self.operation == "stimulus" and not self.appraisal_refs:
+        if self.operation in {"stimulus", "open_component"} and not self.appraisal_refs:
             raise ValueError("stimulus affect update requires appraisal refs")
+        if self.operation == "open_component" and self.before_intensity_bp != 0:
+            raise ValueError("new affect component must start from zero")
         if self.operation == "materialize" and (
             self.appraisal_refs or self.proposed_delta_bp != 0 or self.accepted_delta_bp != 0
         ):
@@ -100,7 +102,7 @@ class AffectComponentUpdate(FrozenModel):
         if self.updated_component.intensity_bp != self.after_intensity_bp:
             raise ValueError("updated component must carry the accepted intensity")
         if (
-            self.operation == "stimulus"
+            self.operation in {"stimulus", "open_component"}
             and self.updated_component.decay_anchor_intensity_bp != self.after_intensity_bp
         ):
             raise ValueError("stimulus update must anchor the accepted intensity")
@@ -129,13 +131,15 @@ class AffectEpisodeUpdatedPayload(AffectAuthorizedMutationPayload):
             raise ValueError("payload appraisal refs must equal update appraisal refs")
         for update in self.component_updates:
             component = update.updated_component
-            if update.operation == "stimulus" and not (
+            if update.operation in {"stimulus", "open_component"} and not (
                 component.decay_anchor_at
                 == component.last_stimulus_at
                 == component.last_updated_at
                 == self.updated_at
             ):
                 raise ValueError("updated component times must equal updated_at")
+            if update.operation == "open_component" and component.opened_at != self.updated_at:
+                raise ValueError("new affect component must open at updated_at")
             if update.operation == "materialize" and component.last_updated_at != self.updated_at:
                 raise ValueError("materialized component time must equal updated_at")
         return self

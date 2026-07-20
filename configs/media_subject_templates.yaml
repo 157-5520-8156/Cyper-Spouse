@@ -5,7 +5,7 @@ version: 2
 # privacy, capture feasibility and clear affect contradictions.
 display_strategies:
   matter_of_fact_showing:
-    communicative_goals: [share_presence, share_discovery]
+    communicative_goals: [inform_status, share_presence, share_discovery]
     tone_affinities: [neutral, calm, tired, frustrated]
     intentionality: lightly_deliberate
     intensity: subtle
@@ -31,7 +31,7 @@ display_strategies:
     temporal_beat: enjoyment_still_unfolding
     forbidden_cues: [advertising_smile, frozen_pose]
   warm_include_you:
-    communicative_goals: [share_presence, revisit_memory, share_discovery]
+    communicative_goals: [inform_status, share_presence, revisit_memory, share_discovery]
     tone_affinities: [warm, calm, bright, tender]
     intentionality: lightly_deliberate
     intensity: subtle
@@ -218,7 +218,7 @@ variants:
     appearance: &everyday_appearance
       hair_arrangements: [hair_down_tucked, half_up, low_ponytail, loose_small_bun, clipped_back, natural_down]
       grooming: [natural, lightly_put_together]
-      accessory_options: [[], [teal_hair_clip]]
+      accessory_options: [[]]
     performance:
       head_yaw: toward_frame_right
       head_pitch: level
@@ -371,7 +371,7 @@ render_lexicon:
     half_up: upper hair visibly gathered into a relaxed half-up arrangement
     low_ponytail: hair visibly gathered into a low ponytail at the nape
     loose_small_bun: hair visibly gathered into a loose small bun, with a few natural strands free
-    clipped_back: front and side strands visibly secured away from the face by the selected clip; the clip must functionally hold the hair rather than merely decorate loose hair
+    clipped_back: front and side strands visibly secured away from the face by a simple, event-supported tie or pin; it must functionally hold the hair rather than merely decorate loose hair
     natural_down: naturally loose shoulder-length hair with no forced symmetry
   outfit_role:
     home_cooking: ordinary comfortable home clothes suitable for cooking, with practical sleeves
@@ -386,8 +386,6 @@ render_lexicon:
   grooming:
     natural: natural grooming with real skin texture and no editorial polish
     lightly_put_together: lightly put together while retaining an everyday appearance
-  accessories:
-    teal_hair_clip: one muted teal hair clip, visibly performing the planned hair arrangement
   head_yaw:
     near_front: face almost forward, without a habitual cute head tilt
     toward_frame_left: head turned toward the left side of the image frame
@@ -476,59 +474,83 @@ render_lexicon:
     unspecified: preserve physically plausible hand responsibilities for the stated capture mode
 
 reference_pose_metadata:
-  assets/reference/celia-v2-reference-01-canonical.png:
-    head_yaw: near_front
-    head_pitch: level
+  assets/reference/01-headphones-candid.png:
+    identity_usage: angle_support
+    head_yaw: toward_frame_right
+    head_pitch: slightly_down
     head_roll: slight
-    gaze_target: lens
-    expression: soft_closed_smile
-    hair_arrangement: natural_down
-  assets/reference/celia-v2-reference-03-angle-10deg.png:
+    gaze_target: off_frame
+    expression: neutral_tired
+    hair_arrangement: loose_small_bun
+  assets/reference/02-bedtime-close-selfie.png:
+    identity_usage: angle_support
     head_yaw: near_front
-    head_pitch: level
-    head_roll: none
-    gaze_target: lens
-    expression: neutral_soft
-    hair_arrangement: natural_down
-  assets/reference/celia-v2-pose-expansion/celia-v2-pose-01-opposite-left-3q-over-shoulder.png:
-    head_yaw: toward_frame_left
-    head_pitch: level
-    head_roll: none
-    gaze_target: lens
-    expression: soft_closed_smile
-    hair_arrangement: natural_down
-  assets/reference/celia-v2-pose-expansion/celia-v2-pose-02-opposite-left-3q-chin-down.png:
-    head_yaw: toward_frame_left
     head_pitch: slightly_down
     head_roll: slight
     gaze_target: lens
-    expression: soft_closed_smile
+    expression: neutral_soft
+    hair_arrangement: natural_down
+  assets/reference/03-tennis-selfie.png:
+    identity_usage: scene_only
+    head_yaw: near_front
+    head_pitch: slight_up
+    head_roll: slight
+    gaze_target: lens
+    expression: breathless_neutral
     hair_arrangement: tied_back
-  assets/reference/celia-v2-pose-expansion/celia-v2-left-front-gentle-laugh-selfie.png:
-    head_yaw: toward_frame_right
+  assets/reference/04-night-walk-turn.png:
+    identity_usage: angle_support
+    head_yaw: toward_frame_left
     head_pitch: level
-    head_roll: slight
+    head_roll: none
     gaze_target: lens
-    expression: gentle_laugh
+    expression: glance_back
     hair_arrangement: natural_down
-  assets/reference/celia-v2-pose-expansion/celia-v2-left-front-kitchen-thoughtful.png:
+  assets/reference/05-restaurant-seated.png:
+    identity_usage: angle_support
+    head_yaw: toward_frame_left
+    head_pitch: slightly_down
+    head_roll: slight
+    gaze_target: off_frame
+    expression: thoughtful
+    hair_arrangement: natural_down
+  assets/reference/06-night-street-seated.png:
+    identity_usage: angle_support
     head_yaw: toward_frame_right
     head_pitch: slightly_down
+    head_roll: slight
+    gaze_target: off_frame
+    expression: neutral_soft
+    hair_arrangement: natural_down
+  assets/reference/07-lakeside-turn.png:
+    identity_usage: angle_support
+    head_yaw: toward_frame_right
+    head_pitch: level
     head_roll: none
-    gaze_target: primary_evidence
-    expression: thoughtful
+    gaze_target: lens
+    expression: glance_back
     hair_arrangement: loose_small_bun
-  assets/reference/celia-v2-relationship-private/03-bedroom-selfie.jpg:
+  assets/reference/08-cafe-phone-canonical.png:
+    identity_usage: canonical_identity
     head_yaw: near_front
     head_pitch: level
     head_roll: none
     gaze_target: lens
     expression: neutral_soft
-    hair_arrangement: loose_small_bun
-  assets/reference/celia-v2-relationship-private/04-bedroom-fullbody.jpg:
-    head_yaw: toward_frame_right
+    hair_arrangement: natural_down
+  assets/reference/09-pool-selfie.png:
+    identity_usage: scene_only
+    head_yaw: near_front
     head_pitch: level
     head_roll: slight
     gaze_target: lens
-    expression: soft_closed_smile
-    hair_arrangement: loose_small_bun
+    expression: breathless_neutral
+    hair_arrangement: wet_down
+  assets/reference/10-sidewalk-turn.png:
+    identity_usage: angle_support
+    head_yaw: toward_frame_left
+    head_pitch: level
+    head_roll: slight
+    gaze_target: lens
+    expression: glance_back
+    hair_arrangement: natural_down

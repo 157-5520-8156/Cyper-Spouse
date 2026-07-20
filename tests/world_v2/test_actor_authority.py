@@ -6,7 +6,7 @@ import sqlite3
 from nacl.signing import SigningKey
 import pytest
 
-from legacy_migration_support import legacy_state_json
+from legacy_migration_support import legacy_state_json, read_head_state_json
 
 import companion_daemon.world_v2.actor_authority_reducers as actor_authority_reducers
 from companion_daemon.world_v2.actor_authority_events import (
@@ -1024,11 +1024,7 @@ def test_sqlite_actor_authority_survives_restart_rebuild_and_detects_tamper(
     reopened.close()
 
     with sqlite3.connect(path) as connection:
-        raw = json.loads(
-            connection.execute(
-                "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-            ).fetchone()[0]
-        )
+        raw = json.loads(read_head_state_json(connection, WORLD))
         raw["actor_authorities"][0]["values"]["principal_ref"] = "operator:tampered"
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ? WHERE world_id = ?",
@@ -1079,7 +1075,10 @@ def test_actor_transition_binding_is_v16_only_and_legacy_injection_is_rejected(
             legacy, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode()
     ).hexdigest()
-    assert legacy_hash == "d2eb4ff96bd2e1a6395c4b9edcc5a2f031b49671038540411b1de96c909574b5"
+    # Pinned fixture bytes embed ROOT_KEYSET_DIGEST; the 2026-07-20 keyset
+    # rotation (production-2 added while both production ledgers held zero
+    # root-signed events) legitimately moved this hash exactly once.
+    assert legacy_hash == "175f4db48ee64187319219ad1f4e7af48afcbb1074edd0e485fa8ba01258b5cf"
     missing = projection.actor_authority_transitions[0].model_dump(mode="python")
     missing.pop("accepted_event_ref")
     missing.pop("accepted_world_revision")
@@ -1147,9 +1146,7 @@ def test_sqlite_migrates_verified_v7_head_to_actor_authority_bundle(tmp_path) ->
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        raw_state = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0]
+        raw_state = read_head_state_json(connection, WORLD)
         state = ReducerState.model_validate_json(raw_state)
         semantic = state.semantic_payload(
             world_id=WORLD,
@@ -1199,9 +1196,7 @@ def test_sqlite_rejects_tampered_v7_head_during_actor_bundle_migration(
     )
     ledger.close()
     with sqlite3.connect(path) as connection:
-        raw_state = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0]
+        raw_state = read_head_state_json(connection, WORLD)
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",

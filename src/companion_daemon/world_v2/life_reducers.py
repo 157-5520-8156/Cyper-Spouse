@@ -15,7 +15,6 @@ from .life_events import (
     WorldOccurrenceSettledPayload,
     WorldOccurrenceTerminalPayload,
 )
-from .activity_timing import activity_completion_allowed
 from .experience_events import ExperienceCommittedPayload, LegacyExperienceCommittedPayload
 from .schemas import (
     Action,
@@ -152,19 +151,12 @@ def transition_activity(
         raise ValueError("activity transition is ahead of logical time")
     if payload.transitioned_at != logical_time:
         raise ValueError("activity transition must be pinned to authoritative logical time")
-    # The catalog's scheduler path must not manufacture an immediate
-    # completion merely because a wake occurred.  An explicit host/user
-    # transition is still allowed to record a real early finish (for example
-    # an activity was interrupted or completed sooner than expected); its
-    # reason/evidence is the authority for that decision.  Restrict the
-    # elapsed-time floor to the proposal-bound path where the reducer can
-    # distinguish an ordinary scheduler wake from such an explicit transition.
-    if (
-        event_type == "ActivityCompleted"
-        and payload.activity_lifecycle_proposal_id is not None
-        and not activity_completion_allowed(plan, logical_time=logical_time)
-    ):
-        raise ValueError("activity cannot complete before its minimum elapsed duration")
+    # Proposal-bound transitions have already been resolved against the
+    # versioned, source-bound activity catalog by
+    # ``_activity_lifecycle_proposal_recorded``.  Repeating the current timing
+    # policy here would reinterpret immutable catalog-v2 proposals during
+    # replay; explicit host transitions remain governed by their own reason
+    # and evidence authority below.
     if payload.transitioned_at.tzinfo is None or payload.transitioned_at.utcoffset() is None:
         raise ValueError("activity transition time must be timezone-aware")
     if (

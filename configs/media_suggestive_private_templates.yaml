@@ -1,0 +1,115 @@
+version: suggestive-private-matrix-v1
+
+# High lane: adult fictional, recipient-exclusive, clearly sexual-suggestive
+# communication.  This catalog does not create new pose or facial systems; it
+# composes existing address, camera, subject and embodiment candidates.
+# Unsupported combinations are rejected rather than cosmetically downgraded.
+
+principal_grounding:
+  relational_escalation:
+    required_evidence: [relationship_media_context.active_exchange]
+  recipient_display:
+    required_evidence: [relationship_media_context.declared_display]
+  private_attire:
+    required_evidence: [character.appearance_state]
+  embodied_aftereffect:
+    required_evidence: [character.visible_physical_state]
+  private_transition:
+    required_evidence: [activity.private_transition]
+  shared_ritual:
+    required_evidence: [relationship_media_context.shared_ritual]
+  private_environment:
+    required_evidence: [location, environment]
+
+# Every image chooses one main mechanism.  It may contain other visual details,
+# but cannot claim two competing main reasons for its recipient-directed pull.
+mechanisms:
+  direct_invitation:
+    compatible_framing: [conversational_close, contextual_body]
+    compatible_coverage: [private_apparel, strategic_cover]
+  playful_tease:
+    compatible_framing: [conversational_close, contextual_body]
+    compatible_coverage: [private_apparel, strategic_cover]
+  withheld_attention:
+    compatible_framing: [conversational_close, whole_person_private]
+    compatible_coverage: [private_apparel, strategic_cover]
+  sensory_immediacy:
+    compatible_framing: [contextual_body, whole_person_private]
+    compatible_coverage: [private_apparel, strategic_cover]
+  private_trust:
+    compatible_framing: [conversational_close, whole_person_private]
+    compatible_coverage: [private_apparel, strategic_cover]
+  confident_display:
+    compatible_framing: [contextual_body, whole_person_private]
+    compatible_coverage: [private_apparel, strategic_cover]
+  interrupted_transition:
+    compatible_framing: [conversational_close, contextual_body]
+    compatible_coverage: [private_apparel, strategic_cover]
+  close_proximity:
+    compatible_framing: [conversational_close]
+    compatible_coverage: [private_apparel, strategic_cover]
+
+# Every high-private flair selects one face-performance profile. These are
+# facial intensity contracts, not extra poses or body-state claims. The most
+# heightened profile is intentionally limited to a face-first front selfie:
+# that is materially more reproducible than asking a distant or mirror shot
+# to carry a subtle expression.
+facial_profiles:
+  natural_private:
+    lanes: [suggestive_private, explicit_private]
+    capture_modes: [character_front_camera, mirror]
+    shot_distances: [intimate_close, close, medium, full_body, long, wide]
+    expression_charges: [charged, veiled]
+    author_contract: "a private but natural lived micro-expression; do not default to a polite smile"
+    render_suffix: ""
+  playful_sensual:
+    lanes: [suggestive_private, explicit_private]
+    capture_modes: [character_front_camera, mirror]
+    shot_distances: [intimate_close, close, medium]
+    expression_charges: [charged, veiled]
+    author_contract: "a playful, recipient-aware sensual expression with visible asymmetry and no polished smile"
+    render_suffix: "Face priority: a playful adult teasing micro-expression, never a posed beauty smile."
+  withheld_desire:
+    lanes: [suggestive_private, explicit_private]
+    capture_modes: [character_front_camera, mirror]
+    shot_distances: [intimate_close, close, medium]
+    expression_charges: [charged, veiled]
+    author_contract: "desire that is deliberately held back: averted or returning eyes, a breath caught before a response"
+    render_suffix: "Face priority: held adult desire—an unfinished breath and a gaze that does not resolve into a smile."
+  breathless_desire:
+    lanes: [suggestive_private, explicit_private]
+    capture_modes: [character_front_camera, mirror]
+    shot_distances: [intimate_close, close]
+    expression_charges: [charged, veiled]
+    author_contract: "a breathless adult moment with warm cheeks, softened focus and a naturally parted mouth"
+    render_suffix: "Face priority: breathless adult desire—warm flush, softened focus and a naturally parted mouth; no polite smile."
+  heightened_ecstasy:
+    lanes: [suggestive_private, explicit_private]
+    capture_modes: [character_front_camera]
+    shot_distances: [intimate_close, close]
+    expression_charges: [charged, veiled]
+    author_contract: "a face-first adult ahegao-inspired micro-expression: deeply flushed cheeks, lifted soft brows, heavy unfocused upward eyes, an open breathy mouth and the tip of her tongue resting at the lower lip; it is not a smile or fashion pose"
+    render_suffix: "Face-first execution: tight shoulder-up front-camera selfie. Unmistakably adult ahegao-inspired micro-expression—deep flush, soft lifted brows, heavy upward-unfocused eyes, an open breathy mouth and tongue tip at the lower lip; no composed stare or smile."
+
+hard_contract:
+  family: character_media
+  privacy: intimate
+  share_intent: intimate_signal
+  relationship_stage: lover
+  recipient_access: recipient_exclusive
+  attraction_expression: sexual_suggestive
+  interaction_bid: invite_desire
+  address_mode: direct_recipient
+  capture_modes: [character_front_camera, mirror]
+  expression_charges: [charged, veiled]
+  coverage_modes: [private_apparel, strategic_cover]
+  render_route: adult_suggestive
+
+safety_boundary:
+  - adult_fictional_character_only
+  - no_nudity_of_key_areas
+  - no_explicit_sexual_activity
+  - no_coercion_or_nonconsent
+  - no_transparent_coverage
+  - no_fetishized_isolated_body_part_focus
+  - anatomy_mirror_and_hand_physics_must_remain_coherent

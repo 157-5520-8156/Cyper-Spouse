@@ -4,6 +4,8 @@ import hashlib
 import json
 import sqlite3
 
+from legacy_migration_support import read_head_state_json
+
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.deliberation import DeliberationResult
 from companion_daemon.world_v2.media_thread_acceptance_runtime import (
@@ -149,13 +151,13 @@ def test_sqlite_migrates_v31_head_without_inventing_media_thread_proposals(tmp_p
     ledger.close()
     with sqlite3.connect(path) as connection:
         row = connection.execute(
-            "SELECT state_json, world_revision FROM world_v2_heads WHERE world_id = ?", (WORLD,)
+            "SELECT world_revision FROM world_v2_heads WHERE world_id = ?", (WORLD,)
         ).fetchone()
         assert row is not None
-        state = ReducerState.model_validate_json(row[0])
+        state = ReducerState.model_validate_json(read_head_state_json(connection, WORLD))
         semantic = state.semantic_payload(
             world_id=WORLD,
-            world_revision=int(row[1]),
+            world_revision=int(row[0]),
             reducer_bundle_version="world-v2-reducers.31",
         )
         legacy_hash = hashlib.sha256(

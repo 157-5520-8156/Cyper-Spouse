@@ -53,9 +53,7 @@ def test_legacy_event_is_upcast_deterministically_without_mutating_fixture() -> 
     assert first.schema_version == "world-v2.1"
     assert first.event_id == "evt-legacy"
     assert first.payload() == {"observation_id": "obs-legacy"}
-    assert first.payload_hash == hashlib.sha256(
-        first.payload_json.encode("utf-8")
-    ).hexdigest()
+    assert first.payload_hash == hashlib.sha256(first.payload_json.encode("utf-8")).hexdigest()
 
 
 def test_current_event_replay_is_identity_preserving() -> None:

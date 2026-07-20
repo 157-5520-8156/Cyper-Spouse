@@ -29,12 +29,22 @@ from .media_selection_acceptance_manifest import (
     MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
     parse_media_selection_acceptance_manifest,
 )
+from .media_continuation_acceptance_manifest import (
+    MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+    MediaContinuationAcceptanceManifest,
+)
 from .media_selection_proposal import MediaSelectionProposalRecordedPayload
 from .image_evidence_contract import IMAGE_EVIDENCE_PAYLOAD_MODELS
 from .private_image_evidence_contract import RECIPIENT_SCOPED_IMAGE_EVIDENCE_PAYLOAD_MODELS
 from .appearance_state import APPEARANCE_STATE_PAYLOAD_MODELS
 from .visible_physical_state import VISIBLE_PHYSICAL_STATE_PAYLOAD_MODELS
+from .visual_fact import VISUAL_FACT_PAYLOAD_MODELS
 from .random_authority import RandomDrawRecordedPayload
+from .life_author_runtime import (
+    LifeAuthorDecisionRecordedPayload,
+    LifeAvailabilitySnapshotRecordedPayload,
+)
+from .media_selection_attempt import MediaSelectionAttemptRecordedPayload
 from .goal_authority_events import (
     V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
     V2_GOAL_PAYLOAD_MODELS,
@@ -49,6 +59,7 @@ from .experience_events import (
     EXPERIENCE_PAYLOAD_MODELS,
     LegacyExperienceCommittedPayload,
 )
+from .aspiration_events import ASPIRATION_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
 from .life_content_events import LIFE_CONTENT_PAYLOAD_MODELS
 from .expression_payload_events import EXPRESSION_PAYLOAD_EVENT_MODELS
@@ -63,6 +74,14 @@ from .appraisal_acceptance_manifest import (
 from .affect_acceptance_manifest import (
     AFFECT_ACCEPTANCE_MANIFEST_VERSION,
     AffectAcceptanceManifest,
+)
+from .relationship_acceptance_manifest import (
+    RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+    RelationshipAcceptanceManifest,
+)
+from .relationship_adjustment_acceptance_manifest import (
+    RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
+    RelationshipAdjustmentAcceptanceManifest,
 )
 from .outcome_acceptance_manifest import (
     OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
@@ -82,6 +101,10 @@ from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReply
 from .expression_plan_manifest import (
     EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
     ExpressionPlanAcceptanceManifest,
+)
+from .social_action_acceptance import (
+    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+    SocialDeferredAcceptanceManifest,
 )
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .private_impression_events import PRIVATE_IMPRESSION_PAYLOAD_MODELS
@@ -160,12 +183,16 @@ class EventContract:
                 MINIMAL_REPLY_MANIFEST_VERSION,
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+                RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+                RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
                 OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
                 INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
                 MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
                 EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
                 ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
                 *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+                MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+                SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
@@ -215,6 +242,21 @@ class EventContract:
             return
         if (
             self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            MediaContinuationAcceptanceManifest.model_validate(dict(payload), strict=True)
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            SocialDeferredAcceptanceManifest.model_validate_json(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                strict=True,
+            )
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
             and payload.get("manifest_version") == APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
         ):
             AppraisalAcceptanceManifest.model_validate(dict(payload), strict=True)
@@ -224,6 +266,19 @@ class EventContract:
             and payload.get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION
         ):
             AffectAcceptanceManifest.model_validate(dict(payload), strict=True)
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            RelationshipAcceptanceManifest.model_validate(dict(payload), strict=True)
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version")
+            == RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            RelationshipAdjustmentAcceptanceManifest.model_validate(dict(payload), strict=True)
             return
         if (
             self.event_type == "AcceptanceRecorded"
@@ -327,6 +382,17 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "FactCommitProposalRecorded": FactCommitProposalRecordedPayloadV2,
         "FactCommittedV2": FactCommitMaterializedPayloadV2,
         "ModelResultRecorded": ModelResultRecordedPayload,
+        "AdvisoryAcceptanceRejected": _payload_model(
+            "AdvisoryAcceptanceRejectedPayload",
+            {
+                "proposal_id": _ID,
+                "source_event_ref": _ID,
+                "advisory_kind": _ID,
+                "stage": _ID,
+                "reason_code": _ID,
+                "failure_fingerprint": _ID,
+            },
+        ),
         "AcceptanceRecorded": _payload_model(
             "AcceptanceRecordedPayload",
             {
@@ -348,10 +414,14 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
         **MEDIA_V2_PAYLOAD_MODELS,
         **IMAGE_EVIDENCE_PAYLOAD_MODELS,
+        **VISUAL_FACT_PAYLOAD_MODELS,
         **RECIPIENT_SCOPED_IMAGE_EVIDENCE_PAYLOAD_MODELS,
         **APPEARANCE_STATE_PAYLOAD_MODELS,
         **VISIBLE_PHYSICAL_STATE_PAYLOAD_MODELS,
         "RandomDrawRecorded": RandomDrawRecordedPayload,
+        "LifeAuthorDecisionRecorded": LifeAuthorDecisionRecordedPayload,
+        "LifeAvailabilitySnapshotRecorded": LifeAvailabilitySnapshotRecordedPayload,
+        "MediaSelectionAttemptRecorded": MediaSelectionAttemptRecordedPayload,
         "MediaSelectionProposalRecorded": MediaSelectionProposalRecordedPayload,
         **INTERACTION_BID_PAYLOAD_MODELS,
         **MEDIA_DELIVERY_THREAD_PAYLOAD_MODELS,
@@ -400,6 +470,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             "ActionReconciliationPayload", {"reconciliation": (ActionReconciliation, ...)}
         ),
         **LIFE_PAYLOAD_MODELS,
+        **ASPIRATION_PAYLOAD_MODELS,
         **APPRAISAL_PAYLOAD_MODELS,
         **AFFECT_PAYLOAD_MODELS,
         **RELATIONSHIP_PAYLOAD_MODELS,
@@ -443,13 +514,16 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "PerceptionResultAccepted": "world_id+result_id",
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
         "ModelResultRecorded": "world_id+model_call_id+model_result_ref",
+        "AdvisoryAcceptanceRejected": "world_id+proposal_id+stage+failure_fingerprint",
         "AcceptanceRecorded": "v2:world_id+manifest_version+acceptance_id;legacy:proposal+revision",
         "MessagePayloadStored": "world_id+acceptance_id+payload_ref+payload_hash",
         "ExpressionPayloadDescriptorRecorded": "world_id+acceptance_id+payload_ref+payload_hash",
         "ExpressionPlanAccepted": "world_id+acceptance_id+plan_id+expression_change_id",
         "ExpressionBeatAuthorized": "world_id+acceptance_id+plan_id+beat_id+payload_hash",
         "ExpressionBeatSettled": "world_id+beat_id+receipt_id+terminal_state",
+        "ExpressionBeatTerminated": "world_id+beat_id+action_id+disposition+source_event_ref",
         "ExpressionPlanCompleted": "world_id+plan_id+receipt_id+terminal_beat_id",
+        "ExpressionPlanTerminated": "world_id+plan_id+terminal_beat_id+disposition+source_event_ref",
         "LegacyAcceptanceAuditRecorded": "migration-only:original-event-id",
         "AffectEpisodeOpened": "world_id+episode_id+transition_id",
         "AffectEpisodeUpdated": "episode_id+transition_id",
@@ -463,10 +537,14 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "PhotoCandidateUnrenderable": "world_id+candidate_id+expected_revision+reason",
         "PhotoCandidateExpired": "world_id+candidate_id+expected_revision+reason",
         "ImageEvidenceDeclared": "world_id+source_event_ref+source_event_payload_hash",
+        "VisualFactRecorded": "world_id+visual_fact_id+content_payload_hash",
         "RecipientScopedImageEvidenceDeclared": "world_id+recipient_ref+source_event_ref+source_event_payload_hash",
         "AppearanceStateRecorded": "world_id+appearance_state_id+entity_revision",
         "VisiblePhysicalStateRecorded": "world_id+physical_state_id+entity_revision",
         "RandomDrawRecorded": "world_id+draw_id",
+        "LifeAuthorDecisionRecorded": "world_id+decision_id",
+        "LifeAvailabilitySnapshotRecorded": "world_id+snapshot_id",
+        "MediaSelectionAttemptRecorded": "world_id+attempt_id",
         "MediaSelectionProposalRecorded": "world_id+proposal_id",
         "MediaOpportunityFrozen": "world_id+opportunity_id",
         "MediaPlanRecorded": "world_id+planning_request_id+plan_id",
@@ -502,6 +580,10 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ExecutionReceiptRecorded": "provider+source_event_id+raw_payload_hash",
         "ActionReconciliationRequired": "result_id+reason+observed_state",
         "NpcRegistered": "world_id+npc_id",
+        "AspirationPlanted": "world_id+aspiration_id+transition_id",
+        "AspirationReinforced": "world_id+aspiration_id+expected_entity_revision+transition_id",
+        "AspirationFaded": "world_id+aspiration_id+expected_entity_revision+transition_id",
+        "AspirationCrystallized": "world_id+aspiration_id+expected_entity_revision+transition_id",
         "ActivityPlanned": "plan_id+transition_id",
         "ActivityStarted": "plan_id+transition_id",
         "ActivityPaused": "plan_id+transition_id",
@@ -836,6 +918,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 successors=("AcceptanceRecorded",),
             ),
             _contract(
+                "AdvisoryAcceptanceRejected",
+                "proposal_acceptance",
+                "deliberation",
+                "AdvisoryAcceptanceRejectedPayload",
+                allowed_predecessors=("ProposalRecorded", "AcceptanceRecorded"),
+                evidence_types=("decision_proposal", "acceptance_validation_failure"),
+            ),
+            _contract(
                 "FactCommitProposalRecorded",
                 "fact_deliberation",
                 "deliberation",
@@ -926,6 +1016,19 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 successors=("PhotoCandidateOpened",),
             ),
             _contract(
+                "VisualFactRecorded",
+                "visual_fact_acceptance",
+                "world",
+                "VisualFactRecordedPayload",
+                allowed_predecessors=(
+                    "ActivityStarted", "ActivityResumed", "ActivityCompleted",
+                    "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted",
+                    "FactCorrected", "FactCommitMaterializedV2",
+                ),
+                evidence_types=("committed_world_event", "immutable_visual_content"),
+                successors=("PhotoCandidateOpened",),
+            ),
+            _contract(
                 "RecipientScopedImageEvidenceDeclared",
                 "recipient_scoped_image_evidence_acceptance",
                 "world",
@@ -963,6 +1066,32 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 evidence_types=("committed_world_event", "visible_physical_evidence"),
             ),
             _contract("RandomDrawRecorded", "random_authority", "world", "RandomDrawRecordedPayload", evidence_types=("frozen_candidate_set",)),
+            _contract(
+                "LifeAuthorDecisionRecorded",
+                "life_author_deliberation",
+                "deliberation",
+                "LifeAuthorDecisionRecordedPayload",
+                allowed_predecessors=("RandomDrawRecorded",),
+                evidence_types=("committed_world_event", "recorded_random_draw", "model_result_hash"),
+                successors=("ActivityPlanned",),
+            ),
+            _contract(
+                "LifeAvailabilitySnapshotRecorded",
+                "life_author_availability",
+                "world",
+                "LifeAvailabilitySnapshotRecordedPayload",
+                allowed_predecessors=("ClockAdvanced",),
+                evidence_types=("committed_world_event", "reviewed_static_seed"),
+                successors=("ActivityPlanned",),
+            ),
+            _contract(
+                "MediaSelectionAttemptRecorded",
+                "media_selection_deliberation",
+                "deliberation",
+                "MediaSelectionAttemptRecordedPayload",
+                allowed_predecessors=("RandomDrawRecorded",),
+                evidence_types=("frozen_candidate_set", "model_result_hash"),
+            ),
             _contract(
                 "MediaSelectionProposalRecorded",
                 "media_selection_deliberation",
@@ -1156,7 +1285,16 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ExpressionBeatSettledPayload",
                 allowed_predecessors=("ExecutionReceiptRecorded",),
                 evidence_types=("terminal_execution_receipt", "expression_beat"),
-                successors=("ExpressionPlanCompleted",),
+                successors=("ExpressionPlanCompleted", "ExpressionPlanTerminated"),
+            ),
+            _contract(
+                "ExpressionBeatTerminated",
+                "expression_lifecycle_runtime",
+                "world",
+                "ExpressionBeatTerminatedPayload",
+                allowed_predecessors=("ActionCancelled",),
+                evidence_types=("cancelled_action", "expression_beat"),
+                successors=("BudgetReleased", "ExpressionPlanTerminated"),
             ),
             _contract(
                 "ExpressionPlanCompleted",
@@ -1165,6 +1303,22 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ExpressionPlanCompletedPayload",
                 allowed_predecessors=("ExpressionBeatSettled",),
                 evidence_types=("settled_expression_beat",),
+            ),
+            _contract(
+                "ExpressionPlanTerminated",
+                "expression_lifecycle_runtime",
+                "world",
+                "ExpressionPlanTerminatedPayload",
+                allowed_predecessors=(
+                    "ExpressionBeatSettled",
+                    "ActionCancelled",
+                    "BudgetReleased",
+                ),
+                evidence_types=(
+                    "terminal_execution_receipt",
+                    "expression_beat",
+                    "cancellation_reason",
+                ),
             ),
             _contract(
                 "BudgetReserved",
@@ -1387,11 +1541,57 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 successors=("WorldOccurrenceCommitted",),
             ),
             _contract(
+                "AspirationPlanted",
+                "aspiration_runtime",
+                "world",
+                "AspirationPlantedPayload",
+                allowed_predecessors=("ClockAdvanced",),
+                evidence_types=("committed_world_event",),
+                successors=(
+                    "AspirationReinforced",
+                    "AspirationFaded",
+                    "AspirationCrystallized",
+                ),
+            ),
+            _contract(
+                "AspirationReinforced",
+                "aspiration_runtime",
+                "world",
+                "AspirationReinforcedPayload",
+                allowed_predecessors=("AspirationPlanted", "AspirationReinforced"),
+                evidence_types=("committed_world_event",),
+                successors=(
+                    "AspirationReinforced",
+                    "AspirationFaded",
+                    "AspirationCrystallized",
+                ),
+            ),
+            _contract(
+                "AspirationFaded",
+                "aspiration_runtime",
+                "world",
+                "AspirationFadedPayload",
+                allowed_predecessors=("AspirationPlanted", "AspirationReinforced"),
+                evidence_types=("committed_world_event",),
+            ),
+            _contract(
+                "AspirationCrystallized",
+                "aspiration_runtime",
+                "world",
+                "AspirationCrystallizedPayload",
+                allowed_predecessors=("AspirationPlanted", "AspirationReinforced"),
+                evidence_types=("committed_world_event", "active_plan"),
+                successors=("ActivityPlanned",),
+            ),
+            _contract(
                 "ActivityPlanned",
                 "proposal_acceptance",
                 "world",
                 "ActivityPlannedPayload",
-                evidence_types=("observed_message", "active_plan"),
+                evidence_types=(
+                    "observed_message", "active_plan", "committed_world_event",
+                    "reviewed_availability_snapshot",
+                ),
                 successors=("ActivityStarted", "ActivityAbandoned", "WorldOccurrenceCommitted"),
             ),
             _contract(

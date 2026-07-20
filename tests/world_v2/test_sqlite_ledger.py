@@ -9,6 +9,7 @@ import pytest
 
 from legacy_migration_support import (
     legacy_state_json,
+    read_head_state_json,
     strip_v16_state_fields,
 )
 
@@ -19,6 +20,7 @@ from companion_daemon.world_v2.schemas import (
     BudgetAccount,
     BudgetReservation,
     BudgetSettlement,
+    ProjectionCursor,
     WorldEvent,
 )
 from companion_daemon.world_v2.reducers import REDUCER_BUNDLE_VERSION, ReducerState
@@ -72,6 +74,266 @@ def test_sqlite_ledger_survives_restart_and_retries_atomic_commit(tmp_path) -> N
     )
     assert reopened.project().world_revision == 2
     reopened.close()
+
+
+def test_wal_maintenance_is_thresholded_and_passive(tmp_path) -> None:
+    path = tmp_path / "wal-maintenance.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-wal-maintenance", "obs-wal-maintenance")],
+        commit_id="commit-wal-maintenance",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+
+    skipped = ledger.maintain_wal_if_needed(threshold_bytes=10**12)
+    assert skipped.status == "skipped"
+    assert skipped.wal_bytes_before == skipped.wal_bytes_after
+
+    checkpointed = ledger.maintain_wal_if_needed(
+        threshold_bytes=1,
+        min_interval_seconds=0,
+    )
+    assert checkpointed.status == "checkpointed"
+    assert checkpointed.busy is False
+    assert checkpointed.checkpointed_frames > 0
+    assert checkpointed.wal_bytes_after <= checkpointed.wal_bytes_before
+
+    throttled = ledger.maintain_wal_if_needed(
+        threshold_bytes=1,
+        min_interval_seconds=60,
+    )
+    assert throttled.status == "skipped"
+    ledger.close()
+
+
+def test_projection_performance_counters_distinguish_head_reads_from_history_replay(
+    tmp_path,
+) -> None:
+    ledger = SQLiteWorldLedger(path=tmp_path / "projection-shape.sqlite3", world_id="world-sqlite-test")
+    startup = ledger.performance_counters()
+    committed = ledger.commit(
+        [event("event-perf-1", "obs-perf-1")],
+        commit_id="commit-perf-1",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    cursor = ProjectionCursor(
+        world_revision=committed.world_revision,
+        deliberation_revision=committed.deliberation_revision,
+        ledger_sequence=committed.ledger_sequence,
+    )
+
+    assert ledger.project_at(cursor).observation_refs == ("obs-perf-1",)
+    assert ledger.project().observation_refs == ("obs-perf-1",)
+    hot = ledger.performance_counters()
+    assert hot.project_at_head_hits == startup.project_at_head_hits + 1
+    assert hot.head_projection_cache_hits > startup.head_projection_cache_hits
+    assert hot.historical_replay_calls == startup.historical_replay_calls
+    assert hot.total_replay_calls == startup.total_replay_calls
+
+    zero = ProjectionCursor(world_revision=0, deliberation_revision=0, ledger_sequence=0)
+    assert ledger.project_at(zero).ledger_sequence == 0
+    historical = ledger.performance_counters()
+    assert historical.historical_replay_calls == hot.historical_replay_calls + 1
+    assert historical.total_replay_calls == hot.total_replay_calls + 1
+    ledger.close()
+
+
+def test_commit_seeded_head_cache_invalidates_on_external_append(tmp_path) -> None:
+    path = tmp_path / "commit-seeded-head-external-append.sqlite3"
+    left = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    right = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    first = left.commit(
+        [event("event-head-seed-1", "obs-head-seed-1")],
+        commit_id="commit-head-seed-1",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    assert left.project().observation_refs == ("obs-head-seed-1",)
+    seeded = left.performance_counters()
+    assert seeded.head_projection_cache_hits >= 1
+
+    right.commit(
+        [event("event-head-seed-2", "obs-head-seed-2")],
+        commit_id="commit-head-seed-2",
+        expected_world_revision=first.world_revision,
+        expected_deliberation_revision=first.deliberation_revision,
+    )
+    assert left.project().observation_refs == (
+        "obs-head-seed-1",
+        "obs-head-seed-2",
+    )
+    refreshed = left.performance_counters()
+    assert refreshed.head_projection_cache_hits == seeded.head_projection_cache_hits
+    assert left.project().observation_refs[-1] == "obs-head-seed-2"
+    hot = left.performance_counters()
+    assert hot.head_projection_cache_hits == refreshed.head_projection_cache_hits + 1
+    left.close()
+    right.close()
+
+
+def test_commit_tail_cache_never_mutates_a_previously_returned_projection(tmp_path) -> None:
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "projection-snapshot-immutability.sqlite3",
+        world_id="world-sqlite-test",
+    )
+    ledger.commit(
+        [event("event-snapshot-a", "obs-snapshot-a")],
+        commit_id="commit-snapshot-a",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    projection_a = ledger.project()
+    cached_state = ledger._head_state_cache  # noqa: SLF001 - canonical-byte equivalence
+    assert cached_state is not None
+    cursor_a = ProjectionCursor(
+        world_revision=projection_a.world_revision,
+        deliberation_revision=projection_a.deliberation_revision,
+        ledger_sequence=projection_a.ledger_sequence,
+    )
+    encoded_a, combined_hash_a = ledger._encode_state_and_hash(  # noqa: SLF001
+        cached_state, cursor_a
+    )
+    assert ledger._decode_state(encoded_a) == cached_state  # noqa: SLF001
+    assert combined_hash_a == ledger._state_hash(cached_state, cursor_a)  # noqa: SLF001
+    frozen_json = projection_a.model_dump_json()
+    frozen_hash = projection_a.semantic_hash
+    ledger.commit(
+        [event("event-snapshot-b", "obs-snapshot-b")],
+        commit_id="commit-snapshot-b",
+        expected_world_revision=projection_a.world_revision,
+        expected_deliberation_revision=projection_a.deliberation_revision,
+    )
+
+    assert projection_a.model_dump_json() == frozen_json
+    assert projection_a.semantic_hash == frozen_hash
+    assert projection_a.observation_refs == ("obs-snapshot-a",)
+    assert ledger.project().observation_refs == ("obs-snapshot-a", "obs-snapshot-b")
+    ledger.close()
+
+
+def test_verified_lookup_tracks_same_process_head_without_replay(tmp_path) -> None:
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "same-process-verified-prefix.sqlite3",
+        world_id="world-sqlite-test",
+    )
+    assert ledger.project().ledger_sequence == 0
+    before = ledger.performance_counters()
+    committed = ledger.commit(
+        [event("event-same-process", "obs-same-process")],
+        commit_id="commit-same-process",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+
+    located = ledger.lookup_event_commit("event-same-process")
+    assert located == (event("event-same-process", "obs-same-process"), committed)
+    assert ledger.project().ledger_sequence == committed.ledger_sequence
+    after = ledger.performance_counters()
+    assert after.total_replay_calls == before.total_replay_calls
+    assert after.historical_replay_calls == before.historical_replay_calls
+    ledger.close()
+
+
+def test_verified_lookup_reuses_immutable_event_after_first_verification(tmp_path) -> None:
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "verified-event-cache.sqlite3",
+        world_id="world-sqlite-test",
+    )
+    committed = ledger.commit(
+        [event("event-cached", "obs-cached")],
+        commit_id="commit-cached",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+
+    assert ledger.lookup_event_commit("event-cached") == (
+        event("event-cached", "obs-cached"),
+        committed,
+    )
+    after_first = ledger.performance_counters()
+    assert ledger.lookup_event_commit("event-cached") == (
+        event("event-cached", "obs-cached"),
+        committed,
+    )
+    after_second = ledger.performance_counters()
+
+    # External writers are still checked by PRAGMA data_version before this
+    # cache is consulted. Re-reading one immutable event in the same verified
+    # history prefix must not re-project the head or re-hash its whole commit.
+    assert after_second.head_projection_reads == after_first.head_projection_reads
+    assert after_second.total_replay_calls == after_first.total_replay_calls
+    ledger.close()
+
+
+def test_verified_lookup_revalidates_cross_connection_change_fail_closed(tmp_path) -> None:
+    path = tmp_path / "cross-connection-verified-prefix.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-cross-connection", "obs-cross-connection")],
+        commit_id="commit-cross-connection",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    # Establish the process-local verified-prefix/head cache before an
+    # unsupported writer changes immutable history through another connection.
+    assert ledger.lookup_event_commit("event-cross-connection") is not None
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """UPDATE world_v2_events
+               SET event_json = replace(event_json, 'obs-cross-connection', 'obs-tampered')
+               WHERE event_id = 'event-cross-connection'"""
+        )
+
+    with pytest.raises(LedgerIntegrityError):
+        ledger.lookup_event_commit("event-cross-connection")
+    ledger.close()
+
+
+def test_verified_lookup_accepts_cross_connection_append_only_after_revalidation(tmp_path) -> None:
+    path = tmp_path / "cross-connection-append.sqlite3"
+    left = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    right = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    before = left.performance_counters()
+    committed = right.commit(
+        [event("event-external-append", "obs-external-append")],
+        commit_id="commit-external-append",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+
+    assert left.lookup_event_commit("event-external-append") == (
+        event("event-external-append", "obs-external-append"),
+        committed,
+    )
+    after = left.performance_counters()
+    assert after.total_replay_calls == before.total_replay_calls + 1
+    left.close()
+    right.close()
+
+
+def test_external_sidecar_write_does_not_replay_unchanged_ledger_history(tmp_path) -> None:
+    path = tmp_path / "sidecar-data-version.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    committed = ledger.commit(
+        [event("event-sidecar-version", "obs-sidecar-version")],
+        commit_id="commit-sidecar-version",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    assert ledger.lookup_event_commit("event-sidecar-version") == (
+        event("event-sidecar-version", "obs-sidecar-version"), committed,
+    )
+    before = ledger.performance_counters()
+    with sqlite3.connect(path) as sidecar:
+        sidecar.execute("CREATE TABLE IF NOT EXISTS benchmark_sidecar (value TEXT)")
+        sidecar.execute("INSERT INTO benchmark_sidecar (value) VALUES ('immutable-content')")
+
+    assert ledger.lookup_event_commit("event-sidecar-version") is not None
+    after = ledger.performance_counters()
+    assert after.total_replay_calls == before.total_replay_calls
+    ledger.close()
 
 
 @pytest.mark.parametrize(
@@ -252,12 +514,8 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        head = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
-            ("world-sqlite-test",),
-        ).fetchone()
-        assert head is not None
-        current_state = ReducerState.model_validate_json(head[0])
+        head_state_json = read_head_state_json(connection, "world-sqlite-test")
+        current_state = ReducerState.model_validate_json(head_state_json)
         legacy_payload = current_state.semantic_payload(
             world_id="world-sqlite-test",
             world_revision=1,
@@ -321,11 +579,13 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
 
     with sqlite3.connect(path) as connection:
         migrated = connection.execute(
-            "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
+            "SELECT reducer_bundle_version FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
         assert migrated[0] == REDUCER_BUNDLE_VERSION
-        assert "pending_actions" in json.loads(migrated[1])
+        assert "pending_actions" in json.loads(
+            read_head_state_json(connection, "world-sqlite-test")
+        )
 
 
 def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) -> None:
@@ -340,12 +600,8 @@ def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) ->
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        head = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
-            ("world-sqlite-test",),
-        ).fetchone()
-        assert head is not None
-        state = ReducerState.model_validate_json(head[0])
+        head_state_json = read_head_state_json(connection, "world-sqlite-test")
+        state = ReducerState.model_validate_json(head_state_json)
         legacy_payload = state.semantic_payload(
             world_id="world-sqlite-test",
             world_revision=1,
@@ -394,7 +650,7 @@ def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) ->
                SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
                WHERE world_id = ?""",
             (
-                legacy_state_json(head[0]),
+                legacy_state_json(head_state_json),
                 legacy_hash,
                 "world-v2-reducers.2",
                 "world-sqlite-test",
@@ -419,10 +675,7 @@ def test_sqlite_atomically_migrates_verified_v3_head_to_appraisal_bundle(tmp_pat
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        state_json = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
-            ("world-sqlite-test",),
-        ).fetchone()[0]
+        state_json = read_head_state_json(connection, "world-sqlite-test")
         state = ReducerState.model_validate_json(state_json)
         payload = state.semantic_payload(
             world_id="world-sqlite-test",
@@ -504,12 +757,7 @@ def test_sqlite_migrates_v5_head_without_affect_projection_fields(tmp_path) -> N
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        raw_state = json.loads(
-            connection.execute(
-                "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
-                ("world-sqlite-test",),
-            ).fetchone()[0]
-        )
+        raw_state = json.loads(read_head_state_json(connection, "world-sqlite-test"))
         state = ReducerState.model_validate_json(json.dumps(raw_state, separators=(",", ":")))
         semantic = state.semantic_payload(
             world_id="world-sqlite-test",
@@ -670,12 +918,7 @@ def test_sqlite_isolates_legacy_v3_unbound_acceptance_audit(
                 "legacy-acceptance",
             ),
         )
-        raw_state = json.loads(
-            connection.execute(
-                "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
-                ("world-sqlite-test",),
-            ).fetchone()[0]
-        )
+        raw_state = json.loads(read_head_state_json(connection, "world-sqlite-test"))
         for key in ("proposal_ids", "proposal_revisions", "acceptance_decisions"):
             raw_state.pop(key, None)
         strip_v16_state_fields(raw_state)
@@ -961,3 +1204,21 @@ def test_budget_overrun_with_other_reservations_survives_restart(tmp_path) -> No
     assert projection.budget_accounts[0].overrun == 20
     assert reopened.rebuild() == projection
     reopened.close()
+
+
+def test_empty_aspirations_stay_out_of_durable_state_bytes_and_hash() -> None:
+    """A field added within one bundle must not invalidate pre-existing heads.
+
+    ``aspirations`` joined ``ReducerState`` without a reducer-bundle bump, so
+    worlds persisted before the field existed must recompute byte-identical
+    state hashes.  An empty tuple therefore stays out of the durable dump
+    entirely; the key may appear only once a world actually plants one.
+    """
+
+    from companion_daemon.world_v2.reducers import ReducerState
+    from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+
+    dumped = SQLiteWorldLedger._state_dump(ReducerState())
+
+    assert "aspirations" not in dumped
+    assert '"aspirations"' not in SQLiteWorldLedger._encode_state(ReducerState())

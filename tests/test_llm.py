@@ -5,12 +5,123 @@ import pytest
 
 from companion_daemon.llm import (
     DeepSeekChatModel,
+    FailoverChatModel,
     ModelCircuitOpenError,
+    OpenAICompatibleChatModel,
     ProviderCircuitBreaker,
     complete_with_timeout,
     model_call_scope,
     model_turn_scope,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [402, 429, 500, 503])
+async def test_provider_failure_falls_back_and_preserves_provider_attribution(
+    status: int,
+) -> None:
+    captured = []
+    primary = DeepSeekChatModel(
+        "deepseek-key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(status, json={"error": "unavailable"})
+        ),
+        usage_observer=captured.append,
+    )
+    fallback = OpenAICompatibleChatModel(
+        "openai-key",
+        "https://api.openai.com/v1",
+        "gpt-5.6-luna",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "备用回复"}}],
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12},
+                },
+            )
+        ),
+        usage_observer=captured.append,
+    )
+    model = FailoverChatModel(primary=primary, fallback=fallback)
+
+    assert await model.complete([{"role": "user", "content": "你好"}]) == "备用回复"
+    assert [(item.provider, item.model, item.status) for item in captured] == [
+        ("deepseek", "deepseek-v4-flash", "failed"),
+        ("openai", "gpt-5.6-luna", "succeeded"),
+    ]
+    assert model.last_provider == "openai"
+    assert model.last_model == "gpt-5.6-luna"
+    assert model.last_attempt_used_fallback is True
+    await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_network_failure_falls_back_but_content_validation_failure_does_not() -> None:
+    fallback_calls = 0
+
+    def fallback_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    fallback = OpenAICompatibleChatModel(
+        "openai-key",
+        "https://api.openai.com/v1",
+        "gpt-5.6-luna",
+        transport=httpx.MockTransport(fallback_handler),
+    )
+    offline = DeepSeekChatModel(
+        "deepseek-key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        transport=httpx.MockTransport(
+            lambda _request: (_ for _ in ()).throw(httpx.ConnectError("offline"))
+        ),
+    )
+    assert await FailoverChatModel(primary=offline, fallback=fallback).complete(
+        [{"role": "user", "content": "network"}]
+    ) == "ok"
+
+    malformed = DeepSeekChatModel(
+        "deepseek-key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"choices": []})
+        ),
+    )
+    malformed_route = FailoverChatModel(primary=malformed, fallback=fallback)
+    with pytest.raises(ValueError, match="choices"):
+        await malformed_route.complete(
+            [{"role": "user", "content": "schema"}]
+        )
+    assert fallback_calls == 1
+    assert malformed_route.last_attempt_used_fallback is False
+    await offline.aclose()
+    await malformed.aclose()
+    await fallback.aclose()
+
+
+def test_openai_compatible_payload_does_not_send_deepseek_controls() -> None:
+    model = OpenAICompatibleChatModel(
+        "openai-key", "https://api.openai.com/v1", "gpt-5.6-luna"
+    )
+
+    payload = model.request_payload(
+        [{"role": "user", "content": "hi"}], temperature=0.7, json_object=True
+    )
+
+    assert payload == {
+        "model": "gpt-5.6-luna",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "none",
+        "max_completion_tokens": 900,
+        "response_format": {"type": "json_object"},
+    }
 
 
 def test_deepseek_thinking_payload_uses_v4_controls_without_temperature() -> None:

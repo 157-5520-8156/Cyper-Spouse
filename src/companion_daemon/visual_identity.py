@@ -18,18 +18,25 @@ class VisualIdentity(BaseModel):
     negative_prompt: str
     reference_asset: str | None = None
     reference_sets: dict[str, list[str]] = Field(default_factory=dict)
+    media_capture_profiles: dict[str, str] = Field(default_factory=dict)
     relationship_tiers: dict[str, RelationshipVisualTier] = Field(default_factory=dict)
     consistency_notes: list[str] = Field(default_factory=list)
 
-    def prompt_block(self, *, relationship_tier: str | None = None) -> str:
+    def prompt_block(
+        self,
+        *,
+        relationship_tier: str | None = None,
+        camera_style: str | None = None,
+        avoid_override: str | None = None,
+    ) -> str:
         tier = self.relationship_tiers.get(relationship_tier or "")
         parts = [
             "Character identity anchor:",
             self.anchor_prompt.strip(),
-            "Selfie style:",
-            self.selfie_style.strip(),
+            "Camera style:",
+            (camera_style or self.selfie_style).strip(),
             "Avoid:",
-            (tier.negative_prompt if tier else self.negative_prompt).strip(),
+            (avoid_override or (tier.negative_prompt if tier else self.negative_prompt)).strip(),
         ]
         if tier:
             parts.extend(["Relationship-media tier:", tier.prompt.strip()])
@@ -46,6 +53,9 @@ class VisualIdentity(BaseModel):
     def relationship_reference_assets(self, tier: str) -> tuple[str, ...]:
         profile = self.relationship_tiers.get(tier)
         return self.reference_assets(profile.reference_profile) if profile else self.reference_assets("relationship_private")
+
+    def capture_prompt(self, capture_mode: str) -> str:
+        return self.media_capture_profiles.get(capture_mode, self.media_capture_profiles.get("handheld_selfie", "")).strip()
 
 
 @lru_cache

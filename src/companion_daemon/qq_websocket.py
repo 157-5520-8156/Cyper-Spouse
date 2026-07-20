@@ -2184,7 +2184,12 @@ def _apply_affective_afterthought_affordance(
     selected_kind: str,
     rng: random.Random,
 ) -> list[AfterthoughtPlan]:
-    """Let affective expression affordance modulate optional follow-up pulses."""
+    """Let affective expression affordance modulate optional follow-up pulses.
+
+    This deliberately changes opportunity, not content.  The eventual
+    afterthought still goes through model generation, hard evidence guarding,
+    Action scheduling, cancellation and receipt settlement.
+    """
     if selected_kind in {
         "set_boundary",
         "concise_refusal",
@@ -2289,6 +2294,9 @@ class CompanionQQClient(botpy.Client):
 
     async def on_ready(self) -> None:
         logger.info("QQ WebSocket client is ready: %s", self.robot.name)
+        recovered = self.engine.recover_pending_media()
+        if recovered:
+            logger.info("resumed %s pending media outbox item(s)", recovered)
 
     async def on_c2c_message_create(self, message: C2CMessage) -> None:
         user_id = message.author.user_openid

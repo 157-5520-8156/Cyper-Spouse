@@ -546,12 +546,16 @@ class TriggerProcess(FrozenModel):
         "recovery",
         "npc_world_appraisal",
         "interaction_appraisal",
+        "silence_appraisal",
+        "plan_disruption_appraisal",
         "interaction_fact",
+        "private_impression_deliberation",
         "read_only_tool_deliberation",
         "perception_deliberation",
         "perception_result_deliberation",
         "affect_deliberation",
         "relationship_deliberation",
+        "relationship_adjustment",
         "outcome_deliberation",
         "expression_reconsideration",
         "media_continuation",
@@ -559,6 +563,10 @@ class TriggerProcess(FrozenModel):
         "media_delivery_interaction",
         "external_result_deliberation",
         "life_ecology",
+        "social_action_deliberation",
+        "memory_candidate_review",
+        "proactive_action_deliberation",
+        "afterthought_author",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -573,12 +581,16 @@ class TriggerProcess(FrozenModel):
             not in {
                 "npc_world_appraisal",
                 "interaction_appraisal",
+                "silence_appraisal",
+                "plan_disruption_appraisal",
                 "interaction_fact",
+                "private_impression_deliberation",
                 "read_only_tool_deliberation",
                 "perception_deliberation",
                 "perception_result_deliberation",
                 "affect_deliberation",
                 "relationship_deliberation",
+                "relationship_adjustment",
                 "outcome_deliberation",
                 "expression_reconsideration",
                 "media_continuation",
@@ -586,6 +598,10 @@ class TriggerProcess(FrozenModel):
                 "media_delivery_interaction",
                 "external_result_deliberation",
                 "life_ecology",
+                "social_action_deliberation",
+                "memory_candidate_review",
+                "proactive_action_deliberation",
+                "afterthought_author",
             }
             and self.source_evidence_ref is not None
         ):
@@ -972,8 +988,11 @@ class AcceptanceDecisionRef(FrozenModel):
         Literal[
             "acceptance-manifest.2",
             "acceptance-manifest.3",
+            "social-deferred-acceptance.1",
             "appraisal-acceptance.1",
             "affect-acceptance.1",
+            "relationship-acceptance.1",
+            "relationship-adjustment-acceptance.1",
             "outcome-acceptance.1",
             "activity-lifecycle-acceptance.2",
             "media-selection-acceptance.1",
@@ -1067,6 +1086,27 @@ class ExpressionPlanManifestBeatRef(FrozenModel):
     action_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ResponseExpectationAuthority(FrozenModel):
+    """Accepted permission to reconsider contact after a genuinely invited response."""
+
+    source_plan_id: str = Field(min_length=1)
+    source_beat_id: str = Field(min_length=1)
+    hoped_response: str = Field(min_length=1, max_length=128)
+    pressure_bp: int = Field(ge=0, le=10_000)
+    importance_bp: int = Field(ge=0, le=10_000)
+    not_before: datetime
+    expires_at: datetime
+    delivery_requirement: Literal[
+        "provider_accepted_or_delivered", "confirmed_delivered"
+    ] = "provider_accepted_or_delivered"
+
+    @model_validator(mode="after")
+    def window_is_bounded(self) -> "ResponseExpectationAuthority":
+        if self.expires_at <= self.not_before:
+            raise ValueError("response expectation expiry must follow opening")
+        return self
+
+
 class ExpressionPlanManifestRef(FrozenModel):
     """Durable authority for one generic accepted expression plan."""
 
@@ -1087,6 +1127,29 @@ class ExpressionPlanManifestRef(FrozenModel):
     acceptance_event_ref: str = Field(min_length=1)
     acceptance_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     recorded_at_world_revision: int = Field(ge=1)
+    response_expectation: ResponseExpectationAuthority | None = None
+    social_source_observation_id: str | None = None
+    social_source_observation_event_ref: str | None = None
+    social_source_observation_event_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    social_commitment_id: str | None = None
+    social_commitment_payload_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def social_authority_is_complete_or_absent(self) -> "ExpressionPlanManifestRef":
+        values = (
+            self.social_source_observation_id,
+            self.social_source_observation_event_ref,
+            self.social_source_observation_event_hash,
+            self.social_commitment_id,
+            self.social_commitment_payload_hash,
+        )
+        if any(item is not None for item in values) and not all(item is not None for item in values):
+            raise ValueError("social expression authority coordinates are partial")
+        return self
 
 
 class StoredMessagePayloadProjection(FrozenModel):
@@ -1145,17 +1208,20 @@ class ExpressionPlanProjection(FrozenModel):
     plan_id: str = Field(min_length=1)
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    state: Literal["authorized", "completed"] = "authorized"
+    state: Literal["authorized", "completed", "terminated"] = "authorized"
     history: tuple["ExpressionPlanLifecycleEntry", ...] = ()
 
 
 class ExpressionPlanLifecycleEntry(FrozenModel):
-    state: Literal["authorized", "completed"]
+    state: Literal["authorized", "completed", "terminated"]
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     receipt_id: str | None = Field(default=None, min_length=1)
     terminal_action_state: (
         Literal["delivered", "failed", "unknown", "cancelled", "expired"] | None
+    ) = None
+    terminal_disposition: (
+        Literal["failed", "unknown", "cancelled", "expired", "superseded"] | None
     ) = None
 
     @model_validator(mode="after")
@@ -1164,10 +1230,16 @@ class ExpressionPlanLifecycleEntry(FrozenModel):
             self.receipt_id is None or self.terminal_action_state is None
         ):
             raise ValueError("completed expression plan history requires terminal receipt")
+        if self.state == "terminated" and self.terminal_disposition is None:
+            raise ValueError("terminated expression plan history requires a disposition")
         if self.state == "authorized" and (
-            self.receipt_id is not None or self.terminal_action_state is not None
+            self.receipt_id is not None
+            or self.terminal_action_state is not None
+            or self.terminal_disposition is not None
         ):
             raise ValueError("authorized expression plan history cannot carry a receipt")
+        if self.state == "completed" and self.terminal_disposition is not None:
+            raise ValueError("completed expression plan history cannot be terminated")
         return self
 
 
@@ -1188,17 +1260,20 @@ class ExpressionBeatProjection(FrozenModel):
     merge_policy: str = Field(min_length=1, max_length=128)
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    state: Literal["authorized", "settled"] = "authorized"
+    state: Literal["authorized", "settled", "terminated"] = "authorized"
     history: tuple["ExpressionBeatLifecycleEntry", ...] = ()
 
 
 class ExpressionBeatLifecycleEntry(FrozenModel):
-    state: Literal["authorized", "settled"]
+    state: Literal["authorized", "settled", "terminated"]
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     receipt_id: str | None = Field(default=None, min_length=1)
     terminal_action_state: (
         Literal["delivered", "failed", "unknown", "cancelled", "expired"] | None
+    ) = None
+    terminal_disposition: (
+        Literal["failed", "unknown", "cancelled", "expired", "superseded"] | None
     ) = None
 
     @model_validator(mode="after")
@@ -1207,10 +1282,16 @@ class ExpressionBeatLifecycleEntry(FrozenModel):
             self.receipt_id is None or self.terminal_action_state is None
         ):
             raise ValueError("settled expression beat history requires terminal receipt")
+        if self.state == "terminated" and self.terminal_disposition is None:
+            raise ValueError("terminated expression beat history requires a disposition")
         if self.state == "authorized" and (
-            self.receipt_id is not None or self.terminal_action_state is not None
+            self.receipt_id is not None
+            or self.terminal_action_state is not None
+            or self.terminal_disposition is not None
         ):
             raise ValueError("authorized expression beat history cannot carry a receipt")
+        if self.state == "settled" and self.terminal_disposition is not None:
+            raise ValueError("settled expression beat history cannot be plan-terminated")
         return self
 
 
@@ -1230,6 +1311,19 @@ class ProposalRevisionRef(FrozenModel):
     # the preceding deliberation was allowed to close.
     candidate_id: str | None = Field(default=None, min_length=1, max_length=256)
     expected_candidate_revision: int | None = Field(default=None, ge=1)
+    trigger_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    source_evidence_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    source_evidence_payload_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    continuation_step: Literal["plan_to_render", "render_to_inspect"] | None = None
+    accepted_change_id: str | None = Field(default=None, min_length=1, max_length=256)
+    continuation_action_kind: Literal["media_render", "media_inspection"] | None = None
+    continuation_intent_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    continuation_payload_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    continuation_payload_hash: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
 
     @model_validator(mode="after")
     def persisted_event_coordinates_are_complete(self) -> "ProposalRevisionRef":
@@ -1237,6 +1331,21 @@ class ProposalRevisionRef(FrozenModel):
             raise ValueError("proposal revision event coordinates are incomplete")
         if (self.candidate_id is None) != (self.expected_candidate_revision is None):
             raise ValueError("proposal revision candidate coordinates are incomplete")
+        continuation_values = (
+            self.trigger_ref,
+            self.source_evidence_ref,
+            self.source_evidence_payload_hash,
+            self.continuation_step,
+            self.accepted_change_id,
+            self.continuation_action_kind,
+            self.continuation_intent_ref,
+            self.continuation_payload_ref,
+            self.continuation_payload_hash,
+        )
+        if any(value is not None for value in continuation_values) and any(
+            value is None for value in continuation_values
+        ):
+            raise ValueError("proposal revision continuation coordinates are incomplete")
         return self
 
 
@@ -2231,6 +2340,48 @@ class NpcProjection(FrozenModel):
     status: Literal["active", "retired"] = "active"
 
 
+class AspirationProjection(FrozenModel):
+    """One low-stakes wish: no due window, no fulfillment pipeline, no rot.
+
+    An aspiration is deliberately *not* a Private Commitment.  Commitments are
+    dated responsibilities whose clock reducer forces open → due → broken at a
+    deadline; an aspiration ("明年毕业想去日本玩") has no deadline and never
+    expires mechanically.  It only ever moves through reinforcement (related
+    lived material touched it again), quiet fading, or — rarely — the
+    crystallization seam that hands it to the ordinary calendar pipeline.
+    ``text`` is copied verbatim from a reviewed seed (anti-fabrication) and
+    ``planted_event_ref`` names this projection's own accepting ledger event,
+    so expression context can always cite committed authority for the wish.
+    """
+
+    aspiration_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    owner_actor_ref: str = Field(min_length=1)
+    seed_id: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=240)
+    privacy_class: PrivacyClass
+    status: Literal["active", "faded", "crystallized"] = "active"
+    planted_at: datetime
+    planted_event_ref: str = Field(min_length=1)
+    source_event_ref: str = Field(min_length=1)
+    last_reinforced_at: datetime | None = None
+    reinforcement_count: int = Field(default=0, ge=0)
+    faded_at: datetime | None = None
+    crystallized_plan_ref: str | None = None
+
+    @model_validator(mode="after")
+    def lifecycle_is_consistent(self) -> AspirationProjection:
+        if (self.status == "faded") != (self.faded_at is not None):
+            raise ValueError("faded aspiration must carry exactly its fade time")
+        if (self.status == "crystallized") != (self.crystallized_plan_ref is not None):
+            raise ValueError("crystallized aspiration must carry exactly its plan ref")
+        if (self.reinforcement_count == 0) != (self.last_reinforced_at is None):
+            raise ValueError("aspiration reinforcement count and time must appear together")
+        if self.last_reinforced_at is not None and self.last_reinforced_at < self.planted_at:
+            raise ValueError("aspiration cannot be reinforced before it was planted")
+        return self
+
+
 class OutcomeObservationProjection(FrozenModel):
     observation_id: str = Field(min_length=1)
     occurrence_id: str = Field(min_length=1)
@@ -2665,7 +2816,9 @@ class CommitmentFulfillmentContract(FrozenModel):
     expected_world_revision: int | None = Field(default=None, ge=1)
     expected_event_type: str | None = None
     expected_action_id: str | None = None
-    expected_action_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    # Action payloads use the canonical ``sha256:<hex>`` wire form.  Legacy
+    # commitments with bare 64-hex hashes remain replayable.
+    expected_action_payload_hash: str | None = Field(default=None, min_length=64, max_length=71)
     expected_result_id: str | None = None
     expected_result_status: Literal["delivered"] | None = None
     expected_thread_id: str | None = None
@@ -3355,6 +3508,12 @@ class RelationshipSignalProjection(FrozenModel):
     persistence: Literal["session", "durable"]
     contradiction_group_ref: str | None = None
     rationale_code: str = Field(min_length=1)
+    # The model's bounded candidate is retained as an auditable *input* for
+    # the later slow-variable compiler.  It is not a relationship mutation;
+    # the compiler/reducer may clip it, decline it, or leave it unconsumed.
+    suggested_deltas: RelationshipVariableDeltas = Field(
+        default_factory=RelationshipVariableDeltas
+    )
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     origin: RelationshipSignalOrigin
     accepted_at: datetime
@@ -3391,6 +3550,23 @@ class RelationshipProposedMutation(FrozenModel):
         return self
 
 
+class RelationshipProposalAuditBinding(FrozenModel):
+    """Exact generic deliberation audit consumed by the relationship compiler.
+
+    Legacy typed relationship proposals deliberately have no binding while the
+    archive remains readable.  New production signal proposals carry all of
+    these fields, making the model suggestion, its capsule and the compiled
+    typed candidate reverse-verifiable as one immutable lineage.
+    """
+
+    proposal_event_ref: str = Field(min_length=1)
+    proposal_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_result_ref: str = Field(min_length=1)
+    capsule_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    change_id: str = Field(min_length=1)
+    change_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class RelationshipProposalProjection(FrozenModel):
     proposal_id: str = Field(min_length=1)
     proposal_kind: Literal["relationship_transition"] = "relationship_transition"
@@ -3412,6 +3588,9 @@ class RelationshipProposalProjection(FrozenModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     policy_refs: tuple[str, ...] = Field(min_length=1)
     proposed_mutation: RelationshipProposedMutation
+    source_audit: RelationshipProposalAuditBinding | None = None
+    recorded_event_ref: str | None = Field(default=None, min_length=1)
+    recorded_event_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def transition_matches_event(self) -> RelationshipProposalProjection:
@@ -3425,6 +3604,8 @@ class RelationshipProposalProjection(FrozenModel):
         }[self.transition_kind]
         if self.proposed_mutation.event_type != expected:
             raise ValueError("relationship proposal transition does not match event")
+        if (self.recorded_event_ref is None) != (self.recorded_event_payload_hash is None):
+            raise ValueError("relationship proposal event provenance must be complete or absent")
         return self
 
 
@@ -4702,6 +4883,7 @@ class LedgerProjection(FrozenModel):
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
     npcs: tuple[NpcProjection, ...] = ()
+    aspirations: tuple[AspirationProjection, ...] = ()
     plans: tuple[PlanStateProjection, ...] = ()
     world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
     outcome_observations: tuple[OutcomeObservationProjection, ...] = ()

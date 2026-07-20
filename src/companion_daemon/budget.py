@@ -4,6 +4,27 @@ from datetime import UTC, datetime
 from companion_daemon.db import CompanionStore
 
 
+# GPT Image 2 standard pricing as checked on 2026-07-13.  This is a
+# deliberately conservative local planning estimate, not an invoice: the API
+# may return a different token count for a particular edit request.
+_USD_TO_CNY = 7.2
+_IMAGE_OUTPUT_USD: dict[tuple[str, str], float] = {
+    ("1024x1024", "low"): 0.006,
+    ("1024x1024", "medium"): 0.053,
+    ("1024x1024", "high"): 0.211,
+    ("1024x1536", "low"): 0.005,
+    ("1024x1536", "medium"): 0.041,
+    ("1024x1536", "high"): 0.165,
+    ("1536x1024", "low"): 0.005,
+    ("1536x1024", "medium"): 0.041,
+    ("1536x1024", "high"): 0.165,
+}
+# A portrait, high-fidelity reference is approximately 6,563 image tokens.
+# GPT Image 2 image inputs are billed at $8/M tokens.  Reference images are
+# the dominant non-output cost in our identity-preserving edit workflow.
+_PORTRAIT_REFERENCE_INPUT_USD = 6_563 * 8 / 1_000_000
+
+
 @dataclass(frozen=True)
 class BudgetDecision:
     allowed: bool
@@ -21,6 +42,30 @@ class ModelBudgetReservation:
 class UsageEstimate:
     kind: str
     cny: float
+
+
+def image_render_estimate(
+    *,
+    reference_count: int,
+    size: str = "1024x1536",
+    quality: str = "medium",
+    attempts: int = 1,
+) -> UsageEstimate:
+    """Return a worst-case local estimate for one planned identity render.
+
+    The planner owns this estimate so callers cannot accidentally budget a
+    three-reference portrait as if it were a bare low-quality square render.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be at least one")
+    output_usd = _IMAGE_OUTPUT_USD.get((size, quality))
+    if output_usd is None:
+        raise ValueError(f"unsupported image render plan: {size} / {quality}")
+    input_usd = max(0, reference_count) * _PORTRAIT_REFERENCE_INPUT_USD
+    return UsageEstimate(
+        "image_generation",
+        round((output_usd + input_usd) * _USD_TO_CNY * attempts, 4),
+    )
 
 
 class BudgetGate:
@@ -163,7 +208,8 @@ class BudgetGate:
 ESTIMATES = {
     "vision": UsageEstimate("vision", 0.03),
     "transcription": UsageEstimate("transcription", 0.05),
-    "image_generation": UsageEstimate("image_generation", 0.35),
+    # Compatibility default for callers that have not yet built a render plan.
+    "image_generation": image_render_estimate(reference_count=2),
     "memory_maintenance": UsageEstimate("memory_maintenance", 0.02),
     "afterthought": UsageEstimate("afterthought", 0.01),
     "proactive_decision": UsageEstimate("proactive_decision", 0.01),

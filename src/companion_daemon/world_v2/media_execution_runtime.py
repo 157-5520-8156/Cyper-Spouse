@@ -23,6 +23,7 @@ from .media_provider_results import (
     media_provider_result_hash,
 )
 from .media_v2 import (
+    artifact_continuation_trigger_id,
     ImmutableMediaPayloadStore, MediaArtifact, MediaInspectionRecord,
     MediaInspectionRecordedPayload, MediaPreview, MediaPreviewFailedPayload,
     MediaPreviewGeneratedPayload, MediaRenderArtifactRecordedPayload,
@@ -180,37 +181,52 @@ class MediaExecutionRuntime:
         self, *, plan_id: str, actor: str, grant: ProviderMediaGrantBinding, account_id: str,
         amount_limit: int, logical_time: datetime, trace_id: str, correlation_id: str,
     ):
+        raise MediaExecutionError(
+            "render authorization requires MediaContinuationRuntime Acceptance"
+        )
+
+    def prepare_render_authorization(
+        self, *, plan_id: str, actor: str, grant: ProviderMediaGrantBinding,
+        account_id: str, amount_limit: int, logical_time: datetime,
+        trace_id: str, correlation_id: str,
+    ) -> tuple[BudgetReservation, Action]:
+        """Validate frozen render authority without writing the ledger.
+
+        The continuation Acceptance recorder is the only new caller.  Keeping
+        construction here makes sidecar and paid-provider checks identical to
+        the execution runtime while withholding write authority.
+        """
+
         projection = self._ledger.project()
         plan = next((item for item in projection.media_plans if item.plan_id == plan_id), None)
-        if plan is None:
-            raise MediaExecutionError("render requires a frozen MediaPlan")
-        if plan.opportunity_id in projection.media_unrenderable_opportunity_ids:
-            raise MediaExecutionError("unrenderable opportunity cannot render")
-        existing = next((item for item in projection.actions if item.intent_ref == plan_id and item.kind == "media_render"), None)
-        if existing is not None:
-            return existing
+        if plan is None or plan.opportunity_id in projection.media_unrenderable_opportunity_ids:
+            raise MediaExecutionError("render requires a renderable frozen MediaPlan")
         self._require_paid_media_profile(amount_limit=amount_limit)
-        continuation = "media-continuation:" + media_digest({"plan_id": plan.plan_id, "step": "plan_to_render"})
-        if not any(item.trigger_id == continuation and item.state in {"open", "claimed"} for item in projection.trigger_processes):
-            raise MediaExecutionError("render requires the exact open continuation of its frozen plan")
         payload = self._require_plan_payload(plan)
-        action_id = "action:media-render:" + media_digest({"world": self._ledger.world_id, "plan": plan_id})
-        reservation = BudgetReservation(
-            reservation_id="reservation:media-render:" + media_digest({"world": self._ledger.world_id, "plan": plan_id}),
-            account_id=account_id, action_id=action_id, category="image", amount_limit=amount_limit,
+        action_id = "action:media-render:" + media_digest(
+            {"world": self._ledger.world_id, "plan": plan_id}
         )
-        action = Action(schema_version="world-v2.1", action_id=action_id, world_id=self._ledger.world_id,
+        reservation = BudgetReservation(
+            reservation_id="reservation:media-render:" + media_digest(
+                {"world": self._ledger.world_id, "plan": plan_id}
+            ),
+            account_id=account_id,
+            action_id=action_id,
+            category="image",
+            amount_limit=amount_limit,
+        )
+        action = Action(
+            schema_version="world-v2.1", action_id=action_id, world_id=self._ledger.world_id,
             logical_time=logical_time, created_at=logical_time, trace_id=trace_id,
             causation_id=_event_id("MediaPlanRecorded", plan_id), correlation_id=correlation_id,
             kind="media_render", layer="media_action", intent_ref=plan_id, actor=actor,
-            target="provider:media-renderer", payload_ref=payload.payload_ref, payload_hash=payload.payload_hash,
-            provider_media_grant=grant, idempotency_key="media-render:" + plan_id,
-            budget_reservation_id=reservation.reservation_id, state="authorized", recovery_policy="effect_once")
-        items = (("BudgetReserved", {"reservation": reservation.model_dump(mode="json")}, reservation.reservation_id),
-                 ("ActionAuthorized", {"action": action.model_dump(mode="json")}, action_id))
-        events = self._events(items=items, actor=actor, logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id, causation_id=action.causation_id)
-        self._ledger.commit_at_cursor(events, expected_cursor=self._cursor(projection), commit_id="commit:media-render-authorize:" + media_digest([event.event_id for event in events]))
-        return action
+            target="provider:media-renderer", payload_ref=payload.payload_ref,
+            payload_hash=payload.payload_hash, provider_media_grant=grant,
+            idempotency_key="media-render:" + plan_id,
+            budget_reservation_id=reservation.reservation_id, state="authorized",
+            recovery_policy="effect_once",
+        )
+        return reservation, action
 
     def record_rendered_artifact(self, *, action_id: str, receipt_id: str, artifact_payload: StoredMediaPayload, logical_time: datetime) -> MediaArtifact:
         projection = self._ledger.project()
@@ -226,7 +242,28 @@ class MediaExecutionRuntime:
             plan_id=plan.plan_id, render_action_id=action_id, artifact_ref=artifact_payload.payload_ref,
             artifact_hash=artifact_payload.payload_hash, media_type=artifact_payload.content_type, attempts=attempt)
         payload = MediaRenderArtifactRecordedPayload(action_id=action_id, receipt_id=receipt_id, artifact=artifact).model_dump(mode="json")
-        self._commit_one("MediaRenderArtifactRecorded", payload, artifact.artifact_id, logical_time, action.trace_id, action.correlation_id, action_id)
+        source_event_id = _event_id("MediaRenderArtifactRecorded", artifact.artifact_id)
+        trigger_id = artifact_continuation_trigger_id(artifact)
+        process = TriggerProcess(
+            trigger_id=trigger_id,
+            trigger_ref=trigger_id,
+            process_kind="media_continuation",
+            source_evidence_ref=source_event_id,
+            state="open",
+        )
+        events = self._events(
+            items=(
+                ("MediaRenderArtifactRecorded", payload, artifact.artifact_id),
+                ("TriggerProcessOpened", {"process": process.model_dump(mode="json")}, trigger_id),
+            ),
+            actor="system:media-execution", logical_time=logical_time,
+            trace_id=action.trace_id, correlation_id=action.correlation_id,
+            causation_id=action_id,
+        )
+        self._ledger.commit_at_cursor(
+            events, expected_cursor=self._cursor(projection),
+            commit_id="commit:media-render-artifact:" + media_digest([event.event_id for event in events]),
+        )
         return artifact
 
     def record_render_failure(self, *, action_id: str, reason_code: str, logical_time: datetime) -> None:
@@ -247,21 +284,47 @@ class MediaExecutionRuntime:
         self._commit_one("MediaPreviewFailed", payload, plan.plan_id, logical_time, action.trace_id, action.correlation_id, action_id)
 
     def authorize_inspection(self, *, artifact_id: str, actor: str, grant: ProviderMediaGrantBinding, account_id: str, amount_limit: int, logical_time: datetime, trace_id: str, correlation_id: str):
+        raise MediaExecutionError(
+            "inspection authorization requires MediaContinuationRuntime Acceptance"
+        )
+
+    def prepare_inspection_authorization(
+        self, *, artifact_id: str, actor: str, grant: ProviderMediaGrantBinding,
+        account_id: str, amount_limit: int, logical_time: datetime,
+        trace_id: str, correlation_id: str,
+    ) -> tuple[BudgetReservation, Action]:
+        """Validate frozen inspection authority without committing effects."""
+
         projection = self._ledger.project()
-        artifact = next((item for item in projection.media_artifacts if item.artifact_id == artifact_id), None)
+        artifact = next(
+            (item for item in projection.media_artifacts if item.artifact_id == artifact_id), None
+        )
         if artifact is None:
             raise MediaExecutionError("inspection requires immutable artifact")
-        existing = next((item for item in projection.actions if item.intent_ref == artifact_id and item.kind == "media_inspection"), None)
-        if existing is not None:
-            return existing
         self._require_paid_media_profile(amount_limit=amount_limit)
-        self._require_payload(artifact.artifact_ref, artifact.artifact_hash)
-        action_id = "action:media-inspection:" + media_digest({"world": self._ledger.world_id, "artifact": artifact_id})
-        reservation = BudgetReservation(reservation_id="reservation:media-inspection:" + media_digest({"world": self._ledger.world_id, "artifact": artifact_id}), account_id=account_id, action_id=action_id, category="image", amount_limit=amount_limit)
-        action = Action(schema_version="world-v2.1", action_id=action_id, world_id=self._ledger.world_id, logical_time=logical_time, created_at=logical_time, trace_id=trace_id, causation_id=_event_id("MediaRenderArtifactRecorded", artifact_id), correlation_id=correlation_id, kind="media_inspection", layer="media_action", intent_ref=artifact_id, actor=actor, target="provider:media-inspector", payload_ref=artifact.artifact_ref, payload_hash=artifact.artifact_hash, provider_media_grant=grant, idempotency_key="media-inspection:" + artifact_id, budget_reservation_id=reservation.reservation_id, state="authorized", recovery_policy="effect_once")
-        events = self._events(items=(("BudgetReserved", {"reservation": reservation.model_dump(mode="json")}, reservation.reservation_id), ("ActionAuthorized", {"action": action.model_dump(mode="json")}, action_id)), actor=actor, logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id, causation_id=action.causation_id)
-        self._ledger.commit_at_cursor(events, expected_cursor=self._cursor(projection), commit_id="commit:media-inspection-authorize:" + media_digest([event.event_id for event in events]))
-        return action
+        payload = self._require_payload(artifact.artifact_ref, artifact.artifact_hash)
+        action_id = "action:media-inspection:" + media_digest(
+            {"world": self._ledger.world_id, "artifact": artifact_id}
+        )
+        reservation = BudgetReservation(
+            reservation_id="reservation:media-inspection:" + media_digest(
+                {"world": self._ledger.world_id, "artifact": artifact_id}
+            ),
+            account_id=account_id, action_id=action_id, category="image",
+            amount_limit=amount_limit,
+        )
+        action = Action(
+            schema_version="world-v2.1", action_id=action_id, world_id=self._ledger.world_id,
+            logical_time=logical_time, created_at=logical_time, trace_id=trace_id,
+            causation_id=_event_id("MediaRenderArtifactRecorded", artifact_id),
+            correlation_id=correlation_id, kind="media_inspection", layer="media_action",
+            intent_ref=artifact_id, actor=actor, target="provider:media-inspector",
+            payload_ref=payload.payload_ref, payload_hash=payload.payload_hash,
+            provider_media_grant=grant, idempotency_key="media-inspection:" + artifact_id,
+            budget_reservation_id=reservation.reservation_id, state="authorized",
+            recovery_policy="effect_once",
+        )
+        return reservation, action
 
     def record_inspection(self, *, action_id: str, receipt_id: str, passed: bool, reason_code: str, observed_summary: str | None, inspection_payload: StoredMediaPayload, logical_time: datetime, repairable: bool = False, repair_scope: tuple[str, ...] = ()) -> MediaInspectionRecord:
         projection = self._ledger.project()

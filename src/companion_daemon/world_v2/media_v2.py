@@ -21,6 +21,7 @@ from pydantic import Field, model_validator
 
 from .schema_core import FrozenModel, PrivacyClass
 from .relationship_media_context import RelationshipMediaContextV1
+from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
 
 
 def canonical_media_json(value: object) -> str:
@@ -445,6 +446,11 @@ class MediaAutomaticDeliveryApproval(FrozenModel):
     artifact_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     sample_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     recipient_ref: str = Field(min_length=1, max_length=256)
+    # Provider addresses are not necessarily the same string as the domain
+    # recipient (for example ``user:1`` vs ``platform:user:1``).  When they
+    # differ, the operator must approve the exact provider target as well;
+    # callers may not substitute an arbitrary target at authorization time.
+    delivery_target_ref: str | None = Field(default=None, min_length=1, max_length=512)
     operator_ref: str = Field(min_length=1, max_length=256)
     family: MediaFamily
     media_machine_version: Literal["media-machine.v5"] = "media-machine.v5"
@@ -749,18 +755,23 @@ class InMemoryImmutableMediaPayloadStore:
 class SQLiteImmutableMediaPayloadStore:
     def __init__(self, *, path: str, world_id: str) -> None:
         self._world_id, self._lock = world_id, RLock()
-        self._connection = sqlite3.connect(path, check_same_thread=False)
-        self._connection.execute("""CREATE TABLE IF NOT EXISTS world_v2_media_payload (
-            world_id TEXT NOT NULL, payload_ref TEXT NOT NULL, payload_hash TEXT NOT NULL,
-            content_type TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(world_id, payload_ref))""")
-        self._connection.commit()
+        self._database_write_lock = sqlite_write_lock(path)
+        # Autocommit; see SQLiteImmutableLifeContentStore for the WAL-pinning
+        # rationale shared by every sidecar on this file.
+        self._connection = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        with self._database_write_lock:
+            configure_shared_sqlite_connection(self._connection)
+            self._connection.execute("""CREATE TABLE IF NOT EXISTS world_v2_media_payload (
+                world_id TEXT NOT NULL, payload_ref TEXT NOT NULL, payload_hash TEXT NOT NULL,
+                content_type TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(world_id, payload_ref))""")
+            self._connection.commit()
 
     def close(self) -> None:
         with self._lock:
             self._connection.close()
 
     def put_if_absent(self, record: StoredMediaPayload) -> None:
-        with self._lock:
+        with self._database_write_lock, self._lock:
             row = self._connection.execute("SELECT payload_hash, content_type, body FROM world_v2_media_payload WHERE world_id=? AND payload_ref=?", (self._world_id, record.payload_ref)).fetchone()
             if row is not None:
                 if StoredMediaPayload(payload_ref=record.payload_ref, payload_hash=row[0], content_type=row[1], body=row[2]) != record:
@@ -808,6 +819,16 @@ def continuation_trigger_id(plan: MediaPlan) -> str:
     return "media-continuation:" + media_digest({"plan_id": plan.plan_id, "step": "plan_to_render"})
 
 
+def artifact_continuation_trigger_id(artifact: MediaArtifact) -> str:
+    return "media-continuation:" + media_digest(
+        {
+            "artifact_id": artifact.artifact_id,
+            "artifact_hash": artifact.artifact_hash,
+            "step": "render_to_inspect",
+        }
+    )
+
+
 def media_repair_trigger_id(*, world_id: str, inspection_id: str) -> str:
     return "media-repair:" + media_digest({"world_id": world_id, "inspection_id": inspection_id})
 
@@ -847,5 +868,5 @@ __all__ = [
     "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "ImageEvidenceIndexEntry", "ImageEventSnapshot", "FrozenMediaEvidenceSnapshot", "MediaPrivacyCeiling", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization", "MediaAutomaticDeliveryApproval", "MediaDeliveryShared",
     "PhotoCandidateOpenedPayload", "PhotoCandidateUnrenderablePayload", "PhotoCandidateExpiredPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload", "MediaRepairAuthorizedPayload", "MediaAutomaticDeliveryApprovedPayload", "MediaDeliverySharedPayload",
     "StoredMediaPayload", "ImmutableMediaPayloadStore", "InMemoryImmutableMediaPayloadStore", "SQLiteImmutableMediaPayloadStore",
-    "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id", "media_repair_trigger_id", "media_repair_attempt_id", "media_repair_action_id", "media_repair_reservation_id", "media_delivery_action_id", "media_delivery_reservation_id", "media_delivery_id",
+    "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id", "artifact_continuation_trigger_id", "media_repair_trigger_id", "media_repair_attempt_id", "media_repair_action_id", "media_repair_reservation_id", "media_delivery_action_id", "media_delivery_reservation_id", "media_delivery_id",
 ]

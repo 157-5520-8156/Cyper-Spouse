@@ -26,6 +26,7 @@ from .location_authority_schemas import (
     V2LocationProjection,
     v2_location_semantic_fingerprint,
 )
+from .local_chronology import LocalChronology
 from .resource_authority_schemas import (
     ResourceKind,
     V2ResourceProjection,
@@ -74,6 +75,19 @@ def _digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(
             canonicalize_json_value(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def _serialized_digest(value: object) -> str:
+    """Hash an already JSON-shaped public value without changing its offsets."""
+
+    return hashlib.sha256(
+        json.dumps(
+            value,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -881,7 +895,7 @@ class SituationCompileCache:
             self._internal_values.pop(key, None)
             return None
         material = value.model_dump(mode="json", exclude={"internal_semantic_hash"})
-        if value.internal_semantic_hash != _digest(material):
+        if value.internal_semantic_hash != _serialized_digest(material):
             self._internal_values.pop(key, None)
             return None
         self._internal_values.move_to_end(key)
@@ -909,8 +923,14 @@ class SituationCompileCache:
 class SituationCompiler:
     """Compile and redact a pinned authority snapshot without I/O or mutation."""
 
-    def __init__(self, cache: SituationCompileCache | None = None) -> None:
+    def __init__(
+        self,
+        cache: SituationCompileCache | None = None,
+        *,
+        local_chronology: LocalChronology | None = None,
+    ) -> None:
         self._cache = cache
+        self._local_chronology = local_chronology or LocalChronology()
 
     def compile(self, request: SituationCompileRequest) -> SituationCompileResult:
         # Revalidate so model_copy cannot bypass the strict public seam.
@@ -923,6 +943,7 @@ class SituationCompiler:
             {
                 "authority_snapshot_hash": authority_snapshot_hash,
                 "situation_policy_input_hash": situation_policy_input_hash,
+                "local_timezone": self._local_chronology.timezone_name,
             }
         )
         cached_internal = (
@@ -1075,6 +1096,7 @@ class SituationCompiler:
             request.policy.privacy_policy_digest,
             request.policy.ordering_policy_digest,
         )
+        local_time = self._local_chronology.localize(request.logical_time)
         draft = SituationProjection(
             world_id=request.world_id,
             authority_snapshot_hash=_digest(_canonical_snapshot_material(snapshot)),
@@ -1083,8 +1105,8 @@ class SituationCompiler:
             ),
             compiled_at_world_revision=request.pinned_world_revision,
             actor_ref=request.actor_ref,
-            logical_time=request.logical_time,
-            time_segment=_time_segment(request.logical_time),
+            logical_time=local_time,
+            time_segment=_time_segment(local_time),
             location_slice=location,
             activity_slices=activities,
             goal_slices=tuple(goals),
@@ -1100,7 +1122,7 @@ class SituationCompiler:
             internal_semantic_hash="0" * 64,
         )
         material = draft.model_dump(mode="json", exclude={"internal_semantic_hash"})
-        return draft.model_copy(update={"internal_semantic_hash": _digest(material)})
+        return draft.model_copy(update={"internal_semantic_hash": _serialized_digest(material)})
 
     def _attention_slice(
         self, snapshot: SituationAuthoritySnapshot, sources: list[SourceRevision]

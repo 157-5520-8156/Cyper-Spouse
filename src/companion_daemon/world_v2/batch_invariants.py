@@ -17,6 +17,18 @@ from .affect_acceptance_manifest import (
     AffectAcceptanceManifest,
     canonical_affect_acceptance_value_hash,
 )
+from .relationship_acceptance_manifest import (
+    RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+    RelationshipAcceptanceManifest,
+    canonical_relationship_acceptance_value_hash,
+)
+from .relationship_events import RelationshipSignalAcceptedPayload
+from .relationship_adjustment_acceptance_manifest import (
+    RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
+    RelationshipAdjustmentAcceptanceManifest,
+    canonical_relationship_adjustment_acceptance_value_hash,
+)
+from .relationship_events import RelationshipSlowVariableAdjustedPayload
 from .activity_lifecycle_acceptance_manifest import (
     ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
     ActivityLifecycleAcceptanceManifest,
@@ -26,6 +38,12 @@ from .media_selection_acceptance_manifest import (
     MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
     canonical_media_selection_value_hash,
     parse_media_selection_acceptance_manifest,
+)
+from .media_continuation_acceptance_manifest import (
+    MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+    MediaContinuationAcceptanceManifest,
+    canonical_media_continuation_hash,
+    media_continuation_event_identity,
 )
 from .media_v2 import MediaOpportunityFrozenPayload
 from .outcome_acceptance_manifest import (
@@ -46,6 +64,8 @@ from .media_thread_acceptance_manifest import (
 )
 from .media_thread_events import MediaDeliveryThreadChangedPayload
 from .event_identity import domain_idempotency_key
+from .commitment_events import CommitmentChangedPayload
+from .thread_events import ThreadChangedPayload
 from .experience_events import ExperienceCommittedPayload
 from .fact_accepted_contracts import (
     fact_commit_event_payload_hash,
@@ -60,8 +80,10 @@ from .acceptance_manifest import parse_acceptance_manifest_v2
 from .minimal_reply_events import (
     ExpressionBeatAuthorizedPayload,
     ExpressionBeatSettledPayload,
+    ExpressionBeatTerminatedPayload,
     ExpressionPlanAcceptedPayload,
     ExpressionPlanCompletedPayload,
+    ExpressionPlanTerminatedPayload,
     MessagePayloadStoredPayload,
     minimal_reply_event_id,
     minimal_reply_idempotency_key,
@@ -81,6 +103,10 @@ from .expression_plan_atomic_recorder import (
     expression_plan_event_id,
     expression_plan_idempotency_key,
 )
+from .social_action_acceptance import (
+    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+    SocialDeferredAcceptanceManifest,
+)
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
@@ -88,6 +114,8 @@ from .appraisal_events import (
 )
 from .affect_events import AFFECT_PAYLOAD_MODELS, AffectAuthorizedMutationPayload
 from .media_v2 import (
+    MediaRenderArtifactRecordedPayload,
+    artifact_continuation_trigger_id,
     MediaPlanRecordedPayload,
     MediaRepairAuthorizedPayload,
     continuation_trigger_id,
@@ -120,12 +148,16 @@ def validate_commit_batch(
         reject_minimal_reply_manifest_without_recorder(events)
         reject_appraisal_acceptance_manifest_without_recorder(events)
         reject_affect_acceptance_manifest_without_recorder(events)
+        reject_relationship_acceptance_manifest_without_recorder(events)
+        reject_relationship_adjustment_acceptance_manifest_without_recorder(events)
         reject_activity_lifecycle_acceptance_manifest_without_recorder(events)
         reject_media_selection_acceptance_manifest_without_recorder(events)
+        reject_media_continuation_acceptance_manifest_without_recorder(events)
         reject_outcome_acceptance_manifest_without_recorder(events)
         reject_interaction_bid_acceptance_manifest_without_recorder(events)
         reject_media_thread_acceptance_manifest_without_recorder(events)
         reject_expression_plan_manifest_without_recorder(events)
+        reject_social_deferred_manifest_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
@@ -143,6 +175,11 @@ def validate_commit_batch(
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
     )
+    _validate_authorized_social_deferred_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
     _validate_authorized_appraisal_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
@@ -153,12 +190,27 @@ def validate_commit_batch(
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
     )
+    _validate_authorized_relationship_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_relationship_adjustment_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
     _validate_authorized_activity_lifecycle_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_media_selection_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_media_continuation_acceptance_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -180,6 +232,7 @@ def validate_commit_batch(
     )
     _validate_expression_receipt_lifecycle_batch(events)
     _validate_media_planning_settlement_batch(events)
+    _validate_media_render_continuation_batch(events)
     _validate_media_repair_acceptance_batch(events)
 
     appraisal_triggers: dict[str, list[tuple[str, str, str | None]]] = {}
@@ -269,9 +322,10 @@ def validate_commit_batch(
     for acceptance_index, acceptance in acceptances:
         if acceptance.get("manifest_version") in {
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
-            ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-            *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
-        }:
+                ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+                *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+                MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+            }:
             # Dedicated source-bound lane is validated above; it is not a
             # member of the generic typed Thread mutation family.
             continue
@@ -362,18 +416,12 @@ def validate_commit_batch(
                 "WorldOccurrenceSettled permits at most one matching committed experience"
             )
 
-    settlement_pairs = {(item.occurrence_id, item.result_id) for item in settlements}
-    for experience in experiences:
-        for binding in experience.experience.values.source_bindings:
-            if (
-                isinstance(binding, ExperienceOccurrenceSettlementBinding)
-                and (
-                    binding.occurrence_id,
-                    binding.result_id,
-                )
-                not in settlement_pairs
-            ):
-                raise ValueError("occurrence-backed experience must accompany its settlement")
+    # A source-bound Experience may be materialized after the settlement
+    # commit.  Its reducer independently resolves the exact settlement event,
+    # world revision, payload hash, occurrence revision and result bytes.  The
+    # older same-batch-only restriction made crash recovery impossible: a
+    # settlement committed just before process death could never gain its
+    # durable Experience on restart.
 
     for mutation_index, binding in typed_mutations:
         matching = [
@@ -431,6 +479,38 @@ def _validate_expression_receipt_lifecycle_batch(events: Sequence[WorldEvent]) -
             or plan.terminal_action_state != beat.terminal_action_state
         ):
             raise ValueError("expression_lifecycle.plan_beat_binding_invalid")
+    by_id = {event.event_id: event for event in events}
+    for event in events:
+        if event.event_type != "ExpressionBeatTerminated":
+            continue
+        terminated_beat = ExpressionBeatTerminatedPayload.model_validate_json(event.payload_json)
+        source = by_id.get(terminated_beat.source_event_ref)
+        if (
+            source is None
+            or source.event_type != "ActionCancelled"
+            or source.payload_hash != terminated_beat.source_event_payload_hash
+            or source.payload().get("action_id") != terminated_beat.action_id
+        ):
+            raise ValueError("expression_lifecycle.beat_termination_source_binding_invalid")
+    for event in events:
+        if event.event_type != "ExpressionPlanTerminated":
+            continue
+        terminated = ExpressionPlanTerminatedPayload.model_validate_json(event.payload_json)
+        source = by_id.get(terminated.source_event_ref)
+        if source is None or source.payload_hash != terminated.source_event_payload_hash:
+            raise ValueError("expression_lifecycle.termination_source_binding_invalid")
+        if terminated.receipt_id is not None:
+            if source.event_type != "ExecutionReceiptRecorded":
+                raise ValueError("expression_lifecycle.termination_receipt_source_invalid")
+            receipt = source.payload().get("receipt")
+            if not isinstance(receipt, dict) or (
+                receipt.get("receipt_id") != terminated.receipt_id
+                or receipt.get("observed_state") != terminated.disposition
+                or receipt.get("is_terminal") is not True
+            ):
+                raise ValueError("expression_lifecycle.termination_receipt_binding_invalid")
+        elif source.event_type != "ActionCancelled":
+            raise ValueError("expression_lifecycle.termination_cancellation_source_invalid")
 
 
 def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> None:
@@ -509,12 +589,16 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
             MINIMAL_REPLY_MANIFEST_VERSION,
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-            *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
-            OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+                *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+                MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+                OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
+            SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
         }
     ]
     if unknown:
@@ -836,6 +920,93 @@ def reject_expression_plan_manifest_without_recorder(events: Sequence[WorldEvent
         for event in events
     ):
         raise ValueError("expression_plan.recorder_capability_required")
+
+
+def reject_social_deferred_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("social_deferred.recorder_capability_required")
+
+
+def _validate_authorized_social_deferred_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("social_deferred.recorder_capability_required")
+    if len(manifests) != 1 or tuple(item.event_type for item in events) != (
+        "AcceptanceRecorded", "PrivateCommitmentOpened", "MessagePayloadStored",
+        "ExpressionPlanAccepted", "ExpressionBeatAuthorized", "BudgetReserved", "ActionAuthorized",
+        "AcceptanceRecorded", "ThreadOpened",
+    ):
+        raise ValueError("social_deferred.accepted_batch_shape_is_not_exact")
+    manifest = SocialDeferredAcceptanceManifest.model_validate_json(manifests[0].payload_json)
+    if manifest.evaluated_world_revision != expected_world_revision:
+        raise ValueError("social_deferred.accepted_batch_authority_is_not_pinned")
+    if manifests[0].causation_id != manifest.proposal_event_ref or any(
+        current.causation_id != previous.event_id for previous, current in zip(events, events[1:])
+    ):
+        raise ValueError("social_deferred.accepted_batch_causation_is_not_exact")
+    expression = manifest.expression_manifest
+    beat = expression.beats[0]
+    commitment = CommitmentChangedPayload.model_validate_json(events[1].payload_json)
+    message = MessagePayloadStoredPayload.model_validate_json(events[2].payload_json)
+    plan = ExpressionPlanAcceptedPayload.model_validate_json(events[3].payload_json)
+    beat_payload = ExpressionBeatAuthorizedPayload.model_validate_json(events[4].payload_json)
+    reservation = BudgetReservation.model_validate_json(
+        json.dumps(events[5].payload()["reservation"], ensure_ascii=False, sort_keys=True)
+    )
+    action = Action.model_validate_json(
+        json.dumps(events[6].payload()["action"], ensure_ascii=False, sort_keys=True)
+    )
+    thread_acceptance = events[7].payload()
+    thread = ThreadChangedPayload.model_validate_json(events[8].payload_json)
+    commitment_after = commitment.commitment_after
+    anchor = next(iter(commitment_after.values.anchor_evidence_refs), None)
+    if (
+        canonical_expression_plan_value_hash(commitment.model_dump(mode="json"))
+        != manifest.commitment_payload_hash
+        or commitment.change_id != manifest.accepted_change_id
+        or commitment.accepted_change_hash != manifest.accepted_change_hash
+        or commitment.acceptance_id != manifest.acceptance_id
+        or commitment.proposal_id != manifest.proposal_id
+        or commitment.commitment_after.commitment_id != manifest.commitment_id
+        or thread.proposal_id != manifest.thread_proposal_id
+        or thread.thread_after.thread_id != manifest.thread_id
+        or canonical_expression_plan_value_hash(thread.model_dump(mode="json"))
+        != manifest.thread_payload_hash
+        or thread_acceptance.get("proposal_id") != manifest.thread_proposal_id
+        or thread_acceptance.get("acceptance_id") != thread.acceptance_id
+        or thread_acceptance.get("accepted_change_hash") != thread.accepted_change_hash
+        or commitment_after.values.subject_ref != manifest.source_observation_id
+        or anchor is None
+        or anchor.ref_id != manifest.source_observation_id
+        or anchor.evidence_type != "observed_message"
+        or anchor.immutable_hash != manifest.source_observation_event_hash
+        or message.acceptance_id != manifest.acceptance_id
+        or message.proposal_id != manifest.proposal_id
+        or message.message != beat.beat.payload
+        or plan.acceptance_id != manifest.acceptance_id
+        or plan.proposal_id != manifest.proposal_id
+        or plan.expression_change_id != expression.expression_change_id
+        or plan.plan_id != expression.plan_id
+        or beat_payload.acceptance_id != manifest.acceptance_id
+        or beat_payload.beat != beat.beat
+        or reservation != beat.reservation
+        or action != beat.action
+        or action.action_id != manifest.action_id
+        or action.kind != "followup"
+    ):
+        raise ValueError("social_deferred.accepted_batch_does_not_match_manifest")
 
 
 def _validate_authorized_expression_plan_manifest_batch(
@@ -1193,6 +1364,154 @@ def reject_affect_acceptance_manifest_without_recorder(events: Sequence[WorldEve
         raise ValueError("affect_acceptance.recorder_capability_required")
 
 
+def _validate_authorized_relationship_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("relationship_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError("relationship_acceptance.accepted_batch_must_be_exact")
+    acceptance, mutation = events
+    try:
+        manifest = RelationshipAcceptanceManifest.model_validate_json(acceptance.payload_json)
+        payload = RelationshipSignalAcceptedPayload.model_validate_json(mutation.payload_json)
+    except Exception as exc:
+        raise ValueError("relationship_acceptance.accepted_batch_payload_is_invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", "RelationshipSignalAccepted")
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or mutation.causation_id != acceptance.event_id
+        or mutation.event_id != manifest.mutation_event_id
+        or mutation.payload_hash != manifest.mutation_payload_hash
+    ):
+        raise ValueError("relationship_acceptance.batch_does_not_match_manifest")
+    if any(
+        (
+            mutation.world_id != acceptance.world_id,
+            mutation.logical_time != acceptance.logical_time,
+            mutation.created_at != acceptance.created_at,
+            mutation.actor != acceptance.actor,
+            mutation.source != acceptance.source,
+            mutation.trace_id != acceptance.trace_id,
+            mutation.correlation_id != acceptance.correlation_id,
+        )
+    ):
+        raise ValueError("relationship_acceptance.envelope_metadata_mismatch")
+    if (
+        payload.acceptance_id != manifest.acceptance_id
+        or payload.proposal_id != manifest.proposal_id
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or payload.signal.origin.accepted_event_ref != mutation.event_id
+        or canonical_relationship_acceptance_value_hash(payload.model_dump(mode="json"))
+        != manifest.mutation_payload_hash
+    ):
+        raise ValueError("relationship_acceptance.mutation_does_not_match_manifest")
+    for item in (acceptance, mutation):
+        expected = domain_idempotency_key(
+            event_type=item.event_type, world_id=item.world_id, payload=item.payload()
+        )
+        if expected is None or item.idempotency_key != expected:
+            raise ValueError("relationship_acceptance.event_identity_is_not_deterministic")
+
+
+def reject_relationship_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("relationship_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_relationship_adjustment_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("relationship_adjustment_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError("relationship_adjustment_acceptance.accepted_batch_must_be_exact")
+    acceptance, mutation = events
+    try:
+        manifest = RelationshipAdjustmentAcceptanceManifest.model_validate_json(
+            acceptance.payload_json
+        )
+        payload = RelationshipSlowVariableAdjustedPayload.model_validate_json(mutation.payload_json)
+    except Exception as exc:
+        raise ValueError("relationship_adjustment_acceptance.accepted_batch_payload_is_invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", "RelationshipSlowVariableAdjusted")
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or mutation.causation_id != acceptance.event_id
+        or mutation.event_id != manifest.mutation_event_id
+        or mutation.payload_hash != manifest.mutation_payload_hash
+    ):
+        raise ValueError("relationship_adjustment_acceptance.batch_does_not_match_manifest")
+    if any(
+        (
+            mutation.world_id != acceptance.world_id,
+            mutation.logical_time != acceptance.logical_time,
+            mutation.created_at != acceptance.created_at,
+            mutation.actor != acceptance.actor,
+            mutation.source != acceptance.source,
+            mutation.trace_id != acceptance.trace_id,
+            mutation.correlation_id != acceptance.correlation_id,
+        )
+    ):
+        raise ValueError("relationship_adjustment_acceptance.envelope_metadata_mismatch")
+    if (
+        payload.operation != "adjust"
+        or payload.acceptance_id != manifest.acceptance_id
+        or payload.proposal_id != manifest.proposal_id
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or canonical_relationship_adjustment_acceptance_value_hash(payload.model_dump(mode="json"))
+        != manifest.mutation_payload_hash
+    ):
+        raise ValueError("relationship_adjustment_acceptance.mutation_does_not_match_manifest")
+    for item in (acceptance, mutation):
+        expected = domain_idempotency_key(
+            event_type=item.event_type, world_id=item.world_id, payload=item.payload()
+        )
+        if expected is None or item.idempotency_key != expected:
+            raise ValueError("relationship_adjustment_acceptance.event_identity_is_not_deterministic")
+
+
+def reject_relationship_adjustment_acceptance_manifest_without_recorder(
+    events: Sequence[WorldEvent],
+) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("relationship_adjustment_acceptance.recorder_capability_required")
+
+
 def reject_activity_lifecycle_acceptance_manifest_without_recorder(
     events: Sequence[WorldEvent],
 ) -> None:
@@ -1286,6 +1605,115 @@ def reject_media_selection_acceptance_manifest_without_recorder(
         for event in events
     ):
         raise ValueError("media_selection_acceptance.recorder_capability_required")
+
+
+def reject_media_continuation_acceptance_manifest_without_recorder(
+    events: Sequence[WorldEvent],
+) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("media_continuation_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_media_continuation_acceptance_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    matches = [
+        event for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not matches:
+        return
+    if not authorized:
+        raise ValueError("media_continuation_acceptance.recorder_capability_required")
+    if len(matches) != 1 or len(events) != 5 or tuple(event.event_type for event in events) != (
+        "AcceptanceRecorded", "TriggerProcessClaimed", "BudgetReserved",
+        "ActionAuthorized", "TriggerProcessCompleted",
+    ):
+        raise ValueError("media_continuation_acceptance.accepted_batch_must_be_exact")
+    acceptance, claim_event, reservation_event, action_event, completion_event = events
+    try:
+        manifest = MediaContinuationAcceptanceManifest.model_validate(
+            acceptance.payload(), strict=True
+        )
+        claimed = TriggerProcess.model_validate_json(
+            json.dumps(claim_event.payload().get("process"), ensure_ascii=False)
+        )
+        reservation = BudgetReservation.model_validate_json(
+            json.dumps(reservation_event.payload().get("reservation"), ensure_ascii=False)
+        )
+        action = Action.model_validate_json(
+            json.dumps(action_event.payload().get("action"), ensure_ascii=False)
+        )
+        completion = completion_event.payload()
+    except Exception as exc:
+        raise ValueError("media_continuation_acceptance.payload_is_invalid") from exc
+    expected_kind = {
+        "plan_to_render": "media_render",
+        "render_to_inspect": "media_inspection",
+    }[manifest.continuation_step]
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or acceptance.event_id != manifest.acceptance_event_ref
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or claim_event.event_id != manifest.claim_event_ref
+        or claim_event.causation_id != acceptance.event_id
+        or canonical_media_continuation_hash(claim_event.payload()) != manifest.claim_payload_hash
+        or reservation_event.event_id != manifest.reservation_event_ref
+        or reservation_event.causation_id != claim_event.event_id
+        or canonical_media_continuation_hash(reservation_event.payload())
+        != manifest.reservation_payload_hash
+        or action_event.event_id != manifest.action_event_ref
+        or action_event.causation_id != reservation_event.event_id
+        or canonical_media_continuation_hash(action_event.payload()) != manifest.action_payload_hash
+        or completion_event.event_id != manifest.completion_event_ref
+        or completion_event.causation_id != action_event.event_id
+        or canonical_media_continuation_hash(completion) != manifest.completion_payload_hash
+        or claimed.trigger_id != manifest.trigger_id
+        or claimed.source_evidence_ref != manifest.source_evidence_ref
+        or claimed.state != "claimed"
+        or claimed.claim_lease is None
+        or completion.get("trigger_id") != manifest.trigger_id
+        or completion.get("owner_id") != claimed.claim_lease.owner_id
+        or completion.get("attempt_id") != claimed.claim_lease.attempt_id
+        or completion.get("runtime_outcome_ref") != action.action_id
+        or reservation.action_id != action.action_id
+        or action.budget_reservation_id != reservation.reservation_id
+        or action.kind != expected_kind
+        or action.action_id != manifest.authorized_action_id
+        or action.intent_ref != manifest.authorized_intent_ref
+        or action.payload_ref != manifest.authorized_payload_ref
+        or action.payload_hash != manifest.authorized_payload_hash
+        or action.causation_id != manifest.source_evidence_ref
+        or action.layer != "media_action"
+        or action.state != "authorized"
+        or action.recovery_policy != "effect_once"
+    ):
+        raise ValueError("media_continuation_acceptance.batch_does_not_match_manifest")
+    if any(
+        getattr(event, field) != getattr(acceptance, field)
+        for event in events[1:]
+        for field in (
+            "world_id", "logical_time", "created_at", "actor", "source",
+            "trace_id", "correlation_id",
+        )
+    ):
+        raise ValueError("media_continuation_acceptance.envelope_metadata_mismatch")
+    for event in events:
+        expected = domain_idempotency_key(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        expected = expected or media_continuation_event_identity(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        if event.idempotency_key != expected:
+            raise ValueError("media_continuation_acceptance.identity_is_not_deterministic")
 
 
 def _validate_authorized_media_selection_acceptance_manifest_batch(
@@ -1671,7 +2099,9 @@ def _validate_media_planning_settlement_batch(events: Sequence[WorldEvent]) -> N
         result = MediaPlanRecordedPayload.model_validate_json(result_event.payload_json)
         if index + 1 >= len(events) or events[index + 1].event_type != "TriggerProcessOpened":
             raise ValueError("frozen MediaPlan must open one render continuation")
-        process = TriggerProcess.model_validate(events[index + 1].payload().get("process"))
+        process = TriggerProcess.model_validate_json(
+            json.dumps(events[index + 1].payload().get("process"), ensure_ascii=False)
+        )
         expected = continuation_trigger_id(result.plan)
         if (
             process.trigger_id != expected
@@ -1681,6 +2111,29 @@ def _validate_media_planning_settlement_batch(events: Sequence[WorldEvent]) -> N
             or process.source_evidence_ref != result_event.event_id
         ):
             raise ValueError("media planning continuation is not bound to frozen plan")
+
+
+def _validate_media_render_continuation_batch(events: Sequence[WorldEvent]) -> None:
+    """Every settled render artifact opens exactly its inspection continuation."""
+
+    for index, event in enumerate(events):
+        if event.event_type != "MediaRenderArtifactRecorded":
+            continue
+        if index + 1 >= len(events) or events[index + 1].event_type != "TriggerProcessOpened":
+            raise ValueError("settled media render must open one inspection continuation")
+        payload = MediaRenderArtifactRecordedPayload.model_validate_json(event.payload_json)
+        process = TriggerProcess.model_validate_json(
+            json.dumps(events[index + 1].payload().get("process"), ensure_ascii=False)
+        )
+        expected = artifact_continuation_trigger_id(payload.artifact)
+        if (
+            process.trigger_id != expected
+            or process.trigger_ref != expected
+            or process.process_kind != "media_continuation"
+            or process.state != "open"
+            or process.source_evidence_ref != event.event_id
+        ):
+            raise ValueError("inspection continuation is not bound to exact render artifact")
 
 
 def _validate_media_repair_acceptance_batch(events: Sequence[WorldEvent]) -> None:
@@ -1736,3 +2189,58 @@ def interaction_appraisal_trigger_identity(world_id: str, observation_ref: str) 
         separators=(",", ":"),
     ).encode("utf-8")
     return f"appraisal:interaction:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def silence_appraisal_trigger_identity(world_id: str, source_evidence_ref: str) -> str:
+    """One deterministic trigger per delivered-reply silence anchor.
+
+    The anchor is the committed ``ExecutionReceiptRecorded`` event of the
+    companion's last visible message; deriving the identity from it makes the
+    per-silence trigger idempotent under replay and concurrent openers.
+    """
+
+    if not world_id or not source_evidence_ref:
+        raise ValueError("silence appraisal identity requires world and receipt event")
+    encoded = json.dumps(
+        [world_id, source_evidence_ref, "silence_appraisal"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"trigger:silence-appraisal:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def private_impression_trigger_identity(world_id: str, source_evidence_ref: str) -> str:
+    """One deterministic trigger per accepted appraisal considered for an impression.
+
+    The anchor is the committed ``AppraisalAccepted`` event; deriving the
+    identity from it makes the per-appraisal trigger idempotent under replay
+    and concurrent openers.
+    """
+
+    if not world_id or not source_evidence_ref:
+        raise ValueError("private impression identity requires world and appraisal event")
+    encoded = json.dumps(
+        [world_id, source_evidence_ref, "private_impression"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"trigger:private-impression:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def plan_disruption_appraisal_trigger_identity(world_id: str, source_evidence_ref: str) -> str:
+    """One deterministic trigger per abandoned-plan anchor.
+
+    The anchor is the committed ``ActivityAbandoned`` event of one plan's
+    terminal transition; deriving the identity from it makes the per-abandonment
+    trigger idempotent under replay and concurrent openers, regardless of which
+    producer (lifecycle acceptance, replacement, direct command) committed it.
+    """
+
+    if not world_id or not source_evidence_ref:
+        raise ValueError("plan disruption identity requires world and abandonment event")
+    encoded = json.dumps(
+        [world_id, source_evidence_ref, "plan_disruption_appraisal"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"trigger:plan-disruption-appraisal:{hashlib.sha256(encoded).hexdigest()}"

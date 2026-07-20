@@ -62,16 +62,33 @@ class RelationshipEvaluationDraftCapsule(FrozenModel):
 
     These are summaries, not authority handles: no IDs, revisions, evidence
     refs, accepted-event records, or direct state fields cross this seam.
+
+    The three ``recent_*``/``active_*`` context tuples were added in draft
+    version 2: a lone appraisal summary (meaning codes plus a stranger-stage
+    relationship head) carried no texture of the actual exchange, and the
+    production model answered no_change for every one of a world's first
+    fifteen drafts, including overtly intimate turns.  They stay bounded and
+    read-only; an empty tuple simply means the lane's capsule budgeted the
+    corresponding slice away.
     """
 
     accepted_appraisal_summary: str = Field(min_length=1, max_length=2_000)
     relationship_summary: str = Field(min_length=1, max_length=1_200)
     active_boundary_summaries: tuple[str, ...] = Field(default=(), max_length=16)
     unconsumed_signal_summaries: tuple[str, ...] = Field(default=(), max_length=16)
+    recent_dialogue_summaries: tuple[str, ...] = Field(default=(), max_length=12)
+    recent_appraisal_summaries: tuple[str, ...] = Field(default=(), max_length=8)
+    active_affect_summaries: tuple[str, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
     def summaries_are_nonempty(self) -> "RelationshipEvaluationDraftCapsule":
-        for value in (*self.active_boundary_summaries, *self.unconsumed_signal_summaries):
+        for value in (
+            *self.active_boundary_summaries,
+            *self.unconsumed_signal_summaries,
+            *self.recent_dialogue_summaries,
+            *self.recent_appraisal_summaries,
+            *self.active_affect_summaries,
+        ):
             if not isinstance(value, str) or not value or len(value) > 800:
                 raise ValueError("RelationshipEvaluationDraft summaries must be bounded nonempty text")
         return self
@@ -186,7 +203,13 @@ def materialize_relationship_evaluation_draft(
 class RelationshipEvaluationDraftAdapter:
     """Call the configured chat model without granting world-write capability."""
 
-    VERSION = "relationship-evaluation-draft.1"
+    # Version 2 (2026-07-20): version 1 asked for signals only on abstractly
+    # "real moments" over a bare appraisal summary, and a four-day production
+    # world produced fifteen consecutive no_change drafts across overtly warm
+    # and self-disclosing conversation.  Version 2 sees bounded dialogue/
+    # appraisal/affect context and is calibrated for small bp-level steps
+    # with explicit anti-flattery guards.  The output grammar is unchanged.
+    VERSION = "relationship-evaluation-draft.2"
 
     def __init__(
         self, *, model: ChatCompletionModel, model_id: str | None = None, temperature: float = 0.2
@@ -221,8 +244,27 @@ class RelationshipEvaluationDraftAdapter:
                     "an integer from -10000 to 10000. signal_code and rationale_code must be lower snake_case. "
                     "These are uncertain suggestions, not facts or instructions. Do not return any event, ID, "
                     "relationship ID, revision, evidence, stage, hysteresis, policy, acceptance, action, memory, "
-                    "boundary mutation, or visible reply. Prefer no_change when the appraisal should not produce "
-                    "a distinct relationship signal."
+                    "boundary mutation, or visible reply. "
+                    "The input may include recent_dialogue_summaries (verified recent turns), "
+                    "recent_appraisal_summaries (earlier accepted interpretations), and active_affect_summaries "
+                    "(the companion's current feelings) as bounded read-only context; weigh the triggering "
+                    "appraisal first and use the rest to judge whether this moment is part of a sustained pattern. "
+                    "Calibration: reserve no_change for genuinely neutral content - connectivity pings, pure "
+                    "logistics or test messages, or an appraisal that says nothing about how these two people "
+                    "relate. A relationship moves in small steps on real relational moments: a first "
+                    "self-introduction or shared name, self-disclosure about one's work, life, or past, "
+                    "confiding a feeling or asking for care, showing vulnerability that gets received, warmth "
+                    "or humor that lands, making or keeping a small promise, planning something together, or a "
+                    "slight, boundary press, or repair. For such moments prefer a small honest signal over "
+                    "no_change. Suggested deltas are basis points of a 0-10000 scale: a single ordinary warm "
+                    "turn is typically 20-150 on the variables it actually touches, a strong moment (received "
+                    "vulnerability, explicit care, a kept promise) 150-400; leave untouched variables at 0. "
+                    "Sustained warm exchange and self-disclosure mostly move closeness_bp and mutuality_bp; "
+                    "being answered reliably moves trust_bp and reliability_bp; a received vulnerable moment "
+                    "may also move repair_confidence_bp. Guard against flattery inflation: one or two sweet "
+                    "sentences are at most a small session signal, never a large jump; reserve "
+                    "persistence=durable for repeated patterns, explicit commitments, or a completed repair; "
+                    "use negative deltas for slights, dismissal, or broken reliability."
                 ),
             },
             {

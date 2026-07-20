@@ -112,6 +112,17 @@ def _commit(ledger: LedgerPort, events: tuple[WorldEvent, ...]) -> ProjectionCur
     )
 
 
+def _tail_event(event_id: str) -> WorldEvent:
+    """Create a clock-neutral non-message event for advancing ledger history."""
+
+    return _event(
+        event_id,
+        "OperatorObservationRecorded",
+        {
+            "observation_id": f"operator:{event_id}",
+            "observation_hash": hashlib.sha256(event_id.encode()).hexdigest(),
+        },
+    )
 @pytest.fixture(params=["memory", "sqlite"])
 def ledger(request: pytest.FixtureRequest, tmp_path: Path) -> LedgerPort:
     if request.param == "memory":
@@ -260,7 +271,7 @@ def test_old_commit_tail_is_stable_after_head_advances(ledger: LedgerPort) -> No
     old = _event("event:old", "ObservationRecorded", {"observation_id": "old"})
     old_cursor = _commit(ledger, (old,))
     before = ledger.observation_events_at((_locator(old),), cursor=old_cursor)
-    _commit(ledger, (_event("event:later", "WorldStarted", {}),))
+    _commit(ledger, (_tail_event("event:later"),))
 
     assert ledger.observation_events_at((_locator(old),), cursor=old_cursor) == before
 
@@ -459,7 +470,7 @@ def test_sqlite_tampered_unique_index_column_fails_during_cursor_proof(
     ledger = SQLiteWorldLedger(path=tmp_path / "idempotency-tamper.sqlite3", world_id=WORLD)
     event = _event("event:target", "ObservationRecorded", {"observation_id": "target"})
     _commit(ledger, (event,))
-    tail = _commit(ledger, (_event("event:tail", "WorldStarted", {}),))
+    tail = _commit(ledger, (_tail_event("event:tail"),))
     ledger._connection.execute(  # noqa: SLF001
         "UPDATE world_v2_events SET idempotency_key = ? WHERE event_id = ?",
         ("forged:index-key", event.event_id),
@@ -502,7 +513,7 @@ def test_sqlite_boundary_verification_prevents_candidate_prefix_replays(
         "event:prefix:second", "ObservationRecorded", {"observation_id": "second"}
     )
     _commit(ledger, (second,))
-    tail = _commit(ledger, (_event("event:prefix:tail", "WorldStarted", {}),))
+    tail = _commit(ledger, (_tail_event("event:prefix:tail"),))
     locators = tuple(sorted((_locator(first), _locator(second)), key=_locator_key))
     original = ledger._replay_locked  # noqa: SLF001
     replay_calls = 0
@@ -543,15 +554,15 @@ def test_shared_commit_count_boundary_and_heterogeneous_rejection(
 ) -> None:
     monkeypatch.setattr(ledger_module, "OBSERVATION_HISTORY_MAX_COMMIT_EVENTS", 2)
     accepted = (
-        _event("event:count:one", "WorldStarted", {}),
-        _event("event:count:two", "WorldStarted", {}),
+        _tail_event("event:count:one"),
+        _tail_event("event:count:two"),
     )
     _commit(ledger, accepted)
     before = ledger.project()
 
     with pytest.raises(ValueError, match="count"):
         ledger.commit(
-            tuple(_event(f"event:excess:{index}", "WorldStarted", {}) for index in range(3)),
+            tuple(_tail_event(f"event:excess:{index}") for index in range(3)),
             expected_world_revision=before.world_revision,
             expected_deliberation_revision=before.deliberation_revision,
         )
@@ -695,7 +706,7 @@ def test_commit_preflight_rebuilds_closed_plain_world_event_storage(
 def test_sqlite_history_read_uses_one_snapshot_and_rolls_back_errors(tmp_path: Path) -> None:
     ledger = SQLiteWorldLedger(path=tmp_path / "snapshot.sqlite3", world_id=WORLD)
     event = _event("event:snapshot", "ObservationRecorded", {"observation_id": "snapshot"})
-    cursor = _commit(ledger, (event, _event("event:snapshot:tail", "WorldStarted", {})))
+    cursor = _commit(ledger, (event, _tail_event("event:snapshot:tail")))
     statements: list[str] = []
     ledger._connection.set_trace_callback(statements.append)  # noqa: SLF001
 

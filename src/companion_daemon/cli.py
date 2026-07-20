@@ -11,6 +11,7 @@ from companion_daemon.world_v2.chat_model_deliberation_adapter import (
 )
 from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
 from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDeliberationAdapter
+from companion_daemon.world_v2.relationship_draft_deliberation_adapter import RelationshipDraftDeliberationAdapter
 from companion_daemon.world_v2.deliberation import ModelRoute, RouteRequest
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
@@ -95,6 +96,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         transport=transport,
         appraisal_model=AppraisalDraftDeliberationAdapter(model=flash_model),
         affect_model=AffectDraftDeliberationAdapter(model=flash_model),
+        relationship_model=RelationshipDraftDeliberationAdapter(model=flash_model),
         fact_model=flash_model,
         memory_model=flash_model,
         now=now,

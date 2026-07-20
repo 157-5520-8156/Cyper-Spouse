@@ -5,12 +5,19 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from companion_daemon.world_v2.batch_invariants import validate_commit_batch
+from companion_daemon.world_v2.action_pump import ActionPump
 from companion_daemon.world_v2.expression_lifecycle_runtime import ExpressionReceiptLifecycle
-from companion_daemon.world_v2.minimal_reply_events import ExpressionBeatSettledPayload
+from companion_daemon.world_v2.minimal_reply_events import (
+    ExpressionBeatSettledPayload,
+    ExpressionBeatTerminatedPayload,
+)
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.settlement import SettlementPlanner
 from companion_daemon.world_v2.schemas import (
     Action,
+    BudgetAccount,
+    BudgetReservation,
+    BudgetSettlement,
     ClaimLease,
     ExecutionReceipt,
     ExpressionBeatLifecycleEntry,
@@ -220,10 +227,38 @@ def test_lifecycle_rejects_tampered_receipt_binding() -> None:
         validate_commit_batch((receipt_event, beat_event), expected_world_revision=0)
 
 
+def test_lifecycle_rejects_forged_plan_termination_source_hash() -> None:
+    failed_action = _action().model_copy(update={"state": "failed"})
+    failed_receipt = _receipt().model_copy(update={"observed_state": "failed"})
+    receipt_event = _event(
+        "ExecutionReceiptRecorded",
+        {"receipt": failed_receipt.model_dump(mode="json")},
+        "forged-termination-receipt",
+    )
+    compiled = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=_projection(),
+        action=failed_action,
+        receipt=failed_receipt,
+        receipt_event=receipt_event,
+    )
+    beat_event = _event(compiled[0].event_type, compiled[0].payload, "forged-termination-beat")
+    forged = dict(compiled[1].payload)
+    forged["source_event_payload_hash"] = "0" * 64
+    plan_event = _event("ExpressionPlanTerminated", forged, "forged-termination-plan")
+
+    with pytest.raises(ValueError, match="termination_source_binding_invalid"):
+        validate_commit_batch((receipt_event, beat_event, plan_event), expected_world_revision=0)
+
+
 def test_multibeat_plan_completes_only_after_the_last_independent_receipt() -> None:
     first = _beat()
     second_action = _action().model_copy(
-        update={"action_id": "action:expression:2", "expression_beat_id": "beat:expression:2"}
+        update={
+            "action_id": "action:expression:2",
+            "expression_beat_id": "beat:expression:2",
+            "state": "authorized",
+            "claim_lease": None,
+        }
     )
     second = _beat().model_copy(
         update={"beat_id": "beat:expression:2", "action_id": second_action.action_id, "dependency_beat_ids": ("beat:expression:1",)}
@@ -252,14 +287,303 @@ def test_multibeat_plan_completes_only_after_the_last_independent_receipt() -> N
     assert [item.event_type for item in last_events] == ["ExpressionBeatSettled", "ExpressionPlanCompleted"]
 
 
-def test_failed_terminal_beat_settles_but_never_completes_the_expression_plan() -> None:
-    failed_action = _action().model_copy(update={"state": "failed"})
-    failed_receipt = _receipt().model_copy(update={"observed_state": "failed"})
-    receipt_event = _event("ExecutionReceiptRecorded", {"receipt": failed_receipt.model_dump(mode="json")}, "failed-receipt")
+@pytest.mark.parametrize("terminal_state", ["failed", "unknown", "cancelled", "expired"])
+def test_non_delivered_terminal_beat_terminates_but_never_completes_plan(
+    terminal_state: str,
+) -> None:
+    failed_action = _action().model_copy(update={"state": terminal_state})
+    failed_receipt = _receipt().model_copy(update={"observed_state": terminal_state})
+    receipt_event = _event("ExecutionReceiptRecorded", {"receipt": failed_receipt.model_dump(mode="json")}, f"{terminal_state}-receipt")
     events = ExpressionReceiptLifecycle().events_for_terminal_receipt(
         projection=_projection(), action=failed_action, receipt=failed_receipt, receipt_event=receipt_event
     )
-    assert [item.event_type for item in events] == ["ExpressionBeatSettled"]
+    assert [item.event_type for item in events] == [
+        "ExpressionBeatSettled",
+        "ExpressionPlanTerminated",
+    ]
+
+    beat_event = _event(events[0].event_type, events[0].payload, f"{terminal_state}-beat")
+    plan_event = _event(events[1].event_type, events[1].payload, f"{terminal_state}-plan")
+    validate_commit_batch((receipt_event, beat_event, plan_event), expected_world_revision=0)
+    state = ReducerState(
+        actions=(failed_action,),
+        pending_actions=(),
+        minimal_reply_manifests=(_manifest(),),
+        expression_plans=(_plan(),),
+        expression_beats=(_beat(),),
+    )
+    state = reduce_event(state, receipt_event)
+    state = reduce_event(state, beat_event)
+    state = reduce_event(state, plan_event)
+    assert state.expression_beats[0].state == "settled"
+    assert state.expression_plans[0].state == "terminated"
+    assert state.expression_plans[0].history[-1].terminal_disposition == terminal_state
+
+
+def test_failed_multibeat_plan_abandons_undispatched_siblings_without_false_delivery() -> None:
+    first = _beat()
+    second_action = _action().model_copy(
+        update={
+            "action_id": "action:expression:2",
+            "expression_beat_id": "beat:expression:2",
+            "state": "authorized",
+            "claim_lease": None,
+        }
+    )
+    second = _beat().model_copy(
+        update={"beat_id": "beat:expression:2", "action_id": second_action.action_id}
+    )
+    failed_action = _action().model_copy(update={"state": "failed"})
+    failed_receipt = _receipt().model_copy(update={"observed_state": "failed"})
+    receipt_event = _event(
+        "ExecutionReceiptRecorded",
+        {"receipt": failed_receipt.model_dump(mode="json")},
+        "multibeat-failed-receipt",
+    )
+    projection = _projection().model_copy(update={"expression_beats": (first, second)})
+    compiled = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=projection,
+        action=failed_action,
+        receipt=failed_receipt,
+        receipt_event=receipt_event,
+    )
+    beat_event = _event(compiled[0].event_type, compiled[0].payload, "multibeat-failed-beat")
+    plan_event = _event(compiled[1].event_type, compiled[1].payload, "multibeat-failed-plan")
+    cancel_event = _event(
+        "ActionCancelled", {"action_id": second_action.action_id}, "multibeat-sibling-cancel"
+    )
+    beat_terminated_payload = ExpressionBeatTerminatedPayload(
+        acceptance_id=second.acceptance_id,
+        proposal_id=second.proposal_id,
+        plan_id=second.plan_id,
+        beat_id=second.beat_id,
+        action_id=second_action.action_id,
+        disposition="cancelled",
+        source_event_ref=cancel_event.event_id,
+        source_event_payload_hash=cancel_event.payload_hash,
+    )
+    beat_terminated_event = _event(
+        "ExpressionBeatTerminated",
+        beat_terminated_payload.model_dump(mode="json"),
+        "multibeat-sibling-beat-terminated",
+    )
+    sibling_reservation = BudgetReservation(
+        reservation_id=second_action.budget_reservation_id,
+        account_id="account:chat",
+        action_id=second_action.action_id,
+        category="chat",
+        amount_limit=10,
+    )
+    budget_release = _event(
+        "BudgetReleased",
+        {
+            "settlement": BudgetSettlement(
+                settlement_id="settlement:multibeat-sibling",
+                reservation_id=sibling_reservation.reservation_id,
+                action_id=second_action.action_id,
+                result_id="result:multibeat-sibling-cancel",
+                state="released",
+                previous_cost=0,
+                cost_actual=0,
+                cost_delta=0,
+            ).model_dump(mode="json")
+        },
+        "multibeat-sibling-budget-released",
+    )
+    validate_commit_batch(
+        (
+            receipt_event,
+            beat_event,
+            cancel_event,
+            beat_terminated_event,
+            budget_release,
+            plan_event,
+        ),
+        expected_world_revision=0,
+    )
+    state = ReducerState(
+        actions=(failed_action, second_action),
+        pending_actions=(second_action,),
+        budget_accounts=(
+            BudgetAccount(
+                account_id="account:chat",
+                category="chat",
+                window_id="window:1",
+                limit=100,
+                reserved=10,
+            ),
+        ),
+        budget_reservations=(sibling_reservation,),
+        minimal_reply_manifests=(_manifest(),),
+        expression_plans=(_plan(),),
+        expression_beats=(first, second),
+    )
+    state = reduce_event(state, receipt_event)
+    state = reduce_event(state, beat_event)
+    state = reduce_event(state, cancel_event)
+    state = reduce_event(state, beat_terminated_event)
+    state = reduce_event(state, budget_release)
+    state = reduce_event(state, plan_event)
+
+    assert [beat.state for beat in state.expression_beats] == ["settled", "terminated"]
+    assert state.expression_beats[1].history[-1].receipt_id is None
+    assert state.expression_beats[1].history[-1].terminal_disposition == "cancelled"
+    assert state.expression_plans[0].state == "terminated"
+    assert state.actions[1].state == "cancelled"
+    assert state.pending_actions == ()
+    assert state.budget_reservations[0].state == "released"
+    terminal_projection = _projection().model_copy(
+        update={
+            "expression_plans": (state.expression_plans[0],),
+            "expression_beats": tuple(state.expression_beats),
+        }
+    )
+    assert not ActionPump._expression_dispatch_allowed(state.actions[1], terminal_projection)
+
+
+def test_inflight_sibling_receipt_settles_after_plan_termination_without_reopening_it() -> None:
+    in_flight_action = _action().model_copy(
+        update={
+            "action_id": "action:expression:inflight",
+            "expression_beat_id": "beat:expression:inflight",
+            "state": "delivered",
+        }
+    )
+    in_flight_beat = _beat().model_copy(
+        update={
+            "beat_id": "beat:expression:inflight",
+            "action_id": in_flight_action.action_id,
+        }
+    )
+    terminated_plan = _plan().model_copy(
+        update={
+            "state": "terminated",
+            "history": (
+                *_plan().history,
+                ExpressionPlanLifecycleEntry(
+                    state="terminated",
+                    event_ref="event:expression:plan-terminated",
+                    event_payload_hash="9" * 64,
+                    receipt_id="receipt:failed-earlier-beat",
+                    terminal_action_state="failed",
+                    terminal_disposition="failed",
+                ),
+            ),
+        }
+    )
+    receipt = _receipt().model_copy(
+        update={
+            "receipt_id": "receipt:expression:inflight",
+            "action_id": in_flight_action.action_id,
+        }
+    )
+    receipt_event = _event(
+        "ExecutionReceiptRecorded",
+        {"receipt": receipt.model_dump(mode="json")},
+        "inflight-receipt-after-plan-terminal",
+    )
+
+    events = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=_projection().model_copy(
+            update={
+                "expression_plans": (terminated_plan,),
+                "expression_beats": (in_flight_beat,),
+            }
+        ),
+        action=in_flight_action,
+        receipt=receipt,
+        receipt_event=receipt_event,
+    )
+
+    assert [event.event_type for event in events] == ["ExpressionBeatSettled"]
+
+
+def test_settlement_planner_explicitly_retires_undispatched_multibeat_siblings() -> None:
+    failed_action = _action().model_copy(update={"state": "dispatch_started"})
+    sibling_action = _action().model_copy(
+        update={
+            "action_id": "action:expression:sibling",
+            "expression_beat_id": "beat:expression:sibling",
+            "budget_reservation_id": "reservation:expression:sibling",
+            "state": "authorized",
+            "claim_lease": None,
+        }
+    )
+    sibling_beat = _beat().model_copy(
+        update={
+            "beat_id": sibling_action.expression_beat_id,
+            "action_id": sibling_action.action_id,
+        }
+    )
+    sibling_reservation = BudgetReservation(
+        reservation_id=sibling_action.budget_reservation_id,
+        account_id="account:chat",
+        action_id=sibling_action.action_id,
+        category="chat",
+        amount_limit=10,
+    )
+    trigger_id = "trigger:settlement:provider:test:source:expression:failed"
+    projection = _projection().model_copy(
+        update={
+            "actions": (failed_action, sibling_action),
+            "pending_actions": (failed_action, sibling_action),
+            "expression_beats": (_beat(), sibling_beat),
+            "budget_reservations": (sibling_reservation,),
+            "trigger_processes": (
+                TriggerProcess(
+                    trigger_id=trigger_id,
+                    trigger_ref="result:expression:failed",
+                    process_kind="settlement",
+                    state="claimed",
+                    claim_lease=ClaimLease(
+                        owner_id="test",
+                        attempt_id="attempt:settlement:failed",
+                        acquired_at=NOW,
+                        expires_at=NOW + timedelta(minutes=2),
+                    ),
+                    attempt_ids=("attempt:settlement:failed",),
+                ),
+            ),
+        }
+    )
+    result = ExternalObservation(
+        schema_version="world-v2.1",
+        result_id="result:expression:failed",
+        world_id=WORLD,
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:expression-lifecycle",
+        causation_id="cause:expression:failed",
+        correlation_id="correlation:expression-lifecycle",
+        kind="execution_receipt",
+        source="provider:test",
+        source_event_id="source:expression:failed",
+        action_id=failed_action.action_id,
+        idempotency_key=failed_action.idempotency_key,
+        status="failed",
+        provider_ref="provider-ref:expression:failed",
+        cost_actual=0,
+        error_class="provider_rejected",
+        observed_at=NOW,
+        raw_payload_hash="raw:expression:failed",
+    )
+
+    planned = SettlementPlanner(world_id=WORLD).plan(
+        result, trigger_id=trigger_id, projection=projection
+    )
+    event_types = tuple(event.event_type for event in planned.events)
+
+    assert event_types[:8] == (
+        "ActionFailed",
+        "ExecutionReceiptRecorded",
+        "ExpressionBeatSettled",
+        "ActionCancelled",
+        "ExpressionBeatTerminated",
+        "BudgetReleased",
+        "ExpressionPlanTerminated",
+        "BudgetSettled",
+    )
+    validate_commit_batch(planned.events, expected_world_revision=0)
 
 
 def test_settlement_planner_appends_lifecycle_as_one_receipt_suffix() -> None:

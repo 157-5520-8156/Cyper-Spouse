@@ -1524,15 +1524,39 @@ def _baseline_proposal_event(payload: dict[str, object]) -> WorldEvent:
 def test_sqlite_replays_complete_affect_baseline_authority_chain(tmp_path) -> None:
     path = tmp_path / "affect-baseline-authority.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
-    episodes = tuple(
-        _record_resolved_affect_episode(
-            ledger,
-            index=index,
-            at=at,
-            source_cluster_ref=f"conversation:baseline:{index}",
-        )
-        for index, at in enumerate((NOW - timedelta(days=8), NOW - timedelta(days=4), NOW), start=1)
+    episode_times = (NOW - timedelta(days=8), NOW - timedelta(days=4), NOW)
+    commit(
+        ledger,
+        [event("event:baseline-world-start", "WorldStarted", {}, at=episode_times[0])],
     )
+    episodes_list: list[AffectEpisodeProjection] = []
+    current = episode_times[0]
+    for index, at in enumerate(episode_times, start=1):
+        if at > current:
+            commit(
+                ledger,
+                [
+                    event(
+                        f"event:baseline-clock:{index}",
+                        "ClockAdvanced",
+                        {
+                            "logical_time_from": current.isoformat(),
+                            "logical_time_to": at.isoformat(),
+                        },
+                        at=at,
+                    )
+                ],
+            )
+            current = at
+        episodes_list.append(
+            _record_resolved_affect_episode(
+                ledger,
+                index=index,
+                at=at,
+                source_cluster_ref=f"conversation:baseline:{index}",
+            )
+        )
+    episodes = tuple(episodes_list)
     payload = _baseline_payload(ledger, episodes, proposal_suffix="success")
     commit(ledger, [_baseline_proposal_event(payload)])
     commit(

@@ -14,9 +14,11 @@ import json
 
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
 from .fact_memory_draft import FactMemoryRetentionDraft
+from .life_content_store import ImmutableLifeContentStore
 from .schemas import (
     ExperienceProjection,
     ExperienceTransitionProjection,
+    LifeContentDescriptorProjection,
     MemoryCandidateProjection,
     MemorySourceBinding,
     WorldEvent,
@@ -42,6 +44,17 @@ def _digest(value: object) -> str:
 
 class ExperienceMemoryCandidateLifecycle(FactMemoryCandidateLifecycle):
     """Accept one source-bound pending→active candidate for an Experience."""
+
+    def __init__(
+        self,
+        *,
+        ledger,
+        actor: str,
+        source: str,
+        content_store: ImmutableLifeContentStore | None = None,
+    ) -> None:
+        super().__init__(ledger=ledger, actor=actor, source=source)
+        self._content_store = content_store
 
     def accept(
         self,
@@ -157,6 +170,48 @@ class ExperienceMemoryCandidateLifecycle(FactMemoryCandidateLifecycle):
             or projected_transition != transition
         ):
             raise ValueError("memory lifecycle Experience authority is no longer current")
+        if self._content_store is not None:
+            descriptor = next(
+                (
+                    item
+                    for item in projection.life_content_descriptors
+                    if isinstance(item, LifeContentDescriptorProjection)
+                    and item.content_kind == "experience_summary"
+                    and item.source_kind == "experience"
+                    and item.source_entity_id == experience.experience_id
+                    and item.source_entity_revision == experience.entity_revision
+                    and item.source_event_ref == experience_event.event_id
+                    and item.source_world_revision == committed.world_revision
+                    and item.source_payload_hash == committed.payload_hash
+                    and item.content_ref == experience.values.summary_ref
+                    and item.content_payload_hash == experience.values.summary_payload_hash
+                    and item.privacy_class == experience.values.privacy_class
+                ),
+                None,
+            )
+            if descriptor is None:
+                raise ValueError(
+                    "memory lifecycle Experience has no matching LifeContentRecorded descriptor"
+                )
+            descriptor_event = next(
+                (
+                    item
+                    for item in projection.committed_world_event_refs
+                    if item.event_id == descriptor.descriptor_event_ref
+                    and item.event_type == "LifeContentRecorded"
+                    and item.world_revision == descriptor.descriptor_world_revision
+                    and item.payload_hash == descriptor.descriptor_payload_hash
+                ),
+                None,
+            )
+            stored = self._content_store.read_exact(content_ref=descriptor.content_ref)
+            if descriptor_event is None or stored is None or (
+                stored.content_kind != "experience_summary"
+                or stored.content_payload_hash != descriptor.content_payload_hash
+            ):
+                raise ValueError(
+                    "memory lifecycle Experience content sidecar is not source-bound"
+                )
         return MemorySourceBinding(
             source_kind="experience",
             source_id=experience.experience_id,

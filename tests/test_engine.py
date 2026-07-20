@@ -2,8 +2,10 @@ import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from companion_daemon.companion_turn import (
@@ -23,8 +25,9 @@ from companion_daemon.engine import (
 )
 from companion_daemon.image_generation import GeneratedImage
 from companion_daemon.image_requests import detect_image_request
-from companion_daemon.llm import FakeCompanionModel
-from companion_daemon.models import IncomingMessage, MessageAttachment, MoodState
+from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel, ModelCallUsage
+from companion_daemon.memory_consolidation import should_consolidate
+from companion_daemon.models import IncomingMessage, MessageAttachment, MoodState, ProactiveDecision
 from companion_daemon.multimodal_analysis import AttachmentInsight
 from companion_daemon.stickers import StickerCatalog, Sticker
 from companion_daemon.character import load_character
@@ -33,6 +36,8 @@ from companion_daemon.time import utc_now
 from companion_daemon.models import LifeRuntimeState
 from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldKernel
+from companion_daemon.world_media import WorldMediaDecision
+from companion_daemon.media_shot import MediaShotPlanner
 
 TEST_PROMPT = "你是凛，用户的赛博女友。"
 
@@ -134,11 +139,76 @@ async def respond_world_turn(
     )
 
 
+def test_world_input_advances_realtime_clock_before_scene_context(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "clock-input.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    started = world.start_from_seed_file(Path("configs/world_seed.yaml"))
+    mode = world.submit(
+        {
+            "type": "set_clock_mode",
+            "world_id": started.world_id,
+            "mode": "realtime",
+            "rate": 1,
+            "idempotency_key": "clock-realtime",
+        },
+        expected_revision=started.revision,
+    )
+    anchor = datetime.fromisoformat(world.events(started.world_id)[-1].observed_at)
+    initial_logical_at = datetime.fromisoformat(
+        world.snapshot(started.world_id)["clock"]["logical_at"]
+    )
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=started.world_id,
+    )
+
+    engine._record_world_input(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="clock-input",
+            text="哈喽",
+            sent_at=anchor + timedelta(hours=3),
+        ),
+        "geoff",
+    )
+
+    logical_at = datetime.fromisoformat(world.snapshot(started.world_id)["clock"]["logical_at"])
+    assert logical_at >= initial_logical_at + timedelta(hours=3)
+    assert world.revision(started.world_id) > mode.revision
+
+
 def test_afterthought_rejects_rephrased_repeat() -> None:
     assert _afterthought_repeats_recent(
         "哦对，刚才那句是复习间隙顺手敲的。",
         ["[qq][刚刚] 她: 哦对，你刚说要考试来着。那我不打扰你啦，好好考。"],
     )
+
+
+def test_world_media_shot_plan_preserves_the_active_scene() -> None:
+    plan = MediaShotPlanner().plan(
+        {
+            "clock": {"logical_at": "2026-07-13T10:00:00+08:00"},
+            "agenda": {
+                "study": {
+                    "activity_id": "study",
+                    "status": "active",
+                    "location": "图书馆",
+                    "title": "复习",
+                    "template_id": "literature_reading",
+                }
+            },
+        },
+        WorldMediaDecision(True, "character_media", "allowed", capture_mode="check_in_timer"),
+        "media:test-scene",
+    )
+
+    assert plan.location == "图书馆"
+    assert plan.source_activity_id == "study"
 
 
 def test_afterthought_prompt_keeps_speaker_ownership_and_does_not_invent_a_reply() -> None:
@@ -210,6 +280,7 @@ async def test_skipped_reply_still_leaves_an_observed_turn_trace(tmp_path: Path)
 async def test_world_enabled_reply_records_input_action_and_delivery_settlement(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
+    store.map_account("qq", "qq-geoff", "geoff")
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
     engine = CompanionEngine(
@@ -285,7 +356,7 @@ async def test_world_mode_question_thread_is_opened_only_after_delivery_and_clos
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
     engine = CompanionEngine(store, QuestionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="在吗", message_id="thread-open")
     )
     assert reply is not None
@@ -488,7 +559,7 @@ async def test_boundary_pressure_is_advisory_and_does_not_hard_veto_a_reply(tmp_
     )
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你现在就必须发给我", message_id="policy-dnd")
     )
 
@@ -503,9 +574,10 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    image_generator = FakeImageGenerator()
     engine = CompanionEngine(
         store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id,
-        image_generator=FakeImageGenerator(), image_output_dir=tmp_path / "images",
+        image_generator=image_generator, image_output_dir=tmp_path / "images",
     )
     await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你好", message_id="media-register")
@@ -527,7 +599,7 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
             break
     assert world.snapshot(world_id)["relationships"]["user:geoff"]["stage"] == "close_friend"
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="能发一张自拍吗", message_id="media-request")
     )
 
@@ -535,7 +607,18 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
     assert reply.image_path and Path(reply.image_path).exists()
     assert reply.media_action_id
     media = next(iter(world.snapshot(world_id)["media"].values()))
+    # CaptureTurnTransport supplies a durable test receipt, so the image
+    # Action is already settled rather than stopping at Engine generation.
     assert media["status"] == "shared"
+    shot_plan = media["shot_plan"]
+    assert shot_plan["source_activity_id"] == "2026-07-11:morning_study"
+    assert shot_plan["location"] == "华东师范大学"
+    assert shot_plan["version"] == "media-shot-v3"
+    assert shot_plan["creative_variant_id"]
+    assert shot_plan["render_direction"]
+    assert world.snapshot(world_id)["actions"][f"media-generation:{media['request_id']}"]["payload"]["shot_plan"] == shot_plan
+    assert "Frozen world media shot plan" in image_generator.prompts[0]
+    assert "Creative rendering direction" in image_generator.prompts[0]
     assert world.snapshot(world_id)["media"][media["request_id"]]["status"] == "shared"
 
 
@@ -545,9 +628,10 @@ async def test_world_image_can_send_after_text_via_background_adapter(tmp_path: 
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    image_generator = FakeImageGenerator()
     engine = CompanionEngine(
         store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id,
-        image_generator=FakeImageGenerator(), image_output_dir=tmp_path / "images",
+        image_generator=image_generator, image_output_dir=tmp_path / "images",
     )
     user_id = engine._ensure_world_user("geoff")
     for index in range(1, 55):
@@ -578,12 +662,15 @@ async def test_world_image_can_send_after_text_via_background_adapter(tmp_path: 
 
     assert (image_path, action_id, reason) == (None, None, "media_generation_pending")
     for _ in range(30):
-        if sent:
+        media = next(iter(world.snapshot(world_id)["media"].values()), {})
+        if sent and media.get("status") == "shared":
             break
         await asyncio.sleep(0.01)
     assert len(sent) == 1 and sent[0].exists()
     media = next(iter(world.snapshot(world_id)["media"].values()))
     assert media["status"] == "shared"
+    assert media["media_kind"] == "character_media"
+    assert media["capture_mode"] == "handheld_selfie"
     await engine.aclose()
 
 
@@ -617,17 +704,23 @@ async def test_world_media_outbox_is_recovered_after_engine_restart(tmp_path: Pa
     world.submit(
         {
             "type": "request_media", "world_id": world_id, "request_id": request_id,
-            "user_id": "user:geoff", "media_kind": "selfie", "topic": "窗边自拍",
+            "user_id": "user:geoff", "media_kind": "character_media", "topic": "窗边自拍",
             "reason": "world_relationship_allows_selfie",
+            "shot_plan": MediaShotPlanner().plan(
+                world.snapshot(world_id),
+                WorldMediaDecision(True, "character_media", "allowed", capture_mode="handheld_selfie"),
+                request_id,
+            ).to_payload(),
             "delivery_context": {
                 "platform": "qq", "platform_user_id": "geoff", "text": source_text, "message_id": "restart-media",
             },
         },
         expected_revision=world.revision(world_id),
     )
+    image_generator = FakeImageGenerator()
     engine = CompanionEngine(
         store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id,
-        image_generator=FakeImageGenerator(), image_output_dir=tmp_path / "images",
+        image_generator=image_generator, image_output_dir=tmp_path / "images",
     )
     delivered: list[Path] = []
 
@@ -638,11 +731,12 @@ async def test_world_media_outbox_is_recovered_after_engine_restart(tmp_path: Pa
     engine.set_media_delivery_handler(deliver)
     assert engine.recover_pending_media() == 1
     for _ in range(30):
-        if delivered:
+        if delivered and world.snapshot(world_id)["media"][request_id]["status"] == "shared":
             break
         await asyncio.sleep(0.01)
     assert delivered and delivered[0].exists()
     assert world.snapshot(world_id)["media"][request_id]["status"] == "shared"
+    assert "Frozen world media shot plan" in image_generator.prompts[0]
     await engine.aclose()
 
 
@@ -709,7 +803,7 @@ async def test_world_mode_store_guard_rejects_legacy_writes_but_allows_world_tur
     store.enable_world_mode()
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你在吗", message_id="guard-1")
     )
 
@@ -809,7 +903,43 @@ async def test_world_mode_proactive_uses_only_world_action(tmp_path: Path, monke
 
 
 @pytest.mark.asyncio
-async def test_world_proactive_keeps_soft_quality_signals_without_serial_audit(
+async def test_world_proactive_media_uses_existing_media_path_without_world_reducer_changes(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "qq-geoff", "geoff")
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    engine.image_generator = object()
+
+    async def delivery(_message, _path):
+        return True
+
+    engine.set_media_delivery_handler(delivery)
+    observed = {}
+
+    async def fake_generate(*, user_id, message, _background=False):
+        observed.update(user_id=user_id, message=message, background=_background)
+        return None, None, "media_generation_pending"
+
+    monkeypatch.setattr(engine, "_maybe_generate_world_image", fake_generate)
+    await engine._maybe_attach_world_proactive_media(
+        canonical_user_id="geoff",
+        decision=ProactiveDecision(canonical_user_id="geoff", private_thought="", should_send=True, platform="qq"),
+        snapshot={
+            "agenda": {"walk": {"activity_id": "walk", "status": "active", "template_id": "campus_walk"}},
+            "media": {},
+        },
+        impulse_id="proactive:walk",
+    )
+
+    assert observed["user_id"] == "user:geoff"
+    assert observed["message"].text in {"发一张生活照", "发一张打卡照", "发一张搞怪随手照"}
+    assert str(observed["message"].message_id).startswith("proactive:walk:media:")
+
+
+@pytest.mark.asyncio
+async def test_world_proactive_hard_blocks_relationship_language_beyond_current_closeness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class SoftSignalModel:
@@ -2580,7 +2710,7 @@ async def test_legacy_side_calls_carry_and_settle_atomic_model_reservations(
         store.upsert_memory(
             "geoff", kind=kind, content=f"独立记忆{index}", source="test", confidence=0.7
         )
-    assert should_consolidate(store, "geoff")
+    assert should_consolidate_memories(store, "geoff")
     await engine._maybe_consolidate("geoff", MoodState())
 
     purposes = {usage.purpose for usage in usages}

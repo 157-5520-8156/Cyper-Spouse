@@ -89,6 +89,7 @@ class ModelCallUsage:
     cache_hit_tokens: int = 0
     cache_miss_tokens: int = 0
     total_tokens: int = 0
+    provider: str = ""
     error: str = ""
     world_id: str = ""
     turn_id: str = ""
@@ -131,6 +132,16 @@ def _is_provider_outage(exc: Exception) -> bool:
         status = exc.response.status_code
         return status == 408 or status == 429 or status >= 500
     return isinstance(exc, (ConnectionError, httpx.TransportError))
+
+
+def _is_failover_eligible_provider_failure(exc: Exception) -> bool:
+    """Classify availability failures without treating bad content as an outage."""
+    if isinstance(exc, ModelCircuitOpenError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in {402, 408, 429} or status >= 500
+    return isinstance(exc, (ConnectionError, TimeoutError, httpx.TransportError))
 
 
 class ProviderCircuitBreaker:
@@ -239,6 +250,8 @@ class ChatModel(Protocol):
 
 
 class DeepSeekChatModel:
+    provider = "deepseek"
+
     def __init__(
         self,
         api_key: str,
@@ -340,6 +353,7 @@ class DeepSeekChatModel:
                     purpose=purpose,
                     model=self.model,
                     status="failed",
+                    provider=self.provider,
                     latency_ms=max(0, int((monotonic() - started) * 1000)),
                     error="provider_timeout" if provider_timeout else "caller_cancelled",
                     world_id=str(call_meta.get("world_id") or ""),
@@ -385,6 +399,7 @@ class DeepSeekChatModel:
                     purpose=purpose,
                     model=self.model,
                     status="failed",
+                    provider=self.provider,
                     latency_ms=max(0, int((monotonic() - started) * 1000)),
                     error=error[:500],
                     world_id=str(call_meta.get("world_id") or ""),
@@ -414,6 +429,7 @@ class DeepSeekChatModel:
                 purpose=purpose,
                 model=self.model,
                 status="succeeded",
+                provider=self.provider,
                 latency_ms=max(0, int((monotonic() - started) * 1000)),
                 prompt_tokens=_usage_int(usage, "prompt_tokens"),
                 completion_tokens=_usage_int(usage, "completion_tokens"),
@@ -457,6 +473,150 @@ class DeepSeekChatModel:
             return
 
 
+class OpenAICompatibleChatModel(DeepSeekChatModel):
+    """Chat Completions client for OpenAI-compatible fallback providers."""
+
+    provider = "openai"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        *,
+        reasoning_effort: str = "none",
+        max_completion_tokens: int = 900,
+        proxy_url: str | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+        usage_observer: Callable[[ModelCallUsage], None] | None = None,
+        circuit_breaker: ProviderCircuitBreaker | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.proxy_url = proxy_url
+        if not 1 <= max_completion_tokens <= 8_192:
+            raise ValueError("max_completion_tokens is out of bounds")
+        self.max_completion_tokens = max_completion_tokens
+        resolved_client = client
+        if resolved_client is None and proxy_url:
+            resolved_client = httpx.AsyncClient(
+                timeout=45,
+                trust_env=False,
+                proxy=proxy_url,
+                transport=transport,
+            )
+        super().__init__(
+            api_key,
+            base_url,
+            model,
+            thinking_enabled=False,
+            reasoning_effort=reasoning_effort,
+            transport=transport,
+            usage_observer=usage_observer,
+            circuit_breaker=circuit_breaker,
+            client=resolved_client,
+        )
+
+    def request_payload(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        json_object: bool = False,
+    ) -> dict[str, object]:
+        del temperature
+        payload: dict[str, object] = {
+            "model": self.model,
+            "messages": messages,
+            "reasoning_effort": self.reasoning_effort,
+            # World-v2 expression drafts are deliberately compact JSON.  A
+            # bounded completion prevents a fallback provider from spending
+            # latency/tokens exploring prose that the materializer will reject.
+            "max_completion_tokens": self.max_completion_tokens,
+        }
+        if json_object:
+            payload["response_format"] = {"type": "json_object"}
+        return payload
+
+
+class FailoverChatModel:
+    """One availability-only failover boundary for a primary chat provider."""
+
+    provider = "deepseek+openai"
+
+    def __init__(self, *, primary: ChatModel, fallback: ChatModel) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.model = f"{getattr(primary, 'model', type(primary).__name__)}->{getattr(fallback, 'model', type(fallback).__name__)}"
+        self.last_provider = str(getattr(primary, "provider", "primary"))
+        self.last_model = str(getattr(primary, "model", type(primary).__name__))
+        # The cognition layer may own one structural-recovery attempt after
+        # this availability boundary.  Expose whether this call already
+        # consumed the installed fallback so it never calls that same provider
+        # a second time for one turn.
+        self.last_attempt_used_fallback = False
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        return await self._complete(messages, temperature=temperature, json_object=False)
+
+    async def complete_json(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        return await self._complete(messages, temperature=temperature, json_object=True)
+
+    async def _complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        json_object: bool,
+    ) -> str:
+        self.last_attempt_used_fallback = False
+        try:
+            result = await self._call(
+                self.primary,
+                messages,
+                temperature=temperature,
+                json_object=json_object,
+            )
+        except Exception as exc:
+            if not _is_failover_eligible_provider_failure(exc):
+                raise
+            self.last_attempt_used_fallback = True
+            self.last_provider = str(getattr(self.fallback, "provider", "fallback"))
+            self.last_model = str(getattr(self.fallback, "model", type(self.fallback).__name__))
+            result = await self._call(
+                self.fallback,
+                messages,
+                temperature=temperature,
+                json_object=json_object,
+            )
+            return result
+        self.last_provider = str(getattr(self.primary, "provider", "primary"))
+        self.last_model = str(getattr(self.primary, "model", type(self.primary).__name__))
+        return result
+
+    @staticmethod
+    async def _call(
+        model: ChatModel,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        json_object: bool,
+    ) -> str:
+        complete_json = getattr(model, "complete_json", None)
+        if json_object and callable(complete_json):
+            return await complete_json(messages, temperature=temperature)
+        return await model.complete(messages, temperature=temperature)
+
+    async def aclose(self) -> None:
+        for model in (self.primary, self.fallback):
+            close = getattr(model, "aclose", None)
+            if callable(close):
+                await close()
+
+
 def _usage_int(source: dict[str, object], key: str) -> int:
     value = source.get(key, 0)
     return max(0, int(value)) if isinstance(value, (int, float)) else 0
@@ -493,7 +653,23 @@ class FakeCompanionModel:
                 },
                 ensure_ascii=False,
             )
-        if "Return a ReplyDraft" in joined:
+        if "Choose exactly one offered opaque candidate_result_ref" in joined:
+            try:
+                candidates = json.loads(messages[-1]["content"])["candidates"]
+                candidate_ref = candidates[0]["candidate_result_ref"]
+            except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+                return "{}"
+            return json.dumps({"candidate_result_ref": candidate_ref}, ensure_ascii=False)
+        if "Choose at most one offered opaque opening token" in joined:
+            try:
+                openings = json.loads(messages[-1]["content"])["openings"]
+                opening_token = openings[0]["opening_token"]
+            except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+                return '{"decision":"no_op"}'
+            return json.dumps(
+                {"decision": "select", "opening_token": opening_token}, ensure_ascii=False
+            )
+        if "Return a ReplyDraft" in joined or "Return an ExpressionDraft" in joined:
             return json.dumps(
                 {
                     "response_text": "我在，刚刚这句我有接到。",

@@ -67,6 +67,14 @@
 
     project(point) {
       const [x, y, z=0] = point;
+      const projection = this.scene.projection;
+      if (projection?.screenAxes) {
+        const axes = projection.screenAxes;
+        return [
+          this.stage.ox + (this.scene.tile.origin[0] + x * axes.x[0] + y * axes.y[0] + z * axes.z[0]) * this.stage.scale,
+          this.stage.oy + (this.scene.tile.origin[1] + x * axes.x[1] + y * axes.y[1] + z * axes.z[1]) * this.stage.scale
+        ];
+      }
       const tile = this.scene.tile;
       return [
         this.stage.ox + (tile.origin[0] + (x-y) * tile.width) * this.stage.scale,
@@ -311,17 +319,20 @@
       const action = actor.action === 'walk' ? 'walk' : actor.pose;
       const walk = this.scene.sprites.walk;
       const pose = this.scene.sprites.poses[action] || this.scene.sprites.poses.idle;
-      const sheet = this.images[action === 'walk' ? walk.image : pose.image];
+      const usesWalkFrames = action === 'walk' || Number.isInteger(pose.walkFrame);
+      const sheet = this.images[usesWalkFrames ? walk.image : pose.image];
       if (!sheet) return;
       const renderPosition = action === 'walk' ? actor.position : (actor.posePosition || actor.position);
       const [px, py] = this.project(renderPosition);
-      const cell = {column:walk.columns[actor.facing] ?? 0, row:action === 'walk' ? Math.floor(actor.walked * walk.frameRate) % walk.frames : 0};
-      const walkSheet = action === 'walk';
-      const [cropX, cropY, cropWidth, cropHeight] = pose.crop;
-      const cw = walkSheet ? sheet.width / Object.keys(walk.columns).length : cropWidth;
-      const ch = walkSheet ? sheet.height / walk.frames : cropHeight;
-      const sx = walkSheet ? cell.column * cw : cropX, sy = walkSheet ? cell.row * ch : cropY;
-      const [dw, dh] = walkSheet ? walk.display : pose.display;
+      const cell = {
+        column:walk.columns[actor.facing] ?? 0,
+        row:action === 'walk' ? Math.floor(actor.walked * walk.frameRate) % walk.frames : pose.walkFrame
+      };
+      const [cropX, cropY, cropWidth, cropHeight] = pose.crop || [];
+      const cw = usesWalkFrames ? sheet.width / Object.keys(walk.columns).length : cropWidth;
+      const ch = usesWalkFrames ? sheet.height / walk.frames : cropHeight;
+      const sx = usesWalkFrames ? cell.column * cw : cropX, sy = usesWalkFrames ? cell.row * ch : cropY;
+      const [dw, dh] = usesWalkFrames ? walk.display : pose.display;
       const x = px - dw / 2, y = py - dh + 6;
       this.ctx.save(); this.ctx.imageSmoothingEnabled = false;
       this.ctx.drawImage(sheet, sx, sy, cw, ch, x, y, dw, dh); this.ctx.restore();

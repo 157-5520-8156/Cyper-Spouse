@@ -11,8 +11,8 @@ runtime_authority:
   v2_ingress_hosts:
     - companion_daemon.world_v2.http_capture_host::HttpV2CaptureHost
     - companion_daemon.world_v2.qq_c2c_host::QQC2CHost
-  deployment_activation: limited-production
-  legacy_status: archive-and-unmigrated-adapters-remain
+  deployment_activation: default
+  legacy_status: explicit-archive-only-for-default-route-graph
   external_evidence: pending
 
 # These are paths that must not reach a legacy behavior writer.  They are v2
@@ -95,7 +95,7 @@ mechanisms:
   - id: source-bound-fact-experience-memory-core
     phase: 2
     status: closed
-    runtime_activation: harness
+    runtime_activation: limited-production
     limitations: [not-every-production-deliberation-path-has-been-proven-to-consume-every-authority]
     sources: [accepted-proposal, committed-occurrence, receipt, operator-authority]
     events: [FactCommittedV2, ExperienceCommitted, CharacterCoreInitialized]
@@ -110,6 +110,7 @@ mechanisms:
       - tests/world_v2/test_experience_authority.py::test_experience_commit_is_typed_exact_immutable_and_zero_cascade
       - tests/world_v2/test_memory_candidate_authority.py::test_ledger_memory_open_accept_is_typed_and_zero_cascade
       - tests/world_v2/test_character_core_authority.py::test_ledger_character_core_initialize_is_typed_replayable_and_zero_cascade
+      - tests/world_v2/test_http_v2_host_migration.py::test_http_default_composition_retains_a_fact_and_retrieval_memory_off_reply_path
 
   - id: v16-situation-constituents
     phase: 2
@@ -132,10 +133,10 @@ mechanisms:
 
   - id: situation-context-and-advisory
     phase: 3
-    status: partial
-    runtime_activation: limited-production
-    limitations: [some-context-slices-remain-explicitly-unavailable, full-production-consumption-coverage-not-proven]
-    sources: [InternalWorldSnapshot, source-bound-authority-heads, advisory-adapters]
+    status: closed
+    runtime_activation: default
+    limitations: [advisory-is-rejectable-by-design, unavailable-authority-remains-explicit]
+    sources: [LedgerProjectionContextResolver, source-bound-authority-heads, advisory-adapters]
     events: [ObservationRecorded, ClockAdvanced]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [SituationProjection, ContextCapsule, InnerAdvisory]
@@ -147,11 +148,13 @@ mechanisms:
       - tests/world_v2/test_situation_compiler_v16.py::test_compile_is_order_invariant_source_bound_and_explicit_about_missing_heads
       - tests/world_v2/test_situation_compiler_v16.py::test_viewer_budget_truncates_stable_prefix_without_changing_internal_hash
       - tests/world_v2/test_advisory_compiler.py::test_compiles_source_bound_rejectable_advisory_without_mutation_ports
+      - tests/world_v2/test_ledger_context_resolver.py::test_real_ledger_resolves_situation_core_and_authoritative_empty_domains
+      - tests/world_v2/test_ledger_context_resolver.py::test_nonempty_context_is_byte_equivalent_across_memory_and_sqlite
 
   - id: appraisal-affect-relationship-impression
     phase: 3
-    status: partial
-    runtime_activation: harness
+    status: closed
+    runtime_activation: default
     limitations: [semantic-recognition-quality-and-long-term-human-calibration-are-not-proven]
     sources: [observed-message, committed-world-occurrence, settled-interaction]
     events: [AppraisalAccepted, AffectEpisodeOpened, PrivateImpressionAccepted, RelationshipSignalAccepted]
@@ -168,9 +171,9 @@ mechanisms:
 
   - id: life-npc-outcome-continuity
     phase: 2
-    status: partial
-    runtime_activation: harness
-    limitations: [world-occurrence-to-everyday-production-dialogue-coverage-is-not-complete]
+    status: closed
+    runtime_activation: default
+    limitations: [world-content-diversity-and-semantic-quality-require-external-longitudinal-evidence]
     sources: [logical-clock, accepted-activity-plan, occurrence-receipt, npc-appraisal]
     events: [ActivityPlanned, WorldOccurrenceSettled, ExperienceCommitted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
@@ -178,17 +181,18 @@ mechanisms:
     decision_consumers: [OutcomeProposalWorker, NpcWorldAppraisalTriggerRuntime, SituationCompiler]
     actions: [life-content]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [offline-harness]
+    adapters: [offline-harness, source-bound-outcome-selection, http-v2, qq-c2c-v2]
     tests:
       - tests/world_v2/test_occurrence_content_coordinator.py::test_coordinator_commits_complete_sidecar_backed_candidate_matrix
       - tests/world_v2/test_outcome_e2e_recovery_replay.py::test_outcome_restart_recovers_full_world_to_affect_and_next_turn_context
+      - tests/world_v2/test_outcome_trigger_runtime.py::test_outcome_draft_adapter_selects_only_context_visible_sidecar_candidate
       - tests/world_v2/test_npc_world_appraisal_trigger_runtime.py::test_settled_npc_event_can_create_a_source_bound_companion_appraisal
 
   - id: proposal-acceptance-manifests
     phase: 4
-    status: partial
-    runtime_activation: limited-production
-    limitations: [only-registered-production-families-are-authorized, fallback-remains-narrower-than-normal-generation]
+    status: closed
+    runtime_activation: default
+    limitations: [unregistered-families-fail-closed, fallback-is-intentionally-minimal]
     sources: [ContextCapsule, InnerAdvisory, model-result, deterministic-proposal-identity]
     events: [ProposalRecorded, ModelResultRecorded, AcceptanceRecorded]
     reducers: [src/companion_daemon/world_v2/reducers.py]
@@ -204,20 +208,24 @@ mechanisms:
 
   - id: expression-beats-deferred-replies
     phase: 5
-    status: partial
-    runtime_activation: limited-production
-    limitations: [reaction-typing-and-sticker-remain-adapter-only, no-claim-that-all-interrupt-behavior-is-live]
+    status: closed
+    runtime_activation: default
+    limitations: [napcat-nontext-only-http-and-other-qq-profiles-text-only, later-is-single-text-followup-only, provider-accepted-still-requires-terminal-receipt]
     sources: [accepted-expression-plan, user-interjection, platform-receipt]
-    events: [ExpressionPlanAccepted, ExpressionBeatAuthorized, ExpressionBeatSettled]
+    events: [ExpressionPlanAccepted, ExpressionBeatAuthorized, ExpressionBeatSettled, ExpressionBeatTerminated, ExpressionPlanCompleted, ExpressionPlanTerminated]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [expression-plans, beats, deferred-replies]
     decision_consumers: [ExpressionLifecycleRuntime, ExpressionReconsiderationRuntime]
-    actions: [reply, reply-later]
+    actions: [reply, followup, reaction, sticker, typing]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
     adapters: [http-v2, qq-c2c-v2]
     tests:
       - tests/world_v2/test_expression_lifecycle_runtime.py::test_multibeat_plan_completes_only_after_the_last_independent_receipt
-      - tests/world_v2/test_expression_action_capabilities.py::test_production_chat_grammar_rejects_an_adapter_only_reaction_even_when_its_beat_is_well_bound
+      - tests/world_v2/test_expression_lifecycle_runtime.py::test_failed_multibeat_plan_abandons_undispatched_siblings_without_false_delivery
+      - tests/world_v2/test_expression_action_capabilities.py::test_text_only_deployment_grammar_rejects_reaction_even_when_global_vertical_is_installed
+      - tests/world_v2/test_qq_c2c_host_migration.py::test_napcat_expression_is_selected_by_the_single_main_model_and_reaches_delivery
+      - tests/world_v2/test_http_v2_host_migration.py::test_http_production_profile_fails_closed_when_model_selects_unavailable_reaction
+      - tests/test_qq_delivery.py::test_napcat_delivery_maps_authorized_expression_tokens_to_exact_endpoints
       - tests/world_v2/test_deferred_reply_runtime.py::test_delivered_reply_later_fulfills_exact_private_commitment
 
   - id: action-budget-receipt-recovery
@@ -240,7 +248,7 @@ mechanisms:
 
   - id: injected-read-only-tool
     phase: 5
-    status: partial
+    status: closed
     runtime_activation: limited-production
     limitations: [requires-explicit-model-and-transport-injection, only-no-change-result-deliberation-is-installed, vision-transcription-and-creative-media-remain-closed]
     sources: [audited-tool-proposal, claimed-tool-trigger, enforcement-authorization, provider-result-descriptor]
@@ -257,47 +265,54 @@ mechanisms:
 
   - id: injected-perception-tool
     phase: 5
-    status: partial
-    runtime_activation: not-wired
-    limitations: [requires-explicit-provider-and-authority-injection, no-default-production-proposal-grammar-or-provider-composition, result-deliberation-is-currently-no-visible-action-only]
+    status: closed
+    runtime_activation: limited-production
+    limitations: [requires-explicit-model-input-source-provider-and-preprovisioned-enforcement-authority, no-default-provider-composition, result-deliberation-is-currently-no-visible-action-only]
     sources: [source-bound-media-input, perception-capability-consent-and-privacy-binding, provider-result-descriptor]
     events: [PerceptionRequestAccepted, PerceptionResultAccepted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [perception-requests, perception-results, perception-result-trigger]
-    decision_consumers: [PerceptionAcceptanceRuntime, PerceptionActionExecutor, PerceptionResultTriggerRuntime, NoopPerceptionResultDeliberator]
+    decision_consumers: [PerceptionTriggerRuntime, PerceptionProposalCompiler, PerceptionAcceptanceRuntime, PerceptionActionExecutor, PerceptionResultTriggerRuntime, PerceptionResultContextCompiler, NoopPerceptionResultDeliberator]
     actions: [perception-tool]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
     adapters: [injected-vision-or-transcription-provider]
     tests:
       - tests/world_v2/test_perception_vertical.py::test_injected_perception_provider_is_source_bound_private_and_result_triggered_once
       - tests/world_v2/test_perception_vertical.py::test_perception_executor_fails_closed_without_final_pump_authorization
+      - tests/world_v2/test_perception_production_composition.py::test_sqlite_attachment_reaches_provider_and_next_turn_context_exactly_once
+      - tests/world_v2/test_perception_production_composition.py::test_selected_attachment_without_enforcement_authority_fails_closed
 
   - id: media-preview-and-approval
     phase: 6
-    status: partial
+    status: closed
     runtime_activation: limited-production
-    limitations: [real-durable-provider-and-operator-approval-evidence-pending, automatic-delivery-not-globally-enabled]
+    limitations: [requires-explicit-complete-media-preview-deployment-and-preprovisioned-enforcement-grant, real-durable-provider-and-operator-approval-evidence-pending, automatic-delivery-not-globally-enabled]
     sources: [committed-life-event, frozen-opportunity, provider-result, operator-approval, delivery-receipt]
-    events: [MediaOpportunityFrozen, MediaPlanRecorded, MediaPreviewGenerated, MediaDeliveryShared]
+    events: [MediaSelectionAttemptRecorded, MediaOpportunityFrozen, MediaPlanRecorded, MediaPreviewGenerated, MediaDeliveryShared]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [media-candidates, media-plans, inspection, preview, media-deliveries]
-    decision_consumers: [MediaPlanningWorker, MediaExecutionWorker, MediaDeliveryRuntime]
+    decision_consumers: [MediaPreviewConductor, MediaPlanningWorker, MediaExecutionWorker, MediaDeliveryRuntime]
     actions: [media-planning, media-render, media-inspection, media-delivery]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [event-media-public-seam, explicit-durable-provider]
+    adapters: [event-media-public-seam, MediaPreviewDeployment, explicit-durable-provider]
     tests:
       - tests/world_v2/test_media_v2_planning.py::test_render_inspection_preview_are_receipt_bound_and_preview_can_never_be_delivery
       - tests/world_v2/test_media_v2_planning.py::test_repairable_inspection_has_one_source_bound_repair_then_second_failure_is_terminal
       - tests/world_v2/test_media_delivery_approval.py::test_share_materializes_only_after_delivered_receipt
       - tests/world_v2/test_media_provider_results.py::test_worker_only_materializes_provider_bytes_bound_to_terminal_receipt
+      - tests/world_v2/test_media_continuation_runtime.py::test_render_artifact_opens_and_accepts_inspection_after_sqlite_restart
+      - tests/world_v2/test_production_turn_application.py::test_media_preview_conductor_recovers_head_proposal_after_sqlite_restart
+      - tests/world_v2/test_production_turn_application.py::test_production_p1_selection_acceptance_commits_the_source_bound_planning_batch
+      - tests/world_v2/test_media_selection_worker.py::test_worker_persists_and_recovers_terminal_attempt_at_same_logical_time
+      - tests/world_v2/test_platform_host.py::test_platform_scheduler_zero_budgets_do_not_enter_any_media_or_background_worker
 
   - id: event-ecology-media-candidates
     phase: 6
-    status: partial
+    status: closed
     runtime_activation: limited-production
-    limitations: [requires-explicit-policy-and-scheduler-drain, opens-preview-opportunities-only-and-never-plans-renders-or-delivers, visual-fact-sidecars-remain-reference-only-without-invented-detail]
+    limitations: [requires-explicit-policy-and-scheduler-drain, trusted-visual-fact-coverage-is-deployment-dependent]
     sources: [committed-shareable-activity-outcome-experience-or-visual-fact, committed-life-or-clock-wake, persisted-media-opportunity-history]
-    events: [PhotoCandidateOpened, MediaOpportunityFrozen]
+    events: [VisualFactRecorded, PhotoCandidateOpened, MediaOpportunityFrozen]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [source-bound-photo-candidates, frozen-media-opportunities, immutable-evidence-snapshots]
     decision_consumers: [EventEcologyMediaCandidateRuntime, MediaPlanningWorker]
@@ -308,6 +323,7 @@ mechanisms:
       - tests/world_v2/test_event_ecology_media.py::test_ecology_derives_diverse_candidates_only_from_existing_shareable_authority
       - tests/world_v2/test_event_ecology_media.py::test_ecology_is_replay_safe_and_category_cooldown_uses_persisted_opportunities
       - tests/world_v2/test_production_turn_application.py::test_production_ecology_runs_only_after_a_durable_life_wake_and_only_opens_preview_opportunities
+      - tests/world_v2/test_visual_fact_media.py::test_object_food_sidecar_is_source_bound_and_replayable_for_ecology
 
   - id: http-v2-ingress
     phase: 7
@@ -328,7 +344,7 @@ mechanisms:
 
   - id: qq-c2c-v2-ingress
     phase: 7
-    status: partial
+    status: closed
     runtime_activation: limited-production
     limitations: [compatible-private-text-only, unsupported-shapes-are-archived-or-rejected, not-a-full-QQ-NapCat-OneBot-migration]
     sources: [QQ-C2C-text, QQ-receipt, scheduler-tick]
@@ -342,13 +358,13 @@ mechanisms:
     tests:
       - tests/world_v2/test_qq_c2c_host_migration.py::test_qq_c2c_host_runs_text_ingress_and_restart_recovery_without_a_legacy_sender
       - tests/world_v2/test_qq_c2c_host_migration.py::test_cli_migration_gate_archives_unsupported_or_explicitly_archived_qq_shapes
-      - tests/world_v2/test_qq_c2c_host_migration.py::test_napcat_v2_branch_never_builds_a_legacy_engine_and_rejects_unsupported_content
+      - tests/world_v2/test_qq_c2c_host_migration.py::test_napcat_v2_branch_never_builds_legacy_engine_and_normalizes_supported_shapes
 
   - id: room-dashboard-viewer-projection
     phase: 7
-    status: partial
-    runtime_activation: limited-production
-    limitations: [read-only-v2-room-endpoint-exists, godot-room-consumer-is-migrated, web-dashboard-default-consumer-remains-legacy]
+    status: closed
+    runtime_activation: default
+    limitations: [read-only-viewer-projection]
     sources: [v2-viewer-request, internal-room-projection]
     events: [WorldStarted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
@@ -365,9 +381,9 @@ mechanisms:
 
   - id: public-dashboard-projection
     phase: 7
-    status: partial
-    runtime_activation: limited-production
-    limitations: [backend-route-and-fixed-public-dto-exist, web-dashboard-default-browser-path-remains-legacy, notices-are-omitted-until-a-typed-public-authority-is-installed]
+    status: closed
+    runtime_activation: default
+    limitations: [notices-are-omitted-until-a-typed-public-authority-is-installed]
     sources: [fixed-dashboard-public-viewer-request, public-situation-and-agenda-projection]
     events: [WorldStarted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
@@ -418,9 +434,9 @@ mechanisms:
 
   - id: legacy-dual-authority-isolation
     phase: 0
-    status: partial
-    runtime_activation: limited-production
-    limitations: [legacy-paths-remain-for-unmigrated-adapters-and-history, global-default-cutover-not-complete]
+    status: closed
+    runtime_activation: default
+    limitations: [legacy-code-remains-only-behind-explicit-archive-or-compatibility-entrypoints]
     sources: [v2-platform-ingress, architecture-guard]
     events: [ObservationRecorded]
     reducers: [src/companion_daemon/world_v2/reducers.py]

@@ -1,0 +1,363 @@
+version: media-shot-v2
+creative_directions:
+  # These are expressive choices, not rules about what occurred or whether a
+  # photo should be sent.  A constrained LLM chooses one and writes a small
+  # pose/camera refinement; the frozen shot plan remains the source of truth.
+  handheld_selfie:
+    - id: personal-update
+      intent: a warm, low-pressure personal update
+      baseline_direction: Let the camera catch a small, photo-aware pause rather than a polished selfie pose.
+    - id: atmosphere-glance
+      intent: sharing the feeling of the moment more than the face
+      baseline_direction: Keep the face slightly off-centre and let the gaze feel briefly caught between the moment and the camera.
+    - id: playful-close
+      intent: a lightly teasing moment for a familiar friend
+      baseline_direction: Add one restrained, spontaneous micro-expression that feels like an inside joke, without becoming exaggerated.
+  check_in_timer:
+    - id: light-pose-check-in
+      intent: a deliberate but relaxed 'I was here' photo
+      baseline_direction: Let her acknowledge the timer with a small half-turn and a gentle, unforced pose while the ongoing action remains visible.
+    - id: atmospheric-check-in
+      intent: keeping a visual memory of the place
+      baseline_direction: Prioritize the sense of space and a quiet in-between moment over a direct performance to the lens.
+    - id: playful-check-in
+      intent: a friend-facing, lightly silly proof-of-visit
+      baseline_direction: Use a small playful gesture or amused expression that still reads as an ordinary, unperformed phone photo.
+  check_in_helper:
+    - id: passerby-light-pose
+      intent: a lightly posed proof-of-visit a nearby person helped take
+      baseline_direction: Let her give the helper's camera a small photo-aware half-turn, as if she has only a few seconds before thanking them and moving on.
+    - id: passerby-atmosphere
+      intent: keeping the place and her own presence in one friendly record
+      baseline_direction: Keep a relaxed acknowledgement of the camera while the setting still takes up real visual space around her.
+    - id: passerby-playful
+      intent: sending a slightly silly check-in to someone familiar
+      baseline_direction: Use one brief, restrained playful gesture that feels improvised for a helpful stranger taking the picture, never like a posed editorial.
+  mirror:
+    - id: outfit-check
+      intent: casually sharing a look before heading out
+      baseline_direction: Make the reflection feel like an accidental second glance at an outfit, with relaxed posture rather than a fashion pose.
+    - id: private-reflection
+      intent: a quiet, personal mirror moment
+      baseline_direction: Let the camera feel secondary to the reflection, with an asymmetrical stance and a soft unguarded expression.
+  candid_life:
+    - id: shared-moment
+      intent: sending a moment someone else happened to catch
+      baseline_direction: Preserve the sense that another person caught an ongoing exchange, while allowing a tiny photo-aware reaction rather than a paparazzi distance.
+    - id: inside-joke
+      intent: sharing a small joke with someone familiar
+      baseline_direction: Make the expression briefly amused and responsive, as if reacting to a companion just outside the frame.
+  unfiltered:
+    - id: low-energy-honesty
+      intent: a safe, ordinary imperfect update
+      baseline_direction: Keep one harmless imperfection and a softened, low-energy expression, but retain warmth and dignity.
+    - id: unpolished-affection
+      intent: a familiar, slightly messy moment worth sharing
+      baseline_direction: Let the front-camera timing feel a little too early or late for a perfect photo, with a fond expression instead of a deliberate pose.
+    - id: little-mishap-complaint
+      intent: a warm, mildly exasperated selfie sent to complain about a harmless little mess
+      baseline_direction: Make it feel like she opened the front camera mid-complaint, with a small rueful smile and one visible, ordinary trace of the harmless mess.
+  default:
+    - id: ordinary-share
+      intent: a believable everyday personal photo
+      baseline_direction: Favor a small human gesture and an unforced photo-aware moment over a symmetrical portrait.
+activity_categories:
+  photo_portfolio: exploring
+  photo_review_disagreement: exploring
+  campus_walk: walking
+  literature_reading: studying
+  course_notes: studying
+  family_bookstore_call: arrival
+  independent_sort: resting
+
+templates:
+  daily:
+    handheld_selfie:
+      - id: daily-window-selfie
+        action: holding a tote strap while pausing naturally
+        gaze: looking slightly past the lens
+        expression: a small relaxed smile
+        framing: chest-up portrait
+        camera_angle: eye-level front-camera view
+        environment_cues: [soft daylight, ordinary everyday background]
+        constraints: [Keep the scene non-specific unless an active activity supplies evidence.]
+        motion_class: interaction
+        motion_cue: one hand is actively settling the tote strap while her shoulders turn away from the lens
+        anti_static_constraints: [Do not center her squarely toward the lens, do not leave both arms hanging still.]
+    check_in_timer:
+      - id: daily-timer-standing
+        action: taking a small step into the timer frame while one hand settles her tote strap
+        gaze: glancing past the timer toward the room
+        expression: a quiet arrival smile
+        framing: three-quarter body environmental portrait
+        camera_angle: eye-level phone-on-tripod view
+        environment_cues: [ordinary entrance or room detail, enough space around the subject]
+        constraints: ["This is a timer or propped-phone photo, never a handheld selfie."]
+        motion_class: transitional
+        motion_cue: one foot is visibly in a small step and the tote shifts naturally with it
+        anti_static_constraints: [Do not make her front-facing and planted with both arms at her sides.]
+    check_in_helper:
+      - id: daily-helper-check-in
+        action: making a small half-turn after asking a nearby person for one quick picture
+        gaze: briefly toward the helper's camera
+        expression: a friendly, restrained smile
+        framing: three-quarter body environmental portrait
+        camera_angle: rear-camera view from a normal requested-photo distance
+        environment_cues: [ordinary entrance or room detail, enough space around the subject]
+        constraints: [The helper is outside the frame; this is a friendly requested photo, never a selfie or surveillance image.]
+        motion_class: transitional
+        motion_cue: the half-turn and shifting tote show she is about to thank the helper and continue
+        anti_static_constraints: [Do not make this a symmetrical fashion pose or a distant paparazzi composition.]
+    mirror:
+      - id: daily-mirror-outfit
+        action: one hand lightly adjusting a cardigan hem
+        gaze: looking at her reflection
+        expression: composed and casual
+        framing: three-quarter body mirror composition
+        camera_angle: believable reflected phone camera view
+        environment_cues: [ordinary hallway or room, one continuous reflection]
+        constraints: [No impossible reflections or extra limbs.]
+        motion_class: interaction
+        motion_cue: her hand is mid-adjustment at the cardigan hem while her weight rests on one leg
+        anti_static_constraints: [Do not use a square, frozen mirror pose or both arms hanging still.]
+    candid_life:
+      - id: daily-companion-candid
+        action: pausing naturally while sharing the moment with a registered companion
+        gaze: looking toward the companion rather than the lens
+        expression: an unposed, warm small smile
+        framing: waist-up third-person candid
+        camera_angle: companion-held eye-level side view
+        environment_cues: [ordinary world-grounded setting, natural conversational distance]
+        constraints: [A registered companion is taking the photo; do not add unregistered people or a selfie arm.]
+        motion_class: candid
+        motion_cue: her body is angled toward the companion during an ongoing exchange
+        anti_static_constraints: [Do not make her stop and face the camera like a posed portrait.]
+    unfiltered:
+      - id: daily-unfiltered-blink
+        action: holding her own front-facing phone while pushing stray hair back after a small everyday mess
+        gaze: briefly toward the front-camera lens
+        expression: an affectionate, slightly exasperated almost-smile
+        framing: casual waist-up photo
+        camera_angle: imperfect arm-length front-camera angle
+        environment_cues: [natural daylight, lived-in everyday detail]
+        constraints: [The character is holding the front camera herself.; Natural imperfection only; never humiliating, sickly, or malformed.]
+        camera_authorship: the character holding her own front-facing phone
+        sharing_motive: a mildly exasperated but affectionate update about a harmless everyday little mess
+        motion_class: interaction
+        motion_cue: her free hand is caught pushing stray hair back while the selfie is taken
+        anti_static_constraints: [Do not turn this into a polished centered selfie or an externally photographed portrait.]
+      - id: daily-unfiltered-complaint
+        action: holding her own front-facing phone a little too close while making a small, rueful face about an ordinary harmless inconvenience
+        gaze: looking straight at the front-camera lens as if explaining herself to a familiar friend
+        expression: amused, mildly exasperated, and still affectionate
+        framing: imperfect close chest-up selfie
+        camera_angle: slightly high arm-length front-camera angle with one edge a little loosely framed
+        environment_cues: [ordinary everyday background, one harmless lived-in detail, natural light]
+        constraints: [The character is holding the front camera herself.; This is a quick complaint selfie, not an externally photographed portrait.; Natural imperfection only; never humiliating, sickly, or malformed.]
+        camera_authorship: the character holding her own front-facing phone
+        sharing_motive: a small affectionate complaint she wants to tell the user before the moment passes
+        motion_class: interaction
+        motion_cue: her phone hand creates a believable arm-length framing while the other hand makes a small unfinished explanatory gesture
+        anti_static_constraints: [Do not turn this into a polished beauty selfie, a distant third-person image, or a dramatic performance.]
+  arrival:
+    check_in_timer:
+      - id: arrival-doorway-timer
+        action: standing just outside the doorway with a tote bag resting naturally
+        gaze: turned lightly toward the destination
+        expression: pleased and a little expectant
+        framing: full-body arrival portrait
+        camera_angle: eye-level phone-on-tripod view
+        environment_cues: [entrance architecture, a clear but text-free location cue, natural daylight]
+        constraints: [This is a timer photo; no hand-held phone or selfie arm.]
+        motion_class: observational
+        motion_cue: her torso and gaze remain turned toward the destination as she arrives
+        anti_static_constraints: [Do not make her face forward with both arms hanging still.]
+      - id: arrival-walking-into-frame
+        action: taking one small step into frame, as if the timer just started
+        gaze: glancing toward the camera after arriving
+        expression: lively restrained smile
+        framing: three-quarter body environmental portrait
+        camera_angle: slightly off-center fixed phone view
+        environment_cues: [destination entrance, location texture, space around the subject]
+        constraints: [No selfie arm; retain a believable timer-photo composition.]
+        motion_class: transitional
+        motion_cue: one foot is captured just after a step into the scene and clothing has slight movement
+        anti_static_constraints: [Do not freeze her in a symmetrical front-facing stance.]
+  exploring:
+    handheld_selfie:
+      - id: exploring-side-selfie
+        action: pausing near an exhibit or display with one shoulder slightly turned
+        gaze: looking from the surroundings back toward the camera
+        expression: interested, bright-eyed smile
+        framing: waist-up environmental selfie
+        camera_angle: gentle three-quarter front-camera view
+        environment_cues: [exhibition or creative-work detail, warm ambient lighting]
+        constraints: [Show enough setting to establish an active creative outing.]
+        motion_class: observational
+        motion_cue: her shoulder and gaze are actively turning from the exhibit back toward the camera
+        anti_static_constraints: [Do not make her stare straight into the lens in a static centered pose.]
+    check_in_timer:
+      - id: exploring-exhibit-timer
+        action: turning away from the exhibit entrance while one hand is still adjusting the tote strap
+        gaze: looking toward the exhibit rather than directly into the timer
+        expression: cheerful but natural
+        framing: full-body environmental portrait
+        camera_angle: eye-level fixed phone view
+        environment_cues: [gallery or creative venue detail, framed work without readable text, spatial depth]
+        constraints: ["No held phone, selfie arm, watermark, or readable signage."]
+        motion_class: observational
+        motion_cue: her torso is visibly turned toward the exhibit and one hand is mid-adjustment on the tote strap
+        anti_static_constraints: [Reject a square front-facing stance, both arms hanging still, or a posed look into the lens.]
+      - id: exploring-moving-timer
+        action: taking a small walking step past the venue entrance
+        gaze: sideways toward the surroundings
+        expression: spontaneous amused smile
+        framing: three-quarter body candid-feeling timer photo
+        camera_angle: fixed phone at a slight three-quarter angle
+        environment_cues: [venue doorway, daylight, subtle movement in clothing]
+        constraints: [No held phone or actual third-party photographer.]
+        motion_class: transitional
+        motion_cue: one foot is mid-step past the entrance and her cardigan has subtle walking movement
+        anti_static_constraints: [Do not make her stop symmetrically in the center of frame.]
+    check_in_helper:
+      - id: exploring-helper-check-in
+        action: making a small half-turn by the exhibit entrance after asking a nearby visitor for one quick picture
+        gaze: briefly toward the helper's camera before looking back at the exhibit
+        expression: a cheerful, lightly photo-aware smile
+        framing: full-body environmental check-in photo
+        camera_angle: rear-camera view from a normal helpful-stranger distance
+        environment_cues: [gallery or creative venue detail, framed work without readable text, spatial depth]
+        constraints: [The helpful stranger stays outside frame; no held phone, selfie arm, watermark, or readable signage.]
+        camera_authorship: a helpful nearby visitor holding the rear camera after being asked for one quick photo
+        sharing_motive: a deliberate but relaxed proof-of-visit she wants to send to a friend
+        motion_class: transitional
+        motion_cue: her torso is halfway between the helper's camera and the exhibit, and one hand is still settling the tote strap
+        anti_static_constraints: [Do not make this a distant candid, a surveillance image, or a stiff symmetrical fashion pose.]
+    candid_life:
+      - id: exploring-companion-candid
+        action: leaning slightly toward an exhibit while listening to her registered companion
+        gaze: focused on the surroundings rather than the lens
+        expression: engaged, mid-conversation smile
+        framing: waist-up third-person candid
+        camera_angle: companion-held natural eye-level view
+        environment_cues: [creative venue detail, candid spatial distance]
+        constraints: [A registered companion is taking the photo; never show an unregistered person.]
+        motion_class: candid
+        motion_cue: she is leaning and turning toward the exhibit while responding to the companion
+        anti_static_constraints: [Do not make her face the camera as if posing for it.]
+  walking:
+    handheld_selfie:
+      - id: walking-shoulder-selfie
+        action: walking slowly with a tote bag and turning one shoulder toward camera
+        gaze: looking briefly over her shoulder
+        expression: airy, relaxed smile
+        framing: waist-up moving selfie
+        camera_angle: slightly elevated front-camera angle
+        environment_cues: [campus path, trees or street texture, soft outdoor light]
+        constraints: [Show gentle movement without distorted limbs.]
+        motion_class: transitional
+        motion_cue: an ongoing walking step with the tote and shoulders moving in opposite directions
+        anti_static_constraints: [Do not make her fully front-facing with a motionless torso.]
+    check_in_timer:
+      - id: walking-path-timer
+        action: taking a natural step along a path with arms relaxed
+        gaze: looking ahead instead of directly at camera
+        expression: quietly happy
+        framing: full-body environmental portrait
+        camera_angle: fixed phone at eye level from several steps away
+        environment_cues: [walkway, trees or campus architecture, open walking space]
+        constraints: [No held phone or selfie arm.]
+        motion_class: transitional
+        motion_cue: one foot is forward in a natural stride and her gaze stays on the path ahead
+        anti_static_constraints: [Do not make her stop centered with both arms vertical.]
+    candid_life:
+      - id: walking-companion-candid
+        action: turning toward her registered companion during a walk
+        gaze: away from the lens toward the companion
+        expression: genuine mid-conversation laugh
+        framing: three-quarter body third-person candid
+        camera_angle: companion-held side angle
+        environment_cues: [walkway, outdoor light, small sense of motion]
+        constraints: [Only use with recorded companion evidence; no selfie arm.]
+        motion_class: candid
+        motion_cue: her body is turning toward the companion during a live conversation
+        anti_static_constraints: [Do not pose her toward the camera or make her arms hang still.]
+    unfiltered:
+      - id: walking-unfiltered-wind-selfie
+        action: holding her own front-facing phone while using her free hand to gather wind-tossed hair back into place
+        gaze: looking toward the lens with a caught-off-guard, amused glance
+        expression: a warm little grimace that reads like a harmless complaint
+        framing: close moving selfie with a little outdoor motion in the background
+        camera_angle: believable arm-length front-camera angle while walking slowly
+        environment_cues: [walkway, trees or campus architecture, soft outdoor light]
+        constraints: [The character is holding the front camera herself.; Keep this a safe everyday update, never a glamorous outdoor portrait or a third-person shot.]
+        camera_authorship: the character holding her own front-facing phone
+        sharing_motive: a quick selfie to complain playfully about the wind interrupting her walk
+        motion_class: transitional
+        motion_cue: her free hand is gathering loose hair while one shoulder and the background retain a small sense of walking movement
+        anti_static_constraints: [Do not make this a static posed outdoor portrait or remove the selfie camera perspective.]
+  studying:
+    handheld_selfie:
+      - id: studying-break-selfie
+        action: sliding a notebook aside while lifting her eyes from the page
+        gaze: looking just beyond the lens after the movement
+        expression: soft, slightly tired smile
+        framing: chest-up seated portrait
+        camera_angle: casual front-camera view
+        environment_cues: [books or notebook, quiet study setting, natural desk light]
+        constraints: [Do not claim a completed study session.]
+        motion_class: interaction
+        motion_cue: one hand is visibly moving the notebook and the seated body is turned from the desk
+        anti_static_constraints: [Do not make this a centered, motionless seated portrait.]
+    check_in_timer:
+      - id: studying-desk-timer
+        action: pulling a chair back slightly while turning from the study desk
+        gaze: toward the books rather than camera
+        expression: focused and calm
+        framing: three-quarter body environmental portrait
+        camera_angle: propped phone at eye level
+        environment_cues: [books, desk, quiet study light]
+        constraints: [No held phone or selfie arm.]
+        motion_class: interaction
+        motion_cue: the chair and hand show an ongoing small movement, with her body angled toward the desk
+        anti_static_constraints: [Do not make her stand squarely facing the camera.]
+  resting:
+    handheld_selfie:
+      - id: resting-soft-selfie
+        action: setting one organized item aside while settling back into her seat
+        gaze: glancing away from the lens toward the item
+        expression: settled, relaxed smile
+        framing: chest-up casual portrait
+        camera_angle: ordinary front-camera view
+        environment_cues: [tidy personal items, warm indoor light]
+        constraints: [Keep the moment low-key and non-glamorous.]
+        motion_class: interaction
+        motion_cue: one hand is in the act of placing an item down and her torso is turning with it
+        anti_static_constraints: [Do not make this a static front-facing portrait.]
+    unfiltered:
+      - id: resting-unfiltered
+        action: holding her own front-facing phone after a small sorting mishap, with slightly rumpled hair and one hand pushing it back
+        gaze: glancing at the front-camera lens while half-laughing at the mess
+        expression: tired, fond, and mildly exasperated
+        framing: casual waist-up photo
+        camera_angle: imperfect arm-length front-camera angle
+        environment_cues: [soft indoor light, an ordinary lived-in room, a small harmless pile of half-sorted clothing or belongings]
+        constraints: [The character is holding the front camera herself.; Natural imperfection only; no degradation or distorted anatomy.]
+        camera_authorship: the character holding her own front-facing phone
+        sharing_motive: a warm, mildly exasperated selfie she sends while complaining about a harmless sorting mess
+        motion_class: interaction
+        motion_cue: her free hand is pushing loose hair back while she lifts the phone for a quick selfie
+        anti_static_constraints: [Do not turn this into an externally photographed portrait, an inert centered pose, or a glamour shot.]
+      - id: resting-sorting-complaint-selfie
+        action: holding her own front-facing phone close to her face while making a small 'what have I gotten myself into' gesture at the half-sorted things beside her
+        gaze: looking into the front-camera lens as if sending a quick voice-note-like complaint
+        expression: an amused eye-roll followed by a fond half-smile
+        framing: casual close waist-up selfie with slightly imperfect timing
+        camera_angle: arm-length front-camera angle, a little off-level from having just picked up the phone
+        environment_cues: [soft indoor evening light, an ordinary lived-in room, a small harmless pile of half-sorted clothing or belongings]
+        constraints: [The character is holding the front camera herself.; The mess stays harmless and ordinary; no degradation, humiliation, or distorted anatomy.]
+        camera_authorship: the character holding her own front-facing phone
+        sharing_motive: a playful self-mocking selfie sent to complain that tidying has gotten a little out of hand
+        motion_class: interaction
+        motion_cue: one hand holds the phone while the free hand is caught midway through a small helpless gesture toward the half-sorted pile
+        anti_static_constraints: [Do not make this an externally photographed room portrait, a perfectly posed selfie, or a glamorized messy-room scene.]

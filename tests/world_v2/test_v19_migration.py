@@ -5,6 +5,8 @@ import hashlib
 import json
 import sqlite3
 
+from legacy_migration_support import read_head_state_json
+
 import pytest
 
 from companion_daemon.world_v2.errors import LedgerIntegrityError
@@ -48,11 +50,7 @@ def test_sqlite_migrates_verified_v18_head_without_fabricating_v19_fields(tmp_pa
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        row = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
-        ).fetchone()
-        assert row is not None
-        legacy_state = json.loads(row[0])
+        legacy_state = json.loads(read_head_state_json(connection, WORLD_ID))
         # These fields did not exist in the .18 persisted state schema.
         legacy_state.pop("fact_commit_proposal_audits_v2")
         legacy_state.pop("acceptance_manifests_v3")
@@ -115,11 +113,7 @@ def test_sqlite_migrates_verified_v19_head_without_fabricating_reply_state(tmp_p
     )
     ledger.close()
     with sqlite3.connect(path) as connection:
-        row = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
-        ).fetchone()
-        assert row is not None
-        state_json = json.loads(row[0])
+        state_json = json.loads(read_head_state_json(connection, WORLD_ID))
         for key in (
             "minimal_reply_manifests",
             "stored_message_payloads",
@@ -180,11 +174,7 @@ def test_sqlite_migrates_verified_v21_head_to_expression_lifecycle_bundle(tmp_pa
     )
     ledger.close()
     with sqlite3.connect(path) as connection:
-        row = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
-        ).fetchone()
-        assert row is not None
-        state_json = json.loads(row[0])
+        state_json = json.loads(read_head_state_json(connection, WORLD_ID))
         state = ReducerState.model_validate_json(json.dumps(state_json, separators=(",", ":")))
         legacy_payload = state.semantic_payload(
             world_id=WORLD_ID,
@@ -265,11 +255,7 @@ def test_sqlite_migrates_verified_v22_head_without_reinterpreting_existing_proje
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        row = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
-        ).fetchone()
-        assert row is not None
-        state = ReducerState.model_validate_json(row[0])
+        state = ReducerState.model_validate_json(read_head_state_json(connection, WORLD_ID))
         # .22 used the same Projection fields as the pre-gate lifecycle
         # bundle; only the declared reducer version changes in its hash.
         payload = state.semantic_payload(

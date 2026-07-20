@@ -236,7 +236,7 @@ async def _run_with_engine(
         if not settings.openai_api_key:
             print("image not generated: OPENAI_API_KEY is missing")
         else:
-            estimate = ESTIMATES["image_generation"]
+            estimate = image_render_estimate(reference_count=0, attempts=1)
             decision = budget_gate.check(estimate, automatic=True)
             if not decision.allowed:
                 print(f"image not generated: {decision.reason}")
@@ -246,6 +246,7 @@ async def _run_with_engine(
                     settings.openai_api_key,
                     base_url=settings.openai_base_url,
                     model=settings.image_model,
+                    proxy_url=getattr(settings, "openai_proxy_url", None),
                 ).generate(
                     life_image_prompt(
                         event.topic,

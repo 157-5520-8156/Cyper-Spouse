@@ -11,7 +11,6 @@ from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world import ConcurrencyConflict, WorldKernel
 from companion_daemon.models import IncomingMessage
-from companion_daemon.stickers import Sticker, StickerCatalog
 
 
 def test_world_enablement_and_trusted_delivery_settlement(tmp_path: Path, monkeypatch) -> None:
@@ -21,7 +20,7 @@ def test_world_enablement_and_trusted_delivery_settlement(tmp_path: Path, monkey
     started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
     engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=kernel, world_id=started.world_id)
     monkeypatch.setattr(app_module, "engine", engine)
-    client = TestClient(app_module.app)
+    client = TestClient(app_module.archive_app)
 
     audit = client.get("/world-runtime/enablement")
     assert audit.status_code == 200
@@ -96,7 +95,7 @@ def test_operator_can_reconcile_unknown_delivery_once_with_audited_external_evid
         reason="process crashed after dispatch",
         expected_revision=kernel.revision(started.world_id),
     )
-    client = TestClient(app_module.app)
+    client = TestClient(app_module.archive_app)
     request = {
         "expected_revision": kernel.revision(started.world_id),
         "status": "delivered",
@@ -329,7 +328,7 @@ def test_reconciliation_without_authority_or_evidence_leaves_delivery_unknown(
         reason="receipt unavailable",
         expected_revision=kernel.revision(started.world_id),
     )
-    client = TestClient(app_module.app)
+    client = TestClient(app_module.archive_app)
     endpoint = f"/world/{started.world_id}/deliveries/{delivery_id}/reconcile"
     body = {
         "expected_revision": kernel.revision(started.world_id),
@@ -436,7 +435,7 @@ def test_operator_reconciliation_never_dispatches_a_following_planned_segment(
         expected_revision=kernel.revision(started.world_id),
     )
 
-    response = TestClient(app_module.app).post(
+    response = TestClient(app_module.archive_app).post(
         f"/world/{started.world_id}/deliveries/{delivery_id}/reconcile",
         headers={"X-Delivery-Reconciliation-Token": "operator-secret"},
         json={
@@ -471,7 +470,7 @@ def test_world_console_reads_active_world_and_submits_clock_commands(tmp_path: P
     started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
     engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=kernel, world_id=started.world_id)
     monkeypatch.setattr(app_module, "engine", engine)
-    client = TestClient(app_module.app)
+    client = TestClient(app_module.archive_app)
 
     page = client.get("/world-console")
     assert page.status_code == 200
@@ -502,25 +501,36 @@ def test_world_console_reports_disabled_runtime(monkeypatch, tmp_path: Path) -> 
     seed_user(store)
     monkeypatch.setattr(app_module, "engine", CompanionEngine(store, FakeCompanionModel(), "你是知栀。"))
 
-    response = TestClient(app_module.app).get("/world-runtime/overview")
+    response = TestClient(app_module.archive_app).get("/world-runtime/overview")
 
     assert response.status_code == 200
     assert response.json() == {"enabled": False}
 
 
-def test_http_message_endpoint_uses_capture_turn_instead_of_hard_defer(tmp_path: Path, monkeypatch) -> None:
-    store = CompanionStore(tmp_path / "deferred-world.sqlite")
-    seed_user(store)
-    kernel = WorldKernel(store)
-    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
-    kernel.submit(
-        {"type": "change_need", "world_id": started.world_id, "need": "energy", "delta": -50},
-        expected_revision=kernel.revision(started.world_id),
-    )
-    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=kernel, world_id=started.world_id)
-    monkeypatch.setattr(app_module, "engine", engine)
+def test_http_message_endpoint_uses_world_v2_capture_without_archive_engine(
+    monkeypatch,
+) -> None:
+    class Capture:
+        async def respond(self, **_kwargs):
+            return type(
+                "Result",
+                (),
+                {
+                    "status": "action_authorized",
+                    "action_id": "action:v2:http-defer",
+                    "text": "晚点见。",
+                    "canonical_user_id": "geoff",
+                },
+            )()
 
-    response = TestClient(app_module.app, raise_server_exceptions=False).post(
+    class ArchiveEngine:
+        def __getattr__(self, name):
+            raise AssertionError(f"World v2 HTTP reached archive Engine: {name}")
+
+    monkeypatch.setattr(app_module, "http_v2_capture", Capture())
+    monkeypatch.setattr(app_module, "engine", ArchiveEngine())
+
+    response = TestClient(app_module.app).post(
         "/messages",
         json=IncomingMessage(
             platform="simulator",
@@ -531,45 +541,24 @@ def test_http_message_endpoint_uses_capture_turn_instead_of_hard_defer(tmp_path:
     )
 
     assert response.status_code == 200
-    action_id = response.json()["world_action_id"]
-    action = kernel.snapshot(started.world_id)["actions"][action_id]
-    assert action["status"] == "delivered"
-    assert action["segment_state"]["segments"][0]["external_receipt"].startswith(
-        "http-capture:"
-    )
+    assert response.json()["world_action_id"] == "action:v2:http-defer"
 
 
-def test_http_message_endpoint_settles_text_via_turn_not_engine_confirmation(tmp_path: Path, monkeypatch) -> None:
-    store = CompanionStore(tmp_path / "sticker-world.sqlite")
-    seed_user(store)
-    kernel = WorldKernel(store)
-    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
-    stickers = StickerCatalog(
-        stickers=[
-            Sticker(
-                id="comfort",
-                category="comfort",
-                mood="calm",
-                intent="comfort",
-                path=Path("assets/stickers/comfort.png"),
-            )
-        ]
-    )
-    engine = CompanionEngine(
-        store,
-        FakeCompanionModel(),
-        "你是知栀。",
-        stickers=stickers,
-        world_kernel=kernel,
-        world_id=started.world_id,
-    )
-    monkeypatch.setattr(app_module, "engine", engine)
+def test_http_message_endpoint_returns_world_v2_capture_text(monkeypatch) -> None:
+    class Capture:
+        async def respond(self, **_kwargs):
+            return type(
+                "Result",
+                (),
+                {
+                    "status": "action_authorized",
+                    "action_id": "action:v2:http-text",
+                    "text": "我在。",
+                    "canonical_user_id": "geoff",
+                },
+            )()
 
-    def should_not_be_called(*_args, **_kwargs) -> None:
-        raise AssertionError("HTTP endpoint must settle through CompanionTurn")
-
-    monkeypatch.setattr(engine, "confirm_media_delivery", should_not_be_called)
-    monkeypatch.setattr(engine, "confirm_sticker_delivery", should_not_be_called)
+    monkeypatch.setattr(app_module, "http_v2_capture", Capture())
 
     response = TestClient(app_module.app).post(
         "/messages",
@@ -582,11 +571,8 @@ def test_http_message_endpoint_settles_text_via_turn_not_engine_confirmation(tmp
     )
 
     assert response.status_code == 200
-    action = kernel.snapshot(started.world_id)["actions"][response.json()["world_action_id"]]
-    assert action["status"] == "delivered"
-    assert action["segment_state"]["segments"][0]["external_receipt"].startswith(
-        "http-capture:"
-    )
+    assert response.json()["text"] == "我在。"
+    assert response.json()["world_action_id"] == "action:v2:http-text"
 
 
 def test_world_console_keeps_unresolved_activity_visible_after_long_history(tmp_path: Path) -> None:
@@ -650,7 +636,7 @@ def test_qq_webhook_observes_through_turn_seam_without_staging_reply(
         lambda: Settings(QQ_VERIFY_SIGNATURES=False),
     )
 
-    response = TestClient(app_module.app).post(
+    response = TestClient(app_module.archive_app).post(
         "/qq/webhook",
         json={
             "op": 0,

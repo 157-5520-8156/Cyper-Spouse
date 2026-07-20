@@ -12,8 +12,19 @@ from .media_selection_draft import (
     MediaCandidateChoice,
     MediaSelectionCapsule,
     MediaSelectionDraftAdapter,
+    MediaSelectionDraftError,
 )
-from .media_selection_proposal import MediaSelectionProposalCompiler
+from .media_selection_proposal import (
+    MediaSelectionProposalCompiler,
+    MediaSelectionProposalRecordedPayload,
+)
+from .media_selection_attempt import (
+    MediaSelectionCandidateRevision,
+    MediaSelectionAttemptRecordedPayload,
+    media_selection_attempt_id,
+)
+from .errors import ConcurrencyConflict
+from .event_identity import domain_idempotency_key
 from .private_image_evidence_contract import RecipientScopedImageEvidenceDeclaredPayload
 from .relationship_media_context import (
     PrivateTransitionEvidenceV1,
@@ -22,7 +33,7 @@ from .relationship_media_context import (
 from .media_candidate_advisory import MediaCandidateAdvisoryCompiler
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
-from .schemas import ProjectionCursor
+from .schemas import ProjectionCursor, WorldEvent
 
 
 class MediaSelectionRunResult(FrozenModel):
@@ -55,10 +66,11 @@ class MediaSelectionWorker:
             and item.source_events
         )
         pending = {
-            (item.candidate_id, item.expected_candidate_revision)
+            (item.candidate_id, item.expected_candidate_revision): item
             for item in getattr(projection, "proposal_revisions", ())
             if getattr(item, "candidate_id", None) is not None
             and getattr(item, "expected_candidate_revision", None) is not None
+            and getattr(item, "proposal_event_ref", None) is not None
         }
         # A proposal deliberately leaves a candidate ``available`` until
         # Acceptance.  Do not call the model again for the same aggregate
@@ -72,19 +84,124 @@ class MediaSelectionWorker:
             if (selection := self._derive_selection(projection=projection, candidate=item)) is not None
         }
         selectable = tuple(item for item in eligible if item.candidate_id in selections)
+        recoverable: list[str] = []
+        invalid_pending = False
+        lookup = getattr(self._ledger, "lookup_event_commit", None)
+        for item in eligible:
+            key = (item.candidate_id, item.entity_revision)
+            revision = pending.get(key)
+            if item.candidate_id not in selections or revision is None:
+                continue
+            located = lookup(revision.proposal_event_ref) if callable(lookup) else None
+            if located is None:
+                invalid_pending = True
+                continue
+            event, commit = located
+            try:
+                proposal = MediaSelectionProposalRecordedPayload.model_validate_json(
+                    event.payload_json
+                )
+            except ValueError:
+                invalid_pending = True
+                continue
+            authority_matches = (
+                event.event_type == "MediaSelectionProposalRecorded"
+                and event.payload_hash == revision.proposal_event_payload_hash
+                and proposal.proposal_id == revision.proposal_id
+                and proposal.candidate_id == item.candidate_id
+                and proposal.expected_candidate_revision == item.entity_revision
+            )
+            if not authority_matches:
+                invalid_pending = True
+                continue
+            if (
+                commit.world_revision == projection.world_revision
+                and commit.deliberation_revision == projection.deliberation_revision
+                and commit.ledger_sequence == projection.ledger_sequence
+            ):
+                recoverable.append(event.event_id)
+        if recoverable:
+            # A crash may occur after ProposalRecorded but before Acceptance.
+            # Reuse that immutable head proposal without another model call.
+            return MediaSelectionRunResult(
+                status="proposed",
+                proposal_event_ref=sorted(recoverable)[0],
+                reason_code="media_selection.recovered_pending_proposal",
+            )
+        if invalid_pending:
+            # A missing or mismatched audit record is an authority failure,
+            # not a stale decision.  Never deliberate around corrupted
+            # proposal lineage.
+            return MediaSelectionRunResult(
+                status="blocked", reason_code="media_selection.pending_proposal_invalid"
+            )
+        # A valid non-head proposal is immutable stale audit history.  It can
+        # no longer be accepted at the current cursor, so Phase 4's fresh-only
+        # rule permits a new deliberation.  Proposal identity includes the new
+        # complete cursor and therefore cannot collide with the stale record.
         candidates = tuple(
             item for item in sorted(selectable, key=lambda value: value.candidate_id)
-            if (item.candidate_id, item.entity_revision) not in pending
         )[:32]
         if not candidates:
             return MediaSelectionRunResult(
                 status="no_op",
+                reason_code="media_selection.no_available_candidates",
+            )
+        durable_lookup = callable(getattr(self._ledger, "lookup_event_commit", None))
+        world_id = getattr(self._ledger, "world_id", getattr(projection, "world_id", None))
+        if durable_lookup and world_id is None:
+            return MediaSelectionRunResult(
+                status="blocked", reason_code="media_selection.ledger_identity_unavailable"
+            )
+        candidate_revisions = tuple(
+            MediaSelectionCandidateRevision(
+                candidate_id=item.candidate_id, entity_revision=item.entity_revision,
+            )
+            for item in candidates
+        )
+        attempt_id = media_selection_attempt_id(
+            world_id=world_id or "embedded-nondurable", logical_time=logical_time,
+            candidates=candidate_revisions,
+        )
+        attempt_event_id = "event:media-selection-attempt:" + attempt_id
+        prior_terminal = (
+            self._ledger.lookup_event_commit(attempt_event_id)
+            if durable_lookup
+            else None
+        )
+        if prior_terminal is not None:
+            event, _commit = prior_terminal
+            try:
+                terminal = MediaSelectionAttemptRecordedPayload.model_validate_json(
+                    event.payload_json
+                )
+            except ValueError:
+                return MediaSelectionRunResult(
+                    status="blocked",
+                    reason_code="media_selection.decline_audit_invalid",
+                )
+            expected = tuple(
+                MediaSelectionCandidateRevision(
+                    candidate_id=item.candidate_id,
+                    entity_revision=item.entity_revision,
+                )
+                for item in candidates
+            )
+            if (
+                event.event_type != "MediaSelectionAttemptRecorded"
+                or terminal.attempt_id != attempt_id
+                or terminal.candidates != expected
+            ):
+                return MediaSelectionRunResult(
+                    status="blocked",
+                    reason_code="media_selection.decline_audit_invalid",
+                )
+            return MediaSelectionRunResult(
+                status="no_op" if terminal.outcome == "declined" else "blocked",
                 reason_code=(
-                    "media_selection.pending_proposal"
-                    if selectable and any(
-                        (item.candidate_id, item.entity_revision) in pending for item in selectable
-                    )
-                    else "media_selection.no_available_candidates"
+                    "media_selection.recovered_decline"
+                    if terminal.outcome == "declined"
+                    else terminal.failure_code
                 ),
             )
         cursor = ProjectionCursor(world_revision=projection.world_revision, deliberation_revision=projection.deliberation_revision, ledger_sequence=projection.ledger_sequence)
@@ -92,35 +209,75 @@ class MediaSelectionWorker:
         # cannot become an authority-bearing identifier by coincidence.
         tokens = {"media-candidate:" + hashlib.sha256(item.candidate_id.encode()).hexdigest(): item for item in candidates}
         draw_suggestion = None
+        attempt_causation_id: str | None = None
         # Production ledgers persist the draw before Deliberation.  Narrow
         # embedded test adapters without durable lookup retain a no-draw path;
         # they cannot claim replayable variability.
-        if callable(getattr(self._ledger, "lookup_event_commit", None)):
-            draw = self._random.draw(
-                attempt_id="media-selection:" + hashlib.sha256(
-                    (projection.world_id + logical_time.isoformat() + ":" + ",".join(sorted(item.candidate_id for item in candidates))).encode()
-                ).hexdigest(),
+        if durable_lookup:
+            try:
+                draw = self._random.draw(
+                attempt_id=attempt_id,
                 candidate_refs=tuple(item.candidate_id for item in candidates),
                 catalog_version="media-selection-random.1", logical_time=logical_time,
                 actor=actor, trace_id=trace_id, correlation_id=correlation_id,
-            )
+                )
+            except ConcurrencyConflict:
+                return MediaSelectionRunResult(
+                    status="blocked", reason_code="media_selection.cursor_stale"
+                )
             suggested_token = next(token for token, item in tokens.items() if item.candidate_id == draw.selected_candidate_ref)
             draw_suggestion = {"selected_token": suggested_token, "sampler_version": draw.sampler_version}
+            attempt_causation_id = "event:random-draw:" + draw.draw_id
             projection = self._ledger.project()
             cursor = ProjectionCursor(
                 world_revision=projection.world_revision,
                 deliberation_revision=projection.deliberation_revision,
                 ledger_sequence=projection.ledger_sequence,
             )
-        draft = await self._draft.deliberate(capsule=MediaSelectionCapsule(candidates=tuple(
-            MediaCandidateChoice(
-                token=token,
-                safe_summary="一件已确认、可选择但不必分享的生活事件",
-                advisory=self._advisory.compile(projection=projection, candidate=tokens[token]).model_material(),
+        try:
+            draft = await self._draft.deliberate(capsule=MediaSelectionCapsule(candidates=tuple(
+                MediaCandidateChoice(
+                    token=token,
+                    safe_summary="一件已确认、可选择但不必分享的生活事件",
+                    advisory=self._advisory.compile(projection=projection, candidate=tokens[token]).model_material(),
+                )
+                for token in sorted(tokens)
+            ), draw_suggestion=draw_suggestion))
+        except MediaSelectionDraftError as exc:
+            if not durable_lookup or not callable(getattr(self._ledger, "commit_at_cursor", None)):
+                return MediaSelectionRunResult(status="blocked", reason_code=exc.code)
+            assert attempt_causation_id is not None
+            return self._record_terminal_attempt(
+                cursor=cursor, candidates=candidates, attempt_id=attempt_id,
+                event_id=attempt_event_id, logical_time=logical_time,
+                actor=actor, trace_id=trace_id, correlation_id=correlation_id,
+                outcome="invalid", model=exc.model,
+                raw_output_hash=exc.raw_output_hash,
+                normalized_output_hash=None, failure_code=exc.code,
+                causation_id=attempt_causation_id,
             )
-            for token in sorted(tokens)
-        ), draw_suggestion=draw_suggestion))
+        except Exception:
+            # Provider timeouts/outages are retryable and therefore are not
+            # written as semantic declines.  They still become a structured
+            # scheduler result so an independent result/background queue can
+            # continue in the same bounded drain.
+            return MediaSelectionRunResult(
+                status="blocked", reason_code="media_selection.model_unavailable"
+            )
         if draft.decision == "no_op":
+            if durable_lookup and callable(getattr(self._ledger, "commit_at_cursor", None)):
+                assert draft.model and draft.raw_output_hash and draft.normalized_output_hash
+                assert attempt_causation_id is not None
+                return self._record_terminal_attempt(
+                    cursor=cursor, candidates=candidates, attempt_id=attempt_id,
+                    event_id=attempt_event_id, logical_time=logical_time,
+                    actor=actor, trace_id=trace_id, correlation_id=correlation_id,
+                    outcome="declined", model=draft.model,
+                    raw_output_hash=draft.raw_output_hash,
+                    normalized_output_hash=draft.normalized_output_hash,
+                    failure_code=None,
+                    causation_id=attempt_causation_id,
+                )
             return MediaSelectionRunResult(status="no_op", reason_code="media_selection.model_declined")
         assert draft.token is not None and draft.model and draft.raw_output_hash and draft.normalized_output_hash
         candidate = tokens[draft.token]
@@ -133,6 +290,53 @@ class MediaSelectionWorker:
         )
         recorded = self._recorder.record(cursor=cursor, proposal=proposal, actor=actor, source=self._source, created_at=logical_time, trace_id=trace_id, correlation_id=correlation_id)
         return MediaSelectionRunResult(status="proposed", proposal_event_ref=recorded.proposal_event_ref)
+
+    def _record_terminal_attempt(
+        self, *, cursor: ProjectionCursor, candidates, attempt_id: str,
+        event_id: str, logical_time: datetime, actor: str, trace_id: str,
+        correlation_id: str, outcome: Literal["declined", "invalid"], model: str,
+        raw_output_hash: str, normalized_output_hash: str | None,
+        failure_code: str | None, causation_id: str,
+    ) -> MediaSelectionRunResult:  # type: ignore[no-untyped-def]
+        payload = MediaSelectionAttemptRecordedPayload(
+            attempt_id=attempt_id,
+            candidates=tuple(
+                MediaSelectionCandidateRevision(
+                    candidate_id=item.candidate_id,
+                    entity_revision=item.entity_revision,
+                )
+                for item in candidates
+            ),
+            outcome=outcome, model=model, raw_output_hash=raw_output_hash,
+            normalized_output_hash=normalized_output_hash, failure_code=failure_code,
+        )
+        event_payload = payload.model_dump(mode="json")
+        event = WorldEvent.from_payload(
+            schema_version="world-v2.1", event_id=event_id,
+            event_type="MediaSelectionAttemptRecorded", world_id=self._ledger.world_id,
+            logical_time=logical_time, created_at=logical_time, actor=actor,
+            source=self._source, trace_id=trace_id,
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+            idempotency_key=domain_idempotency_key(
+                event_type="MediaSelectionAttemptRecorded",
+                world_id=self._ledger.world_id, payload=event_payload,
+            ) or "media-selection-attempt:" + attempt_id,
+            payload=event_payload,
+        )
+        try:
+            self._ledger.commit_at_cursor(
+                (event,), expected_cursor=cursor,
+                commit_id="commit:media-selection-attempt:" + attempt_id,
+            )
+        except ConcurrencyConflict:
+            return MediaSelectionRunResult(
+                status="blocked", reason_code="media_selection.cursor_stale"
+            )
+        return MediaSelectionRunResult(
+            status="no_op" if outcome == "declined" else "blocked",
+            reason_code="media_selection.model_declined" if outcome == "declined" else failure_code,
+        )
 
     def _derive_selection(self, *, projection, candidate) -> MediaSelection | None:  # type: ignore[no-untyped-def]
         """Derive all P3 authority from ledger facts, never from model output."""

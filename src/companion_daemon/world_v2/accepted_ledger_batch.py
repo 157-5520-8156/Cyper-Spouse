@@ -18,15 +18,23 @@ from weakref import WeakKeyDictionary
 from .schemas import ProjectionCursor, WorldEvent
 from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .affect_acceptance_manifest import AFFECT_ACCEPTANCE_MANIFEST_VERSION
+from .relationship_acceptance_manifest import RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION
+from .relationship_adjustment_acceptance_manifest import (
+    RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
+)
 from .activity_lifecycle_acceptance_manifest import (
     ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
 )
 from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
+from .media_continuation_acceptance_manifest import (
+    MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+)
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .expression_plan_manifest import EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
 from .interaction_bid_acceptance_manifest import INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
 from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
+from .social_action_acceptance import SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
 
 
 class AcceptedLedgerBatchError(ValueError):
@@ -140,12 +148,16 @@ class AcceptedLedgerBatchIssuer:
             MINIMAL_REPLY_MANIFEST_VERSION,
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
+            RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+            MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
+            SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
         }:
             raise AcceptedLedgerBatchError("accepted batch must begin with an accepted manifest")
         for name, value in {

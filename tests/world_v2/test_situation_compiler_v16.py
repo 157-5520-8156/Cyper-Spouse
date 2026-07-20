@@ -26,6 +26,7 @@ from companion_daemon.world_v2.location_authority_schemas import (
     V2LocationValues,
     v2_location_semantic_fingerprint,
 )
+from companion_daemon.world_v2.local_chronology import LocalChronology
 from companion_daemon.world_v2.resource_authority_schemas import (
     V2ResourceOrigin,
     V2ResourceProjection,
@@ -386,6 +387,16 @@ def test_compile_is_order_invariant_source_bound_and_explicit_about_missing_head
     assert tuple(item.identity for item in first.internal.source_revisions) == tuple(
         sorted(item.identity for item in first.internal.source_revisions)
     )
+
+
+def test_compile_expresses_current_time_and_daypart_in_local_chronology() -> None:
+    result = SituationCompiler(
+        local_chronology=LocalChronology("Asia/Shanghai")
+    ).compile(_request())
+
+    assert result.internal is not None
+    assert result.internal.logical_time.isoformat() == "2026-07-14T19:30:00+08:00"
+    assert result.internal.time_segment == "evening"
 
 
 def test_snapshot_rejects_cross_world_future_and_wrong_actor_heads() -> None:

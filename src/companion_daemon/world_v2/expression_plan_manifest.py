@@ -18,6 +18,7 @@ from pydantic import Field, model_validator
 
 from .minimal_reply_acceptance import ExpressionBeatMaterial
 from .schema_core import FrozenModel
+from .schemas import ResponseExpectationAuthority
 from .schemas import Action, BudgetReservation
 
 if TYPE_CHECKING:
@@ -66,6 +67,12 @@ def canonical_expression_plan_manifest_hash(value: dict[str, object]) -> str:
             item.model_dump(mode="json") if isinstance(item, ExpressionPlanBeatManifest) else item
             for item in material["beats"]
         )
+    expectation = material.get("response_expectation")
+    if isinstance(expectation, ResponseExpectationAuthority):
+        material["response_expectation"] = expectation.model_dump(mode="json")
+    elif expectation is None:
+        # Preserve every pre-initiative manifest hash byte-for-byte.
+        material.pop("response_expectation", None)
     return canonical_expression_plan_value_hash(material)
 
 
@@ -118,6 +125,7 @@ class ExpressionPlanAcceptanceManifest(FrozenModel):
     ordering_policy: str = Field(min_length=1, max_length=128)
     terminal_policy: str = Field(min_length=1, max_length=128)
     beats: tuple[ExpressionPlanBeatManifest, ...] = Field(min_length=1, max_length=32)
+    response_expectation: ResponseExpectationAuthority | None = None
     manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
@@ -149,6 +157,11 @@ class ExpressionPlanAcceptanceManifest(FrozenModel):
             raise ValueError("expression plan manifest action ids must be unique")
         if any(item.action.intent_ref != f"{self.proposal_id}:{item.intent_id}" for item in self.beats):
             raise ValueError("expression plan manifest action intent does not bind proposal")
+        if self.response_expectation is not None and (
+            self.response_expectation.source_plan_id != self.plan_id
+            or self.response_expectation.source_beat_id not in beat_ids
+        ):
+            raise ValueError("response expectation does not bind this expression")
         return self
 
 
@@ -170,6 +183,7 @@ def build_expression_plan_manifest(
         "plan_id": material.plan_id,
         "ordering_policy": material.ordering_policy,
         "terminal_policy": material.terminal_policy,
+        "response_expectation": material.response_expectation,
         "beats": tuple(
             ExpressionPlanBeatManifest(
                 beat=item.beat,

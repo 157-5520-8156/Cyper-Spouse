@@ -407,7 +407,7 @@
       "status": "needs-art", "method": "imagegen-background-extraction",
       "sources": ["sources/teal-stool-chroma-v2.png"],
       "generation": {"reference": "zhizhi-room-isometric-v2.png", "inputCrop": [580, 860, 760, 1040], "background": "flat #ff00ff chroma", "alphaPostprocess": {"helper": "imagegen/scripts/remove_chroma_key.py", "keying": {"autoKey": "border", "transparentThreshold": 12, "opaqueThreshold": 220, "softMatte": true, "despill": true}}},
-      "note": "Tight reference-crop candidate for the low teal footstool; it replaces a high-leg generated stool only in art-draft and must pass position/angle browser review before final approval."
+      "note": "Tight reference-crop candidate contributes only an alpha ownership mask. Runtime RGB is cropped from the room master, preserving its original angle and material; the assembled layer must pass position/angle browser review before approval."
     }
   ],
   "items": [
@@ -463,7 +463,7 @@
     {"id":"bedside-table","zone":"bedroom","category":"furniture","status":"planned","interactive":false},
     {"id":"bedside-lamp","zone":"bedroom","category":"lighting","status":"planned","interactive":false},
     {"id":"bedside-decor-cluster","zone":"bedroom","category":"decor-cluster","status":"planned","interactive":false},
-    {"id":"teal-stool","zone":"bedroom","category":"furniture","status":"partial","interactive":false,"note":"Production v1 is verified, while art-draft uses a separately calibrated low-stool v2 candidate that still requires final browser approval."},
+    {"id":"teal-stool","zone":"bedroom","category":"furniture","status":"partial","interactive":false,"note":"Production v1 is verified; art-draft uses master RGB plus an AI-derived ownership alpha mask and still requires final browser approval."},
     {"id":"bed-rug","zone":"bedroom","category":"soft-furnishing","status":"planned","interactive":false},
     {"id":"divider","zone":"bedroom","category":"furniture","status":"partial","interactive":false,"note":"Logical object and front matte exist; full RGB remains in master."},
     {"id":"bed-divider-content-cluster","zone":"bedroom","category":"decor-cluster","status":"planned","interactive":false},

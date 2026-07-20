@@ -36,6 +36,18 @@ def test_fact_memory_draft_is_limited_to_the_installed_salience_matrix() -> None
     assert result.salience.future_utility_bp == 7900
 
 
+def test_fact_memory_draft_normalizes_provider_probability_salience() -> None:
+    raw = _retained()
+    raw["salience"] = {
+        key: value / 10_000 for key, value in raw["salience"].items()  # type: ignore[union-attr]
+    }
+
+    result = materialize_fact_memory_draft(json.dumps(raw))
+
+    assert result is not None
+    assert result.salience.future_utility_bp == 7900
+
+
 @pytest.mark.parametrize(
     "raw",
     [

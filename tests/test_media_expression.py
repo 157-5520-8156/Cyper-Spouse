@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from companion_daemon.media_address import MediaAddressStrategy
@@ -6,6 +8,7 @@ from companion_daemon.media_camera import CameraGeometry
 from companion_daemon.media_embodiment import build_embodied_candidates
 from companion_daemon.media_expression import (
     PERCEPTUAL_SIGNATURE_VERSION,
+    _identity_selection,
     build_complete_candidates,
     candidate_perceptual_signature,
 )
@@ -26,6 +29,147 @@ def test_media_address_strategy_round_trips_a_recipient_directed_photo() -> None
     )
 
     assert MediaAddressStrategy.from_payload(strategy.to_payload()) == strategy
+
+
+def test_identity_reference_contract_never_exceeds_anchor_plus_one_geometry_asset(tmp_path) -> None:
+    assets = tuple(str(tmp_path / name) for name in ("canonical.png", "fullbody.png", "left.png"))
+    for path in assets:
+        Path(path).write_bytes(b"reference")
+    geometry = CameraGeometry.create(
+        shot_distance="full_body",
+        camera_height="eye",
+        view_axis="left_three_quarter",
+        pitch="level",
+        roll="level",
+        orientation="portrait",
+        subject_occupancy="balanced",
+        subject_placement="center",
+        environment_share="supporting",
+        focus_behavior="subject_priority",
+        imperfection_profile="clean_intentional",
+        device_visibility="external_unseen",
+    )
+
+    selection = _identity_selection(
+        geometry,
+        assets=assets,
+        metadata={
+            assets[2]: {
+                "identity_usage": "angle_support",
+                "head_yaw": "toward_frame_left",
+            }
+        },
+        catalog_version="test-catalog",
+        selection_seed="full-body-reference-limit",
+    )
+
+    assert selection is not None
+    assert selection.asset_ids == (assets[0], assets[2])
+    assert len(selection.asset_ids) == 2
+
+
+def test_identity_reference_contract_never_uses_profile_support_without_canonical_anchor(tmp_path) -> None:
+    assets = tuple(str(tmp_path / name) for name in ("canonical.png", "profile.png", "left.png"))
+    for path in assets:
+        Path(path).write_bytes(b"reference")
+    geometry = CameraGeometry.create(
+        shot_distance="medium",
+        camera_height="eye",
+        view_axis="left_three_quarter",
+        pitch="level",
+        roll="level",
+        orientation="portrait",
+        subject_occupancy="balanced",
+        subject_placement="center",
+        environment_share="supporting",
+        focus_behavior="subject_priority",
+        imperfection_profile="clean_intentional",
+        device_visibility="external_unseen",
+    )
+
+    selection = _identity_selection(
+        geometry,
+        assets=assets,
+        metadata={
+            assets[0]: {"identity_usage": "canonical_identity", "head_yaw": "near_front"},
+            assets[1]: {"identity_usage": "profile_only", "head_yaw": "toward_frame_left"},
+            assets[2]: {"identity_usage": "angle_support", "head_yaw": "toward_frame_left"},
+        },
+        catalog_version="test-catalog",
+        selection_seed="profile-is-not-an-identity-anchor",
+    )
+
+    assert selection is not None
+    assert selection.asset_ids == (assets[0], assets[2])
+    assert selection.roles == ("identity_anchor", "angle_support")
+
+
+def test_oblique_reflection_adds_only_an_eligible_angle_support_to_canonical(tmp_path) -> None:
+    assets = tuple(str(tmp_path / name) for name in ("canonical.png", "profile.png", "right.png"))
+    for path in assets:
+        Path(path).write_bytes(b"reference")
+    geometry = CameraGeometry.create(
+        shot_distance="full_body",
+        camera_height="chest",
+        view_axis="reflection_oblique",
+        pitch="level",
+        roll="level",
+        orientation="portrait",
+        subject_occupancy="balanced",
+        subject_placement="right_third",
+        environment_share="supporting",
+        focus_behavior="subject_priority",
+        imperfection_profile="reflection_layer",
+        device_visibility="mirror_visible",
+    )
+
+    selection = _identity_selection(
+        geometry,
+        assets=assets,
+        metadata={
+            assets[0]: {"identity_usage": "canonical_identity", "head_yaw": "near_front"},
+            assets[1]: {"identity_usage": "profile_only", "head_yaw": "toward_frame_left"},
+            assets[2]: {"identity_usage": "angle_support", "head_yaw": "toward_frame_right"},
+        },
+        catalog_version="test-catalog",
+        selection_seed="reflection-identity-contract",
+    )
+
+    assert selection is not None
+    assert selection.asset_ids == (assets[0], assets[2])
+    assert selection.roles == ("identity_anchor", "angle_support")
+
+
+def test_unclassified_reference_cannot_silently_become_angle_support(tmp_path) -> None:
+    assets = tuple(str(tmp_path / name) for name in ("canonical.png", "unknown-profile.png"))
+    for path in assets:
+        Path(path).write_bytes(b"reference")
+    geometry = CameraGeometry.create(
+        shot_distance="medium",
+        camera_height="eye",
+        view_axis="reflection_oblique",
+        pitch="level",
+        roll="level",
+        orientation="portrait",
+        subject_occupancy="balanced",
+        subject_placement="center",
+        environment_share="supporting",
+        focus_behavior="subject_priority",
+        imperfection_profile="reflection_layer",
+        device_visibility="mirror_visible",
+    )
+
+    selection = _identity_selection(
+        geometry,
+        assets=assets,
+        metadata={},
+        catalog_version="test-catalog",
+        selection_seed="unknown-is-not-an-angle-support",
+    )
+
+    assert selection is not None
+    assert selection.asset_ids == (assets[0],)
+    assert selection.roles == ("identity_anchor",)
 
 
 def test_media_address_strategy_rejects_attraction_without_recipient_address() -> None:

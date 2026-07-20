@@ -2,7 +2,9 @@ from datetime import UTC, datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from companion_daemon.budget import BudgetGate, UsageEstimate
+import pytest
+
+from companion_daemon.budget import BudgetGate, UsageEstimate, image_render_estimate
 from companion_daemon.db import CompanionStore
 
 
@@ -31,6 +33,14 @@ def test_usage_totals_are_windowed(tmp_path: Path) -> None:
 
     assert store.usage_total("day", datetime.now(UTC)) == 0.03
     assert store.usage_count("vision", "month", datetime.now(UTC)) == 1
+
+
+def test_image_render_estimate_accounts_for_reference_images_and_retry_reserve() -> None:
+    single = image_render_estimate(reference_count=2, quality="medium", attempts=1)
+    retry_reserve = image_render_estimate(reference_count=2, quality="medium", attempts=2)
+
+    assert single.cny > 1
+    assert retry_reserve.cny == pytest.approx(single.cny * 2, abs=0.0001)
 
 
 def test_model_usage_summary_groups_real_tokens_by_purpose(tmp_path: Path) -> None:

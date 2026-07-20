@@ -12,6 +12,10 @@ from companion_daemon.world_v2.image_evidence_contract import (
     ImageEvidenceDeclaredPayload,
     ImageEvidenceV1,
 )
+from companion_daemon.world_v2.private_image_evidence_contract import (
+    RecipientScopedImageEvidenceDeclaredPayload,
+    RecipientScopedImageEvidenceV1,
+)
 from companion_daemon.world_v2.schemas import CommittedWorldEventRef, ProjectionCursor, WorldEvent
 
 
@@ -112,6 +116,51 @@ def test_binder_refuses_to_infer_a_mirror_from_character_presence_alone() -> Non
     ledger = _Ledger(source, declaration)
 
     assert CharacterMediaFactBinder(ledger=ledger).discover(cursor=_cursor(ledger), logical_time=NOW) == ()
+
+
+def test_recipient_scoped_personal_never_opens_a_p3_candidate_but_private_still_does() -> None:
+    """Candidate discovery mirrors P3's private-only authorization boundary."""
+
+    personal_source = _event(event_id="event:personal-activity", event_type="ActivityCompleted", payload={})
+    private_source = _event(event_id="event:private-activity", event_type="ActivityCompleted", payload={})
+
+    def declaration(*, event_id: str, source: WorldEvent, visibility: str) -> WorldEvent:
+        return _event(
+            event_id=event_id,
+            event_type="RecipientScopedImageEvidenceDeclared",
+            payload=RecipientScopedImageEvidenceDeclaredPayload(
+                source_event_ref=source.event_id,
+                source_event_payload_hash=source.payload_hash,
+                source_event_type=source.event_type,
+                source_privacy_ceiling=visibility,
+                recipient_ref="user:recipient",
+                image_evidence=RecipientScopedImageEvidenceV1(
+                    visibility=visibility,
+                    activity={"id": "activity:wind-down", "kind": "wind_down"},
+                    character_media=CharacterMediaEvidenceV1(
+                        character_ref="agent:companion",
+                        present=True,
+                        capture_capabilities=("character_front_camera",),
+                    ),
+                ),
+                declared_at=NOW,
+            ).model_dump(mode="json"),
+        )
+
+    personal = declaration(
+        event_id="event:personal-declaration", source=personal_source, visibility="personal"
+    )
+    private = declaration(
+        event_id="event:private-declaration", source=private_source, visibility="private"
+    )
+    ledger = _Ledger(personal_source, personal, private_source, private)
+
+    candidates = CharacterMediaFactBinder(ledger=ledger).discover(cursor=_cursor(ledger), logical_time=NOW)
+
+    assert len(candidates) == 1
+    assert candidates[0].privacy_ceiling == "private"
+    assert candidates[0].source_event_refs == tuple(sorted((private_source.event_id, private.event_id)))
+    assert personal.event_id not in candidates[0].source_event_refs
 
 
 def test_candidate_runtime_opens_only_the_binder_discovered_candidate_after_its_declaration_wake() -> None:

@@ -65,7 +65,12 @@ class _Ledger:
     def lookup_event_commit(self, event_id: str):  # type: ignore[no-untyped-def]
         if self.event is None or event_id != self.event.event_id:
             return None
-        return self.event, SimpleNamespace(world_revision=7, deliberation_revision=3, ledger_sequence=11)
+        return self.event, SimpleNamespace(
+            world_revision=7,
+            deliberation_revision=3,
+            ledger_sequence=11,
+            event_ids=(self.event.event_id,),
+        )
 
 
 class _TriggerStore:
@@ -106,6 +111,68 @@ class _Activity:
         if self.raises:
             raise RuntimeError("activity failed")
         return SimpleNamespace(status=self.status)
+
+
+class _LifeAuthor:
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self.raises = raises
+        self.calls = []
+
+    async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        if self.raises is not None:
+            raise self.raises
+        return SimpleNamespace(status="idle")
+
+
+class _OpenWorld:
+    def __init__(self, status: str) -> None:
+        self.status = status
+        self.calls = []
+
+    def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        return SimpleNamespace(status=self.status)
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_accepts_exact_clock_from_a_multi_world_event_commit() -> None:
+    """A tick may atomically append ClockAdvanced plus affect decay events."""
+
+    event = _event("clock-with-affect-decay")
+    ledger = _Ledger(event)
+    ledger.lookup_event_commit = lambda event_id: (  # type: ignore[method-assign]
+        (
+            event,
+            SimpleNamespace(
+                # CommitResult carries the revision after the whole batch;
+                # the clock's committed ref carries its event-level revision.
+                world_revision=8,
+                deliberation_revision=3,
+                ledger_sequence=12,
+                event_ids=(event.event_id, "event:affect-decayed"),
+            ),
+        )
+        if event_id == event.event_id
+        else None
+    )
+    trigger_store, media = _TriggerStore(), _Media()
+    runtime = LifeEcologyRuntime(
+        ledger=ledger,
+        trigger_store=trigger_store,
+        media_followup=media,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:multi-event-clock",
+        correlation_id="correlation:multi-event-clock",
+    )
+
+    assert result.status == "idle"
+    assert len(trigger_store.claims) == 1
+    assert len(media.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -249,6 +316,58 @@ async def test_life_ecology_fails_safe_without_media_when_activity_followup_fail
     assert result.reason_code == "life_ecology.activity_followup_failed"
     assert media.calls == []
     assert trigger_store.completed[0][2] == "failed_safe"
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_keeps_model_deferred_wake_recoverable_instead_of_terminalizing_it() -> None:
+    event = _event("clock-open-world-deferred")
+    trigger_store, media, open_world = _TriggerStore(), _Media(), _OpenWorld("deferred")
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        open_world_followup=open_world,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:open-world-deferred",
+        correlation_id="correlation:open-world-deferred",
+    )
+
+    assert result.status == "deferred"
+    assert result.reason_code == "life_ecology.open_world_deferred"
+    assert result.open_world_followup_status == "deferred"
+    assert media.calls == []
+    assert trigger_store.completed == []
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_does_not_hide_life_author_programming_errors() -> None:
+    event = _event("clock-author-bug")
+    trigger_store, media = _TriggerStore(), _Media()
+    author = _LifeAuthor(raises=RuntimeError("programming bug"))
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        life_author_followup=author,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    with pytest.raises(RuntimeError, match="programming bug"):
+        await runtime.advance_once(
+            wake_event_ref=event.event_id,
+            trace_id="trace:author-bug",
+            correlation_id="correlation:author-bug",
+        )
+
+    assert len(author.calls) == 1
+    assert media.calls == []
+    # Do not terminalise an owned wake after an unexpected code defect: the
+    # exception must remain observable and the durable run recoverable.
+    assert trigger_store.completed == []
 
 
 @pytest.mark.asyncio

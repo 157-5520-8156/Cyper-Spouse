@@ -93,25 +93,28 @@ EXTERNAL_CAPABILITIES: tuple[ExternalCapability, ...] = (
         capability_id="expression.reaction",
         action_kind="reaction",
         family="expression",
-        availability="adapter_only",
-        installed_closure=("immutable_payload", "receipt_binding_adapter"),
-        missing_closure=("proposal_materializer", "concrete_transport", "receipt_recovery"),
+        availability="production",
+        installed_closure=(
+            "immutable_payload", "specialized_acceptance", "concrete_transport", "receipt_recovery"
+        ),
     ),
     ExternalCapability(
         capability_id="expression.typing",
         action_kind="typing",
         family="expression",
-        availability="adapter_only",
-        installed_closure=("immutable_payload", "receipt_binding_adapter"),
-        missing_closure=("proposal_materializer", "concrete_transport", "receipt_recovery"),
+        availability="production",
+        installed_closure=(
+            "immutable_payload", "specialized_acceptance", "concrete_transport", "receipt_recovery"
+        ),
     ),
     ExternalCapability(
         capability_id="expression.sticker",
         action_kind="sticker",
         family="expression",
-        availability="adapter_only",
-        installed_closure=("immutable_payload", "receipt_binding_adapter"),
-        missing_closure=("proposal_materializer", "concrete_transport", "receipt_recovery"),
+        availability="production",
+        installed_closure=(
+            "immutable_payload", "specialized_acceptance", "concrete_transport", "receipt_recovery"
+        ),
     ),
     ExternalCapability(
         capability_id="perception.vision",

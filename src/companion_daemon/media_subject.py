@@ -908,7 +908,21 @@ def presentation_prompt_block(
     presentation: SubjectPresentationPlan,
     *,
     config_path: Path = DEFAULT_SUBJECT_CONFIG,
+    appearance_mode: str = "full",
+    include_identity_reference_guidance: bool = True,
 ) -> str:
+    """Compile the frozen subject performance without changing its facts.
+
+    Most renderers need the complete shot-local appearance contract.  A
+    reference-free, LoRA-bound private workflow is different: its event
+    evidence and embodied contract own wardrobe, grooming, and accessories.
+    Repeating the ordinary fallback wardrobe from a generic presentation can
+    otherwise contradict an evidenced private outfit.  The two flags expose
+    that seam without creating a second subject-presentation format.
+    """
+
+    if appearance_mode not in {"full", "event_authoritative"}:
+        raise ValueError("invalid subject presentation appearance mode")
     appearance = presentation.appearance
     performance = presentation.performance
     try:
@@ -952,13 +966,39 @@ def presentation_prompt_block(
         else f"- expression and body: {render('expression', performance.expression)}; "
     )
     body_prefix = "- body: " if facial or modern_facial else ""
+    if appearance_mode == "event_authoritative":
+        appearance_line = (
+            f"- hair: {render('hair_arrangement', appearance.hair_arrangement)}. "
+            "The outfit, grooming, and accessories must follow selected event evidence and the "
+            "frozen embodied presentation; never replace them with an ordinary default wardrobe.\n"
+        )
+        accessory_rule = (
+            "Do not add an unlisted signature accessory or inherit an accessory from a generic identity "
+            "description.\n"
+        )
+    else:
+        appearance_line = (
+            f"- appearance source: {appearance.source}; hair: "
+            f"{render('hair_arrangement', appearance.hair_arrangement)}; "
+            f"outfit: {render('outfit_role', appearance.outfit_role)}; "
+            f"grooming: {render('grooming', appearance.grooming)}; "
+            f"accessories: {accessories}\n"
+        )
+        accessory_rule = (
+            "The accessory list is exhaustive for this shot: do not add an unlisted signature hair clip "
+            "or inherit accessories from an identity reference.\n"
+        )
+    identity_guidance = (
+        "Identity references and the general identity anchor define identity only. This shot-specific "
+        "appearance overrides their default hairstyle tendencies. Do not copy their head angle, gaze, "
+        "expression, hairstyle, gesture, or framing. Follow this frozen presentation instead."
+        if include_identity_reference_guidance
+        else "Follow this frozen presentation and the event-supported appearance; do not introduce a generic "
+        "identity-reference pose, wardrobe, accessory, or framing."
+    )
     return (
         "Frozen subject presentation (camera-frame directions, not the character's left/right):\n"
-        f"- appearance source: {appearance.source}; hair: "
-        f"{render('hair_arrangement', appearance.hair_arrangement)}; "
-        f"outfit: {render('outfit_role', appearance.outfit_role)}; "
-        f"grooming: {render('grooming', appearance.grooming)}; "
-        f"accessories: {accessories}\n"
+        f"{appearance_line}"
         f"- head geometry: {render('head_yaw', performance.head_yaw)}; "
         f"{render('head_pitch', performance.head_pitch)}; "
         f"{render('head_roll', performance.head_roll)}"
@@ -972,12 +1012,9 @@ def presentation_prompt_block(
         f"occlusion risk={performance.occlusion_complexity}. Keep the wrist, hand, sleeve opening, "
         "and any displayed object anatomically readable and visually distinct, with the correct "
         "contact or attachment to the described surface.\n"
-        "The accessory list is exhaustive for this shot: do not add an unlisted signature hair clip "
-        "or inherit accessories from an identity reference.\n"
+        f"{accessory_rule}"
         f"{social}"
-        "Identity references and the general identity anchor define identity only. This shot-specific "
-        "appearance overrides their default hairstyle tendencies. Do not copy their head angle, gaze, "
-        "expression, hairstyle, gesture, or framing. Follow this frozen presentation instead."
+        f"{identity_guidance}"
     )
 
 
@@ -1043,6 +1080,13 @@ def _infer_outfit_role(snapshot: Mapping[str, object]) -> str:
         "study": "campus_casual",
         "studying": "campus_casual",
         "exercise": "athletic",
+        "workout": "athletic",
+        "gym": "athletic",
+        "pilates": "athletic",
+        "dance": "athletic",
+        "dancing": "athletic",
+        "running": "athletic",
+        "swimming": "swimwear",
         "sleep": "home_rest",
         "travel": "travel_casual",
         "walking": "outdoor_casual",

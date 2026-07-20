@@ -26,6 +26,7 @@ from typing import Callable, Iterable, Literal, Mapping
 
 from .proposal_audit_schemas import ModelResultAuditProjection, RecordedModelResultAudit
 from .replay_evidence import ReplayEvidence
+from .schemas import LedgerProjection
 
 
 RouteClass = Literal[
@@ -44,6 +45,8 @@ _REQUIRED_TRACE_SEGMENTS = frozenset(
         "coalescing",
         "queue",
         "snapshot",
+        "context",
+        "ledger_commit",
         "advisor",
         "model_ttft",
         "model_completion",
@@ -506,19 +509,45 @@ def model_traces_from_replay(
     audit.1 record into provider-provenance.
     """
 
+    return model_traces_from_projection(
+        projection=evidence.projection,
+        classifier=classifier,
+        token_provenance=token_provenance,
+        thinking_tokens_by_call=thinking_tokens_by_call,
+    )
+
+
+def model_traces_from_projection(
+    *,
+    projection: LedgerProjection,
+    classifier: RouteClassifier = default_route_classifier,
+    token_provenance: TokenProvenance = "unknown",
+    thinking_tokens_by_call: Mapping[str, int] | None = None,
+) -> tuple[ModelCallTrace, ...]:
+    """Extract persisted model audits from the authenticated current head.
+
+    Production hot-path metrics use the incrementally persisted SQLite head;
+    exporting a full replay-evidence bundle merely to read this projection
+    would itself perform history work and contaminate the performance gate.
+    """
+
     thinking = dict(thinking_tokens_by_call or {})
     traces: list[ModelCallTrace] = []
-    for projection in evidence.projection.model_result_audits:
-        audit = RecordedModelResultAudit.model_validate_json(projection.audit_json)
+    for audit_projection in projection.model_result_audits:
+        audit = RecordedModelResultAudit.model_validate_json(audit_projection.audit_json)
         usage = audit.usage
-        route_class = usage.route_class if usage is not None else classifier(audit, projection)
+        route_class = (
+            usage.route_class
+            if usage is not None
+            else classifier(audit, audit_projection)
+        )
         traces.append(
             ModelCallTrace(
-                turn_id=projection.trigger_ref,
+                turn_id=audit_projection.trigger_ref,
                 route_class=route_class,
                 model_call_id=audit.model_call_id,
                 attempt_id=audit.attempt_id,
-                attempt_index=projection.attempt_index,
+                attempt_index=audit_projection.attempt_index,
                 model_id=audit.model_id,
                 model_version=audit.model_version,
                 model_tier=audit.route.tier,
@@ -759,5 +788,6 @@ __all__ = [
     "CostGateResult", "CostProfile", "CostProfileGate", "LatencyMetricsExporter", "LatencyReport",
     "MechanicalTraceGate", "MechanicalTraceGateResult", "ModelCallTrace", "RouteCostLimit",
     "EconomyTraceError", "TEST_ECONOMY_V1", "TraceSegmentSample", "default_route_classifier",
-    "model_traces_from_replay", "require_paid_action_profile", "trace_input_from_json", "trace_output_json",
+    "model_traces_from_projection", "model_traces_from_replay", "require_paid_action_profile",
+    "trace_input_from_json", "trace_output_json",
 ]

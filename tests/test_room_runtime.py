@@ -5,7 +5,7 @@ import subprocess
 def test_room_runtime_javascript_contract() -> None:
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        ["node", "--test", "tests/js/room_runtime.test.js"],
+        ["node", "--test", "tests/js/room_runtime.test.js", "tests/js/tile_runtime.test.js"],
         cwd=root,
         capture_output=True,
         check=False,

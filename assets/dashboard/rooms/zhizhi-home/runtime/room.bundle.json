@@ -19,6 +19,28 @@
       393
     ]
   },
+  "projection": {
+    "assetKit": "../../asset-kits/orthographic-isometric-v1.json",
+    "camera": {
+      "projection": "orthographic",
+      "azimuthDegrees": 45,
+      "elevationDegrees": 30
+    },
+    "screenAxes": {
+      "x": [
+        85,
+        42
+      ],
+      "y": [
+        -85,
+        42
+      ],
+      "z": [
+        0,
+        -84
+      ]
+    }
+  },
   "images": {
     "room": "/assets/dashboard/zhizhi-room-isometric-v2.png",
     "sprite": "/assets/dashboard/zhizhi-iso-walk-v4.png",
@@ -49,16 +71,11 @@
     },
     "poses": {
       "idle": {
-        "image": "idle",
-        "crop": [
-          100,
-          70,
-          250,
-          500
-        ],
+        "image": "sprite",
+        "walkFrame": 0,
         "display": [
-          58,
-          116
+          132,
+          132
         ]
       },
       "sit": {
@@ -463,7 +480,7 @@
         "category": "furniture",
         "status": "partial",
         "interactive": false,
-        "note": "Production v1 is verified, while art-draft uses a separately calibrated low-stool v2 candidate that still requires final browser approval."
+        "note": "Production v1 is verified; art-draft uses master RGB plus an AI-derived ownership alpha mask and still requires final browser approval."
       },
       {
         "id": "bed-rug",
@@ -896,7 +913,12 @@
           0
         ]
       },
-      "auditPose": {}
+      "auditPose": {},
+      "dimensions": {
+        "width": 2,
+        "depth": 1,
+        "height": 1.5
+      }
     },
     {
       "id": "bed",
@@ -952,7 +974,12 @@
           0
         ]
       },
-      "auditPose": {}
+      "auditPose": {},
+      "dimensions": {
+        "width": 2,
+        "depth": 2,
+        "height": 0.8
+      }
     },
     {
       "id": "sofa",
@@ -1015,6 +1042,11 @@
       },
       "auditPose": {
         "behind": "sit"
+      },
+      "dimensions": {
+        "width": 2,
+        "depth": 1,
+        "height": 1.1
       }
     },
     {
@@ -1069,7 +1101,12 @@
           0
         ]
       },
-      "auditPose": {}
+      "auditPose": {},
+      "dimensions": {
+        "width": 1,
+        "depth": 1,
+        "height": 0.7
+      }
     },
     {
       "id": "dining",
@@ -1133,7 +1170,12 @@
           0
         ]
       },
-      "auditPose": {}
+      "auditPose": {},
+      "dimensions": {
+        "width": 2,
+        "depth": 2,
+        "height": 0.7
+      }
     },
     {
       "id": "divider",
@@ -1199,7 +1241,12 @@
           0
         ]
       },
-      "auditPose": {}
+      "auditPose": {},
+      "dimensions": {
+        "width": 2,
+        "depth": 0.5,
+        "height": 2.5
+      }
     },
     {
       "id": "teal-stool",
@@ -1254,7 +1301,12 @@
           0
         ]
       },
-      "auditPose": {}
+      "auditPose": {},
+      "dimensions": {
+        "width": 0.75,
+        "depth": 0.75,
+        "height": 0.75
+      }
     }
   ],
   "interactions": {
@@ -3812,8 +3864,8 @@
             "role": "front",
             "image": "tealStoolFront0Draft",
             "origin": [
-              626,
-              900
+              600,
+              870
             ],
             "depthBias": 500
           }
@@ -3826,9 +3878,9 @@
           "front": false
         },
         "provenance": {
-          "method": "imagegen-background-extraction",
+          "method": "master-pixels-with-ai-alpha-mask",
           "reference": "zhizhi-room-isometric-v2.png",
-          "source": "sources/teal-stool-chroma-v2.png"
+          "source": "../../zhizhi-room-isometric-v2.png"
         },
         "audit": {},
         "auditPose": {}

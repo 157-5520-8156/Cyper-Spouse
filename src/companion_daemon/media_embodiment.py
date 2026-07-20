@@ -342,6 +342,7 @@ def build_embodied_candidates(
         raise ValueError("invalid sensual charge ceiling")
     state = VisiblePhysicalStateResolver().resolve(snapshot)
     wardrobe_refs = _private_wardrobe_evidence_refs(snapshot)
+    functional_bodywear_refs = _functional_bodywear_evidence_refs(snapshot)
     catalog = load_embodiment_catalog(config_path)
     recent = {item.split("|", 1)[0] for item in recent_signatures[-12:] if item}
     recent_three = tuple(recent_signatures[-3:])
@@ -393,6 +394,13 @@ def build_embodied_candidates(
             for coverage_mode in coverage_modes:
                 if coverage_mode in {"private_apparel", "strategic_cover"} and not wardrobe_refs:
                     continue
+                # A functional bodywear result must be grounded either in the
+                # frozen appearance state or in an activity that reasonably
+                # supplies that clothing for this one shot.  This stops a
+                # generic indoor/private event from acquiring a sports bra or
+                # swimwear merely because a charged candidate was available.
+                if coverage_mode == "functional_bodywear" and not functional_bodywear_refs:
+                    continue
                 if charge == "veiled" and (
                     coverage_mode not in {"private_apparel", "strategic_cover"} or not wardrobe_refs
                 ):
@@ -430,6 +438,8 @@ def build_embodied_candidates(
                         wardrobe_evidence_refs=(
                             wardrobe_refs
                             if coverage_mode in {"private_apparel", "strategic_cover"}
+                            else functional_bodywear_refs
+                            if coverage_mode == "functional_bodywear"
                             else ()
                         ),
                     )
@@ -466,7 +476,18 @@ def build_embodied_candidates(
     return tuple(sorted(candidates, key=weighted_key)[:limit])
 
 
-def embodiment_prompt_block(presentation: EmbodiedPresentation) -> str:
+def embodiment_prompt_block(
+    presentation: EmbodiedPresentation,
+    *,
+    include_coverage_boundary: bool = True,
+) -> str:
+    """Compile a frozen body presentation without changing its semantic contract.
+
+    The ordinary renderer needs the conservative coverage wording below.  A
+    specialized high-private provider owns that interpretation itself, so its
+    prompt can deliberately omit that *render-time* wording while the frozen
+    MediaPlan and its deterministic eligibility checks remain unchanged.
+    """
     cue_text = (
         "; ".join(
             f"{cue.cue_id}={cue.intensity} on {','.join(cue.regions)} "
@@ -482,6 +503,30 @@ def embodiment_prompt_block(presentation: EmbodiedPresentation) -> str:
         if presentation.version in {EMBODIED_PRESENTATION_V2, EMBODIED_PRESENTATION_V3}
         else ""
     )
+    natural_visibility = (
+        "- natural visibility allowance: retain any naturally visible non-key region supported by the "
+        "frozen coverage mode and activity; do not invent extra clothing merely to neutralize a grounded "
+        "adult private image.\n"
+        if include_coverage_boundary and presentation.sensual_charge != "none"
+        else ""
+    )
+    charged_functional_visibility = (
+        "- charged functional-bodywear target: use ordinary opaque activity-appropriate training clothing, "
+        "but do not default to a fully covered long-sleeve-and-long-pants silhouette when the frozen plan "
+        "allows shoulders, arms, waist or legs. Keep at least one supported non-key region naturally visible "
+        "within a whole-person action; this is not an isolated body-part focus.\n"
+        if include_coverage_boundary
+        and presentation.sensual_charge == "charged"
+        and presentation.coverage_mode == "functional_bodywear"
+        and set(presentation.allowed_regions).intersection({"shoulders", "arms", "waist", "legs"})
+        else ""
+    )
+    boundary = (
+        f"- forbidden: {'; '.join(presentation.forbidden_cues)}. Never isolate one body part "
+        "as a fetish subject; keep every key area opaquely covered and the anatomy physically coherent."
+        if include_coverage_boundary
+        else "- Keep the complete planned body action, hands, camera relationship, and anatomy physically coherent."
+    )
     return (
         "Frozen embodied presentation:\n"
         f"- dimensions: physical_salience={presentation.physical_salience}; "
@@ -494,8 +539,9 @@ def embodiment_prompt_block(presentation: EmbodiedPresentation) -> str:
         f"- evidenced physical cues: {cue_text}\n"
         f"- sensory treatment: {'; '.join(presentation.sensory_cues) or 'ordinary'}\n"
         f"- regions may appear naturally: {', '.join(presentation.allowed_regions) or 'none emphasized'}\n"
-        f"- forbidden: {'; '.join(presentation.forbidden_cues)}. Never isolate one body part "
-        "as a fetish subject; keep every key area opaquely covered and the anatomy physically coherent."
+        f"{natural_visibility}"
+        f"{charged_functional_visibility}"
+        f"{boundary}"
     )
 
 
@@ -597,7 +643,11 @@ def _relationship_allows_charge(stage: str, charge: str) -> bool:
 def _private_wardrobe_evidence_refs(snapshot: Mapping[str, object]) -> tuple[str, ...]:
     refs: list[str] = []
     appearance = _mapping(_mapping(snapshot.get("character")).get("appearance_state"))
-    for field in ("coverage_mode", "outfit_role"):
+    # ``coverage_mode`` proves the broad boundary, but it does not tell the
+    # renderer what the person is actually wearing.  Preserve any explicit
+    # private-garment description selected from the same frozen appearance
+    # state, so the provider cannot fill that gap with a generic layered look.
+    for field in ("coverage_mode", "outfit_role", "outfit", "description"):
         value = str(appearance.get(field) or "").lower()
         if _private_wardrobe_text(value):
             refs.append(f"/character/appearance_state/{field}")
@@ -628,11 +678,72 @@ def _private_wardrobe_text(value: str) -> bool:
             "bath towel",
             "bedsheet",
             "oversized shirt",
+            "sleepwear",
+            "pajama",
+            "nightgown",
+            "camisole",
             "内衣",
             "浴袍",
             "浴巾",
             "床单",
             "宽大衬衫",
+            "睡衣",
+            "睡裙",
+            "家居服",
+            "家居短裤",
+            "吊带睡裙",
+        )
+    )
+
+
+def _functional_bodywear_evidence_refs(snapshot: Mapping[str, object]) -> tuple[str, ...]:
+    """Return only concrete evidence that supports functional bodywear.
+
+    This is deliberately broader than an exact wardrobe string: a committed
+    swimming, dance, or exercise event makes shot-local athletic/swim clothing
+    physically plausible.  It is still evidence for *this* image, rather than
+    a fact written back to the World.
+    """
+
+    refs: list[str] = []
+    appearance = _mapping(_mapping(snapshot.get("character")).get("appearance_state"))
+    for field in ("coverage_mode", "outfit_role", "description"):
+        if _functional_bodywear_text(str(appearance.get(field) or "").lower()):
+            refs.append(f"/character/appearance_state/{field}")
+    activity = _mapping(snapshot.get("activity"))
+    for field in ("kind", "description"):
+        if _functional_bodywear_text(str(activity.get(field) or "").lower()):
+            refs.append(f"/activity/{field}")
+    event = _mapping(snapshot.get("event"))
+    for field in ("summary", "outcome"):
+        if _functional_bodywear_text(str(event.get(field) or "").lower()):
+            refs.append(f"/event/{field}")
+    return tuple(dict.fromkeys(refs))
+
+
+def _functional_bodywear_text(value: str) -> bool:
+    return any(
+        token in value
+        for token in (
+            "functional_bodywear",
+            "athletic",
+            "sports bra",
+            "sportswear",
+            "workout",
+            "exercise",
+            "gym",
+            "running",
+            "dance",
+            "swimming",
+            "swimwear",
+            "运动服",
+            "运动背心",
+            "健身",
+            "跑步",
+            "练舞",
+            "舞蹈",
+            "游泳",
+            "泳衣",
         )
     )
 

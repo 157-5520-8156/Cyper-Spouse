@@ -30,7 +30,13 @@ def _hash(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode()).hexdigest()
 
 
-def _change(kind: str, transition: str) -> TypedChange:
+def _change(
+    kind: str,
+    transition: str,
+    *,
+    appraisal_change_refs: list[str] | None = None,
+    change_id: str | None = None,
+) -> TypedChange:
     payloads: dict[str, dict[str, object]] = {
         "expression_plan_transition": {
             "plan_id": "plan:1",
@@ -62,7 +68,11 @@ def _change(kind: str, transition: str) -> TypedChange:
         },
         "affect_transition": {
             "episode_id": "affect:1",
-            "appraisal_change_refs": ["change:appraisal"],
+            "appraisal_change_refs": (
+                appraisal_change_refs
+                if appraisal_change_refs is not None
+                else ["change:appraisal_transition"]
+            ),
             "component_deltas": [{"name": "hurt", "value": 5000}],
             "decay_config": {
                 "object_ref": "policy:decay",
@@ -102,7 +112,7 @@ def _change(kind: str, transition: str) -> TypedChange:
         "outcome_settlement": "occurrence:1",
     }[kind]
     return TypedChange(
-        change_id=f"change:{kind}",
+        change_id=change_id or f"change:{kind}",
         kind=kind,
         target_id=target,
         transition=transition,
@@ -172,6 +182,46 @@ def _minimal_reply() -> MinimalProposal:
     )
 
 
+def _interaction_decision(
+    changes: tuple[TypedChange, ...],
+    *,
+    affect_decision: str | None = None,
+    action: bool = False,
+) -> DecisionProposal:
+    actions = (
+        (
+            ProposalActionIntent(
+                intent_id="intent:interaction-smuggle",
+                kind="tool_query",
+                layer="read_only_tool",
+                target="user:1",
+                payload_ref="payload:1",
+                payload_hash=_hash("hi"),
+                causal_change_id=changes[0].change_id if changes else None,
+            ),
+        )
+        if action
+        else ()
+    )
+    resolved_affect_decision = affect_decision or (
+        "propose" if any(item.kind == "affect_transition" for item in changes) else "no_change"
+    )
+    return DecisionProposal(
+        proposal_id="proposal:interaction-composite",
+        trigger_ref="trigger:1",
+        evaluated_world_revision=1,
+        evidence_refs=(),
+        proposed_changes=changes,
+        action_intents=actions,
+        confidence=7000,
+        brief_rationale="bounded same-turn appraisal and optional affect",
+        affect_decision=resolved_affect_decision,
+        behavior_tendency="consider",
+        stance="neutral",
+        display_strategy="private",
+    )
+
+
 def test_catalogue_is_closed_and_every_reachable_change_has_all_three_authority_descriptors() -> (
     None
 ):
@@ -180,9 +230,14 @@ def test_catalogue_is_closed_and_every_reachable_change_has_all_three_authority_
         "chat_reply",
         "interaction_appraisal",
         "settled_world_appraisal",
+        "silence_appraisal",
+        "plan_disruption_appraisal",
         "affect",
+        "relationship",
         "outcome",
         "interaction_bid",
+        "proactive",
+        "quick_reaction",
     }
     for grammar in PRODUCTION_PROPOSAL_GRAMMARS.values():
         for capability in grammar.capabilities:
@@ -207,6 +262,8 @@ def test_catalogue_is_read_only_and_replacing_its_public_view_fails_closed(
         ("chat_reply", _change("expression_plan_transition", "accept"), True, False),
         ("interaction_appraisal", _change("appraisal_transition", "activate"), False, False),
         ("settled_world_appraisal", _change("appraisal_transition", "activate"), False, False),
+        ("silence_appraisal", _change("appraisal_transition", "activate"), False, False),
+        ("plan_disruption_appraisal", _change("appraisal_transition", "activate"), False, False),
         ("affect", _change("affect_transition", "open"), False, True),
         ("outcome", _change("outcome_settlement", "settle"), False, False),
     ],
@@ -215,6 +272,156 @@ def test_each_production_lane_accepts_only_its_specialized_change(
     lane: str, change: TypedChange, action: bool, affect: bool
 ) -> None:
     production_proposal_grammar(lane).validate(_decision(change, action=action, affect=affect))  # type: ignore[arg-type]
+
+
+def test_interaction_appraisal_accepts_one_appraisal_with_one_exactly_bound_affect() -> None:
+    appraisal = _change("appraisal_transition", "activate")
+    affect = _change(
+        "affect_transition",
+        "open",
+        appraisal_change_refs=[appraisal.change_id],
+    )
+    production_proposal_grammar("interaction_appraisal").validate(
+        _interaction_decision((appraisal, affect))
+    )
+
+
+def test_interaction_appraisal_preserves_appraisal_only_no_affect_decision() -> None:
+    appraisal = _change("appraisal_transition", "activate")
+    production_proposal_grammar("interaction_appraisal").validate(
+        _interaction_decision((appraisal,))
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "action", "error"),
+    [
+        (
+            (_change("affect_transition", "open"),),
+            False,
+            "interaction_appraisal_count_invalid",
+        ),
+        (
+            (
+                _change("appraisal_transition", "activate"),
+                _change(
+                    "affect_transition",
+                    "open",
+                    appraisal_change_refs=["change:wrong-appraisal"],
+                ),
+            ),
+            False,
+            "interaction_affect_appraisal_binding_invalid",
+        ),
+        (
+            (
+                _change("appraisal_transition", "activate"),
+                _change(
+                    "affect_transition",
+                    "open",
+                    appraisal_change_refs=[
+                        "change:appraisal_transition",
+                        "change:unrelated-appraisal",
+                    ],
+                ),
+            ),
+            False,
+            "interaction_affect_appraisal_binding_invalid",
+        ),
+        (
+            (
+                _change("appraisal_transition", "activate"),
+                _change(
+                    "appraisal_transition",
+                    "activate",
+                    change_id="change:appraisal_transition:duplicate",
+                ),
+            ),
+            False,
+            "interaction_appraisal_count_invalid",
+        ),
+        (
+            (
+                _change("appraisal_transition", "activate"),
+                _change("expression_plan_transition", "accept"),
+            ),
+            False,
+            "interaction_change_not_reachable",
+        ),
+        (
+            (_change("appraisal_transition", "activate"),),
+            True,
+            "action_not_reachable",
+        ),
+    ],
+)
+def test_interaction_appraisal_rejects_every_unbound_or_unauthorized_composite(
+    changes: tuple[TypedChange, ...],
+    action: bool,
+    error: str,
+) -> None:
+    with pytest.raises(ProductionProposalGrammarError, match=error):
+        production_proposal_grammar("interaction_appraisal").validate(
+            _interaction_decision(changes, action=action)
+        )
+
+
+def test_interaction_appraisal_rejects_affect_decision_mismatches_defensively() -> None:
+    appraisal = _change("appraisal_transition", "activate")
+    affect = _change("affect_transition", "open", appraisal_change_refs=[appraisal.change_id])
+    with_affect = _interaction_decision((appraisal, affect)).model_copy(
+        update={"affect_decision": "no_change"}
+    )
+    without_affect = _interaction_decision((appraisal,)).model_copy(
+        update={"affect_decision": "propose"}
+    )
+    for proposal in (with_affect, without_affect):
+        with pytest.raises(
+            ProductionProposalGrammarError,
+            match="interaction_affect_decision_invalid",
+        ):
+            production_proposal_grammar("interaction_appraisal").validate(proposal)
+
+
+def test_interaction_appraisal_rejects_multiple_affects_defensively() -> None:
+    appraisal = _change("appraisal_transition", "activate")
+    affect = _change("affect_transition", "open", appraisal_change_refs=[appraisal.change_id])
+    proposal = _interaction_decision((appraisal, affect)).model_copy(
+        update={
+            "proposed_changes": (
+                appraisal,
+                affect,
+                _change(
+                    "affect_transition",
+                    "open",
+                    appraisal_change_refs=[appraisal.change_id],
+                    change_id="change:affect_transition:duplicate",
+                ),
+            )
+        }
+    )
+    with pytest.raises(
+        ProductionProposalGrammarError,
+        match="interaction_affect_count_invalid",
+    ):
+        production_proposal_grammar("interaction_appraisal").validate(proposal)
+
+
+def test_every_other_lane_rejects_the_source_bound_appraisal_affect_composite() -> None:
+    appraisal = _change("appraisal_transition", "activate")
+    affect = _change("affect_transition", "open", appraisal_change_refs=[appraisal.change_id])
+    proposal = _interaction_decision((appraisal, affect))
+    for lane in (
+        "chat_reply",
+        "settled_world_appraisal",
+        "affect",
+        "relationship",
+        "outcome",
+        "interaction_bid",
+        "proactive",
+    ):
+        with pytest.raises(ProductionProposalGrammarError, match="change_count_not_reachable"):
+            production_proposal_grammar(lane).validate(proposal)  # type: ignore[arg-type]
 
 
 def test_grammar_rejects_valid_but_unreachable_changes_and_no_change() -> None:
@@ -263,4 +470,8 @@ def test_production_composition_cannot_construct_an_ungrammared_deliberation() -
         and isinstance(keyword.value, ast.Constant)
         and isinstance(keyword.value.value, str)
     }
-    assert lanes == set(PRODUCTION_PROPOSAL_GRAMMARS)
+    # ``quick_reaction`` deliberately owns no Deliberation/capsule stack: its
+    # bounded local gate produces the proposal and QuickReactionWorker
+    # validates it against production_proposal_grammar("quick_reaction")
+    # before the audit is recorded (covered by the quick-reaction vertical).
+    assert lanes == set(PRODUCTION_PROPOSAL_GRAMMARS) - {"quick_reaction"}

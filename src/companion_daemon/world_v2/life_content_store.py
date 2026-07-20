@@ -15,6 +15,8 @@ import sqlite3
 from threading import RLock
 from typing import Literal, Protocol
 
+from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
+
 
 LifeContentKind = Literal["outcome_candidate", "occurrence_result", "experience_summary"]
 
@@ -87,28 +89,35 @@ class SQLiteImmutableLifeContentStore:
             raise ValueError("life content SQLite store needs path and world id")
         self._world_id = world_id
         self._lock = RLock()
-        self._connection = sqlite3.connect(path, check_same_thread=False)
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS world_v2_life_content (
-                world_id TEXT NOT NULL,
-                content_ref TEXT NOT NULL,
-                content_kind TEXT NOT NULL,
-                content_payload_hash TEXT NOT NULL,
-                text TEXT NOT NULL,
-                PRIMARY KEY (world_id, content_ref)
+        self._database_write_lock = sqlite_write_lock(path)
+        # Autocommit: an implicit DML transaction on a shared-file sidecar
+        # holds a WAL read snapshot until commit; any path that skips the
+        # commit pins the WAL's checkpoint/reset point for the process
+        # lifetime.  Single-statement writes need no transaction here.
+        self._connection = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        with self._database_write_lock:
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            configure_shared_sqlite_connection(self._connection)
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS world_v2_life_content (
+                    world_id TEXT NOT NULL,
+                    content_ref TEXT NOT NULL,
+                    content_kind TEXT NOT NULL,
+                    content_payload_hash TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    PRIMARY KEY (world_id, content_ref)
+                )
+                """
             )
-            """
-        )
-        self._connection.commit()
+            self._connection.commit()
 
     def close(self) -> None:
         with self._lock:
             self._connection.close()
 
     def put_if_absent(self, record: StoredLifeContent) -> None:
-        with self._lock:
+        with self._database_write_lock, self._lock:
             row = self._connection.execute(
                 """
                 SELECT content_kind, content_payload_hash, text

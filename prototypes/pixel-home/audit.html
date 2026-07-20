@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>像素小屋 · 美术验收</title>
+<style>
+  body { background:#221a2b; color:#f3e9d6; font-family: ui-monospace, Menlo, monospace; padding: 16px; }
+  h1 { font-size: 14px; color:#e8c568; margin-bottom: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; }
+  figure { margin: 0; background:#2e2438; border:1px solid #4d3b5c; border-radius:8px; padding:8px; }
+  figcaption { font-size: 11px; color:#b8a898; margin-top: 6px; text-align:center; }
+  canvas { display:block; image-rendering: pixelated; background:#241b2e; }
+</style>
+</head>
+<body>
+  <h1>美术验收画廊 —— 每格是一个交互场景的放大特写</h1>
+  <div class="row" id="gallery"></div>
+  <script src="js/pixel.js"></script>
+  <script src="js/sprites.js"></script>
+  <script src="js/actor.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/audit.js"></script>
+</body>
+</html>

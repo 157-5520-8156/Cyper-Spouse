@@ -251,7 +251,7 @@ def test_clock_history_is_only_part_of_v16_semantics() -> None:
     )
 
 
-def test_later_observation_temporarily_stales_clock_until_next_tick() -> None:
+def test_later_wall_clock_observation_does_not_advance_world_clock() -> None:
     reduced = reduce_event(state_at_now(), clock_event())
     observed_at = NOW + timedelta(minutes=5)
     observation = WorldEvent.from_payload(
@@ -259,7 +259,7 @@ def test_later_observation_temporarily_stales_clock_until_next_tick() -> None:
         event_id="event:observation:after-clock",
         world_id="world:test",
         event_type="ObservationRecorded",
-        logical_time=observed_at,
+        logical_time=reduced.logical_time,
         created_at=observed_at,
         actor="actor:user",
         source="test",
@@ -270,19 +270,19 @@ def test_later_observation_temporarily_stales_clock_until_next_tick() -> None:
         payload={"observation_id": "observation:after-clock"},
     )
     after_observation = reduce_event(reduced, observation)
-    assert after_observation.logical_time == observed_at
-    with pytest.raises(ValueError, match="not installed or current"):
-        resolve_latest_clock(
-            after_observation.clock_transition_history,
-            current_logical_time=after_observation.logical_time,
-        )
+    assert after_observation.logical_time == reduced.logical_time
+    latest_before_tick = resolve_latest_clock(
+        after_observation.clock_transition_history,
+        current_logical_time=after_observation.logical_time,
+    )
+    assert latest_before_tick == after_observation.clock_transition_history[-1]
 
     recovered_at = observed_at + timedelta(minutes=1)
     recovered = reduce_event(
         after_observation,
         clock_event(
             event_id="event:clock:recover-after-observation",
-            origin=observed_at,
+            origin=after_observation.logical_time,
             target=recovered_at,
         ),
     )
@@ -290,5 +290,5 @@ def test_later_observation_temporarily_stales_clock_until_next_tick() -> None:
         recovered.clock_transition_history,
         current_logical_time=recovered.logical_time,
     )
-    assert latest.logical_time_from == observed_at
+    assert latest.logical_time_from == reduced.logical_time
     assert latest.logical_time_to == recovered_at

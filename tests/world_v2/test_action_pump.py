@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from companion_daemon.world_v2.action_pump import ActionPump
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import (
@@ -49,6 +50,31 @@ def _action(
         state="authorized",
         recovery_policy=recovery_policy,
     )
+
+
+def test_ordered_expression_beats_may_follow_provider_acceptance_without_claiming_delivery() -> None:
+    first = _action().model_copy(
+        update={
+            "action_id": "action:expression:first",
+            "state": "provider_accepted",
+            "expression_plan_id": "plan:expression:1",
+            "expression_beat_id": "beat:expression:1",
+        }
+    )
+    second = _action().model_copy(
+        update={
+            "action_id": "action:expression:second",
+            "dependencies": (first.action_id,),
+            "expression_plan_id": first.expression_plan_id,
+            "expression_beat_id": "beat:expression:2",
+        }
+    )
+    ordinary = second.model_copy(
+        update={"expression_plan_id": None, "expression_beat_id": None}
+    )
+
+    assert ActionPump._dependencies_satisfied(action=second, actions=(first, second))
+    assert not ActionPump._dependencies_satisfied(action=ordinary, actions=(first, ordinary))
 
 
 def _event(event_type: str, payload: dict[str, object], suffix: str) -> WorldEvent:
@@ -186,6 +212,31 @@ async def test_action_pump_persists_start_before_dispatch_and_settles_receipt() 
     assert projection.budget_reservations[0].state == "settled"
     event_types = [item.event.event_type for item in ledger.export_replay_evidence().events]
     assert event_types.index("ActionDispatchStarted") < event_types.index("ExternalObservationRecorded")
+
+
+@pytest.mark.asyncio
+async def test_targeted_ingress_batches_schedule_claim_and_dispatch_start() -> None:
+    ledger = _ready_ledger()
+    executor = _DeliveredExecutor()
+    runtime = WorldRuntime(
+        world_id=WORLD,
+        ledger=ledger,
+        action_executor=executor,
+        action_pump_owner="pump:primary",
+    )
+
+    result = await runtime.drain_action("action:reply:1")
+
+    assert result is not None and result.status == "settled"
+    events = ledger.export_replay_evidence().events
+    lifecycle = [
+        item.event.event_type
+        for item in events
+        if item.event.event_type
+        in {"ActionScheduled", "ActionClaimed", "ActionDispatchStarted"}
+    ]
+    assert lifecycle == ["ActionScheduled", "ActionClaimed", "ActionDispatchStarted"]
+    assert executor.dispatch_calls == 1
 
 
 @pytest.mark.asyncio
@@ -380,6 +431,113 @@ async def test_pending_deadline_converts_the_original_action_to_unknown() -> Non
     assert recovered is not None and recovered.status == "marked_unknown"
     assert executor.dispatch_calls == 1
     assert executor.lookup_calls == 0
+    assert ledger.project().actions[0].state == "unknown"
+
+
+class _AckThenVerifyExecutor:
+    """Dispatch returns a non-terminal ack; recovery can verify delivery."""
+
+    def __init__(self, *, verified: bool) -> None:
+        self.dispatch_calls = 0
+        self.verify_calls = 0
+        self.verify_refs: list[str] = []
+        self._verified = verified
+
+    async def dispatch(self, action: Action) -> ProviderReceipt:
+        self.dispatch_calls += 1
+        return ProviderReceipt(
+            provider_receipt_id="provider-event:ack:1",
+            action_id=action.action_id,
+            idempotency_key=action.idempotency_key,
+            provider="provider:test",
+            provider_ref="platform:message_id:10001",
+            status="provider_accepted",
+            artifact_refs=(),
+            cost_actual=0,
+            received_at=NOW,
+            raw_payload_hash="sha256:provider-ack-1",
+        )
+
+    async def lookup_result(self, _action: Action) -> None:
+        return None
+
+    async def verify_delivery(
+        self, action: Action, *, provider_ref: str
+    ) -> ProviderReceipt | None:
+        self.verify_calls += 1
+        self.verify_refs.append(provider_ref)
+        if not self._verified:
+            return None
+        return ProviderReceipt(
+            provider_receipt_id="provider-event:verified:1",
+            action_id=action.action_id,
+            idempotency_key=action.idempotency_key,
+            provider="provider:test",
+            provider_ref=f"{provider_ref}:verified",
+            status="delivered",
+            artifact_refs=(),
+            cost_actual=0,
+            received_at=datetime(2026, 7, 15, 12, 5, tzinfo=UTC),
+            raw_payload_hash="sha256:provider-verified-1",
+        )
+
+
+async def _accepted_then_lease_elapsed(
+    executor: _AckThenVerifyExecutor,
+) -> tuple[WorldLedger, WorldRuntime]:
+    ledger = _ready_ledger()
+    runtime = WorldRuntime(
+        world_id=WORLD,
+        ledger=ledger,
+        action_executor=executor,
+        action_pump_owner="pump:primary",
+    )
+    first = await runtime.drain_actions_once()
+    assert first is not None and first.status == "settled"
+    assert ledger.project().actions[0].state == "provider_accepted"
+    await runtime.advance(
+        ClockObservation(
+            schema_version="world-v2.1",
+            tick_id="tick:ack-lease-elapsed",
+            world_id=WORLD,
+            logical_time=datetime(2026, 7, 15, 12, 5, tzinfo=UTC),
+            created_at=datetime(2026, 7, 15, 12, 5, tzinfo=UTC),
+            trace_id="trace:ack-lease-elapsed",
+            causation_id="scheduler:ack-lease-elapsed",
+            correlation_id="conversation:1",
+            logical_time_from=NOW,
+            logical_time_to=datetime(2026, 7, 15, 12, 5, tzinfo=UTC),
+            reason="test ack recovery",
+        )
+    )
+    return ledger, runtime
+
+
+@pytest.mark.asyncio
+async def test_provider_accepted_recovery_upgrades_to_delivered_with_verification() -> None:
+    executor = _AckThenVerifyExecutor(verified=True)
+    ledger, runtime = await _accepted_then_lease_elapsed(executor)
+
+    recovered = await runtime.drain_actions_once()
+
+    assert recovered is not None and recovered.status == "settled"
+    assert executor.dispatch_calls == 1
+    assert executor.verify_calls == 1
+    assert executor.verify_refs == ["platform:message_id:10001"]
+    projection = ledger.project()
+    assert projection.actions[0].state == "delivered"
+    assert projection.budget_reservations[0].state == "settled"
+
+
+@pytest.mark.asyncio
+async def test_provider_accepted_recovery_without_evidence_still_becomes_unknown() -> None:
+    executor = _AckThenVerifyExecutor(verified=False)
+    ledger, runtime = await _accepted_then_lease_elapsed(executor)
+
+    recovered = await runtime.drain_actions_once()
+
+    assert recovered is not None and recovered.status == "marked_unknown"
+    assert executor.verify_calls == 1
     assert ledger.project().actions[0].state == "unknown"
 
 

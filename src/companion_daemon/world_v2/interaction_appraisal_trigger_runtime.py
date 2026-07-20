@@ -12,15 +12,22 @@ import asyncio
 from datetime import timedelta
 import hashlib
 import json
+import logging
+import time
 from typing import Literal
 
 from .affect_trigger import affect_deliberation_trigger_events, affect_deliberation_trigger_id
+from .relationship_trigger import relationship_deliberation_trigger_events, relationship_deliberation_trigger_id
 from .appraisal_proposal_worker import AppraisalProposalWorker
+from .immediate_emotion_proposal_worker import ImmediateEmotionProposalWorker
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort, ObservationEventLocator
 from .pinned_turn import PinnedTurnCompiler
 from .schema_core import FrozenModel
 from .schemas import ClaimLease, Observation, ProjectionCursor, TriggerProcess, WorldEvent
+
+
+_LOG = logging.getLogger(__name__)
 
 
 def _digest(value: object) -> str:
@@ -32,7 +39,9 @@ def _digest(value: object) -> str:
 class AppraisalTriggerRunResult(FrozenModel):
     trigger_id: str
     status: Literal["idle", "owned_elsewhere", "completed_existing", "processed"]
-    work_status: Literal["no_proposal", "no_change", "accepted"] | None = None
+    work_status: Literal[
+        "no_proposal", "no_change", "accepted", "advisory_validation_rejected"
+    ] | None = None
 
 
 class InteractionAppraisalTriggerRuntime:
@@ -46,6 +55,8 @@ class InteractionAppraisalTriggerRuntime:
         worker: AppraisalProposalWorker,
         owner_id: str,
         affect_owner_id: str | None = None,
+        relationship_owner_id: str | None = None,
+        immediate_emotion_worker: ImmediateEmotionProposalWorker | None = None,
         lease_seconds: int = 120,
         source: str = "world-v2:interaction-appraisal-trigger-runtime",
     ) -> None:
@@ -55,21 +66,47 @@ class InteractionAppraisalTriggerRuntime:
             raise ValueError("interaction appraisal worker must own the exact ledger")
         if affect_owner_id is not None and not affect_owner_id:
             raise ValueError("affect owner must not be empty")
+        if relationship_owner_id is not None and not relationship_owner_id:
+            raise ValueError("relationship owner must not be empty")
+        if (
+            immediate_emotion_worker is not None
+            and immediate_emotion_worker.ledger is not ledger
+        ):
+            raise ValueError("immediate emotion worker must own the exact ledger")
         self._ledger = ledger
         self._pinned_turn = pinned_turn
         self._worker = worker
         self._owner_id = owner_id
         self._affect_owner_id = affect_owner_id
+        self._relationship_owner_id = relationship_owner_id
+        self._immediate_emotion_worker = immediate_emotion_worker
         self._lease_seconds = lease_seconds
         self._source = source
 
     async def drain_one(self) -> AppraisalTriggerRunResult:
+        return await self._run_one(observation_id=None)
+
+    async def run_observation(self, observation_id: str) -> AppraisalTriggerRunResult:
+        """Process the exact new interaction before its visible reply is deliberated.
+
+        The durable trigger remains the authority and recovery seam.  Selecting it by
+        source observation prevents an older queued interaction from delaying or
+        contaminating the current same-turn emotion pass.
+        """
+
+        if not observation_id:
+            raise ValueError("same-turn appraisal requires an observation id")
+        return await self._run_one(observation_id=observation_id)
+
+    async def _run_one(self, *, observation_id: str | None) -> AppraisalTriggerRunResult:
+        started = time.perf_counter()
         projection = await self._project()
         process = next(
             (
                 item
                 for item in projection.trigger_processes
                 if item.process_kind == "interaction_appraisal" and item.state != "terminal"
+                and (observation_id is None or item.source_evidence_ref == observation_id)
             ),
             None,
         )
@@ -90,6 +127,11 @@ class InteractionAppraisalTriggerRuntime:
                 observation=observation,
                 observation_event=source_event,
                 cursor=current_cursor,
+            )
+            _LOG.warning(
+                "interaction appraisal phases trace=%s audit_ms=%.1f",
+                source_event.trace_id,
+                (time.perf_counter() - started) * 1000,
             )
             if audited.proposal_id is None:
                 await self._complete(
@@ -117,25 +159,60 @@ class InteractionAppraisalTriggerRuntime:
             if stored is None:
                 raise RuntimeError("interaction appraisal audit event is unavailable")
             work_cursor = self._cursor_from_commit(stored[1])
-            if work_cursor != current_cursor:
+            if work_cursor != current_cursor and self._immediate_emotion_worker is None:
                 # A decision audit is cursor-bound.  Do not compile it against a
                 # newer world snapshot; a later drain can create a fresh bounded
                 # audit from the same immutable source message.
                 raise RuntimeError("interaction appraisal audit cursor is stale")
 
-        if self._ledger.blocks_event_loop:
-            work = await asyncio.to_thread(
-                self._worker.process,
-                world_id=self._ledger.world_id,
-                cursor=work_cursor,
-                proposal_id=audit.proposal_id,
-            )
+        if self._immediate_emotion_worker is not None:
+            operation = self._immediate_emotion_worker.process
+            kwargs = {
+                "world_id": self._ledger.world_id,
+                "audit_cursor": work_cursor,
+                "proposal_id": audit.proposal_id,
+            }
         else:
-            work = self._worker.process(
-                world_id=self._ledger.world_id,
-                cursor=work_cursor,
-                proposal_id=audit.proposal_id,
+            operation = self._worker.process
+            kwargs = {
+                "world_id": self._ledger.world_id,
+                "cursor": work_cursor,
+                "proposal_id": audit.proposal_id,
+            }
+        try:
+            result = (
+                await asyncio.to_thread(operation, **kwargs)
+                if self._ledger.blocks_event_loop
+                else operation(**kwargs)
             )
+            _LOG.warning(
+                "interaction appraisal phases trace=%s worker_ms=%.1f",
+                source_event.trace_id,
+                (time.perf_counter() - started) * 1000,
+            )
+        except ValueError as exc:
+            # Appraisal/Affect are advisory state.  Their typed compiler and
+            # Acceptance still fail closed (the accepted batch is atomic), but
+            # a rejected advisory must not discard the independently audited
+            # Expression from the same model result.  Close the durable trigger
+            # with a stable failure fingerprint so recovery does not retry an
+            # invalid candidate forever, then let the visible lane continue.
+            failure_fingerprint = _digest(
+                {"exception_type": type(exc).__name__, "message": str(exc)[:240]}
+            )
+            await self._record_advisory_rejection(
+                proposal_id=audit.proposal_id,
+                source_event_ref=audit.event_ref,
+                source_event=source_event,
+                cursor=self._cursor(await self._project()),
+                failure_fingerprint=failure_fingerprint,
+            )
+            return AppraisalTriggerRunResult(
+                trigger_id=active.trigger_id,
+                status="processed",
+                work_status="advisory_validation_rejected",
+            )
+        work = result.appraisal if self._immediate_emotion_worker is not None else result
         if work.status == "no_change":
             await self._complete(
                 process=active,
@@ -148,7 +225,10 @@ class InteractionAppraisalTriggerRuntime:
             )
         if work.acceptance_commit is None:
             raise RuntimeError("accepted interaction appraisal has no acceptance commit")
-        await self._open_affect_trigger(acceptance_event_ids=work.acceptance_commit.event_ids)
+        await self._open_affect_trigger(
+            acceptance_event_ids=work.acceptance_commit.event_ids,
+            include_affect=self._immediate_emotion_worker is None,
+        )
         return AppraisalTriggerRunResult(
             trigger_id=active.trigger_id, status="processed", work_status="accepted"
         )
@@ -286,8 +366,59 @@ class InteractionAppraisalTriggerRuntime:
             + _digest([process.trigger_id, process.claim_lease.attempt_id, outcome_ref]),
         )
 
-    async def _open_affect_trigger(self, *, acceptance_event_ids: tuple[str, ...]) -> None:
-        if self._affect_owner_id is None:
+    async def _record_advisory_rejection(
+        self,
+        *,
+        proposal_id: str,
+        source_event_ref: str,
+        source_event: WorldEvent,
+        cursor: ProjectionCursor,
+        failure_fingerprint: str,
+    ) -> None:
+        """Persist why advisory Acceptance produced no authoritative mutation."""
+
+        payload = {
+            "proposal_id": proposal_id,
+            "source_event_ref": source_event_ref,
+            "advisory_kind": "appraisal_affect",
+            "stage": "immediate_emotion_acceptance",
+            "reason_code": "advisory_validation_rejected",
+            "failure_fingerprint": failure_fingerprint,
+        }
+        identity = domain_idempotency_key(
+            event_type="AdvisoryAcceptanceRejected",
+            world_id=self._ledger.world_id,
+            payload=payload,
+        )
+        if identity is None:
+            raise ValueError("advisory rejection audit identity is missing")
+        event = WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id="event:advisory-acceptance-rejected:"
+            + _digest([proposal_id, "immediate_emotion_acceptance", failure_fingerprint]),
+            world_id=self._ledger.world_id,
+            event_type="AdvisoryAcceptanceRejected",
+            logical_time=source_event.logical_time,
+            created_at=source_event.created_at,
+            actor=self._owner_id,
+            source=self._source,
+            trace_id=source_event.trace_id,
+            causation_id=source_event_ref,
+            correlation_id=source_event.correlation_id,
+            idempotency_key=identity,
+            payload=payload,
+        )
+        await self._commit_at_cursor(
+            (event,),
+            cursor=cursor,
+            commit_id="commit:advisory-acceptance-rejected:"
+            + _digest([proposal_id, failure_fingerprint]),
+        )
+
+    async def _open_affect_trigger(
+        self, *, acceptance_event_ids: tuple[str, ...], include_affect: bool = True
+    ) -> None:
+        if (not include_affect or self._affect_owner_id is None) and self._relationship_owner_id is None:
             return
         appraisal_event = next(
             (
@@ -301,18 +432,36 @@ class InteractionAppraisalTriggerRuntime:
         if appraisal_event is None:
             raise RuntimeError("accepted interaction appraisal has no durable mutation event")
         projection = await self._project()
-        trigger_id = affect_deliberation_trigger_id(
+        events = []
+        affect_id = affect_deliberation_trigger_id(
             world_id=self._ledger.world_id, appraisal_event_id=appraisal_event.event_id
         )
-        if any(item.trigger_id == trigger_id for item in projection.trigger_processes):
+        if include_affect and self._affect_owner_id is not None and not any(
+            item.trigger_id == affect_id for item in projection.trigger_processes
+        ):
+            events.extend(
+                affect_deliberation_trigger_events(
+                    appraisal_event=appraisal_event, owner_id=self._affect_owner_id
+                )
+            )
+        relationship_id = relationship_deliberation_trigger_id(
+            world_id=self._ledger.world_id, appraisal_event_id=appraisal_event.event_id
+        )
+        if self._relationship_owner_id is not None and not any(
+            item.trigger_id == relationship_id for item in projection.trigger_processes
+        ):
+            events.extend(
+                relationship_deliberation_trigger_events(
+                    appraisal_event=appraisal_event, owner_id=self._relationship_owner_id
+                )
+            )
+        if not events:
             return
         await self._commit(
-            affect_deliberation_trigger_events(
-                appraisal_event=appraisal_event, owner_id=self._affect_owner_id
-            ),
+            tuple(events),
             world_revision=projection.world_revision,
             deliberation_revision=projection.deliberation_revision,
-            commit_id=f"commit:interaction-appraisal:open-affect:{trigger_id}",
+            commit_id=f"commit:interaction-appraisal:open-downstream:{affect_id}:{relationship_id}",
         )
 
     @staticmethod
@@ -321,7 +470,16 @@ class InteractionAppraisalTriggerRuntime:
             (
                 item
                 for item in projection.proposal_audits
-                if item.proposal_kind == "decision" and item.trigger_ref == source_event.event_id
+                if item.proposal_kind == "decision"
+                and item.trigger_ref == source_event.event_id
+                # The visible-expression draft intentionally shares the same
+                # immutable source Observation.  It is not an appraisal audit
+                # and may have been committed at an earlier cursor, so never
+                # join it merely because both proposals are DecisionProposal.
+                and (
+                    item.proposal_id.startswith("proposal:appraisal-draft:")
+                    or item.proposal_id.startswith("proposal:interaction-appraisal:")
+                )
             ),
             None,
         )

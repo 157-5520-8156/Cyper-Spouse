@@ -6,6 +6,7 @@ import pytest
 
 from companion_daemon.world_v2.media_delivery_runtime import (
     MediaDeliveryReceiptLifecycle,
+    MediaDeliveryRuntime,
     require_current_media_delivery_approval,
 )
 from companion_daemon.world_v2.media_delivery_interaction import (
@@ -127,6 +128,40 @@ def test_operator_approval_is_revisioned_and_invalidates_not_dispatched_action()
     )
     with pytest.raises(ValueError, match="stale"):
         require_current_media_delivery_approval(action=action, projection=_projection(state), logical_time=approval_2.approved_at)
+
+
+def test_authorization_rejects_a_provider_target_not_bound_by_the_operator() -> None:
+    approval = _approval().model_copy(update={"delivery_target_ref": "platform:user:1"})
+    state = reduce_event(
+        _state(), _event(
+            "MediaAutomaticDeliveryApproved",
+            {"approval": approval.model_dump(mode="json")},
+            "approved-target",
+        ),
+    )
+
+    class _Ledger:
+        world_id = WORLD
+
+        def project(self):  # type: ignore[no-untyped-def]
+            return _projection(state)
+
+        def commit_at_cursor(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return None
+
+    runtime = MediaDeliveryRuntime(ledger=_Ledger())
+    with pytest.raises(ValueError, match="target"):
+        runtime.authorize_delivery(
+            approval_id=approval.approval_id,
+            approval_revision=approval.entity_revision,
+            actor="companion:girl",
+            target="platform:someone-else",
+            account_id="account:image",
+            amount_limit=1,
+            logical_time=NOW,
+            trace_id="trace:target-mismatch",
+            correlation_id="correlation:target-mismatch",
+        )
 
 
 def test_share_materializes_only_after_delivered_receipt() -> None:

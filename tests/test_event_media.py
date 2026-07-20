@@ -23,7 +23,7 @@ from companion_daemon.event_media import (
     _inspection_prompt,
     _repair_prompt,
 )
-from companion_daemon.image_generation import GeneratedImage
+from companion_daemon.image_generation import GeneratedImage, ImageGenerationProviderError
 from companion_daemon.media_eligibility import PrivateExpressionBasis
 
 
@@ -115,11 +115,24 @@ async def test_expression_charge_ceiling_falls_back_and_rejects_conflicts() -> N
 
 
 @pytest.mark.asyncio
-async def test_v5_refuses_to_promote_an_ordinary_event_into_private_media(
+async def test_v5_refuses_an_exclusive_recommendation_without_event_proof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
-    result = await MediaPlanner(FakeModel(_proposal())).plan(
+    proposal = _proposal(
+        media_lane="exclusive_private",
+        recipient_access="recipient_exclusive",
+        attraction_expression="charged",
+    )
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+    result = await MediaPlanner(V5SelectingModel(proposal)).plan(
         _opportunity(
             privacy="intimate",
             sensual_charge_ceiling="charged",
@@ -164,6 +177,9 @@ async def test_v5_private_media_requires_a_world_frozen_private_expression_basis
         share_intent="intimate_signal",
         privacy="intimate",
         interaction_bid_id="invite_desire",
+        media_lane="exclusive_private",
+        recipient_access="recipient_exclusive",
+        attraction_expression="charged",
         supporting_evidence_refs=[
             "/relationship_media_context/declared_display",
             "/activity/kind",
@@ -183,6 +199,8 @@ async def test_v5_private_media_requires_a_world_frozen_private_expression_basis
     model = V5SelectingModel(proposal)
     result = await MediaPlanner(model).plan(opportunity)
 
+    # The legacy exclusive-private lane still requires its basis in frozen
+    # evidence. The new high private routes carry their own render contract.
     assert isinstance(rejected, NotRenderable)
     assert rejected.reason == "unselected_private_expression_basis_evidence"
     assert isinstance(result, PlannedMedia)
@@ -194,7 +212,15 @@ async def test_v5_private_media_requires_a_world_frozen_private_expression_basis
         result.plan.private_expression_basis.evidence_ref
         == "/relationship_media_context/declared_display"
     )
+    assert result.plan.identity_reference_selection is not None
+    # Charged intent must not pull a tennis/pool source photo into an
+    # unrelated private event merely because it is more revealing.
+    assert all(
+        "03-tennis-selfie" not in asset and "09-pool-selfie" not in asset
+        for asset in result.plan.identity_reference_selection.asset_ids
+    )
     assert "Private-expression proof" in compile_media_prompt(result.plan, None)
+    assert "Do not add conservative extra layers" in compile_media_prompt(result.plan, None)
     planning_prompt = str(model.messages[-1]["content"])
     assert "private_expression_basis=" in planning_prompt
     assert "include its frozen basis evidence pointer" in planning_prompt
@@ -202,6 +228,140 @@ async def test_v5_private_media_requires_a_world_frozen_private_expression_basis
     tampered_basis["private_expression_basis"]["recipient_ref"] = "user:other"
     with pytest.raises(ValueError, match="invalid media plan payload"):
         MediaPlan.from_payload(tampered_basis)
+
+
+@pytest.mark.asyncio
+async def test_v5_proven_private_opportunity_normalizes_model_lane_label_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private action cannot be lost because the planner calls it ordinary."""
+
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    snapshot = _snapshot(
+        activity={"kind": "dance", "description": "练完舞在更衣镜前缓一会"},
+        location={"name": "舞室更衣区", "kind": "private", "mirror_available": True},
+    )
+    snapshot["relationship_media_context"] = {
+        "declared_display": {
+            "event_id": "display:private-dance",
+            "kind": "recipient_directed",
+            "recipient_ref": "user:1",
+        }
+    }
+    opportunity = replace(
+        _opportunity(
+            privacy="intimate",
+            sensual_charge_ceiling="charged",
+            snapshot=snapshot,
+            audience_context=AudienceContext(recipient_ref="user:1", relationship_stage="lover"),
+        ),
+        opportunity_id="opportunity:private-normalized",
+        private_expression_basis=PrivateExpressionBasis(
+            kind="recipient_display",
+            evidence_refs=("/relationship_media_context/declared_display",),
+            required_charge="charged",
+        ),
+    )
+    # This imitates the observed DeepSeek failure: it selects a legal private
+    # candidate but emits an ordinary lane, ordinary intent, and ambient access.
+    proposal = _proposal(
+        content_domain="activity_process",
+        share_intent="record",
+        privacy="intimate",
+        interaction_bid_id="invite_appreciation",
+        media_lane="ordinary_life",
+        recipient_access="ambient",
+        attraction_expression="none",
+        primary_evidence_ref="/activity/description",
+        supporting_evidence_refs=["/activity/kind"],
+    )
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+
+    result = await MediaPlanner(V5SelectingModel(proposal)).plan(opportunity)
+
+    # The planner's lane is no longer rewritten from an upstream evidence
+    # basis. World remains free to select a high lane explicitly later.
+    assert isinstance(result, NotRenderable)
+
+
+@pytest.mark.asyncio
+async def test_renderer_retries_transient_provider_error_once_but_not_invalid_request(
+    tmp_path: Path,
+) -> None:
+    planned = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+
+    class FlakyGenerator(FakeGenerator):
+        async def generate(self, prompt: str, *, output_path: Path, **kwargs):
+            if self.calls == 0:
+                self.calls += 1
+                self.prompts.append(prompt)
+                raise ImageGenerationProviderError(provider="openai", kind="transient", status_code=429)
+            return await super().generate(prompt, output_path=output_path, **kwargs)
+
+    recovered = await MediaRenderer(
+        generator=FlakyGenerator(),
+        inspector=FakeInspector([_inspection(True)]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+    assert isinstance(recovered, RenderedMedia)
+    assert recovered.attempts == 2
+
+    class RejectedGenerator(FakeGenerator):
+        async def generate(self, prompt: str, *, output_path: Path, **kwargs):
+            self.calls += 1
+            self.prompts.append(prompt)
+            raise ImageGenerationProviderError(
+                provider="openai", kind="invalid_request", status_code=400
+            )
+
+    rejected_generator = RejectedGenerator()
+    rejected = await MediaRenderer(
+        generator=rejected_generator,
+        inspector=FakeInspector([_inspection(True)]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+    assert not isinstance(rejected, RenderedMedia)
+    assert rejected.reason.startswith("image_provider_invalid_request")
+    assert rejected_generator.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_renderer_retries_transient_inspection_without_generating_a_second_image(
+    tmp_path: Path,
+) -> None:
+    planned = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+
+    class TransientInspector(FakeInspector):
+        async def inspect(self, *args, **kwargs):
+            if self.calls == 0:
+                self.calls += 1
+                raise ImageGenerationProviderError(
+                    provider="openai_inspector", kind="transient", status_code=429
+                )
+            return await super().inspect(*args, **kwargs)
+
+    generator = FakeGenerator()
+    rendered = await MediaRenderer(
+        generator=generator,
+        inspector=TransientInspector([_inspection(True)]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert isinstance(rendered, RenderedMedia)
+    assert rendered.attempts == 1
+    assert generator.calls == 1
 
 
 def test_private_self_authored_capture_requires_visual_proof_even_in_preview() -> None:
@@ -243,6 +403,9 @@ def _proposal(**overrides: object) -> dict[str, object]:
         "polish": "casual",
         "tone": "bright",
         "privacy": "personal",
+        "media_lane": "ordinary_life",
+        "recipient_access": "ambient",
+        "attraction_expression": "none",
         "primary_evidence_ref": "/activity/description",
         "supporting_evidence_refs": ["/objects/0/description", "/location/name"],
         "composition": "主体与事件环境同时可辨的自然中近景",
@@ -408,6 +571,10 @@ class V5SelectingModel(FakeModel):
             and payload["character_visibility"] in item["legal_character_visibilities"]
             and payload["route"] in item["legal_routes"]
         ]
+        if payload.get("media_lane") == "exclusive_private":
+            legal = [
+                item for item in legal if "exclusive_private" in item.get("legal_media_lanes", [])
+            ]
         if not legal:
             legal = [
                 item
@@ -440,7 +607,12 @@ class V5SelectingModel(FakeModel):
         if payload["share_intent"] not in selected["legal_share_intents"]:
             payload["share_intent"] = selected["legal_share_intents"][0]
         payload["complete_candidate_id"] = selected["complete_candidate_id"]
-        payload["interaction_bid_id"] = selected["legal_interaction_bids"][0]
+        # Preserve the proposal's bid when the selected complete candidate
+        # explicitly supports it.  Choosing the first candidate value here
+        # used to turn a legal `inform_status` request into `invite_opinion`,
+        # so the fixture was testing its own rewrite rather than the planner.
+        if payload["interaction_bid_id"] not in selected["legal_interaction_bids"]:
+            payload["interaction_bid_id"] = selected["legal_interaction_bids"][0]
         payload["character_visibility"] = selected["legal_character_visibilities"][0]
         payload["route"] = selected["legal_routes"][0]
         if payload["content_domain"] == "food_drink" and payload["visual_form"] not in {
@@ -592,7 +764,10 @@ async def test_v5_new_status_bid_is_available_to_character_media(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
-    proposal = _proposal(interaction_bid_id="inform_status")
+    # `inform_status` is a status/update bid, not a show-and-tell bid.  Keep
+    # the test inside its declared interaction affinity rather than relying on
+    # an invalid `show_and_tell` combination.
+    proposal = _proposal(interaction_bid_id="inform_status", share_intent="record")
     for field in (
         "composition",
         "action",
@@ -1574,7 +1749,7 @@ async def test_v4_rejects_legacy_intimate_intensity_field() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sensual_ceiling_requires_intimate_privacy_and_eligible_relationship() -> None:
+async def test_sensual_ceiling_requires_intimate_privacy_but_not_local_relationship_policy() -> None:
     privacy_conflict = await MediaPlanner(FakeModel(_proposal())).plan(
         _opportunity(sensual_charge_ceiling="charged")
     )
@@ -1590,8 +1765,7 @@ async def test_sensual_ceiling_requires_intimate_privacy_and_eligible_relationsh
 
     assert isinstance(privacy_conflict, NotRenderable)
     assert privacy_conflict.reason == "sensual_charge_ceiling_requires_intimate_privacy"
-    assert isinstance(relationship_conflict, NotRenderable)
-    assert relationship_conflict.reason == "sensual_charge_ceiling_relationship_conflict"
+    assert isinstance(relationship_conflict, PlannedMedia)
 
 
 @pytest.mark.asyncio
@@ -1852,6 +2026,73 @@ async def test_v5_renderer_repairs_generic_portrait_without_replanning(
     assert rendered.attempts == 2
     assert "generic_portrait_dilution" in generator.prompts[1]
     assert planned.plan.plan_id in generator.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_v5_renderer_rejects_identity_drift_then_withholds_after_one_repair(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A visually plausible stranger must never reach delivery as the character."""
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = _proposal(interaction_bid_id="share_presence")
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+    planned = await MediaPlanner(V5SelectingModel(proposal)).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    drifted = MediaInspection(
+        **{
+            **_inspection(True).__dict__,
+            "rule_version": "media-inspection-v7",
+            "identity_consistency_ok": False,
+        }
+    )
+    generator = FakeGenerator()
+
+    result = await MediaRenderer(
+        generator=generator,
+        inspector=FakeInspector([drifted, drifted]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert not isinstance(result, RenderedMedia)
+    assert result.reason == "identity_consistency_failed"
+    assert result.attempts == 2
+    assert generator.calls == 2
+    assert "identity_consistency_failed" in generator.prompts[1]
+    assert "canonical identity anchor must dominate" in generator.prompts[1]
+    assert "merely similar-looking woman" in generator.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_v5_inspection_requires_unambiguous_same_person_identity_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = _proposal(interaction_bid_id="share_presence")
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+    planned = await MediaPlanner(V5SelectingModel(proposal)).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    prompt = _inspection_prompt(planned.plan)
+
+    assert "unequivocally the same fictional person" in prompt
+    assert "not merely a similarly styled or demographically similar face" in prompt
+    assert "narrower V-shaped face" in prompt
+    assert "unrequested legible/nonsensical text" in prompt
 
 
 @pytest.mark.asyncio
@@ -2344,6 +2585,25 @@ async def test_openai_inspector_returns_actual_summary_in_same_visual_call(tmp_p
     content = observed["payload"]["messages"][0]["content"]  # type: ignore[index]
     assert "observed_summary" in content[0]["text"]
     assert "garment_topology_ok" in content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_openai_inspector_classifies_provider_rejection(tmp_path: Path) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": {"code": "rate_limit_exceeded"}})
+
+    planned = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    image = tmp_path / "image.png"
+    image.write_bytes(b"png")
+
+    with pytest.raises(ImageGenerationProviderError) as raised:
+        await OpenAIMediaInspector("key", transport=httpx.MockTransport(handler)).inspect(
+            image, plan=planned.plan, prompt="ignored"
+        )
+
+    assert raised.value.provider == "openai_inspector"
+    assert raised.value.kind == "transient"
 
 
 @pytest.mark.asyncio

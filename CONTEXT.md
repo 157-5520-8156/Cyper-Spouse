@@ -56,6 +56,42 @@ The World's frozen selection of one Photo Candidate for possible rendering. It i
 
 One evidence-bound, replayable photographic interpretation of a Media Opportunity. It selects exactly one primary visual subject, capture authorship, visual form, sharing intent, polish, tone, and privacy level without changing World facts or deciding whether to send.
 
+## Media Render Profile
+
+A versioned, frozen declaration of how one Media Plan is rendered: its model ecosystem, rendering route, identity-binding method, supported controls, cost policy, and capability status. A Media Render Profile may only claim a capability proved for that exact route; it does not select an event, reinterpret a plan, or decide delivery.
+
+## Identity Binding
+
+The precise mechanism by which a Media Render Profile preserves character identity: `reference_edit`, `style_reference_unverified`, or `compatible_lora`. Identity Binding is a renderer capability, not a property of an image file; a LoRA cannot be presumed compatible across model ecosystems or provider routes.
+
+## External Generation
+
+One persisted submission of a frozen Media Plan to an external rendering provider. It records the render profile, provider receipt, request hash, terminal result, cost and artifact hash so replay never resubmits or changes the plan.
+
+## Media Lane
+
+The frozen semantic kind of one new character-media plan: `ordinary_life` is pure event sharing; `alluring_life` is event-grounded life sharing with visible feminine or hormonal expression; `exclusive_private` is the legacy evidence-bound recipient display; `suggestive_private` and `explicit_private` are separately routed high-private render lanes. `explicit_reserved` is a historical non-renderable proposal value. A Media Lane is suggested by the planner model and accepted only by deterministic candidate, capture and privacy checks; upstream authorization, relationship and delivery policy are not reimplemented here.
+
+## Suggestive Private Media
+
+`suggestive_private` is the adult-fictional, recipient-exclusive high-private Media Lane for a strongly recipient-directed private expression. It reuses the ordinary Media Plan and photographic contracts and freezes a dedicated rendering route. It never silently degrades to a normal renderer or lower Lane.
+
+## Private Render Contract
+
+The replayable high-Lane portion of a new Media Plan: lane, attraction mechanism, framing mode, coverage mode, visibility tier and dedicated renderer route. It is not an authorization decision; the upstream environment owns authorization, relationship and sending policy. Legacy Suggestive Media Authorization payloads remain readable only for replay of historical plans.
+
+## Suggestive Private Contract
+
+The historical v1 high-Lane contract containing a frozen authorization. It is retained solely to replay old Media Plans; new plans use `PrivateRenderContract`.
+
+## Recipient Access
+
+The frozen intended scope of one Media Lane: ambient, recipient-directed, or recipient-exclusive. It describes how the image addresses its audience, not who is allowed to possess the artifact after delivery.
+
+## Attraction Expression
+
+The frozen communicative intensity of a Media Lane: `none`, `feminine`, `charged`, `sexual_suggestive`, `explicit_adult`, or the historical reject value `explicit_reserved`. It is distinct from visible skin, outfit category and relationship stage; those remain separate evidence and upstream policy concerns.
+
 ## Media Inspection
 
 A recorded visual assessment of media. It states whether the artifact is deliverable and describes what is actually visible, including deviations from the Media Plan.

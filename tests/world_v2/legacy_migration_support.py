@@ -3,6 +3,21 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+
+from companion_daemon.world_v2.sqlite_ledger import load_head_state_json
+
+
+def read_head_state_json(connection: sqlite3.Connection, world_id: str) -> str:
+    """Return one head's full state JSON for either storage format.
+
+    Production heads store their state as per-item rows; legacy fixtures
+    store one full-row document.  Tests that need the current state document
+    (usually to derive an honest legacy fixture from it) must not care which
+    format the ledger persisted.
+    """
+
+    return load_head_state_json(connection, world_id)
 
 
 V16_ONLY_STATE_FIELDS = (

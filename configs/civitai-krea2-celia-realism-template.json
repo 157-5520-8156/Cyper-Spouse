@@ -1,0 +1,34 @@
+{
+  "tags": [
+    "project:krea2-celia-realism-template-v1"
+  ],
+  "allowMatureContent": true,
+  "steps": [
+    {
+      "$type": "imageGen",
+      "name": "krea2-celia-realism-template-v1",
+      "priority": "high",
+      "input": {
+        "engine": "comfy",
+        "ecosystem": "krea2",
+        "model": "turbo",
+        "operation": "createImage",
+        "prompt": "{{render_prompt}}",
+        "negativePrompt": "child, minor, teen, young-looking, loli, generic face, different person, altered identity, duplicate person, extra arms, extra hands, extra fingers, malformed hands, twisted limbs, broken anatomy, stiff pose, blank expression, plastic skin, airbrushed skin, low quality, blurry, watermark, text",
+        "width": 512,
+        "height": 768,
+        "steps": 8,
+        "cfgScale": 1,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "seed": "{{seed}}",
+        "quantity": 1,
+        "loras": {
+          "urn:air:krea2:lora:civitai:2750659@3094831": 1.0,
+          "urn:air:krea2:lora:civitai:2787068@3140284": 1.0,
+          "urn:air:krea2:lora:civitai:2781697@3132956": 0.1
+        }
+      }
+    }
+  ]
+}

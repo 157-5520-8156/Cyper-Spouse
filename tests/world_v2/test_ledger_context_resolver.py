@@ -87,6 +87,7 @@ class CountingLedger:
         self.project_at_calls = 0
         self.resolved_batches: list[tuple[str, ...]] = []
         self.lookups: list[str] = []
+        self.commit_calls = 0
 
     @property
     def world_id(self):
@@ -119,6 +120,7 @@ class CountingLedger:
     def commit(
         self, events, *, expected_world_revision, expected_deliberation_revision, commit_id=None
     ):
+        self.commit_calls += 1
         return self.delegate.commit(
             events,
             expected_world_revision=expected_world_revision,
@@ -180,6 +182,7 @@ def test_real_ledger_resolves_situation_core_and_authoritative_empty_domains(
     second = _compiler(counted).compile(query)
 
     assert first.model_dump_json() == second.model_dump_json()
+    assert first.logical_time.isoformat() == "2026-07-15T23:00:00+08:00"
     assert first.current_situation.availability == "available"
     assert first.character_core.items[0].item_ref == core.core_id
     assert first.relevant_facts.availability == "available"
@@ -191,12 +194,85 @@ def test_real_ledger_resolves_situation_core_and_authoritative_empty_domains(
     # path, so an empty authority result is distinguishable from absence.
     assert first.private_impressions.availability == "available"
     assert first.private_impressions.items == ()
+    assert first.available_capabilities.availability == "available"
+    assert first.available_capabilities.items == ()
     # Advisories still exist only as a source-bound per-turn overlay below.
     assert first.advisories.availability == "unavailable"
     assert counted.project_at_calls == 2
     # Situation and CharacterCore request only their consumed refs; no full replay API exists.
     assert all(len(batch) <= 1 for batch in counted.resolved_batches)
     assert set(counted.lookups) == {core.origin.accepted_event_ref}
+    assert counted.commit_calls == 0
+
+
+def test_context_resolution_has_no_ledger_write_side_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger, _, _ = initialized_character_ledger(monkeypatch)
+    counted = CountingLedger(ledger)
+    before = ledger.project()
+
+    _compiler(counted).compile(
+        query_from_projection(
+            before, actor_ref="actor:companion", trigger_ref="event:incoming"
+        )
+    )
+
+    assert counted.commit_calls == 0
+    assert ledger.project() == before
+
+
+def test_context_window_reports_complete_source_bound_truncation() -> None:
+    world_id = "world:context-window"
+    ledger = WorldLedger.in_memory(world_id=world_id)
+    events = [_event(world_id)]
+    for index in range(12):
+        account = BudgetAccount(
+            account_id=f"account:{index:02d}",
+            category="chat",
+            window_id="window:day",
+            limit=100,
+        )
+        events.append(
+            WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id=f"event:budget:{index:02d}",
+                world_id=world_id,
+                event_type="BudgetAccountConfigured",
+                logical_time=NOW,
+                created_at=NOW,
+                actor="system:test",
+                source="test",
+                trace_id="trace:context-window",
+                causation_id=f"cause:budget:{index:02d}",
+                correlation_id="correlation:context-window",
+                idempotency_key=f"identity:budget:{index:02d}",
+                payload={"account": account.model_dump(mode="json")},
+            )
+        )
+    ledger.commit(events, expected_world_revision=0, expected_deliberation_revision=0)
+    projection = ledger.project()
+
+    capsule = _compiler(ledger).compile(
+        query_from_projection(
+            projection, actor_ref="actor:companion", trigger_ref="event:start"
+        )
+    )
+
+    assert capsule.action_budget.availability == "available"
+    assert capsule.action_budget.truncated is True
+    assert len(capsule.action_budget.items) == 1
+    assert all(len(item.source_bindings) == 1 for item in capsule.action_budget.items)
+    budget_omissions = tuple(
+        entry
+        for entry in capsule.budget.truncation_log
+        if entry.slice_name == "action_budget"
+    )
+    assert {(entry.reason, entry.omitted_count) for entry in budget_omissions} == {
+        ("item_budget", 4),
+        ("character_budget", 7),
+    }
+    assert sum(entry.omitted_count for entry in budget_omissions) == 11
 
 
 def test_budget_accounts_are_source_bound_to_their_complete_event_lineage() -> None:
@@ -280,30 +356,6 @@ def test_budget_accounts_are_source_bound_to_their_complete_event_lineage() -> N
 def test_advisory_overlay_is_available_only_after_same_cursor_source_binding() -> None:
     world_id = "world:context-advisory-overlay"
     ledger = _empty_ledger(world_id=world_id)
-    ledger.commit(
-        [
-            WorldEvent.from_payload(
-                schema_version="world-v2.1",
-                event_id="event:clock",
-                world_id=world_id,
-                event_type="ClockAdvanced",
-                logical_time=NOW,
-                created_at=NOW,
-                actor="system:test",
-                source="test",
-                trace_id="trace:advisory",
-                causation_id="cause:clock",
-                correlation_id="correlation:advisory",
-                idempotency_key="identity:clock",
-                payload={
-                    "logical_time_from": (NOW - timedelta(minutes=1)).isoformat(),
-                    "logical_time_to": NOW.isoformat(),
-                },
-            )
-        ],
-        expected_world_revision=1,
-        expected_deliberation_revision=0,
-    )
     projection = ledger.project()
     query = query_from_projection(
         projection, actor_ref="actor:companion", trigger_ref="event:start"
@@ -330,13 +382,21 @@ def test_advisory_overlay_is_available_only_after_same_cursor_source_binding() -
         producer_version="test-classifier.1",
     )
 
-    capsule = _compiler(ledger).compile_for_deliberation_with_advisories(
-        query, (advisory,)
+    counted = CountingLedger(ledger)
+    compiler = _compiler(counted)
+    prepared = compiler.prepare_for_deliberation(query)
+    base = compiler.finalize_prepared(prepared).capsule
+    capsule = compiler.compile_prepared_with_advisories(
+        prepared, (advisory,)
     ).capsule
 
+    assert counted.project_at_calls == 1
+    assert base.advisories.availability == "unavailable"
     assert capsule.advisories.availability == "available"
     assert capsule.advisories.source_refs == ("event:start",)
     assert capsule.advisories.items[0].item_ref == advisory.advisory_id
+    with pytest.raises(ValueError, match="another compiler"):
+        _compiler(ledger).finalize_prepared(prepared)
 
 
 def test_active_appraisal_hypotheses_are_source_bound_into_the_next_capsule() -> None:
@@ -470,6 +530,64 @@ def test_sqlite_reopen_replays_identical_capsule_bytes(tmp_path: Path) -> None:
     assert after == before
 
 
+def test_nonempty_context_is_byte_equivalent_across_memory_and_sqlite(
+    tmp_path: Path,
+) -> None:
+    world_id = "world:context-adapter-equivalence"
+    account = BudgetAccount(
+        account_id="account:chat",
+        category="chat",
+        window_id="window:day",
+        limit=100,
+    )
+
+    def populate(ledger: LedgerPort) -> None:
+        configured = WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id="event:budget",
+            world_id=world_id,
+            event_type="BudgetAccountConfigured",
+            logical_time=NOW,
+            created_at=NOW,
+            actor="system:test",
+            source="test",
+            trace_id="trace:adapter-equivalence",
+            causation_id="cause:budget",
+            correlation_id="correlation:adapter-equivalence",
+            idempotency_key="identity:budget",
+            payload={"account": account.model_dump(mode="json")},
+        )
+        ledger.commit(
+            [_event(world_id), configured],
+            expected_world_revision=0,
+            expected_deliberation_revision=0,
+        )
+
+    memory = WorldLedger.in_memory(world_id=world_id)
+    sqlite = SQLiteWorldLedger(path=tmp_path / "equivalent.sqlite3", world_id=world_id)
+    populate(memory)
+    populate(sqlite)
+
+    memory_projection = memory.project()
+    sqlite_projection = sqlite.project()
+    memory_capsule = _compiler(memory).compile(
+        query_from_projection(
+            memory_projection, actor_ref="actor:companion", trigger_ref="event:start"
+        )
+    )
+    sqlite_capsule = _compiler(sqlite).compile(
+        query_from_projection(
+            sqlite_projection, actor_ref="actor:companion", trigger_ref="event:start"
+        )
+    )
+
+    assert sqlite_projection == memory_projection
+    assert sqlite_capsule.model_dump_json() == memory_capsule.model_dump_json()
+    assert sqlite_capsule.action_budget.availability == "available"
+    assert sqlite_capsule.action_budget.items[0].item_ref == "account:chat:window:day"
+    sqlite.close()
+
+
 class _RankValues(BaseModel):
     confidence_bp: int
 
@@ -551,6 +669,104 @@ def test_stale_cursor_fails_before_historical_replay(
 
     with pytest.raises(ValueError, match="indexed projection reader"):
         _compiler(ledger).compile(stale_query)
+
+
+def test_sqlite_context_compile_after_each_commit_reuses_incremental_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twenty/thirty-turn growth uses one canonical pass and no head decode."""
+
+    world_id = "world:context-incremental-head"
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "context-incremental-head.sqlite3", world_id=world_id
+    )
+    ledger.commit(
+        [_event(world_id)],
+        commit_id="commit:context-incremental-head:start",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    compiler = _compiler(ledger)
+    decode_calls = 0
+    legacy_state_hash_calls = 0
+    canonical_sizes: dict[int, int] = {}
+    original_decode = ledger._decode_state  # noqa: SLF001 - performance seam assertion
+    original_state_hash = ledger._state_hash  # noqa: SLF001
+    original_encode_and_hash = ledger._encode_state_and_hash  # noqa: SLF001
+
+    def counted_decode(value: str):
+        nonlocal decode_calls
+        decode_calls += 1
+        return original_decode(value)
+
+    def counted_state_hash(state, cursor):
+        nonlocal legacy_state_hash_calls
+        legacy_state_hash_calls += 1
+        return original_state_hash(state, cursor)
+
+    def counted_encode_and_hash(state, cursor):
+        encoded, state_hash = original_encode_and_hash(state, cursor)
+        canonical_sizes[cursor.ledger_sequence] = len(encoded.encode("utf-8"))
+        return encoded, state_hash
+
+    original_encode_delta = ledger._encode_state_delta  # noqa: SLF001
+
+    def sized_encode_delta(state, cursor):
+        # The incremental commit path no longer materializes the canonical
+        # document; its per-field UTF-8 chunks carry the equivalent size.
+        result = original_encode_delta(state, cursor)
+        fragment_bytes = ledger._state_fragment_bytes  # noqa: SLF001
+        assert fragment_bytes is not None
+        canonical_sizes[cursor.ledger_sequence] = sum(
+            len(chunk) for chunk in fragment_bytes[1].values()
+        )
+        return result
+
+    monkeypatch.setattr(ledger, "_decode_state", counted_decode)
+    monkeypatch.setattr(ledger, "_state_hash", counted_state_hash)
+    monkeypatch.setattr(ledger, "_encode_state_and_hash", counted_encode_and_hash)
+    monkeypatch.setattr(ledger, "_encode_state_delta", sized_encode_delta)
+    try:
+        checkpoints: dict[int, int] = {}
+        for index in range(1, 31):
+            head = ledger.project()
+            trigger = _observation(world_id, index)
+            ledger.commit(
+                [trigger],
+                commit_id=f"commit:context-incremental-head:{index}",
+                expected_world_revision=head.world_revision,
+                expected_deliberation_revision=head.deliberation_revision,
+            )
+            before = ledger.performance_counters()
+            projection = ledger.project()
+            query = query_from_projection(
+                projection,
+                actor_ref="actor:companion",
+                trigger_ref=trigger.event_id,
+            )
+            first = compiler.compile(query)
+            after = ledger.performance_counters()
+            second = compiler.compile(query)
+
+            # Building the exact post-commit projection and Context should be
+            # served entirely from the commit-produced verified head.  A miss
+            # here decodes and validates state_json whose size grows with the
+            # whole conversation rather than with this turn's delta.
+            read_delta = after.head_projection_reads - before.head_projection_reads
+            hit_delta = after.head_projection_cache_hits - before.head_projection_cache_hits
+            assert read_delta >= 3
+            assert hit_delta == read_delta
+            assert after.historical_replay_calls == before.historical_replay_calls
+            assert second.capsule_id == first.capsule_id
+            assert second.model_dump(mode="json") == first.model_dump(mode="json")
+            if index in {20, 30}:
+                checkpoints[index] = canonical_sizes[projection.ledger_sequence]
+        assert decode_calls == 0
+        assert legacy_state_hash_calls == 0
+        assert len(canonical_sizes) == 30
+        assert checkpoints[30] > checkpoints[20]
+    finally:
+        ledger.close()
 
 
 def test_explicit_actor_relevance_scope_is_bound_into_every_proof() -> None:

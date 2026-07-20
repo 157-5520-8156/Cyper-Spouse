@@ -13,6 +13,8 @@ from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
 
+from companion_daemon.llm import model_call_scope
+
 from .schema_core import FrozenModel
 
 
@@ -24,6 +26,16 @@ class MediaSelectionDraftModel(Protocol):
     model: str
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.2) -> str: ...
+
+
+class MediaSelectionDraftError(ValueError):
+    """A terminal, hash-bound model response that violates the bounded grammar."""
+
+    def __init__(self, *, code: str, model: str, raw_output: str) -> None:
+        self.code = code
+        self.model = model
+        self.raw_output_hash = _hash(raw_output)
+        super().__init__(code)
 
 
 class MediaCandidateChoice(FrozenModel):
@@ -62,35 +74,48 @@ class MediaSelectionDraftAdapter:
     async def deliberate(self, *, capsule: MediaSelectionCapsule) -> MediaSelectionDraft:
         if not capsule.candidates:
             return MediaSelectionDraft(decision="no_op")
-        raw = await self._model.complete(
-            [
-                {"role": "system", "content": (
-                    "Choose one offered candidate token or decline. Return exactly JSON: "
-                    '{"decision":"no_op"} or {"decision":"select","token":"offered"}. '
-                    "A token is not permission to create, send, or describe an image."
-                )},
-                {"role": "user", "content": json.dumps({
-                    "candidates": [item.model_dump() for item in capsule.candidates],
-                    "draw_suggestion": capsule.draw_suggestion,
-                }, ensure_ascii=False)},
-            ],
-            temperature=self._temperature,
-        )
+        with model_call_scope("world_v2_media_selection"):
+            raw = await self._model.complete(
+                [
+                    {"role": "system", "content": (
+                        "Choose one offered candidate token or decline. Return exactly JSON: "
+                        '{"decision":"no_op"} or {"decision":"select","token":"offered"}. '
+                        "A token is not permission to create, send, or describe an image."
+                    )},
+                    {"role": "user", "content": json.dumps({
+                        "candidates": [item.model_dump() for item in capsule.candidates],
+                        "draw_suggestion": capsule.draw_suggestion,
+                    }, ensure_ascii=False)},
+                ],
+                temperature=self._temperature,
+            )
         try:
             value = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ValueError("media selection model did not return JSON") from exc
+            raise MediaSelectionDraftError(
+                code="media_selection.model_not_json",
+                model=self._model.model,
+                raw_output=raw,
+            ) from exc
         if not isinstance(value, dict):
-            raise ValueError("media selection model did not return an object")
+            raise MediaSelectionDraftError(
+                code="media_selection.model_not_object",
+                model=self._model.model,
+                raw_output=raw,
+            )
         if value == {"decision": "no_op"}:
             normalized = '{"decision":"no_op"}'
             return MediaSelectionDraft(decision="no_op", model=self._model.model, raw_output_hash=_hash(raw), normalized_output_hash=_hash(normalized))
         token = value.get("token")
         offered = {item.token for item in capsule.candidates}
         if set(value) != {"decision", "token"} or value.get("decision") != "select" or token not in offered:
-            raise ValueError("media selection model chose an unknown candidate")
+            raise MediaSelectionDraftError(
+                code="media_selection.model_unknown_candidate",
+                model=self._model.model,
+                raw_output=raw,
+            )
         normalized = json.dumps({"decision": "select", "token": token}, separators=(",", ":"))
         return MediaSelectionDraft(decision="select", token=token, model=self._model.model, raw_output_hash=_hash(raw), normalized_output_hash=_hash(normalized))
 
 
-__all__ = ["MediaCandidateChoice", "MediaSelectionCapsule", "MediaSelectionDraft", "MediaSelectionDraftAdapter", "MediaSelectionDraftModel"]
+__all__ = ["MediaCandidateChoice", "MediaSelectionCapsule", "MediaSelectionDraft", "MediaSelectionDraftAdapter", "MediaSelectionDraftError", "MediaSelectionDraftModel"]

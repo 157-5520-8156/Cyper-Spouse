@@ -200,10 +200,48 @@ def update_affect_episode(
 
     components = list(current.components)
     component_index = {item.component_id: offset for offset, item in enumerate(components)}
-    if {item.component_id for item in payload.component_updates} != set(component_index):
+    existing_updates = {
+        item.component_id
+        for item in payload.component_updates
+        if item.operation != "open_component"
+    }
+    if existing_updates != set(component_index):
         raise ValueError("affect update must materialize every episode component")
     for change in payload.component_updates:
         offset = component_index.get(change.component_id)
+        if change.operation == "open_component":
+            if offset is not None:
+                raise ValueError("new affect component identity is already active")
+            after = change.updated_component
+            if (
+                change.before_intensity_bp != 0
+                or change.after_intensity_bp != change.accepted_delta_bp
+                or change.accepted_delta_bp <= 0
+                or change.proposed_delta_bp < change.accepted_delta_bp
+                or after.opened_at != logical_time
+                or after.decay_anchor_at != logical_time
+                or after.decay_not_before
+                != logical_time + _seconds(after.decay_profile.delay_seconds)
+                or after.appraisal_refs != change.appraisal_refs
+                or any(
+                    item.dimension == after.dimension
+                    and item.source_cluster_ref == after.source_cluster_ref
+                    for item in components
+                )
+                or any(
+                    other.status == "active"
+                    and other.episode_id != current.episode_id
+                    and any(
+                        item.dimension == after.dimension
+                        and item.source_cluster_ref == after.source_cluster_ref
+                        for item in other.components
+                    )
+                    for other in episodes
+                )
+            ):
+                raise ValueError("new affect component is not a valid episode extension")
+            components.append(_validated_component(after))
+            continue
         if offset is None:
             raise ValueError(f"unknown affect component {change.component_id!r}")
         before = components[offset]

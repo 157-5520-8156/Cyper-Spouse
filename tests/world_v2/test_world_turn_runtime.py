@@ -24,9 +24,9 @@ from companion_daemon.world_v2.proposal_envelope import (
     ProposalActionIntent,
     TypedChange,
 )
-from companion_daemon.world_v2.runtime import WorldRuntime
+from companion_daemon.world_v2.runtime import WorldRuntime, _requires_immediate_emotion
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
-from companion_daemon.world_v2.schemas import BudgetAccount, ExternalObservation, WorldEvent
+from companion_daemon.world_v2.schemas import BudgetAccount, ExternalObservation, Observation, WorldEvent
 from companion_daemon.world_v2.platform_action_executor import (
     PlatformActionExecutor,
     PlatformDispatchReceipt,
@@ -166,6 +166,41 @@ def _event(event_type: str, payload: dict[str, object], suffix: str) -> WorldEve
         correlation_id="test",
         idempotency_key=f"turn-runtime:{suffix}",
         payload=payload,
+    )
+
+
+def _observation_for_emotion_gate(*, text: str | None, attachment: bool = False) -> Observation:
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    return Observation(
+        schema_version="world-v2.1",
+        observation_id="observation:emotion-gate",
+        world_id="world:turn-runtime",
+        logical_time=now,
+        created_at=now,
+        trace_id="trace:emotion-gate",
+        causation_id="message:emotion-gate",
+        correlation_id="conversation:emotion-gate",
+        source="test",
+        source_event_id="message:emotion-gate",
+        actor="user:user.1",
+        channel="test",
+        payload_ref="payload:emotion-gate",
+        payload_hash="sha256:" + "a" * 64,
+        text=text,
+        received_at=now,
+        attachment_refs=("attachment:image:1",) if attachment else (),
+    )
+
+
+def test_pure_attachment_does_not_block_the_visible_reply_on_same_turn_appraisal() -> None:
+    assert not _requires_immediate_emotion(
+        _observation_for_emotion_gate(text=None, attachment=True)
+    )
+
+
+def test_emotional_text_with_attachment_keeps_same_turn_appraisal() -> None:
+    assert _requires_immediate_emotion(
+        _observation_for_emotion_gate(text="这张图让我很难过", attachment=True)
     )
 
 

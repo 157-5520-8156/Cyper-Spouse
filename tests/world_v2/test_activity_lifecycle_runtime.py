@@ -20,6 +20,7 @@ from companion_daemon.world_v2.life_ecology_trigger_store import LedgerLifeEcolo
 from companion_daemon.world_v2.schema_core import EvidenceRef
 from companion_daemon.world_v2.schemas import (
     CommitResult,
+    MessageObservationRef,
     PlanStateProjection,
     ProjectionCursor,
     WorldEvent,
@@ -179,12 +180,73 @@ def test_recorder_and_acceptance_runtime_preserve_the_exact_proposal_to_effect_c
     assert ledger.accepted[1].payload()["activity_lifecycle_proposal_id"] == proposal.proposal_id
 
 
+def test_interruption_acceptance_records_source_bound_change_plan_coordinates() -> None:
+    projection, trigger_id = _claimed_projection()
+    observation = MessageObservationRef(
+        observation_id="observation:user:interrupt",
+        source="test", source_event_id="message:interrupt",
+        content_payload_hash="b" * 64, event_payload_hash="c" * 64,
+        world_revision=8, actor="user:geoff", channel="direct",
+        payload_ref="payload:interrupt",
+    )
+    active = projection.plans[0].model_copy(update={
+        "status": "active", "authority_origin": None,
+    })
+    projection = projection.model_copy(update={
+        "plans": (active,), "message_observations": (observation,),
+    })
+    ledger = _Ledger(projection)
+    ledger.issuer = AcceptedLedgerBatchIssuer()
+    proposal = ActivityLifecycleProposalCompiler(
+        catalog=_catalog(), ecology_catalog_version=ECOLOGY_CATALOG_VERSION
+    ).compile(
+        projection=projection, wake_event_ref="event:clock:opening",
+        ecology_trigger_id=trigger_id,
+        draft=_selected_draft(projection=projection),
+    )
+    assert proposal is not None and proposal.opening_kind == "interruption"
+    record = ActivityLifecycleProposalRecorder(ledger=ledger).record(
+        cursor=ledger.cursor, proposal=proposal,
+        actor="worker:life-ecology", source="test", created_at=NOW,
+        trace_id="trace:interrupt", correlation_id="correlation:interrupt",
+    )
+    runtime = ActivityLifecycleAcceptanceRuntime(
+        ledger=ledger, batch_issuer=ledger.issuer
+    )
+
+    runtime.accept(
+        handle=runtime.pin_proposal(
+            cursor=ledger.cursor, proposal_event_ref=record.proposal_event_ref
+        ),
+        actor="worker:life-ecology", source="test", logical_time=NOW,
+        created_at=NOW, trace_id="trace:interrupt",
+        correlation_id="correlation:interrupt",
+    )
+
+    effect = ledger.accepted[1].payload()
+    assert effect["policy_refs"] == [
+        "policy:activity-lifecycle.1",
+        "matrix:deviation:change_plan",
+        "matrix:source:interruption",
+    ]
+    assert effect["evidence_refs"][-1]["evidence_type"] == "observed_message"
+    assert effect["evidence_refs"][-1]["ref_id"] == observation.observation_id
+
+
 class _Model:
     model = "test-flash"
 
     async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
         token = __import__("json").loads(messages[1]["content"])["openings"][0]["opening_token"]
         return '{"decision":"select","opening_token":"' + token + '"}'
+
+
+class _InvalidModel:
+    model = "test-invalid"
+
+    async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
+        del messages, temperature
+        return "not-json"
 
 
 @pytest.mark.asyncio
@@ -212,6 +274,34 @@ async def test_worker_turns_one_claimed_wake_into_one_accepted_transition() -> N
 
     assert result.status == "transitioned"
     assert [item.event_type for item in ledger.accepted] == ["AcceptanceRecorded", "ActivityStarted"]
+
+
+@pytest.mark.asyncio
+async def test_worker_isolates_invalid_model_output_from_the_life_scheduler() -> None:
+    projection, trigger_id = _claimed_projection()
+    ledger = _Ledger(projection)
+    ledger.issuer = AcceptedLedgerBatchIssuer()
+    worker = ActivityLifecycleWorker(
+        ledger=ledger,
+        catalog=_catalog(),
+        draft_adapter=ActivityLifecycleDraftAdapter(model=_InvalidModel()),
+        proposal_recorder=ActivityLifecycleProposalRecorder(ledger=ledger),
+        acceptance_runtime=ActivityLifecycleAcceptanceRuntime(ledger=ledger, batch_issuer=ledger.issuer),
+        ecology_catalog_version=ECOLOGY_CATALOG_VERSION,
+    )
+
+    result = await worker.advance_once(
+        wake_event_ref="event:clock:opening",
+        trigger_id=trigger_id,
+        logical_time=NOW,
+        actor="worker:life-ecology",
+        trace_id="trace:invalid-model",
+        correlation_id="correlation:invalid-model",
+    )
+
+    assert result.status == "blocked"
+    assert result.reason_code == "activity_lifecycle.model_unavailable"
+    assert ledger.accepted == ()
 
 
 @pytest.mark.asyncio

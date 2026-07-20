@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import sqlite3
 
 import pytest
 
-from legacy_migration_support import strip_v16_state_fields
+from legacy_migration_support import read_head_state_json, strip_v16_state_fields
 
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
@@ -34,10 +34,16 @@ WORLD = "world-fact-authority"
 POLICY = ("policy:fact-v1",)
 
 
-def event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
+def event(
+    event_id: str,
+    event_type: str,
+    payload: dict[str, object],
+    *,
+    logical_time: datetime = NOW,
+) -> WorldEvent:
     return WorldEvent.from_payload(
         schema_version="world-v2.1", event_id=event_id, world_id=WORLD,
-        event_type=event_type, logical_time=NOW, created_at=NOW,
+        event_type=event_type, logical_time=logical_time, created_at=NOW,
         actor="system:test", source="test", trace_id="trace:fact",
         causation_id=f"cause:{event_id}", correlation_id="correlation:fact",
         idempotency_key=domain_idempotency_key(
@@ -178,10 +184,11 @@ def proposal(value: FactChangedPayload) -> FactProposalProjection:
 
 def initialized(kind=WorldLedger.in_memory):
     ledger = kind(world_id=WORLD)
-    ledger.commit([event("world:start", "WorldStarted", {})],
+    origin = NOW - timedelta(minutes=1)
+    ledger.commit([event("world:start", "WorldStarted", {}, logical_time=origin)],
                   expected_world_revision=0, expected_deliberation_revision=0)
     ledger.commit([event("clock:start", "ClockAdvanced", {
-        "logical_time_from": "2026-07-15T11:59:00+00:00",
+        "logical_time_from": origin.isoformat(),
         "logical_time_to": NOW.isoformat(),
     })], expected_world_revision=1, expected_deliberation_revision=0)
     ledger.commit([event("operator:fact", "OperatorObservationRecorded", {
@@ -644,9 +651,7 @@ def test_fact_correction_compensation_restores_exact_latest_before_image(tmp_pat
     assert reopened.project() == expected
     reopened.close()
     with sqlite3.connect(path) as connection:
-        raw = json.loads(connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0])
+        raw = json.loads(read_head_state_json(connection, WORLD))
         raw["fact_transitions"][-1]["compensates_transition_id"] = "transition:missing"
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ? WHERE world_id = ?",
@@ -789,9 +794,7 @@ def test_sqlite_fact_roundtrip_rebuild_tamper_and_v11_migration(tmp_path) -> Non
     assert reopened.rebuild() == expected
     reopened.close()
     with sqlite3.connect(path) as connection:
-        raw = json.loads(connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0])
+        raw = json.loads(read_head_state_json(connection, WORLD))
         raw["facts"][0]["values"]["value_hash"] = "0" * 64
         connection.execute("UPDATE world_v2_heads SET state_json = ? WHERE world_id = ?",
                            (json.dumps(raw, separators=(",", ":")), WORLD))
@@ -805,9 +808,7 @@ def test_sqlite_fact_roundtrip_rebuild_tamper_and_v11_migration(tmp_path) -> Non
     record_message(legacy, observation_id="message:legacy")
     legacy.close()
     with sqlite3.connect(legacy_path) as connection:
-        state_json = connection.execute(
-            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
-        ).fetchone()[0]
+        state_json = read_head_state_json(connection, WORLD)
         raw_state = json.loads(state_json)
         strip_v16_state_fields(raw_state)
         retained = raw_state["message_observations"][0]

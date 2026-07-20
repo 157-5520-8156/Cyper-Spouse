@@ -24,7 +24,7 @@ NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 def test_catalog_exposes_the_frozen_matrix_vocabulary_without_behavior_commands() -> None:
     catalog = default_matrix_catalog()
 
-    assert catalog.catalog_version == "world-v2-matrix-1"
+    assert catalog.catalog_version == "world-v2-matrix-2"
     assert catalog.lookup("appraisal.negative").value_set == (
         "disappointment",
         "dismissal",
@@ -48,6 +48,18 @@ def test_catalog_exposes_the_frozen_matrix_vocabulary_without_behavior_commands(
         "strong_disagreement",
         "boundary_pressure",
     }
+    assert set(catalog.lookup("user_affect.signal").value_set) >= {
+        "disappointed",
+        "withdrawing",
+        "uncertain",
+    }
+    assert set(catalog.lookup("continuity.thread_signal").value_set) >= {
+        "possible_unfinished_share",
+        "possible_repair_need",
+        "possible_boundary_residue",
+    }
+    assert catalog.lookup("user_affect.signal").owner == "advisory"
+    assert catalog.lookup("continuity.thread_signal").owner == "advisory"
     assert "no_intervention" in catalog.lookup("social_response_option").value_set
     assert all(field.behavior_authority == "none" for field in catalog.fields)
 
@@ -153,17 +165,15 @@ def test_catalog_validates_schema_and_only_coordinate_compatibility() -> None:
             CombinationConstraint(
                 constraint_id="silence-needs-no-visible-action",
                 when=(MatrixSelection(field_id="test.stance", value="remain_silent"),),
-                incompatible_with=(
-                    MatrixSelection(field_id="test.visible_action", value="reply"),
-                ),
+                incompatible_with=(MatrixSelection(field_id="test.visible_action", value="reply"),),
                 rationale="coordinate contradiction only; this does not select a response",
             ),
         ),
     )
 
-    assert catalog.validate_schema(
-        (MatrixSelection(field_id="test.stance", value="defer"),)
-    ) == (MatrixSelection(field_id="test.stance", value="defer"),)
+    assert catalog.validate_schema((MatrixSelection(field_id="test.stance", value="defer"),)) == (
+        MatrixSelection(field_id="test.stance", value="defer"),
+    )
     with pytest.raises(MatrixSchemaError, match="unknown field"):
         catalog.validate_schema((MatrixSelection(field_id="unknown", value="defer"),))
     with pytest.raises(MatrixSchemaError, match="unknown value"):

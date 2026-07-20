@@ -1,0 +1,14 @@
+{
+  "scenario_id": "new-acquaintance-attunement-targeted-real-audit.v1",
+  "turns": [
+    {"id": "T01", "at_minutes": 0, "text": "你好，第一次见。"},
+    {"id": "T06", "at_minutes": 2, "text": "我最近在准备一个很重要的项目。"},
+    {"id": "T07", "at_minutes": 4, "text": "它是一个高拟真的虚拟伴侣项目。"},
+    {"id": "T08", "at_minutes": 6, "text": "我其实挺怕最后做砸的。"},
+    {"id": "T09", "at_minutes": 8, "text": "你刚才回得有点敷衍，我有点失望。"},
+    {"id": "T10", "at_minutes": 10, "text": "不用硬安慰我，说真话就行。"},
+    {"id": "T11", "at_minutes": 12, "text": "你会不会其实根本不在意？"},
+    {"id": "T12", "at_minutes": 14, "text": "好吧，刚才我语气也有点冲。"}
+  ],
+  "after_silence": {"advance_minutes": 180}
+}

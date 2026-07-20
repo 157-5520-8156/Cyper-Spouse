@@ -8,6 +8,7 @@ from companion_daemon.world_v2.platform_action_executor import (
     PlatformDispatchReceipt,
     ResolvedActionPayload,
 )
+from companion_daemon.world_v2.production_latency_trace import ProductionLatencyRecorder
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import BudgetAccount, BudgetReservation, WorldEvent
@@ -90,6 +91,17 @@ class Transport:
         )
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.value = 1_000_000_000
+
+    def __call__(self) -> int:
+        return self.value
+
+    def advance_ms(self, value: int) -> None:
+        self.value += value * 1_000_000
+
+
 @pytest.mark.asyncio
 async def test_platform_executor_dispatches_only_the_authorized_payload_and_binds_receipt() -> None:
     payloads = Payloads("我在。")
@@ -110,6 +122,63 @@ async def test_platform_executor_dispatches_only_the_authorized_payload_and_bind
 
 
 @pytest.mark.asyncio
+async def test_platform_executor_records_real_dispatch_receipt_and_visible_boundaries() -> None:
+    clock = _Clock()
+    recorder = ProductionLatencyRecorder(clock_ns=clock)
+    trace = recorder.start_ingress(
+        trace_id="trace:platform-adapter", environment="offline_in_process"
+    )
+
+    class TimedPayloads(Payloads):
+        async def resolve(self, current: Action) -> ResolvedActionPayload:
+            clock.advance_ms(3)
+            return await super().resolve(current)
+
+    class TimedTransport(Transport):
+        async def send(self, request):  # type: ignore[no-untyped-def]
+            clock.advance_ms(7)
+            return await super().send(request)
+
+    receipt = await PlatformActionExecutor(
+        payloads=TimedPayloads("我在。"),
+        transport=TimedTransport(),
+        latency_recorder=recorder,
+    ).dispatch(action())
+
+    assert receipt is not None and receipt.status == "delivered"
+    assert {sample.segment: sample.duration_ms for sample in trace.samples()} == {
+        "dispatch": 3.0,
+        "ingress_to_visible": 10.0,
+        "receipt": 7.0,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ("failed", "provider_accepted"))
+async def test_non_delivered_receipt_does_not_fabricate_visibility(status: str) -> None:
+    clock = _Clock()
+    recorder = ProductionLatencyRecorder(clock_ns=clock)
+    trace = recorder.start_ingress(
+        trace_id="trace:platform-adapter", environment="real_transport"
+    )
+
+    class FailedTransport(Transport):
+        async def send(self, request):  # type: ignore[no-untyped-def]
+            receipt = await super().send(request)
+            return receipt.model_copy(update={"status": status})
+
+    await PlatformActionExecutor(
+        payloads=Payloads("我在。"),
+        transport=FailedTransport(),
+        latency_recorder=recorder,
+    ).dispatch(action())
+
+    segments = {sample.segment for sample in trace.samples()}
+    assert segments == {"dispatch", "receipt"}
+    assert "ingress_to_visible" not in segments
+
+
+@pytest.mark.asyncio
 async def test_platform_executor_renders_delayed_followup_as_the_same_message_primitive() -> None:
     transport = Transport()
     executor = PlatformActionExecutor(
@@ -119,7 +188,22 @@ async def test_platform_executor_renders_delayed_followup_as_the_same_message_pr
     receipt = await executor.dispatch(action(text="晚一点再把这句话说完。", kind="followup"))
 
     assert receipt.status == "delivered"
-    assert transport.sent[0].kind == "reply"
+    assert transport.sent[0].kind == "followup"
+
+
+@pytest.mark.asyncio
+async def test_platform_executor_preserves_proactive_kind_for_transport_policy() -> None:
+    transport = Transport()
+    executor = PlatformActionExecutor(
+        payloads=Payloads("刚才那件事我又想了一下。"), transport=transport
+    )
+
+    receipt = await executor.dispatch(
+        action(text="刚才那件事我又想了一下。", kind="proactive_message")
+    )
+
+    assert receipt.status == "delivered"
+    assert transport.sent[0].kind == "proactive_message"
 
 
 @pytest.mark.asyncio

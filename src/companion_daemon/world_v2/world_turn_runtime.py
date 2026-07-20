@@ -11,10 +11,12 @@ from typing import Protocol
 from .runtime import WorldRuntime
 from .action_pump import ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
+from .afterthought_author import AfterthoughtRunResult
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
 from .expression_reconsideration_runtime import ExpressionReconsiderationRunResult
+from .social_action_worker import SocialActionRunResult
 from .schemas import (
     ClockObservation,
     ExternalObservation,
@@ -55,12 +57,23 @@ class WorldTurnRuntime:
         )
         source_event_id = f"{turn.platform}:{turn.platform_user_id}:{turn.platform_message_id}"
         payload_hash = _inbound_payload_hash(turn)
+        reaction_target = turn.coalescing_metadata.get("reaction_target_message_id")
+        platform_message_id = (
+            reaction_target
+            if isinstance(reaction_target, str) and reaction_target
+            else turn.platform_message_id
+        )
+        logical_time = await self._runtime.current_logical_time()
         return await self._runtime.ingest(
             Observation(
                 schema_version="world-v2.1",
                 observation_id=f"observation:{source_event_id}",
                 world_id=self._runtime.world_id,
-                logical_time=turn.observed_at,
+                # Provider arrival time is evidence, not World Clock authority.
+                # A production world is initialized by WorldStarted and moves
+                # only through ClockAdvanced; unbootstrapped in-memory fixtures
+                # retain the historical first-observation fallback.
+                logical_time=logical_time or turn.observed_at,
                 created_at=turn.observed_at,
                 trace_id=turn.trace_id,
                 causation_id=source_event_id,
@@ -73,7 +86,13 @@ class WorldTurnRuntime:
                 payload_hash=payload_hash,
                 text=turn.text,
                 received_at=turn.observed_at,
-                reply_context={"target": target},
+                # Provider identity is committed with the Observation so a
+                # later reaction can bind the exact inbound message without
+                # trusting a model-supplied target.
+                reply_context={
+                    "target": target,
+                    "platform_message_id": platform_message_id,
+                },
                 attachment_refs=turn.attachment_refs,
                 coalescing_metadata=turn.coalescing_metadata,
             )
@@ -137,6 +156,8 @@ class WorldTurnRuntime:
         | AffectTriggerRunResult
         | FactTriggerRunResult
         | ExpressionReconsiderationRunResult
+        | AfterthoughtRunResult
+        | SocialActionRunResult
         | None
     ):
         """Advance one durable low-priority affect job, if this host configured one.

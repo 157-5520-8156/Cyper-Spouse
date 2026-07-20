@@ -5,18 +5,39 @@ import tomllib
 
 import pytest
 
+import companion_daemon.config as config_module
 from companion_daemon.config import Settings, get_settings
 from companion_daemon.db import CompanionStore
-from companion_daemon.runtime import build_companion_engine, require_flash_model
+from companion_daemon.event_media import FirstPersonPrivatePromptAuthor
+from companion_daemon.image_generation import CivitaiTemplateWorkflowImageGenerator
+from companion_daemon.runtime import (
+    build_event_media_renderer,
+    build_companion_engine,
+    build_specialized_media_generators,
+    require_flash_model,
+)
+from companion_daemon.time import utc_now
 from companion_daemon.world import WorldKernel
 
 
-def test_runtime_builds_engine_with_fake_model() -> None:
-    engine = build_companion_engine(use_fake_model=True)
+def test_runtime_builds_engine_with_fake_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "runtime.sqlite"))
+    get_settings.cache_clear()
+    try:
+        engine = build_companion_engine(use_fake_model=True)
+    finally:
+        get_settings.cache_clear()
 
     assert engine.companion_system_prompt
     assert engine.world_kernel is not None
     assert engine.world_id is not None
+    clock = engine.world_kernel.snapshot(engine.world_id)["clock"]
+    assert clock["mode"] == "realtime"
+    assert clock["rate"] == 1
+    logical_at = datetime.fromisoformat(str(clock["logical_at"]))
+    assert utc_now().astimezone(logical_at.tzinfo) - logical_at <= timedelta(minutes=5)
 
 
 def test_daemon_prompt_core_is_default_without_env() -> None:
@@ -26,8 +47,143 @@ def test_daemon_prompt_core_is_default_without_env() -> None:
     assert settings.deepseek_model == "deepseek-v4-flash"
     assert settings.deepseek_thinking_enabled is False
     assert settings.deepseek_deep_appraisal_model == "deepseek-v4-flash"
-    assert settings.deepseek_deep_appraisal_thinking_enabled is True
+    assert settings.deepseek_deep_appraisal_thinking_enabled is False
     assert not hasattr(settings, "world_runtime_enabled")
+
+
+def test_specialized_media_generator_rejects_legacy_sdxl_as_a_high_lane_fallback() -> None:
+    assert build_specialized_media_generators(Settings(_env_file=None, CIVITAI_API_KEY="")) == {}
+    assert build_specialized_media_generators(Settings(CIVITAI_API_KEY="civitai-test-key")) == {}
+
+    assert build_specialized_media_generators(
+        Settings(
+            CIVITAI_API_KEY="civitai-test-key",
+            CIVITAI_SUGGESTIVE_IMAGE_MODEL="urn:air:sdxl:checkpoint:civitai:312530@2840768",
+        )
+    ) == {}
+    assert build_specialized_media_generators(
+        Settings(
+            CIVITAI_API_KEY="civitai-test-key",
+            CIVITAI_SUGGESTIVE_IMAGE_MODEL="urn:air:sdxl:checkpoint:civitai:312530@2840768",
+            CIVITAI_PROXY_URL="http://proxy.test:8080",
+        )
+    ) == {}
+
+
+def test_runtime_refuses_high_private_routes_without_the_reviewed_template() -> None:
+    settings = Settings(
+        CIVITAI_API_KEY="civitai-test-key",
+        CIVITAI_KREA2_ENABLED=True,
+        CIVITAI_KREA2_TEMPLATE_PATH=None,
+    )
+    generators = build_specialized_media_generators(settings)
+
+    assert generators == {}
+
+
+def test_runtime_prefers_the_reviewed_krea2_template_for_both_high_private_routes(tmp_path: Path) -> None:
+    template = tmp_path / "krea2.json"
+    template.write_text(
+        '{"allowMatureContent":true,"steps":[{"$type":"imageGen","input":'
+        '{"engine":"comfy","ecosystem":"krea2","model":"turbo","operation":"createImage",'
+        '"prompt":"{{render_prompt}}",'
+        '"negativePrompt":"fixed","width":512,"height":768,"steps":8,"cfgScale":1,'
+        '"sampler":"euler","scheduler":"simple","quantity":1,"seed":"{{seed}}",'
+        '"loras":{"urn:air:krea2:lora:civitai:test@1":1.0}}}]}',
+        encoding="utf-8",
+    )
+    settings = Settings(
+        CIVITAI_API_KEY="civitai-test-key",
+        CIVITAI_KREA2_ENABLED=True,
+        CIVITAI_KREA2_TEMPLATE_PATH=str(template),
+    )
+
+    generators = build_specialized_media_generators(settings)
+
+    assert isinstance(generators["adult_suggestive"], CivitaiTemplateWorkflowImageGenerator)
+    assert generators["adult_suggestive"] is generators["adult_explicit"]
+    assert generators["adult_suggestive"].require_reference_free
+
+
+def test_runtime_uses_the_existing_openai_proxy_when_civitai_has_no_override(tmp_path: Path) -> None:
+    template = tmp_path / "krea2.json"
+    template.write_text(
+        '{"allowMatureContent":true,"steps":[{"$type":"imageGen","input":'
+        '{"engine":"comfy","ecosystem":"krea2","model":"turbo","operation":"createImage",'
+        '"prompt":"{{render_prompt}}",'
+        '"negativePrompt":"fixed","width":512,"height":768,"steps":8,"cfgScale":1,'
+        '"sampler":"euler","scheduler":"simple","quantity":1,"seed":"{{seed}}",'
+        '"loras":{"urn:air:krea2:lora:civitai:test@1":1.0}}}]}',
+        encoding="utf-8",
+    )
+    generator = build_specialized_media_generators(
+        Settings(
+            _env_file=None,
+            CIVITAI_API_KEY="civitai-test-key",
+            CIVITAI_KREA2_ENABLED=True,
+            CIVITAI_KREA2_TEMPLATE_PATH=str(template),
+            OPENAI_PROXY_URL="http://openai-proxy.test:8080",
+        )
+    )["adult_suggestive"]
+
+    assert isinstance(generator, CivitaiTemplateWorkflowImageGenerator)
+    assert generator.proxy_url == "http://openai-proxy.test:8080"
+
+
+def test_runtime_uses_standard_https_proxy_when_no_specific_proxy_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "krea2.json"
+    template.write_text(
+        '{"allowMatureContent":true,"steps":[{"$type":"imageGen","input":'
+        '{"engine":"comfy","ecosystem":"krea2","model":"turbo","operation":"createImage",'
+        '"prompt":"{{render_prompt}}",'
+        '"negativePrompt":"fixed","width":512,"height":768,"steps":8,"cfgScale":1,'
+        '"sampler":"euler","scheduler":"simple","quantity":1,"seed":"{{seed}}",'
+        '"loras":{"urn:air:krea2:lora:civitai:test@1":1.0}}}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "_macos_launchctl_env", lambda _name: None)
+    monkeypatch.setenv("HTTPS_PROXY", "http://standard-proxy.test:7897")
+    generator = build_specialized_media_generators(
+        Settings(
+            _env_file=None,
+            CIVITAI_API_KEY="civitai-test-key",
+            CIVITAI_KREA2_ENABLED=True,
+            CIVITAI_KREA2_TEMPLATE_PATH=str(template),
+        )
+    )["adult_suggestive"]
+
+    assert isinstance(generator, CivitaiTemplateWorkflowImageGenerator)
+    assert generator.proxy_url == "http://standard-proxy.test:7897"
+
+
+def test_event_media_renderer_receives_the_same_reviewed_high_lane_routes(tmp_path: Path) -> None:
+    template = tmp_path / "krea2.json"
+    template.write_text(
+        '{"allowMatureContent":true,"steps":[{"$type":"imageGen","input":'
+        '{"engine":"comfy","ecosystem":"krea2","model":"turbo","operation":"createImage",'
+        '"prompt":"{{render_prompt}}",'
+        '"negativePrompt":"fixed","width":512,"height":768,"steps":8,"cfgScale":1,'
+        '"sampler":"euler","scheduler":"simple","quantity":1,"seed":"{{seed}}",'
+        '"loras":{"urn:air:krea2:lora:civitai:test@1":1.0}}}]}',
+        encoding="utf-8",
+    )
+    renderer = build_event_media_renderer(
+        Settings(
+            CIVITAI_API_KEY="civitai-test-key",
+            CIVITAI_KREA2_ENABLED=True,
+            CIVITAI_KREA2_TEMPLATE_PATH=str(template),
+            OPENROUTER_API_KEY="openrouter-test-key",
+        ),
+        generator=object(),
+        inspector=object(),
+        output_dir=tmp_path / "media",
+    )
+
+    assert isinstance(renderer.specialized_generators["adult_suggestive"], CivitaiTemplateWorkflowImageGenerator)
+    assert renderer.specialized_generators["adult_suggestive"] is renderer.specialized_generators["adult_explicit"]
+    assert isinstance(renderer.private_prompt_author, FirstPersonPrivatePromptAuthor)
 
 
 def test_runtime_allows_explicitly_routed_strong_models_but_rejects_empty_name() -> None:
@@ -51,7 +207,7 @@ async def test_runtime_models_share_provider_circuit_breaker(
     assert engine.interaction_appraisal_model is not None
     assert engine.interaction_deep_appraisal_model is not None
     assert engine.interaction_appraisal_model.thinking_enabled is False
-    assert engine.interaction_deep_appraisal_model.thinking_enabled is True
+    assert engine.interaction_deep_appraisal_model.thinking_enabled is False
     assert engine.model.circuit_breaker is not None
     assert (
         engine.model.circuit_breaker
@@ -197,7 +353,11 @@ def test_all_production_entrypoints_use_the_world_runtime_factory() -> None:
     project_root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((project_root / "pyproject.toml").read_text())
     scripts = project["project"]["scripts"]
-    offline_tools = {"companion-eval-experience"}
+    offline_tools = {
+        "companion-eval-experience",
+        "companion-world-v2-test-economy",
+        "companion-world-v2-formal-eval",
+    }
     retired_tools = {"companion-send-sticker"}
 
     for script_name, target in scripts.items():
@@ -210,8 +370,11 @@ def test_all_production_entrypoints_use_the_world_runtime_factory() -> None:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
         if script_name not in offline_tools | retired_tools:
-            assert "build_companion_engine" in calls, (
-                f"production entrypoint {script_name!r} must use the single world runtime factory"
+            assert calls & {
+                "build_companion_engine",
+                "build_sqlite_world_v2_turn_application",
+            }, (
+                f"production entrypoint {script_name!r} must use an installed world runtime factory"
             )
         assert "CompanionEngine" not in calls, (
             f"production entrypoint {script_name!r} must not construct a bypass engine"

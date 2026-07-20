@@ -13,9 +13,21 @@ from companion_daemon.world import (
     _state_hash,
     parse_reply_candidate,
 )
+from companion_daemon.media_shot import MediaShotPlanner
+from companion_daemon.world_media import WorldMediaDecision
 
 
 NOW = datetime(2026, 7, 11, 9, 0, tzinfo=UTC)
+
+
+def media_shot_payload(
+    snapshot: dict[str, object], *, request_id: str, media_kind: str = "selfie"
+) -> dict[str, object]:
+    return MediaShotPlanner().plan(
+        snapshot,
+        WorldMediaDecision(True, media_kind, "test", capture_mode="handheld_selfie"),
+        request_id,
+    ).to_payload()
 
 
 def world_seed() -> dict[str, object]:
@@ -358,6 +370,7 @@ def test_media_generation_and_delivery_are_separate_world_actions(tmp_path: Path
             "type": "request_media", "world_id": started.world_id, "request_id": "image:one",
             "user_id": "user:geoff", "media_kind": "selfie", "topic": "宿舍里的随手拍",
             "reason": "world_relationship_allows_selfie", "rule_version": "world-media-v1",
+            "shot_plan": media_shot_payload(kernel.snapshot(started.world_id), request_id="image:one"),
         },
         expected_revision=user.revision,
     )
@@ -379,6 +392,83 @@ def test_media_generation_and_delivery_are_separate_world_actions(tmp_path: Path
     media = kernel.snapshot(started.world_id)["media"]["image:one"]
     assert media["status"] == "shared"
     assert media["delivery_action_id"] == "media-delivery:image:one"
+
+
+def test_media_delivery_context_is_preserved_in_the_world_outbox(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    context = {"platform": "qq", "platform_user_id": "geoff", "text": "能发一张自拍吗", "message_id": "media-context"}
+    requested = kernel.submit(
+        {
+            "type": "request_media", "world_id": started.world_id, "request_id": "image:context",
+            "user_id": "user:geoff", "media_kind": "selfie", "topic": "窗边自拍",
+            "reason": "world_relationship_allows_selfie", "delivery_context": context,
+            "shot_plan": media_shot_payload(kernel.snapshot(started.world_id), request_id="image:context"),
+        },
+        expected_revision=user.revision,
+    )
+
+    generation = kernel.snapshot(started.world_id)["actions"]["media-generation:image:context"]
+    assert generation["payload"]["delivery_context"] == context
+    assert generation["payload"]["capture_mode"] == "handheld_selfie"
+    assert generation["payload"]["shot_plan"] == kernel.snapshot(started.world_id)["media"]["image:context"]["shot_plan"]
+
+    generated = kernel.record_external_result(
+        "media-generation:image:context",
+        {"kind": "media_generation", "status": "delivered", "artifact_path": "assets/life/one.png", "artifact_hash": "abc123"},
+        expected_revision=requested.revision,
+        world_id=started.world_id,
+    )
+    kernel.submit(
+        {"type": "schedule_media_delivery", "world_id": started.world_id, "request_id": "image:context"},
+        expected_revision=generated.revision,
+    )
+    delivery = kernel.snapshot(started.world_id)["actions"]["media-delivery:image:context"]
+    assert delivery["payload"]["delivery_context"] == context
+
+
+def test_personal_media_requires_a_frozen_shot_plan(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+
+    with pytest.raises(WorldError, match="media request requires"):
+        kernel.submit(
+            {
+                "type": "request_media", "world_id": started.world_id, "request_id": "image:no-plan",
+                "user_id": "user:geoff", "media_kind": "character_media", "topic": "窗边自拍",
+                "reason": "world_relationship_allows_personal_media",
+            },
+            expected_revision=user.revision,
+        )
+
+
+def test_personal_media_rejects_a_plan_not_grounded_in_current_activity(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    plan = media_shot_payload(kernel.snapshot(started.world_id), request_id="image:forged")
+    plan["location"] = "未来旅行地"
+
+    with pytest.raises(WorldError, match="media request requires"):
+        kernel.submit(
+            {
+                "type": "request_media", "world_id": started.world_id, "request_id": "image:forged",
+                "user_id": "user:geoff", "media_kind": "selfie", "topic": "旅行打卡",
+                "reason": "world_relationship_allows_personal_media", "shot_plan": plan,
+            },
+            expected_revision=user.revision,
+        )
 
 
 def test_failed_media_generation_cannot_be_shared(tmp_path: Path) -> None:

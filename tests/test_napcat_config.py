@@ -195,7 +195,9 @@ def test_napcat_adapter_caps_single_turn_continuation_wait(monkeypatch) -> None:
     monkeypatch.setattr(napcat_cli, "build_companion_engine", lambda **_kwargs: SimpleNamespace())
     monkeypatch.setattr(napcat_cli, "QQMessageCoalescer", FakeCoalescer)
 
-    napcat_cli.create_app(adapter="napcat", use_fake_model=True)
+    napcat_cli.create_app(
+        adapter="napcat", use_fake_model=True, world_v2_c2c=False
+    )
 
     policy = captured["turn_policy"]
     decision = policy.decide(  # type: ignore[attr-defined]
@@ -313,7 +315,9 @@ async def test_napcat_http_event_reaches_companion_turn_and_settles_receipt(
     monkeypatch.setattr(napcat_cli, "get_settings", lambda: settings)
     monkeypatch.setattr(napcat_cli, "build_companion_engine", lambda **_kwargs: engine)
     monkeypatch.setattr(napcat_cli, "_target_for", lambda *_args: target)
-    app = napcat_cli.create_app(adapter="napcat", use_fake_model=True)
+    app = napcat_cli.create_app(
+        adapter="napcat", use_fake_model=True, world_v2_c2c=False
+    )
     event = {
         "post_type": "message",
         "message_type": "private",

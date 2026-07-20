@@ -48,5 +48,6 @@
 
 - snapshot/compiler、bridge、durable store、生态与 production composition 的
   聚焦测试通过。
-- 离线冻结场景校验通过，manifest hash：
-  `9be374805c19fb3302287ca375310eb81830fd89934f1cacf5708ff70cf2c02e`。
+- 离线冻结场景校验当前通过 `.5` manifest：
+  `f214504a5416dc2b31ba83907eeb95723ff9e674db3df84ebd3d477a509f0cf4`；本 P0
+  审计当时的 `.4` hash 已由逻辑时钟与 ExpressionPlan 终态 authority 升级取代。

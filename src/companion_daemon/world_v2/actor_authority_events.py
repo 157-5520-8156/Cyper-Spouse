@@ -21,8 +21,18 @@ from .schemas import ActorAuthorityValues, FrozenModel, WorldEvent
 ROOT_KEYSET_VERSION = "deployment-root-keyset.1"
 _ROOT_KEYSET_ITEMS = (
     (
+        # The production-1 seed was never actually held by this deployment
+        # (both production ledgers contain zero root-signed events when the
+        # key was rotated on 2026-07-20, so no committed proof pins the old
+        # digest).  The stale pin stays listed for history transparency.
         "deployment-root:production-1",
         "e906091515984b3aef1f4e7200959d594d88632eaf4a9c0ff6b5bba82aba6212",
+    ),
+    (
+        # Active deployment root.  The ed25519 seed lives outside the
+        # repository (operator .env, provisioning-only).
+        "deployment-root:production-2",
+        "bf2719538ff9eec9053d17460ae543f983eeb99814d1b8c674d337e265b8282f",
     ),
     (
         "test-only:development-root-1",

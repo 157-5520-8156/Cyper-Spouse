@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -13,10 +14,23 @@ from .expression_payload_store import (
     ImmutableExpressionPayloadStore,
     StoredExpressionPayload,
 )
+from .expression_payload_contract import validate_materialized_expression_payload
 from .proposal_audit_schemas import ProposalAuditProjection
-from .proposal_envelope import ProposalInput, validate_proposal_envelope
+from .proposal_envelope import (
+    EventShareClaimBinding,
+    ProposalInput,
+    ResponseExpectationDraftPayload,
+    validate_proposal_envelope,
+)
 from .schema_core import FrozenModel
-from .schemas import Action, BudgetAccount, BudgetReservation, ProjectionCursor
+from .schemas import (
+    Action,
+    BudgetAccount,
+    BudgetReservation,
+    Observation,
+    ProjectionCursor,
+    ResponseExpectationAuthority,
+)
 
 
 EXPRESSION_PLAN_ACCEPTANCE_POLICY_VERSION = "expression-plan-acceptance.1"
@@ -29,7 +43,9 @@ class ExpressionPlanAcceptanceError(ValueError):
 
 
 def _canonical_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 def _digest(value: object) -> str:
@@ -44,11 +60,14 @@ class ExpressionPlanBudgetPolicy(FrozenModel):
     actor: str = Field(min_length=1, max_length=256)
     allowed_targets: tuple[str, ...] = Field(min_length=1, max_length=64)
     recovery_policy: str = Field(min_length=1, max_length=128)
+    category: Literal["chat", "proactive"] = "chat"
     policy_version: str = EXPRESSION_PLAN_ACCEPTANCE_POLICY_VERSION
 
     @model_validator(mode="after")
     def target_set_is_canonical(self) -> "ExpressionPlanBudgetPolicy":
-        if tuple(sorted(self.allowed_targets)) != self.allowed_targets or len(set(self.allowed_targets)) != len(self.allowed_targets):
+        if tuple(sorted(self.allowed_targets)) != self.allowed_targets or len(
+            set(self.allowed_targets)
+        ) != len(self.allowed_targets):
             raise ValueError("expression plan target allow-list must be sorted and unique")
         return self
 
@@ -78,11 +97,14 @@ class ExpressionPlanAcceptanceMaterial(FrozenModel):
     ordering_policy: str = Field(min_length=1)
     terminal_policy: str = Field(min_length=1)
     beats: tuple[ExpressionPlanBeatMaterialized, ...] = Field(min_length=1, max_length=32)
+    response_expectation: ResponseExpectationAuthority | None = None
 
     @model_validator(mode="after")
     def material_is_closed(self) -> "ExpressionPlanAcceptanceMaterial":
         ids = {item.beat.beat_id for item in self.beats}
-        if len(ids) != len(self.beats) or any(item.beat.plan_id != self.plan_id for item in self.beats):
+        if len(ids) != len(self.beats) or any(
+            item.beat.plan_id != self.plan_id for item in self.beats
+        ):
             raise ValueError("expression plan material beat identity is invalid")
         if any(set(item.beat.dependency_beat_ids) - ids for item in self.beats):
             raise ValueError("expression plan material dependency is unknown")
@@ -97,6 +119,11 @@ class ExpressionPlanAcceptanceMaterial(FrozenModel):
                 or item.action.intent_ref != f"{self.proposal_id}:{item.intent_id}"
             ):
                 raise ValueError("expression plan material action is not beat-bound")
+        if self.response_expectation is not None and (
+            self.response_expectation.source_plan_id != self.plan_id
+            or self.response_expectation.source_beat_id not in ids
+        ):
+            raise ValueError("response expectation is not expression-bound")
         return self
 
 
@@ -112,6 +139,7 @@ def derive_expression_plan_material(
     trace_id: str,
     correlation_id: str,
     payload_store: ImmutableExpressionPayloadStore | None = None,
+    source_observation: Observation | None = None,
 ) -> ExpressionPlanAcceptanceMaterial:
     """Fail closed unless all external expression work is one complete plan.
 
@@ -140,17 +168,29 @@ def derive_expression_plan_material(
     plan_id = payload.get("plan_id")
     if not isinstance(plan_id, str) or not plan_id:
         raise ExpressionPlanAcceptanceError("plan_invalid")
-    if account.account_id != policy.account_id or account.category != "chat":
+    if account.account_id != policy.account_id or account.category != policy.category:
         raise ExpressionPlanAcceptanceError("budget_account_unavailable")
     external_intents = tuple(
         item for item in proposal.action_intents if item.kind in proposal.EXPRESSION_ACTION_KINDS
     )
-    if len(external_intents) != len(proposal.action_intents) or len(external_intents) != len(drafts):
+    if len(external_intents) != len(proposal.action_intents) or len(external_intents) != len(
+        drafts
+    ):
         raise ExpressionPlanAcceptanceError("expression_intents_not_exact")
     by_beat = {item.beat_ref: item for item in external_intents}
     if None in by_beat or len(by_beat) != len(external_intents):
         raise ExpressionPlanAcceptanceError("expression_intents_not_exact")
-    if account.limit - account.reserved - account.spent < policy.amount_limit_per_action * len(drafts):
+    _validate_event_share_claim(
+        proposal=proposal,
+        change=change,
+        payload=payload,
+        drafts=drafts,
+        intents=external_intents,
+        policy=policy,
+    )
+    if account.limit - account.reserved - account.spent < policy.amount_limit_per_action * len(
+        drafts
+    ):
         raise ExpressionPlanAcceptanceError("budget_unavailable")
 
     identity_root = {
@@ -162,27 +202,39 @@ def derive_expression_plan_material(
         "plan_id": plan_id,
     }
     action_id_by_beat: dict[str, str] = {}
-    parsed: list[tuple[dict[str, object], object, MessagePayloadMaterial, ExpressionBeatMaterial, str]] = []
+    parsed: list[
+        tuple[dict[str, object], object, MessagePayloadMaterial, ExpressionBeatMaterial, str]
+    ] = []
     for draft in drafts:
         if not isinstance(draft, dict):
             raise ExpressionPlanAcceptanceError("beats_invalid")
         beat_id = draft.get("beat_id")
         text = draft.get("inline_text")
         referenced_ref = draft.get("payload_ref")
-        payload_ref = referenced_ref if isinstance(referenced_ref, str) else draft.get("materialized_payload_ref")
+        payload_ref = (
+            referenced_ref
+            if isinstance(referenced_ref, str)
+            else draft.get("materialized_payload_ref")
+        )
         payload_hash = draft.get("payload_hash")
-        if not all(isinstance(value, str) and value for value in (beat_id, payload_ref, payload_hash)):
+        if not all(
+            isinstance(value, str) and value for value in (beat_id, payload_ref, payload_hash)
+        ):
             raise ExpressionPlanAcceptanceError("beat_binding_invalid")
         if isinstance(text, str) and text:
             if payload_hash != "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest():
                 raise ExpressionPlanAcceptanceError("beat_binding_invalid")
             message = MessagePayloadMaterial(
-                payload_ref=payload_ref, payload_hash=payload_hash, text=text,
+                payload_ref=payload_ref,
+                payload_hash=payload_hash,
+                text=text,
                 content_type=str(draft.get("content_type")),
             )
         else:
             message = _resolve_sidecar_payload(
-                draft=draft, payload_ref=payload_ref, payload_hash=payload_hash,
+                draft=draft,
+                payload_ref=payload_ref,
+                payload_hash=payload_hash,
                 payload_store=payload_store,
             )
         intent = by_beat.get(beat_id)
@@ -194,6 +246,24 @@ def derive_expression_plan_material(
             or intent.target not in policy.allowed_targets
         ):
             raise ExpressionPlanAcceptanceError("beat_binding_invalid")
+        if intent.kind in {"reaction", "typing", "sticker"}:
+            if message.storage_kind != "inline_text" or message.text is None:
+                raise ExpressionPlanAcceptanceError("expression_payload_invalid")
+            expected_provider_message_id = None
+            if source_observation is not None:
+                context = source_observation.reply_context or {}
+                candidate = context.get("platform_message_id")
+                if isinstance(candidate, str) and candidate:
+                    expected_provider_message_id = candidate
+            try:
+                validate_materialized_expression_payload(
+                    action_kind=intent.kind,
+                    content_type=message.content_type,
+                    body=message.text,
+                    expected_provider_message_id=expected_provider_message_id,
+                )
+            except ValueError as exc:
+                raise ExpressionPlanAcceptanceError("expression_payload_invalid") from exc
         expected_intent_dependencies = tuple(
             by_beat[dependency].intent_id for dependency in draft.get("dependency_beat_ids", ())
         )
@@ -226,14 +296,18 @@ def derive_expression_plan_material(
             reconsider_policy=str(draft.get("reconsider_policy")),
             merge_policy=str(draft.get("merge_policy")),
         )
-        action_id_by_beat[beat_id] = "action:expression-plan:" + _digest({**identity_root, "beat_id": beat_id, "role": "action"})
+        action_id_by_beat[beat_id] = "action:expression-plan:" + _digest(
+            {**identity_root, "beat_id": beat_id, "role": "action"}
+        )
         parsed.append((draft, intent, beat.payload, beat, _digest(intent.model_dump(mode="json"))))
 
     materialized: list[ExpressionPlanBeatMaterialized] = []
     for draft, intent, _message, beat, intent_hash in parsed:
         beat_id = beat.beat_id
         action_id = action_id_by_beat[beat_id]
-        reservation_id = "reservation:expression-plan:" + _digest({**identity_root, "beat_id": beat_id, "role": "budget"})
+        reservation_id = "reservation:expression-plan:" + _digest(
+            {**identity_root, "beat_id": beat_id, "role": "budget"}
+        )
         delay = draft.get("delay_window")
         not_before = expires_at = None
         if isinstance(delay, dict):
@@ -241,31 +315,79 @@ def derive_expression_plan_material(
             expires_at = datetime.fromisoformat(str(delay["expires_at"]))
         dependencies = tuple(action_id_by_beat[item] for item in beat.dependency_beat_ids)
         action = Action(
-            schema_version="world-v2.1", action_id=action_id, world_id=world_id,
-            logical_time=logical_time, created_at=created_at, trace_id=trace_id,
-            causation_id=audit.event_ref, correlation_id=correlation_id, kind=intent.kind,
-            layer="external_action", intent_ref=f"{proposal.proposal_id}:{intent.intent_id}",
-            actor=policy.actor, target=intent.target, payload_ref=beat.payload.payload_ref,
-            payload_hash=beat.payload.payload_hash, expression_plan_id=plan_id,
+            schema_version="world-v2.1",
+            action_id=action_id,
+            world_id=world_id,
+            logical_time=logical_time,
+            created_at=created_at,
+            trace_id=trace_id,
+            causation_id=audit.event_ref,
+            correlation_id=correlation_id,
+            kind=intent.kind,
+            layer="external_action",
+            intent_ref=f"{proposal.proposal_id}:{intent.intent_id}",
+            actor=policy.actor,
+            target=intent.target,
+            payload_ref=beat.payload.payload_ref,
+            payload_hash=beat.payload.payload_hash,
+            expression_plan_id=plan_id,
             expression_beat_id=beat_id,
-            idempotency_key="expression-plan:" + _digest({**identity_root, "beat_id": beat_id, "role": "idempotency"}),
-            not_before=not_before, expires_at=expires_at, dependencies=dependencies,
-            budget_reservation_id=reservation_id, state="authorized", recovery_policy=policy.recovery_policy,
+            idempotency_key="expression-plan:"
+            + _digest({**identity_root, "beat_id": beat_id, "role": "idempotency"}),
+            not_before=not_before,
+            expires_at=expires_at,
+            dependencies=dependencies,
+            budget_reservation_id=reservation_id,
+            state="authorized",
+            recovery_policy=policy.recovery_policy,
         )
-        materialized.append(ExpressionPlanBeatMaterialized(
-            beat=beat, intent_id=intent.intent_id, intent_hash=intent_hash,
-            reservation=BudgetReservation(
-                reservation_id=reservation_id, account_id=policy.account_id, action_id=action_id,
-                category="chat", amount_limit=policy.amount_limit_per_action,
-            ), action=action,
-        ))
+        materialized.append(
+            ExpressionPlanBeatMaterialized(
+                beat=beat,
+                intent_id=intent.intent_id,
+                intent_hash=intent_hash,
+                reservation=BudgetReservation(
+                    reservation_id=reservation_id,
+                    account_id=policy.account_id,
+                    action_id=action_id,
+                    category=policy.category,
+                    amount_limit=policy.amount_limit_per_action,
+                ),
+                action=action,
+            )
+        )
+    response_expectation = None
+    raw_expectation = payload.get("response_expectation")
+    if raw_expectation is not None:
+        try:
+            expectation = ResponseExpectationDraftPayload.model_validate(
+                raw_expectation, strict=True
+            )
+        except ValueError as exc:
+            raise ExpressionPlanAcceptanceError("response_expectation_invalid") from exc
+        response_expectation = ResponseExpectationAuthority(
+            source_plan_id=plan_id,
+            source_beat_id=materialized[-1].beat.beat_id,
+            hoped_response=expectation.hoped_response,
+            pressure_bp=expectation.pressure_bp,
+            importance_bp=expectation.importance_bp,
+            not_before=logical_time + timedelta(seconds=expectation.wait_seconds),
+            expires_at=logical_time + timedelta(seconds=expectation.expires_after_seconds),
+        )
     return ExpressionPlanAcceptanceMaterial(
-        proposal_id=proposal.proposal_id, proposal_event_ref=audit.event_ref,
-        proposal_event_payload_hash=audit.event_payload_hash, proposal_hash=proposal.proposal_hash,
-        cursor=cursor, policy_digest=policy.digest, expression_change_id=change.change_id,
-        expression_change_hash=change.payload.payload_hash, plan_id=plan_id,
-        ordering_policy=str(payload.get("ordering_policy")), terminal_policy=str(payload.get("terminal_policy")),
+        proposal_id=proposal.proposal_id,
+        proposal_event_ref=audit.event_ref,
+        proposal_event_payload_hash=audit.event_payload_hash,
+        proposal_hash=proposal.proposal_hash,
+        cursor=cursor,
+        policy_digest=policy.digest,
+        expression_change_id=change.change_id,
+        expression_change_hash=change.payload.payload_hash,
+        plan_id=plan_id,
+        ordering_policy=str(payload.get("ordering_policy")),
+        terminal_policy=str(payload.get("terminal_policy")),
         beats=tuple(materialized),
+        response_expectation=response_expectation,
     )
 
 
@@ -296,11 +418,16 @@ def _resolve_sidecar_payload(
     elif isinstance(inline, (str, dict)) and inline:
         encoded = inline if isinstance(inline, str) else _canonical_json(inline)
         try:
-            payload_store.put_if_absent(StoredExpressionPayload(
-                payload_ref=payload_ref, payload_hash=payload_hash,
-                content_type=content_type, privacy_class="private",
-                payload_kind="inline_encrypted", encoded_payload=encoded,
-            ))
+            payload_store.put_if_absent(
+                StoredExpressionPayload(
+                    payload_ref=payload_ref,
+                    payload_hash=payload_hash,
+                    content_type=content_type,
+                    privacy_class="private",
+                    payload_kind="inline_encrypted",
+                    encoded_payload=encoded,
+                )
+            )
         except ValueError as exc:
             raise ExpressionPlanAcceptanceError("sidecar_payload_invalid") from exc
         record = payload_store.read_exact(payload_ref=payload_ref)
@@ -315,13 +442,19 @@ def _resolve_sidecar_payload(
     ):
         raise ExpressionPlanAcceptanceError("sidecar_payload_unavailable")
     return MessagePayloadMaterial(
-        payload_ref=record.payload_ref, payload_hash=record.payload_hash,
-        text=None, content_type=record.content_type, storage_kind="sidecar",
-        sidecar_kind=record.payload_kind, privacy_class=record.privacy_class,
+        payload_ref=record.payload_ref,
+        payload_hash=record.payload_hash,
+        text=None,
+        content_type=record.content_type,
+        storage_kind="sidecar",
+        sidecar_kind=record.payload_kind,
+        privacy_class=record.privacy_class,
     )
 
 
-def _validate_audit(*, audit: ProposalAuditProjection, proposal: ProposalInput, cursor: ProjectionCursor) -> None:
+def _validate_audit(
+    *, audit: ProposalAuditProjection, proposal: ProposalInput, cursor: ProjectionCursor
+) -> None:
     if (
         proposal.proposal_id != audit.proposal_id
         or proposal.proposal_hash != audit.proposal_hash
@@ -331,8 +464,50 @@ def _validate_audit(*, audit: ProposalAuditProjection, proposal: ProposalInput, 
         raise ExpressionPlanAcceptanceError("authority_mismatch")
 
 
+def _validate_event_share_claim(
+    *,
+    proposal: ProposalInput,
+    change,
+    payload: dict[str, object],
+    drafts: list[object],
+    intents: tuple[object, ...],
+    policy: ExpressionPlanBudgetPolicy,
+) -> None:
+    settled = tuple(
+        item for item in proposal.evidence_refs if item.evidence_kind == "settled_world_event"
+    )
+    raw_claim = payload.get("event_share_claim")
+    if not settled and raw_claim is None:
+        return
+    if len(settled) != 1 or raw_claim is None or len(drafts) != 1 or len(intents) != 1:
+        raise ExpressionPlanAcceptanceError("event_share_claim_invalid")
+    try:
+        claim = EventShareClaimBinding.model_validate(raw_claim)
+    except Exception as exc:
+        raise ExpressionPlanAcceptanceError("event_share_claim_invalid") from exc
+    draft = drafts[0]
+    intent = intents[0]
+    if not isinstance(draft, dict):
+        raise ExpressionPlanAcceptanceError("event_share_claim_invalid")
+    source = settled[0]
+    if (
+        proposal.trigger_ref != source.ref_id
+        or change.evidence_refs != (source.ref_id,)
+        or claim.claim_text != draft.get("inline_text")
+        or claim.source_event_ref != source.ref_id
+        or claim.source_payload_hash != source.immutable_hash
+        or claim.source_world_revision != source.source_world_revision
+        or claim.recipient_ref != getattr(intent, "target", None)
+        or claim.recipient_ref not in policy.allowed_targets
+    ):
+        raise ExpressionPlanAcceptanceError("event_share_claim_invalid")
+
+
 __all__ = [
-    "EXPRESSION_PLAN_ACCEPTANCE_POLICY_VERSION", "ExpressionPlanAcceptanceError",
-    "ExpressionPlanAcceptanceMaterial", "ExpressionPlanBeatMaterialized",
-    "ExpressionPlanBudgetPolicy", "derive_expression_plan_material",
+    "EXPRESSION_PLAN_ACCEPTANCE_POLICY_VERSION",
+    "ExpressionPlanAcceptanceError",
+    "ExpressionPlanAcceptanceMaterial",
+    "ExpressionPlanBeatMaterialized",
+    "ExpressionPlanBudgetPolicy",
+    "derive_expression_plan_material",
 ]

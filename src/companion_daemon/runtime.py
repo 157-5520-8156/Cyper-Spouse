@@ -1,32 +1,127 @@
 from pathlib import Path
 import logging
+import os
+from datetime import datetime, timedelta
 
 import httpx
 
 from companion_daemon.character import load_character
-from companion_daemon.config import get_settings
+from companion_daemon.config import Settings, get_settings
 from companion_daemon.conversation import SillyTavernConversationCore
 from companion_daemon.budget import BudgetGate
 from companion_daemon.attachment_cache import AttachmentCache
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.image_generation import (
+    CivitaiTemplateWorkflowImageGenerator,
     ComfyUIImageGenerator,
     FallbackImageGenerator,
     OpenAIImageQualityGate,
     OpenAIImageGenerator,
+    VolcArkImageGenerator,
 )
 from companion_daemon.llm import (
     DeepSeekChatModel,
     FakeCompanionModel,
     ModelCallUsage,
+    OpenAICompatibleChatModel,
     ProviderCircuitBreaker,
 )
 from companion_daemon.multimodal_analysis import MultimodalAnalyzer, OpenAIMultimodalAnalyzer
 from companion_daemon.stickers import load_stickers
+from companion_daemon.time import utc_now
 from companion_daemon.world import WorldKernel
 
 logger = logging.getLogger(__name__)
+
+
+def build_specialized_media_generators(settings: Settings) -> dict[str, object]:
+    """Return only explicitly configured specialized render capabilities.
+
+    The ordinary image backend is intentionally not a fallback here.  A
+    high-lane ``suggestive_private`` plan names ``adult_suggestive`` and the
+    MediaRenderer fails closed if this mapping is empty.
+    """
+
+    if not settings.civitai_api_key:
+        return {}
+    if settings.civitai_krea2_enabled:
+        template_path = settings.civitai_krea2_template_path
+        if template_path is not None:
+            if not template_path.is_file():
+                return {}
+            generator = CivitaiTemplateWorkflowImageGenerator(
+                settings.civitai_api_key,
+                template_path=template_path,
+                base_url=settings.civitai_base_url,
+                # The Civitai orchestration endpoint needs the same explicit
+                # transport escape hatch as OpenAI in this deployment.  Keep
+                # a Civitai-specific override, but fall back to the already
+                # configured API proxy rather than relying on shell proxy
+                # variables (the adapters intentionally use trust_env=False).
+                proxy_url=(
+                    settings.civitai_proxy_url
+                    or settings.openai_proxy_url
+                    or os.environ.get("HTTPS_PROXY")
+                    or os.environ.get("https_proxy")
+                ),
+                # The high-private profile is deliberately pure Krea2 LoRA +
+                # reviewed workflow.  Reject a future template edit that adds
+                # any fixed or dynamic image input instead of silently
+                # reintroducing reference-image leakage.
+                require_reference_free=True,
+            )
+            return {"adult_suggestive": generator, "adult_explicit": generator}
+    # High private lanes may only use the reviewed Krea2 recipe.  In
+    # particular, a legacy SDXL setting must never turn into an accidental
+    # replacement for a frozen high-lane MediaPlan.
+    return {}
+
+
+def build_event_media_renderer(
+    settings: Settings,
+    *,
+    generator: object | None,
+    inspector: object,
+    output_dir: Path,
+    budget_gate: BudgetGate | None = None,
+):
+    """Build the one image-machine renderer used by a World-v2 host.
+
+    This keeps provider/profile wiring out of the World runtime.  The host
+    injects the ordinary generator and inspector it already owns; this factory
+    adds only the capability-gated high-lane routes.  If the reviewed template
+    is disabled or invalid, the renderer is deliberately returned without
+    those routes and frozen high plans fail closed.
+    """
+
+    from companion_daemon.event_media import FirstPersonPrivatePromptAuthor, MediaRenderer
+
+    # This is the default high-lane expression path.  The renderer keeps the
+    # resulting prose inside the same frozen plan and Krea2 workflow; it is
+    # not a second image route.  The legacy compiler remains a compatibility
+    # fallback only when this optional provider is intentionally unavailable.
+    private_prompt_author = None
+    if settings.hermes_private_prompt_enabled and settings.openrouter_api_key:
+        private_prompt_author = FirstPersonPrivatePromptAuthor(
+            OpenAICompatibleChatModel(
+                api_key=settings.openrouter_api_key,
+                base_url=settings.openrouter_base_url,
+                model=settings.hermes_private_prompt_model,
+                max_completion_tokens=320,
+                proxy_url=settings.openai_proxy_url,
+            )
+        )
+
+    return MediaRenderer(
+        generator=generator,
+        inspector=inspector,
+        output_dir=output_dir,
+        visual_identity_path=settings.visual_identity_path,
+        budget_gate=budget_gate,
+        specialized_generators=build_specialized_media_generators(settings),
+        private_prompt_author=private_prompt_author,
+    )
 
 
 def require_configured_model(model: str | None, *, setting: str) -> str:
@@ -43,6 +138,44 @@ def require_configured_model(model: str | None, *, setting: str) -> str:
 require_flash_model = require_configured_model
 
 
+def _ensure_runtime_clock_is_current(world_kernel: WorldKernel, world_id: str) -> None:
+    clock = world_kernel.snapshot(world_id).get("clock", {})
+    if not isinstance(clock, dict):
+        return
+    if clock.get("mode") != "realtime" or int(clock.get("rate") or 0) != 1:
+        world_kernel.submit(
+            {
+                "type": "set_clock_mode",
+                "world_id": world_id,
+                "mode": "realtime",
+                "rate": 1,
+                "idempotency_key": "runtime-clock-realtime-v1",
+            },
+            expected_revision=world_kernel.revision(world_id),
+        )
+        clock = world_kernel.snapshot(world_id).get("clock", {})
+        if not isinstance(clock, dict):
+            return
+    logical_raw = str(clock.get("logical_at") or "")
+    if not logical_raw:
+        return
+    logical_at = datetime.fromisoformat(logical_raw)
+    observed_now = utc_now()
+    target_logical_at = observed_now.astimezone(logical_at.tzinfo)
+    if target_logical_at - logical_at <= timedelta(minutes=5):
+        return
+    world_kernel.submit(
+        {
+            "type": "advance_clock",
+            "world_id": world_id,
+            "target_logical_at": target_logical_at.isoformat(),
+            "observed_at": observed_now.isoformat(),
+            "idempotency_key": f"runtime-clock-catchup:{observed_now.isoformat()}",
+        },
+        expected_revision=world_kernel.revision(world_id),
+    )
+
+
 def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     settings = get_settings()
     store = CompanionStore(Path(settings.database_path), primary_user_id=settings.primary_user_id)
@@ -52,6 +185,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     store.enable_world_mode()
     world_kernel = WorldKernel(store)
     world_id = world_kernel.ensure_seed_file(settings.world_seed_path).world_id
+    _ensure_runtime_clock_is_current(world_kernel, world_id)
     world_kernel.recover_interrupted_outgoing_deliveries(world_id)
     world_kernel.import_verified_facts(world_id, store.active_fact_lines(settings.primary_user_id))
     character = load_character(str(settings.character_path))
@@ -61,6 +195,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     def record_model_usage(usage: ModelCallUsage) -> None:
         store.record_model_usage(
             purpose=usage.purpose,
+            provider=usage.provider,
             model=usage.model,
             status=usage.status,
             latency_ms=usage.latency_ms,
@@ -202,25 +337,47 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             if settings.comfyui_workflow_path and settings.comfyui_workflow_path.is_file()
             else None
         )
+        ark_generator = (
+            VolcArkImageGenerator(
+                settings.ark_api_key,
+                base_url=settings.ark_base_url,
+                model=settings.ark_image_model,
+                image_size=settings.ark_image_size,
+            )
+            if settings.ark_api_key
+            else None
+        )
         if settings.image_backend == "openai":
             image_generator = openai_generator
         elif settings.image_backend == "comfyui":
             image_generator = comfy_generator
-        elif comfy_generator and openai_generator:
-            image_generator = FallbackImageGenerator(comfy_generator, openai_generator)
+        elif settings.image_backend == "ark":
+            image_generator = ark_generator
+        elif comfy_generator:
+            image_generator = FallbackImageGenerator(
+                comfy_generator,
+                ark_generator or openai_generator,
+            )
         else:
-            image_generator = comfy_generator or openai_generator
+            image_generator = ark_generator or openai_generator
         if image_generator is None:
             logger.warning(
                 "automatic image generation is enabled but no selected backend is configured"
             )
-        if settings.image_quality_gate_enabled and settings.openai_api_key:
+        # Seedream generation is intentionally usable with no OpenAI proxy.
+        # Do not let an optional OpenAI vision gate turn a successful Ark
+        # render into a delivery failure. A provider-neutral/Ark inspector can
+        # later be wired into the same ImageQualityGate seam.
+        ark_only_rendering = image_generator is ark_generator
+        if settings.image_quality_gate_enabled and settings.openai_api_key and not ark_only_rendering:
             image_quality_gate = OpenAIImageQualityGate(
                 settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 model=settings.vision_model,
                 proxy_url=settings.openai_proxy_url,
             )
+        elif settings.image_quality_gate_enabled and ark_only_rendering:
+            logger.info("OpenAI quality gate disabled for explicit Ark image backend")
     rewrite_model = None
     if settings.enable_reply_rewrite and settings.deepseek_api_key and not use_fake_model:
         rewrite_model = DeepSeekChatModel(

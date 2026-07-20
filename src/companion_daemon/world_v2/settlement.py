@@ -8,6 +8,7 @@ from .action_lifecycle import settlement_event_type, transition_action
 from .errors import InvalidActionTransition
 from .event_identity import domain_idempotency_key
 from .expression_lifecycle_runtime import ExpressionReceiptLifecycle
+from .minimal_reply_events import ExpressionBeatTerminatedPayload
 from .media_delivery_runtime import MediaDeliveryReceiptLifecycle
 from .media_delivery_interaction import media_delivery_interaction_trigger_event
 from .read_only_tool import accepted_tool_result_events
@@ -304,7 +305,7 @@ class SettlementPlanner:
                 request=perception_request, accepted_event_ref=f"event:{trigger_id}:perception-result",
             ):
                 events.append(self._event(result, trigger_id=trigger_id, event_type=event_type, suffix=suffix, payload=payload))
-        events.extend(
+        expression_events = tuple(
             self._event(
                 result,
                 trigger_id=trigger_id,
@@ -319,6 +320,104 @@ class SettlementPlanner:
                 receipt_event=receipt_event,
             )
         )
+        terminal_plan_event = next(
+            (event for event in expression_events if event.event_type == "ExpressionPlanTerminated"),
+            None,
+        )
+        events.extend(
+            event for event in expression_events if event.event_type != "ExpressionPlanTerminated"
+        )
+        if terminal_plan_event is not None:
+            # A required beat failure makes every not-yet-dispatched sibling
+            # ineligible.  Retire those Action/budget authorities in this same
+            # settlement UoW so a terminal plan cannot leak reserved capacity.
+            for sibling in projection.actions:
+                if (
+                    sibling.action_id == action.action_id
+                    or sibling.expression_plan_id != action.expression_plan_id
+                    or sibling.state not in {"authorized", "scheduled", "claimed"}
+                ):
+                    continue
+                reservation = next(
+                    (
+                        item
+                        for item in projection.budget_reservations
+                        if item.reservation_id == sibling.budget_reservation_id
+                    ),
+                    None,
+                )
+                if reservation is None or reservation.state != "reserved":
+                    raise ValueError("terminal expression sibling lacks reserved budget authority")
+                events.append(
+                    self._event(
+                        result,
+                        trigger_id=trigger_id,
+                        event_type="ActionCancelled",
+                        suffix=f"expression-sibling-cancelled-{sibling.action_id}",
+                        payload={
+                            "action_id": sibling.action_id,
+                        },
+                    )
+                )
+                sibling_cancel = events[-1]
+                sibling_beat = next(
+                    (
+                        item
+                        for item in projection.expression_beats
+                        if item.beat_id == sibling.expression_beat_id
+                    ),
+                    None,
+                )
+                terminal_payload = terminal_plan_event.payload()
+                if sibling_beat is None:
+                    raise ValueError("terminal expression sibling lacks beat authority")
+                beat_terminated = ExpressionBeatTerminatedPayload(
+                    acceptance_id=sibling_beat.acceptance_id,
+                    proposal_id=sibling_beat.proposal_id,
+                    plan_id=sibling_beat.plan_id,
+                    beat_id=sibling_beat.beat_id,
+                    action_id=sibling.action_id,
+                    disposition=(
+                        "superseded"
+                        if terminal_payload.get("disposition") == "superseded"
+                        else "cancelled"
+                    ),
+                    source_event_ref=sibling_cancel.event_id,
+                    source_event_payload_hash=sibling_cancel.payload_hash,
+                )
+                events.append(
+                    self._event(
+                        result,
+                        trigger_id=trigger_id,
+                        event_type="ExpressionBeatTerminated",
+                        suffix=f"expression-sibling-beat-terminated-{sibling.action_id}",
+                        payload=beat_terminated.model_dump(mode="json"),
+                    )
+                )
+                sibling_result_id = f"{result.result_id}:cancelled-sibling:{sibling.action_id}"
+                sibling_settlement = BudgetSettlement(
+                    settlement_id=(
+                        f"budget-settlement:{result.source}:{result.source_event_id}:"
+                        f"cancelled-sibling:{sibling.action_id}"
+                    ),
+                    reservation_id=reservation.reservation_id,
+                    action_id=sibling.action_id,
+                    result_id=sibling_result_id,
+                    state="released",
+                    previous_cost=reservation.settled_cost,
+                    cost_actual=0,
+                    cost_delta=-reservation.settled_cost,
+                )
+                events.append(
+                    self._event(
+                        result,
+                        trigger_id=trigger_id,
+                        event_type="BudgetReleased",
+                        suffix=f"expression-sibling-budget-released-{sibling.action_id}",
+                        payload={"settlement": sibling_settlement.model_dump(mode="json")},
+                    )
+                )
+            events.append(terminal_plan_event)
         media_events = tuple(
             self._event(
                 result,

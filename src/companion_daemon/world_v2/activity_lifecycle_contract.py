@@ -12,6 +12,13 @@ from .schema_core import EvidenceRef, FrozenModel
 
 
 ActivityLifecycleOperation = Literal["start", "pause", "resume", "complete", "abandon"]
+ActivityLifecycleOpeningKind = Literal[
+    "ordinary", "user_influence", "interruption", "change_plan", "repair",
+    "shared_private",
+]
+ActivityLifecycleOpeningCauseKind = Literal[
+    "message_observation", "clock_activity_conflict", "plan_authority",
+]
 ActivityLifecycleEffectEventType = Literal[
     "ActivityStarted", "ActivityPaused", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned"
 ]
@@ -43,6 +50,8 @@ def activity_lifecycle_mutation_hash(
     catalog_version: str,
     catalog_hash: str,
     opening_token: str,
+    opening_kind: ActivityLifecycleOpeningKind,
+    cause_kind: ActivityLifecycleOpeningCauseKind | None,
 ) -> str:
     return hashlib.sha256(
         _canonical(
@@ -55,6 +64,8 @@ def activity_lifecycle_mutation_hash(
                 "evaluated_world_revision": evaluated_world_revision,
                 "expected_plan_revision": expected_plan_revision,
                 "opening_token": opening_token,
+                "opening_kind": opening_kind,
+                "cause_kind": cause_kind,
                 "operation": operation,
                 "plan_id": plan_id,
                 "wake_event_payload_hash": wake_event_payload_hash,
@@ -77,12 +88,14 @@ class ActivityLifecycleProposalRecordedPayload(FrozenModel):
     catalog_version: str = Field(min_length=1, max_length=128)
     catalog_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     opening_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    opening_kind: ActivityLifecycleOpeningKind
+    cause_kind: ActivityLifecycleOpeningCauseKind | None = None
     plan_id: str = Field(min_length=1, max_length=512)
     expected_plan_revision: int = Field(ge=1)
     operation: ActivityLifecycleOperation
     effect_event_type: ActivityLifecycleEffectEventType
     proposed_change_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=2, max_length=2)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=2, max_length=3)
     policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     model: str = Field(min_length=1, max_length=256)
     raw_output_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -105,19 +118,39 @@ class ActivityLifecycleProposalRecordedPayload(FrozenModel):
             catalog_version=self.catalog_version,
             catalog_hash=self.catalog_hash,
             opening_token=self.opening_token,
+            opening_kind=self.opening_kind,
+            cause_kind=self.cause_kind,
         ):
             raise ValueError("activity lifecycle proposed change hash is invalid")
-        if tuple(item.evidence_type for item in self.evidence_refs) != (
-            "active_plan",
-            "committed_world_event",
-        ):
-            raise ValueError("activity lifecycle evidence must be canonical plan then clock wake")
+        evidence_types = tuple(item.evidence_type for item in self.evidence_refs)
+        if evidence_types not in {
+            ("active_plan", "committed_world_event"),
+            ("active_plan", "committed_world_event", "observed_message"),
+        }:
+            raise ValueError(
+                "activity lifecycle evidence must be plan, clock, then optional message"
+            )
+        has_message = len(evidence_types) == 3
+        if has_message != (self.cause_kind == "message_observation"):
+            raise ValueError("authority-shaped lifecycle opening has incomplete cause evidence")
+        allowed_causes = {
+            "ordinary": {None},
+            "user_influence": {"message_observation"},
+            "interruption": {"message_observation", "clock_activity_conflict"},
+            "change_plan": {"message_observation", "plan_authority"},
+            "repair": {"plan_authority"},
+            "shared_private": {"message_observation"},
+        }
+        if self.cause_kind not in allowed_causes[self.opening_kind]:
+            raise ValueError("activity lifecycle opening cause does not match its authority shape")
         return self
 
 
 __all__ = [
     "ActivityLifecycleEffectEventType",
     "ActivityLifecycleOperation",
+    "ActivityLifecycleOpeningKind",
+    "ActivityLifecycleOpeningCauseKind",
     "ActivityLifecycleProposalRecordedPayload",
     "EFFECT_BY_ACTIVITY_OPERATION",
     "activity_lifecycle_mutation_hash",

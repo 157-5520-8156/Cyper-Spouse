@@ -15,10 +15,14 @@ from typing import Literal
 from pydantic import Field
 
 from .media_v2 import PhotoCandidate
+from .mood_view import mood_summary_prose
 from .schema_core import FrozenModel
 
 
-ADVISORY_VERSION = "media-candidate-advisory.1"
+# ``.2`` fills the emotional_meaning signal from accepted, active Affect so
+# the share/keep decision has an inner-state cause.  The advisory remains
+# strictly model-facing material with no reducer or acceptance consumer.
+ADVISORY_VERSION = "media-candidate-advisory.2"
 
 
 def _digest(value: object) -> str:
@@ -30,7 +34,7 @@ def _digest(value: object) -> str:
 class MediaCandidateAdvisory(FrozenModel):
     """Safe, model-readable material; it grants no media authority."""
 
-    advisory_version: Literal["media-candidate-advisory.1"] = ADVISORY_VERSION
+    advisory_version: Literal["media-candidate-advisory.2"] = ADVISORY_VERSION
     candidate_id: str = Field(min_length=1, max_length=256)
     ecology_category: str = Field(min_length=1, max_length=128)
     freshness_bp: int = Field(ge=0, le=10_000)
@@ -38,13 +42,14 @@ class MediaCandidateAdvisory(FrozenModel):
     visual_evidence_bp: int = Field(ge=0, le=10_000)
     budget_state: Literal["available", "constrained", "unconfigured"]
     advisory_score_bp: int = Field(ge=0, le=10_000)
+    emotional_meaning: str | None = Field(default=None, min_length=1, max_length=400)
     missing_signals: tuple[Literal["emotional_meaning", "existing_media", "user_preference"], ...] = ()
     digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     def model_material(self) -> dict[str, object]:
         """Omit authority-bearing IDs and reduce numbers to a bounded context."""
 
-        return {
+        material: dict[str, object] = {
             "category": self.ecology_category,
             "freshness_bp": self.freshness_bp,
             "novelty_bp": self.novelty_bp,
@@ -53,6 +58,9 @@ class MediaCandidateAdvisory(FrozenModel):
             "advisory_score_bp": self.advisory_score_bp,
             "missing_signals": self.missing_signals,
         }
+        if self.emotional_meaning is not None:
+            material["emotional_meaning"] = self.emotional_meaning
+        return material
 
 
 class MediaCandidateAdvisoryCompiler:
@@ -70,7 +78,18 @@ class MediaCandidateAdvisoryCompiler:
         novelty = self._novelty(projection=projection, candidate=candidate, now=projection.logical_time)
         visual_evidence = 10_000 if len(candidate.source_events) >= 2 else 0
         budget_state, budget_score = self._budget(projection=projection)
-        missing = ("emotional_meaning", "existing_media", "user_preference")
+        # Sharing a photo is a feeling-coloured act: the same lakeside light
+        # reads differently on a bright day and on a drained one.  The mood
+        # line comes only from accepted, active Affect; when nothing rises
+        # above the noticeable floor the signal honestly stays missing.
+        emotional_meaning = mood_summary_prose(
+            getattr(projection, "affect_episodes", ())
+        ) or None
+        missing = tuple(
+            signal
+            for signal in ("emotional_meaning", "existing_media", "user_preference")
+            if signal != "emotional_meaning" or emotional_meaning is None
+        )
         score = (freshness + novelty + visual_evidence + budget_score) // 4
         material = {
             "advisory_version": ADVISORY_VERSION,
@@ -81,6 +100,7 @@ class MediaCandidateAdvisoryCompiler:
             "visual_evidence_bp": visual_evidence,
             "budget_state": budget_state,
             "advisory_score_bp": score,
+            "emotional_meaning": emotional_meaning,
             "missing_signals": missing,
         }
         return MediaCandidateAdvisory(**material, digest=_digest(material))

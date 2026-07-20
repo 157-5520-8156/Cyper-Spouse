@@ -5,13 +5,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import hashlib
 import json
+import logging
 from typing import Literal
+
+import httpx
 
 from .batch_invariants import appraisal_trigger_identity
 from .event_identity import domain_idempotency_key
 from .experience_memory_candidate_lifecycle import ExperienceMemoryCandidateLifecycle
 from .experience_events import ExperienceCommittedPayload, experience_mutation_hash
-from .fact_memory_draft import FactMemoryRetentionDraft
+from .fact_memory_draft import FactMemoryDraftAdapter, FactMemoryRetentionDraft
 from .life_author_seed import ReviewedLifeSeedCatalog
 from .life_content_events import LifeContentRecordedPayload
 from .life_content_store import ImmutableLifeContentStore, StoredLifeContent, life_content_payload_hash
@@ -26,6 +29,12 @@ from .occurrence_content_coordinator import (
     OccurrenceContentCommitRequest,
     OccurrenceContentCoordinator,
     OutcomeCandidateContent,
+)
+from .mood_view import mood_summary_prose
+from .outcome_selection_draft import (
+    OutcomeSelectionDraftAdapter,
+    OutcomeSelectionModel,
+    OutcomeSelectionOption,
 )
 from .plan_evidence import canonical_plan_evidence_hash
 from .random_authority import RandomAuthority
@@ -76,6 +85,9 @@ def _experience_privacy(source_privacy: str) -> str:
     return source_privacy if _PRIVACY_RANK[source_privacy] >= _PRIVACY_RANK["personal"] else "personal"
 
 
+_LOG = logging.getLogger(__name__)
+
+
 class LifeAftermathResult(FrozenModel):
     status: Literal["occurrence_opened", "settled", "recovered_experience", "no_op"]
     reason_code: str
@@ -87,8 +99,10 @@ class LifeAftermathRuntime:
     """One bounded authority seam from accepted activity to lived history.
 
     Models never provide identities, locations, result refs, hashes, or prose.
-    Candidate prose comes only from the reviewed seed; a durable random draw
-    selects one frozen candidate on a later wake.
+    Candidate prose comes only from the reviewed seed. When an optional
+    outcome-selection model is installed it chooses among those candidates;
+    the durable random draw remains the deterministic fallback when the model
+    is unavailable or returns an invalid response.
     """
 
     def __init__(
@@ -96,6 +110,8 @@ class LifeAftermathRuntime:
         occurrence_content: OccurrenceContentCoordinator,
         content_store: ImmutableLifeContentStore, owner_actor_ref: str,
         experience_memory_lifecycle: ExperienceMemoryCandidateLifecycle | None = None,
+        outcome_selection_model: OutcomeSelectionModel | None = None,
+        memory_adapter: FactMemoryDraftAdapter | None = None,
         actor: str = "worker:world-v2:life-aftermath",
     ) -> None:
         if occurrence_content.ledger is not ledger:
@@ -112,11 +128,17 @@ class LifeAftermathRuntime:
         ):
             raise ValueError("life aftermath memory lifecycle must own the exact ledger")
         self._experience_memory_lifecycle = experience_memory_lifecycle
+        self._outcome_selection = (
+            OutcomeSelectionDraftAdapter(model=outcome_selection_model)
+            if outcome_selection_model is not None
+            else None
+        )
+        self._memory_adapter = memory_adapter
         self._owner_actor_ref = owner_actor_ref
         self._actor = actor
         self._random = RandomAuthority(ledger=ledger, source="world-v2:life-aftermath-random")
 
-    def advance_once(
+    async def advance_once(
         self, *, wake_event_ref: str, trace_id: str, correlation_id: str
     ) -> LifeAftermathResult:
         projection = self._ledger.project()
@@ -139,7 +161,7 @@ class LifeAftermathRuntime:
             None,
         )
         if recoverable is not None:
-            experience_id = self._commit_experience(
+            experience_id = await self._commit_experience(
                 occurrence=recoverable, logical_time=projection.logical_time,
                 trace_id=trace_id, correlation_id=correlation_id,
             )
@@ -160,7 +182,7 @@ class LifeAftermathRuntime:
             None,
         )
         if active is not None:
-            experience_id = self._settle(
+            experience_id = await self._settle(
                 occurrence=active, wake=wake, logical_time=projection.logical_time,
                 trace_id=trace_id, correlation_id=correlation_id,
             )
@@ -257,7 +279,7 @@ class LifeAftermathRuntime:
         self._commit((event,), commit_id="commit:life-aftermath:activate:" + suffix)
         return committed.occurrence_id
 
-    def _settle(self, *, occurrence, wake, logical_time: datetime,
+    async def _settle(self, *, occurrence, wake, logical_time: datetime,
                 trace_id: str, correlation_id: str) -> str:
         wake_evidence = self._event_evidence(wake, purpose="life_transition")
         suffix = occurrence.occurrence_id.removeprefix("occurrence:life-aftermath:")
@@ -299,6 +321,41 @@ class LifeAftermathRuntime:
             if item.candidate_result_ref == draw.selected_candidate_ref
         )
         proposal_id = "proposal:life-aftermath:outcome:" + _digest([occurrence.occurrence_id, wake.event_id])
+        proposal_event_id = "event:life-aftermath:outcome-proposal:" + suffix
+        existing_proposal = self._ledger.lookup_event_commit(proposal_event_id)
+        if existing_proposal is not None:
+            persisted = OutcomeProposalRecordedPayload.model_validate_json(
+                existing_proposal[0].payload_json
+            )
+            chosen = next(
+                item
+                for item in occurrence.candidate_outcomes
+                if item.candidate_result_ref == persisted.candidate_result_ref
+            )
+        elif self._outcome_selection is not None:
+            options = tuple(
+                OutcomeSelectionOption(
+                    candidate_result_ref=item.candidate_result_ref,
+                    summary=self._candidate_text(item.content_ref, item.content_payload_hash),
+                )
+                for item in occurrence.candidate_outcomes
+            )
+            try:
+                selected = await self._outcome_selection.deliberate(
+                    options=options,
+                    mood_summary=mood_summary_prose(projection.affect_episodes) or None,
+                )
+            except (TimeoutError, ConnectionError, OSError, httpx.HTTPError, ValueError) as exc:
+                _LOG.warning(
+                    "life aftermath outcome model unavailable; using reviewed random fallback: %s",
+                    exc,
+                )
+            else:
+                chosen = next(
+                    item
+                    for item in occurrence.candidate_outcomes
+                    if item.candidate_result_ref == selected.candidate_result_ref
+                )
         change_id = "change:life-aftermath:settle:" + suffix
         change_hash = outcome_mutation_hash(
             change_id=change_id, occurrence_id=occurrence.occurrence_id,
@@ -325,7 +382,7 @@ class LifeAftermathRuntime:
             expires_at=logical_time + timedelta(minutes=5),
         )
         proposal_event = self._event(
-            event_id="event:life-aftermath:outcome-proposal:" + suffix,
+            event_id=proposal_event_id,
             event_type="OutcomeProposalRecorded", payload=proposal_payload.model_dump(mode="json"),
             logical_time=logical_time, trace_id=trace_id, causation_id=observation_event.event_id,
             correlation_id=correlation_id,
@@ -414,17 +471,17 @@ class LifeAftermathRuntime:
             item for item in self._ledger.project().world_occurrences
             if item.occurrence_id == occurrence.occurrence_id
         )
-        return self._commit_experience(
+        return await self._commit_experience(
             occurrence=settled, logical_time=logical_time,
             trace_id=trace_id, correlation_id=correlation_id,
         )
 
-    def _commit_experience(self, *, occurrence, logical_time: datetime,
+    async def _commit_experience(self, *, occurrence, logical_time: datetime,
                            trace_id: str, correlation_id: str) -> str:
         suffix = occurrence.occurrence_id.removeprefix("occurrence:life-aftermath:")
         experience_id = "experience:life-aftermath:" + suffix
         if self._has_experience(self._ledger.project(), occurrence.occurrence_id):
-            self._materialize_experience_memory(
+            await self._materialize_experience_memory(
                 experience_id=experience_id,
                 logical_time=logical_time,
                 trace_id=trace_id,
@@ -582,7 +639,7 @@ class LifeAftermathRuntime:
             (acceptance_event, experience_event, content_event),
             commit_id="commit:life-aftermath:experience:" + suffix,
         )
-        self._materialize_experience_memory(
+        await self._materialize_experience_memory(
             experience_id=experience_id,
             logical_time=logical_time,
             trace_id=trace_id,
@@ -590,7 +647,7 @@ class LifeAftermathRuntime:
         )
         return experience_id
 
-    def _materialize_experience_memory(
+    async def _materialize_experience_memory(
         self,
         *,
         experience_id: str,
@@ -600,11 +657,11 @@ class LifeAftermathRuntime:
     ) -> None:
         """Retain settled lived history through the existing memory authority.
 
-        This first production pass uses a conservative world-continuity
-        classification: the semantic text remains the immutable sidecar and
-        the candidate is still source-bound, private, replayable, and subject
-        to the normal memory withdrawal/decay machinery.  A later model pass
-        may refine salience without changing this authority seam.
+        The semantic text remains the immutable sidecar and the candidate is
+        still source-bound, private, replayable, and subject to normal memory
+        withdrawal/decay.  An optional model may refine retention and salience
+        inside the installed matrix without changing this authority seam; the
+        continuity draft below is the deterministic fallback.
         """
 
         lifecycle = self._experience_memory_lifecycle
@@ -653,6 +710,33 @@ class LifeAftermathRuntime:
                 matrix_digest=MEMORY_SALIENCE_MATRIX_DIGEST,
             ),
         )
+        if self._memory_adapter is not None:
+            try:
+                summary = self._content_store.read_exact(content_ref=experience.values.summary_ref)
+                if summary is None or summary.content_payload_hash != experience.values.summary_payload_hash:
+                    raise ValueError("experience summary sidecar is unavailable for memory classification")
+                classified = await self._memory_adapter.classify(
+                    predicate_code="world.experience",
+                    source_text=summary.text,
+                )
+            except (TimeoutError, ConnectionError, OSError, httpx.HTTPError, ValueError) as exc:
+                _LOG.warning(
+                    "experience memory model unavailable; using continuity fallback: %s", exc
+                )
+            else:
+                if classified is not None:
+                    draft = classified
+                else:
+                    # A settled Experience is her lived history: continuity
+                    # retention is the design default and decay/withdrawal own
+                    # forgetting.  The model refines salience when it engages;
+                    # its fact-shaped "retain=false" must not silently erase
+                    # the lived day (in production it declined every single
+                    # experience and she accumulated zero memories).
+                    _LOG.warning(
+                        "experience memory model declined; keeping continuity draft for %s",
+                        experience_id,
+                    )
         lifecycle.accept(
             experience=experience,
             transition=transition,

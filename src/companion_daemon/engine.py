@@ -16,7 +16,7 @@ import httpx
 
 from companion_daemon.attachment_cache import AttachmentCache
 from companion_daemon.affective_advisory import AffectAdvisory, AffectiveAdvisoryEngine
-from companion_daemon.budget import ESTIMATES, BudgetGate
+from companion_daemon.budget import ESTIMATES, BudgetGate, image_render_estimate
 from companion_daemon.usage_metrics import estimate_routed_model_reserve_cny
 from companion_daemon.character import CharacterProfile
 from companion_daemon.context_assembler import ContextAssembler
@@ -48,6 +48,13 @@ from companion_daemon.memory_consolidation import (
     should_consolidate,
     consolidate_memories,
 )
+from companion_daemon.media_preferences import (
+    load_media_preferences,
+    persist_media_preferences,
+    update_media_preferences_from_text,
+)
+from companion_daemon.media_shot import MediaShotDirector, MediaShotPlan, MediaShotPlanner
+from companion_daemon.world_media_intent import WorldMediaIntentPolicy
 from companion_daemon.image_agency import decide_image_agency, image_agency_prompt_line
 from companion_daemon.image_generation import (
     ImageGenerator,
@@ -115,12 +122,18 @@ from companion_daemon.multimodal import summarize_attachments
 from companion_daemon.multimodal_analysis import AttachmentInsight, MultimodalAnalyzer
 from companion_daemon.personality_drift import apply_personality_drift
 from companion_daemon.prompts import proactive_prompt, reply_prompt
-from companion_daemon.proactive_feedback import apply_proactive_feedback, classify_proactive_feedback
+from companion_daemon.proactive_feedback import (
+    apply_proactive_feedback,
+    classify_proactive_feedback,
+)
 from companion_daemon.proactive_triggers import ProactiveTrigger, evaluate_proactive_trigger
 from companion_daemon.reply_decision import classify_message
 from companion_daemon.proactive_waiting import apply_waiting_after_proactive
 from companion_daemon.relationship import advance_relationship, key_event_bonus
-from companion_daemon.relationship_events import apply_key_relationship_event, detect_key_relationship_event
+from companion_daemon.relationship_events import (
+    apply_key_relationship_event,
+    detect_key_relationship_event,
+)
 from companion_daemon.repair_curve import apply_repair_curve, serious_repair_key_event
 from companion_daemon.reply_segments import split_reply_text
 from companion_daemon.reply_stickers import choose_reply_sticker
@@ -179,9 +192,7 @@ from companion_daemon.world_media import WorldMediaPolicy
 logger = logging.getLogger(__name__)
 
 
-def contextual_history_for_user(
-    history: object, user_id: str
-) -> list[dict[str, object]]:
+def contextual_history_for_user(history: object, user_id: str) -> list[dict[str, object]]:
     """Keep private dialogue context scoped to the active world user."""
     if not isinstance(history, list):
         return []
@@ -225,9 +236,7 @@ async def _complete_structured_model(
     return await model.complete(messages, temperature=temperature)
 
 
-def _recover_plain_chat_candidate(
-    raw: str, *, user_text: str
-) -> dict[str, object] | None:
+def _recover_plain_chat_candidate(raw: str, *, user_text: str) -> dict[str, object] | None:
     """Accept a bounded natural reply when a provider misses the JSON envelope.
 
     The envelope carries optional choreography and inner-life proposals, but a
@@ -241,7 +250,10 @@ def _recover_plain_chat_candidate(
         return None
     if not re.search(r"[\u4e00-\u9fff]", text):
         return None
-    if re.search(r"(?:json|JSON|格式|输出).{0,24}(?:错|误|失败|没|不|按)|抱歉.{0,24}(?:json|JSON|格式|输出)", text):
+    if re.search(
+        r"(?:json|JSON|格式|输出).{0,24}(?:错|误|失败|没|不|按)|抱歉.{0,24}(?:json|JSON|格式|输出)",
+        text,
+    ):
         return None
     # A plain response cannot attach provenance.  Keep this fast recovery to
     # an explicit, narrow language of conversation, opinion and presence;
@@ -272,9 +284,7 @@ def _recover_plain_chat_candidate(
         "考完压力自己说听明白理解陪聊在的了是也还就都吧呢大力再磨人种这很"
     )
     novel_chinese = {
-        char
-        for char in text
-        if "\u4e00" <= char <= "\u9fff" and char not in set(user_text)
+        char for char in text if "\u4e00" <= char <= "\u9fff" and char not in set(user_text)
     }
     if (
         not plain_presence
@@ -295,6 +305,7 @@ def _recover_plain_chat_candidate(
         "proposed_action_ids": [],
         "claims": [],
     }
+
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -368,16 +379,24 @@ class CompanionEngine:
         self.context_assembler = ContextAssembler()
         self.affective_advisory_engine = AffectiveAdvisoryEngine()
         self.world_media_policy = WorldMediaPolicy()
+        self.world_media_intent_policy = WorldMediaIntentPolicy()
+        self.media_shot_planner = MediaShotPlanner()
         self.interaction_appraisal_model = interaction_appraisal_model
         self.interaction_deep_appraisal_model = interaction_deep_appraisal_model
         self.expressive_model = expressive_model
+        # This director never selects an opportunity or changes world facts.
+        # It only gives an already-frozen shot a bounded, human-feeling visual
+        # expression; the regular model is a compatible fallback in lean setups.
+        self.media_shot_director = MediaShotDirector(expressive_model or model)
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
         self.managed_async_resources = managed_async_resources
         # The adapter returns a receipt-bearing delivery outcome.  A legacy
         # boolean is intentionally still accepted at this boundary, but it is
         # treated as delivery *uncertain* rather than as proof of delivery.
-        self.media_delivery_handler: Callable[[IncomingMessage, Path], Awaitable[object]] | None = None
+        self.media_delivery_handler: Callable[[IncomingMessage, Path], Awaitable[object]] | None = (
+            None
+        )
         self._media_tasks: set[asyncio.Task[None]] = set()
         # Semantic appraisals are advisory side work.  Retaining their tasks
         # makes shutdown deterministic and avoids orphaning a provider call.
@@ -423,9 +442,7 @@ class CompanionEngine:
             samples = self.store.recent_model_usage_samples(model=model_name)
         # DeepSeek reports reasoning as a breakdown of completion tokens;
         # adding it again would reserve the same billed output twice.
-        observed_output_tokens = tuple(
-            int(sample["completion_tokens"]) for sample in samples
-        )
+        observed_output_tokens = tuple(int(sample["completion_tokens"]) for sample in samples)
         return estimate_routed_model_reserve_cny(
             model=model_name,
             prompt_characters=prompt_characters,
@@ -569,9 +586,7 @@ class CompanionEngine:
         temperature: float,
         action_id: str = "",
     ) -> str:
-        decision = self._secondary_model_call_decision(
-            purpose, model=model, messages=messages
-        )
+        decision = self._secondary_model_call_decision(purpose, model=model, messages=messages)
         if not decision.allowed:
             raise ConnectionError(decision.reason)
         resolved_action_id = action_id or f"secondary:{purpose}:{uuid4().hex}"
@@ -714,23 +729,32 @@ class CompanionEngine:
                 if isinstance(result, dict):
                     insights.append(dict(result))
                 continue
-            self._submit_world_with_retry({
-                "type": "schedule_action", "world_id": self.world_id,
-                "action_id": action_id, "kind": "attachment_analysis",
-                "expires_at": (self._world_logical_now() + timedelta(minutes=10)).isoformat(),
-                "payload": {
-                    "source_message_id": message_id, "attachment_index": index,
-                    "kind": attachment.kind, "source_fingerprint": source_fingerprint,
-                    "user_id": world_user_id,
-                },
-                "idempotency_key": f"schedule:{action_id}",
-            })
-            self._submit_world_with_retry({
-                "type": "claim_external_action", "world_id": self.world_id,
-                "action_id": action_id,
-                "lease_expires_observed_at": (utc_now() + timedelta(minutes=3)).isoformat(),
-                "idempotency_key": f"claim:{action_id}",
-            })
+            self._submit_world_with_retry(
+                {
+                    "type": "schedule_action",
+                    "world_id": self.world_id,
+                    "action_id": action_id,
+                    "kind": "attachment_analysis",
+                    "expires_at": (self._world_logical_now() + timedelta(minutes=10)).isoformat(),
+                    "payload": {
+                        "source_message_id": message_id,
+                        "attachment_index": index,
+                        "kind": attachment.kind,
+                        "source_fingerprint": source_fingerprint,
+                        "user_id": world_user_id,
+                    },
+                    "idempotency_key": f"schedule:{action_id}",
+                }
+            )
+            self._submit_world_with_retry(
+                {
+                    "type": "claim_external_action",
+                    "world_id": self.world_id,
+                    "action_id": action_id,
+                    "lease_expires_observed_at": (utc_now() + timedelta(minutes=3)).isoformat(),
+                    "idempotency_key": f"claim:{action_id}",
+                }
+            )
             prior_result: dict[str, object] | None = None
             for prior_id, raw_prior in self.world_kernel.snapshot(self.world_id)["actions"].items():
                 if prior_id == action_id or not isinstance(raw_prior, dict):
@@ -749,7 +773,11 @@ class CompanionEngine:
                 ):
                     prior_result = candidate
             if prior_result is not None:
-                cache = dict(prior_result.get("cache", {})) if isinstance(prior_result.get("cache"), dict) else {}
+                cache = (
+                    dict(prior_result.get("cache", {}))
+                    if isinstance(prior_result.get("cache"), dict)
+                    else {}
+                )
                 cache["analysis_hit"] = True
                 result = {
                     **prior_result,
@@ -757,15 +785,20 @@ class CompanionEngine:
                     "attachment_index": index,
                     "cache": cache,
                 }
-                self._submit_world_with_retry({
-                    "type": "record_external_result", "world_id": self.world_id,
-                    "action_id": action_id, "result": result,
-                    "idempotency_key": f"settle:{action_id}",
-                })
+                self._submit_world_with_retry(
+                    {
+                        "type": "record_external_result",
+                        "world_id": self.world_id,
+                        "action_id": action_id,
+                        "result": result,
+                        "idempotency_key": f"settle:{action_id}",
+                    }
+                )
                 insights.append(result)
                 continue
             cache_result: dict[str, object] = {
-                "status": "not_configured", "retention_days": 30,
+                "status": "not_configured",
+                "retention_days": 30,
             }
             if self.attachment_cache and attachment.url:
                 try:
@@ -779,45 +812,62 @@ class CompanionEngine:
                         now=utc_now(),
                     )
                     cache_result = {
-                        "status": "stored", "retention_days": 30,
+                        "status": "stored",
+                        "retention_days": 30,
                         "expires_at": cached.expires_at.isoformat(),
                     }
                 except Exception as exc:
-                    logger.warning("attachment cache degraded for %s: %s", action_id, type(exc).__name__)
+                    logger.warning(
+                        "attachment cache degraded for %s: %s", action_id, type(exc).__name__
+                    )
                     cache_result = {
-                        "status": "failed", "retention_days": 30,
+                        "status": "failed",
+                        "retention_days": 30,
                         "reason": type(exc).__name__,
                     }
             try:
                 insight = await self.multimodal_analyzer.analyze(attachment)
                 result: dict[str, object] = {
-                    "status": "delivered", "source_message_id": message_id,
-                    "attachment_index": index, "kind": insight.kind,
-                    "summary": insight.summary[:2000], "confidence": insight.confidence,
+                    "status": "delivered",
+                    "source_message_id": message_id,
+                    "attachment_index": index,
+                    "kind": insight.kind,
+                    "summary": insight.summary[:2000],
+                    "confidence": insight.confidence,
                     "cache": cache_result,
                     "analysis_expires_at": (utc_now() + timedelta(days=30)).isoformat(),
                 }
             except Exception as exc:
-                self._submit_world_with_retry({
-                    "type": "record_external_result", "world_id": self.world_id,
-                    "action_id": action_id,
-                    "result": {"status": "failed", "reason": type(exc).__name__},
-                    "idempotency_key": f"settle:{action_id}",
-                })
+                self._submit_world_with_retry(
+                    {
+                        "type": "record_external_result",
+                        "world_id": self.world_id,
+                        "action_id": action_id,
+                        "result": {"status": "failed", "reason": type(exc).__name__},
+                        "idempotency_key": f"settle:{action_id}",
+                    }
+                )
                 continue
-            self._submit_world_with_retry({
-                "type": "record_external_result", "world_id": self.world_id,
-                "action_id": action_id, "result": result,
-                "idempotency_key": f"settle:{action_id}",
-            })
+            self._submit_world_with_retry(
+                {
+                    "type": "record_external_result",
+                    "world_id": self.world_id,
+                    "action_id": action_id,
+                    "result": result,
+                    "idempotency_key": f"settle:{action_id}",
+                }
+            )
             insights.append(result)
         return insights
 
     @staticmethod
     def _world_message_id(message: IncomingMessage) -> str:
-        return message.message_id or sha256(
-            f"{message.platform}:{message.platform_user_id}:{message.sent_at.isoformat()}:{message.text}".encode()
-        ).hexdigest()[:24]
+        return (
+            message.message_id
+            or sha256(
+                f"{message.platform}:{message.platform_user_id}:{message.sent_at.isoformat()}:{message.text}".encode()
+            ).hexdigest()[:24]
+        )
 
     @staticmethod
     def _world_user_id(canonical_user_id: str) -> str:
@@ -829,7 +879,8 @@ class CompanionEngine:
         if not isinstance(facts, dict):
             return []
         return [
-            item for item in facts.values()
+            item
+            for item in facts.values()
             if isinstance(item, dict)
             and str(item.get("status") or "current") in {"current", "confirmed"}
         ]
@@ -851,8 +902,10 @@ class CompanionEngine:
             return user_id
         self._submit_world_with_retry(
             {
-                "type": "register_user", "world_id": self.world_id,
-                "user_id": user_id, "name": canonical_user_id,
+                "type": "register_user",
+                "world_id": self.world_id,
+                "user_id": user_id,
+                "name": canonical_user_id,
                 "idempotency_key": f"register-user:{user_id}",
             }
         )
@@ -916,23 +969,24 @@ class CompanionEngine:
         for extracted in extract_memories(message):
             if not is_durable_user_fact(extracted):
                 continue
-            digest = sha256(
-                f"{user_id}|{extracted.kind}|{extracted.content}".encode()
-            ).hexdigest()[:20]
+            digest = sha256(f"{user_id}|{extracted.kind}|{extracted.content}".encode()).hexdigest()[
+                :20
+            ]
             self._submit_world_with_retry(
                 {
-                    "type": "confirm_fact", "world_id": self.world_id,
-                    "fact_id": f"user-fact:{digest}", "subject": user_id,
-                    "value": extracted.content, "source": f"user_message:{key}",
+                    "type": "confirm_fact",
+                    "world_id": self.world_id,
+                    "fact_id": f"user-fact:{digest}",
+                    "subject": user_id,
+                    "value": extracted.content,
+                    "source": f"user_message:{key}",
                     "conflict_key": extracted.fact_key or extracted.kind,
                     "idempotency_key": f"user-fact:{digest}",
                 }
             )
         conversation_fact = conversation_fact_candidate(message.text)
         if conversation_fact:
-            digest = sha256(
-                f"{user_id}|conversation|{conversation_fact}".encode()
-            ).hexdigest()[:20]
+            digest = sha256(f"{user_id}|conversation|{conversation_fact}".encode()).hexdigest()[:20]
             self._submit_world_with_retry(
                 {
                     "type": "confirm_fact",
@@ -1024,7 +1078,17 @@ class CompanionEngine:
     def _begin_world_model_call(self, *, purpose: str, causation: str) -> str:
         digest = sha256(f"{purpose}|{causation}".encode("utf-8")).hexdigest()[:20]
         action_id = f"model_call:{digest}"
-        self._submit_world_with_retry({"type": "schedule_action", "world_id": self.world_id, "action_id": action_id, "kind": "model_call", "expires_at": (self._world_logical_now() + timedelta(minutes=5)).isoformat(), "payload": {"purpose": purpose, "causation": causation}, "idempotency_key": f"schedule:{action_id}"})
+        self._submit_world_with_retry(
+            {
+                "type": "schedule_action",
+                "world_id": self.world_id,
+                "action_id": action_id,
+                "kind": "model_call",
+                "expires_at": (self._world_logical_now() + timedelta(minutes=5)).isoformat(),
+                "payload": {"purpose": purpose, "causation": causation},
+                "idempotency_key": f"schedule:{action_id}",
+            }
+        )
         self._submit_world_with_retry(
             {
                 "type": "claim_external_action",
@@ -1036,7 +1100,9 @@ class CompanionEngine:
         )
         return action_id
 
-    def _record_world_model_output(self, *, purpose: str, causation: str, content: str, action_id: str) -> None:
+    def _record_world_model_output(
+        self, *, purpose: str, causation: str, content: str, action_id: str
+    ) -> None:
         """Persist a model return as non-factual audit input before using it."""
         if not self.world_kernel or not self.world_id:
             return
@@ -1047,7 +1113,11 @@ class CompanionEngine:
                 "type": "record_external_result",
                 "world_id": self.world_id,
                 "action_id": action_id,
-                "result": {"kind": "model_call", "status": "delivered", "output_hash": sha256(content.encode("utf-8")).hexdigest()},
+                "result": {
+                    "kind": "model_call",
+                    "status": "delivered",
+                    "output_hash": sha256(content.encode("utf-8")).hexdigest(),
+                },
                 "idempotency_key": f"settle:{action_id}",
             }
         )
@@ -1067,7 +1137,15 @@ class CompanionEngine:
         )
 
     def _fail_world_model_call(self, action_id: str, reason: str) -> None:
-        self._submit_world_with_retry({"type": "record_external_result", "world_id": self.world_id, "action_id": action_id, "result": {"kind": "model_call", "status": "failed", "reason": reason[:300]}, "idempotency_key": f"fail:{action_id}"})
+        self._submit_world_with_retry(
+            {
+                "type": "record_external_result",
+                "world_id": self.world_id,
+                "action_id": action_id,
+                "result": {"kind": "model_call", "status": "failed", "reason": reason[:300]},
+                "idempotency_key": f"fail:{action_id}",
+            }
+        )
 
     def _schedule_contextual_user_affect_advisory(
         self,
@@ -1201,10 +1279,7 @@ class CompanionEngine:
                 content=result.raw_proposal,
                 action_id=action_id,
             )
-            if (
-                result.proposal is not None
-                and result.accepted.kind == "boundary_violation"
-            ):
+            if result.proposal is not None and result.accepted.kind == "boundary_violation":
                 # A high-confidence, quote-bound slight may leave emotional
                 # residue.  It is deliberately a post-delivery affect-only
                 # write: no current reply, relation, Action, or deliberation
@@ -1225,14 +1300,13 @@ class CompanionEngine:
                     )
                 return
             if result.proposal is None or result.accepted.kind not in {
-                "user_withdrawing", "user_confused"
+                "user_withdrawing",
+                "user_confused",
             }:
                 return
             affect = UserAffectAppraisal(
                 kind=(
-                    "disappointment"
-                    if result.accepted.kind == "user_withdrawing"
-                    else "confusion"
+                    "disappointment" if result.accepted.kind == "user_withdrawing" else "confusion"
                 ),
                 intensity=max(2, min(4, int(result.proposal.severity))),
                 unresolved=True,
@@ -1300,23 +1374,42 @@ class CompanionEngine:
             request=request,
             user_text=message.text,
         )
-        request_id = "media:" + sha256(
-            f"{user_id}|{message.message_id}|{request.type}|{request.directive}".encode("utf-8")
-        ).hexdigest()[:20]
+        request_id = (
+            "media:"
+            + sha256(
+                f"{user_id}|{message.message_id}|{request.type}|{request.directive}".encode("utf-8")
+            ).hexdigest()[:20]
+        )
         existing = snapshot.get("media", {}).get(request_id, {})
+        shot_plan: MediaShotPlan | None = None
+        personal_media = decision.kind in {"selfie", "character_media", "relationship_private"}
         if isinstance(existing, dict):
             if existing.get("status") in {"generated", "shared"} and existing.get("artifact_path"):
-                return str(existing["artifact_path"]), f"media-delivery:{request_id}", "existing_media_request"
-            if (
-                not _background
-                and existing.get("status") in {"requested", "generation_failed", "delivery_failed", "rejected"}
-            ):
+                return (
+                    str(existing["artifact_path"]),
+                    f"media-delivery:{request_id}",
+                    "existing_media_request",
+                )
+            if not _background and existing.get("status") in {
+                "requested",
+                "generation_failed",
+                "delivery_failed",
+                "rejected",
+            }:
                 return None, None, f"existing_media_{existing['status']}"
+            if _background and personal_media and existing.get("status") == "requested":
+                try:
+                    shot_plan = MediaShotPlan.from_payload(existing.get("shot_plan"))
+                except ValueError:
+                    return None, None, "existing_media_missing_shot_plan"
         if not decision.allowed:
             self._submit_world_with_retry(
                 {
-                    "type": "reject_media_request", "world_id": self.world_id,
-                    "request_id": request_id, "user_id": user_id, "reason": decision.reason,
+                    "type": "reject_media_request",
+                    "world_id": self.world_id,
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "reason": decision.reason,
                     "rule_version": self.world_media_policy.RULE_VERSION,
                     "idempotency_key": f"media-reject:{request_id}",
                 }
@@ -1324,32 +1417,49 @@ class CompanionEngine:
             return None, None, decision.reason
         if decision.requires_deliberation:
             deliberation = snapshot.get("last_deliberation", {})
-            stance = (
-                str(deliberation.get("stance") or "")
-                if isinstance(deliberation, dict)
-                else ""
-            )
+            stance = str(deliberation.get("stance") or "") if isinstance(deliberation, dict) else ""
             if stance != "comply":
                 self._submit_world_with_retry(
                     {
-                        "type": "reject_media_request", "world_id": self.world_id,
-                        "request_id": request_id, "user_id": user_id,
+                        "type": "reject_media_request",
+                        "world_id": self.world_id,
+                        "request_id": request_id,
+                        "user_id": user_id,
                         "reason": f"deliberation:{stance or 'defer'}:{decision.reason}",
                         "rule_version": self.world_media_policy.RULE_VERSION,
                         "idempotency_key": f"media-reject:{request_id}",
                     }
                 )
                 return None, None, decision.reason
+        if personal_media and shot_plan is None:
+            shot_plan = self.media_shot_planner.plan(snapshot, decision, request_id)
+            shot_plan = await self.media_shot_director.direct(shot_plan)
         if not _background:
-            self._submit_world_with_retry(
-                {
-                    "type": "request_media", "world_id": self.world_id,
-                    "request_id": request_id, "user_id": user_id, "media_kind": decision.kind,
-                    "topic": decision.prompt_topic, "reason": decision.reason,
-                    "rule_version": self.world_media_policy.RULE_VERSION,
-                    "idempotency_key": f"media-request:{request_id}",
-                }
-            )
+            command = {
+                "type": "request_media",
+                "world_id": self.world_id,
+                "request_id": request_id,
+                "user_id": user_id,
+                "media_kind": decision.kind,
+                "capture_mode": decision.capture_mode or "handheld_selfie",
+                "topic": decision.prompt_topic,
+                "reason": decision.reason,
+                "delivery_context": message.model_dump(
+                    mode="json",
+                    exclude={
+                        "attachments",
+                        "emoji",
+                        "sticker_kind",
+                        "reply_target",
+                        "source_message_ids",
+                    },
+                ),
+                "rule_version": self.world_media_policy.RULE_VERSION,
+                "idempotency_key": f"media-request:{request_id}",
+            }
+            if shot_plan is not None:
+                command["shot_plan"] = shot_plan.to_payload()
+            self._submit_world_with_retry(command)
             if self.media_delivery_handler:
                 self._schedule_world_media_generation(user_id=user_id, message=message)
                 return None, None, "media_generation_pending"
@@ -1363,7 +1473,22 @@ class CompanionEngine:
                 idempotency_key=f"media-generation-failed:{request_id}",
             )
             return None, None, "image_generator_unavailable"
-        estimate = ESTIMATES["image_generation"]
+        media_kind = str(existing.get("media_kind") or decision.kind)
+        profile = (
+            "relationship_private" if media_kind == "relationship_private" else "everyday_selfie"
+        )
+        scene_topic = decision.prompt_topic
+        if shot_plan is not None:
+            scene_topic += shot_plan.prompt_block()
+        references = visual_reference_paths(
+            self.visual_identity_path,
+            profile=profile,
+            relationship_tier=shot_plan.relationship_tier if shot_plan else decision.intimacy_tier,
+            scene_hint=scene_topic,
+        )
+        estimate = image_render_estimate(
+            reference_count=len(references), attempts=2 if self.image_quality_gate else 1
+        )
         if self.budget_gate and not self.budget_gate.check(estimate, automatic=True).allowed:
             await self._settle_background_media_result(
                 action_id=action_id,
@@ -1373,12 +1498,16 @@ class CompanionEngine:
                 idempotency_key=f"media-generation-budget:{request_id}",
             )
             return None, None, "budget_gate_blocked"
-        profile = "relationship_private" if decision.kind == "relationship_private" else "everyday_selfie"
         prompt = life_image_prompt(
-            decision.prompt_topic,
-            kind="selfie" if decision.kind in {"selfie", "relationship_private"} else "life",
+            scene_topic,
+            kind="character_media"
+            if media_kind in {"selfie", "character_media", "relationship_private"}
+            else "life",
             profile=profile,
-            relationship_tier=decision.intimacy_tier,
+            relationship_tier=shot_plan.relationship_tier if shot_plan else decision.intimacy_tier,
+            capture_mode=shot_plan.capture_mode
+            if shot_plan
+            else decision.capture_mode or "handheld_selfie",
             visual_identity_path=self.visual_identity_path,
         )
         output_path = self.image_output_dir / f"world-{request_id}.png"
@@ -1387,11 +1516,7 @@ class CompanionEngine:
                 self.image_generator,
                 prompt,
                 output_path=output_path,
-                reference_images=visual_reference_paths(
-                    self.visual_identity_path,
-                    profile=profile,
-                    relationship_tier=decision.intimacy_tier,
-                ),
+                reference_images=references,
                 quality_gate=self.image_quality_gate,
             )
         except Exception as exc:
@@ -1404,7 +1529,10 @@ class CompanionEngine:
             )
             return None, None, "media_generation_failed"
         if self.budget_gate:
-            self.budget_gate.record(estimate, note=f"world_media:{decision.kind}")
+            self.budget_gate.record(
+                image_render_estimate(reference_count=len(references), attempts=generated.attempts),
+                note=f"world_media:{media_kind}:attempts={generated.attempts}",
+            )
         artifact_path = str(generated.path)
         await self._settle_background_media_result(
             action_id=action_id,
@@ -1418,7 +1546,9 @@ class CompanionEngine:
         )
         self._submit_world_with_retry(
             {
-                "type": "schedule_media_delivery", "world_id": self.world_id, "request_id": request_id,
+                "type": "schedule_media_delivery",
+                "world_id": self.world_id,
+                "request_id": request_id,
                 "outbound_kind": "reply",
                 "idempotency_key": f"media-delivery:{request_id}",
             }
@@ -1431,6 +1561,56 @@ class CompanionEngine:
         )
         self._media_tasks.add(task)
         task.add_done_callback(self._media_tasks.discard)
+
+    def recover_pending_media(self) -> int:
+        """Resume scheduled media work after an adapter or process restart.
+
+        The world ledger is the outbox.  Only a bounded incoming-message
+        envelope is persisted with each media request, so recovery never needs
+        to guess a recipient from current conversation state.
+        """
+        if not self.world_kernel or not self.world_id or not self.media_delivery_handler:
+            return 0
+        snapshot = self.world_kernel.snapshot(self.world_id)
+        media = snapshot.get("media", {})
+        actions = snapshot.get("actions", {})
+        if not isinstance(media, dict):
+            return 0
+        recovered = 0
+        for item in media.values():
+            if not isinstance(item, dict) or item.get("status") not in {"requested", "generated"}:
+                continue
+            raw_message = item.get("delivery_context")
+            if not isinstance(raw_message, dict):
+                continue
+            try:
+                message = IncomingMessage.model_validate(raw_message)
+            except Exception:
+                logger.warning(
+                    "skipped unrecoverable media outbox item with invalid delivery context"
+                )
+                continue
+            request_id = str(item.get("request_id") or "")
+            if item.get("status") == "generated" and isinstance(actions, dict):
+                delivery_action_id = f"media-delivery:{request_id}"
+                if delivery_action_id not in actions:
+                    try:
+                        self._submit_world_with_retry(
+                            {
+                                "type": "schedule_media_delivery",
+                                "world_id": self.world_id,
+                                "request_id": request_id,
+                                "idempotency_key": f"media-delivery:{request_id}",
+                            }
+                        )
+                    except Exception:
+                        logger.exception("failed to restore media delivery action: %s", request_id)
+                        continue
+            self._schedule_world_media_generation(
+                user_id=str(item.get("user_id") or ""), message=message
+            )
+            recovered += 1
+        return recovered
 
     async def _complete_world_media_generation(
         self, *, user_id: str, message: IncomingMessage
@@ -1457,9 +1637,17 @@ class CompanionEngine:
             )
             return
 
-        status = str(getattr(delivery, "status", "unknown"))
-        receipt = str(getattr(delivery, "external_receipt", "") or "").strip()
-        reason = str(getattr(delivery, "reason", "") or "").strip()
+        # Legacy adapters return a boolean; newer QQ adapters return a durable
+        # dispatch receipt.  A true legacy result is still a positive adapter
+        # acknowledgement and must reconcile the media outbox.
+        if isinstance(delivery, bool):
+            status = "delivered" if delivery else "failed"
+            receipt = "legacy_adapter_confirmed" if delivery else ""
+            reason = ""
+        else:
+            status = str(getattr(delivery, "status", "unknown"))
+            receipt = str(getattr(delivery, "external_receipt", "") or "").strip()
+            reason = str(getattr(delivery, "reason", "") or "").strip()
         if status == "delivered" and receipt:
             await self._settle_background_media_result(
                 action_id=action_id,
@@ -1490,7 +1678,12 @@ class CompanionEngine:
         self, *, message: IncomingMessage, appraisal: str
     ) -> tuple[str | None, str | None]:
         """Select a local sticker from world expression state, then schedule delivery."""
-        if not self.world_kernel or not self.world_id or not self.stickers or not message.message_id:
+        if (
+            not self.world_kernel
+            or not self.world_id
+            or not self.stickers
+            or not message.message_id
+        ):
             return None, None
         snapshot = self.world_kernel.snapshot(self.world_id)
         intent = self.world_media_policy.sticker_intent(snapshot, appraisal=appraisal)
@@ -1501,23 +1694,32 @@ class CompanionEngine:
             return None, None
         self._submit_world_with_retry(
             {
-                "type": "schedule_sticker_delivery", "world_id": self.world_id,
-                "sticker_id": sticker.id, "sticker_path": str(sticker.path), "intent": intent,
-                "causation_id": message.message_id, "rule_version": self.world_media_policy.RULE_VERSION,
+                "type": "schedule_sticker_delivery",
+                "world_id": self.world_id,
+                "sticker_id": sticker.id,
+                "sticker_path": str(sticker.path),
+                "intent": intent,
+                "causation_id": message.message_id,
+                "rule_version": self.world_media_policy.RULE_VERSION,
                 "outbound_kind": "reply",
                 "idempotency_key": f"sticker:{message.message_id}:{intent}",
             }
         )
         return str(sticker.path), f"sticker-delivery:{message.message_id}"
 
-    def begin_world_typing(self, message: IncomingMessage, *, reason: str = "composing_reply") -> None:
+    def begin_world_typing(
+        self, message: IncomingMessage, *, reason: str = "composing_reply"
+    ) -> None:
         """Record an observable typing transition without touching legacy mood state."""
         if not self.world_kernel or not self.world_id or not message.message_id:
             return
         self._submit_world_with_retry(
             {
-                "type": "set_typing_state", "world_id": self.world_id,
-                "message_id": message.message_id, "typing": "started", "reason": reason,
+                "type": "set_typing_state",
+                "world_id": self.world_id,
+                "message_id": message.message_id,
+                "typing": "started",
+                "reason": reason,
                 "idempotency_key": f"typing-start:{message.message_id}",
             }
         )
@@ -1532,8 +1734,11 @@ class CompanionEngine:
             return
         self._submit_world_with_retry(
             {
-                "type": "set_typing_state", "world_id": self.world_id,
-                "message_id": message.message_id, "typing": "stopped", "reason": reason,
+                "type": "set_typing_state",
+                "world_id": self.world_id,
+                "message_id": message.message_id,
+                "typing": "stopped",
+                "reason": reason,
                 "idempotency_key": f"typing-stop:{message.message_id}:{reason}",
             }
         )
@@ -1636,7 +1841,9 @@ class CompanionEngine:
             except Exception as exc:
                 try:
                     self.world_kernel.settle_turn(
-                        self.world_id, str(message.message_id), status="failed",
+                        self.world_id,
+                        str(message.message_id),
+                        status="failed",
                         reason=type(exc).__name__,
                         expected_revision=self.world_kernel.revision(self.world_id),
                     )
@@ -1645,7 +1852,8 @@ class CompanionEngine:
                 raise
             awaiting_delivery = reply is not None and defer_delivery
             self.world_kernel.settle_turn(
-                self.world_id, str(message.message_id),
+                self.world_id,
+                str(message.message_id),
                 status="deferred" if reply is None or awaiting_delivery else "delivered",
                 reason=(
                     "awaiting_external_delivery"
@@ -1708,6 +1916,15 @@ class CompanionEngine:
         runtime = synchronize_life_runtime(self.store, canonical_user_id, next_state)
 
         self.store.save_incoming(canonical_user_id, message)
+        preferences = load_media_preferences(self.store, canonical_user_id)
+        updated_preferences = update_media_preferences_from_text(message.text, preferences)
+        if updated_preferences is not None:
+            persist_media_preferences(
+                self.store,
+                canonical_user_id,
+                updated_preferences,
+                source=f"{message.platform}:{message.message_id or 'turn'}",
+            )
         self.store.record_interaction_event(
             canonical_user_id,
             event_kind=event.kind,
@@ -1729,9 +1946,7 @@ class CompanionEngine:
             message.text,
             runtime,
             recent_her_lines=[
-                line.split("她:", 1)[-1]
-                for line in recent_lines_before
-                if "她:" in line
+                line.split("她:", 1)[-1] for line in recent_lines_before if "她:" in line
             ],
         )
         if contradiction:
@@ -1894,14 +2109,13 @@ class CompanionEngine:
                 self.store.upsert_memory(
                     canonical_user_id,
                     kind="user_visual_anchor",
-                    content=(
-                        "用户明确说这张图是自己/自拍；可见线索："
-                        f"{insight.summary}"
-                    ),
+                    content=(f"用户明确说这张图是自己/自拍；可见线索：{insight.summary}"),
                     source=source,
                     confidence=min(0.88, max(0.62, insight.confidence)),
                 )
-                attachment_lines.append("视觉身份: 用户明确说这张图是自己；以后只能作为弱线索，不要凭图擅自认人。")
+                attachment_lines.append(
+                    "视觉身份: 用户明确说这张图是自己；以后只能作为弱线索，不要凭图擅自认人。"
+                )
             next_state = update_mood_for_attachment_insight(next_state, insight)
 
         next_state = advance_relationship(
@@ -1915,7 +2129,9 @@ class CompanionEngine:
                 ]
             ),
         )
-        next_state = next_state.model_copy(update={"has_unread": mark_unread if skip_reply else False})
+        next_state = next_state.model_copy(
+            update={"has_unread": mark_unread if skip_reply else False}
+        )
         self.store.save_mood_state(canonical_user_id, next_state)
         runtime = synchronize_life_runtime(self.store, canonical_user_id, next_state)
 
@@ -1962,16 +2178,18 @@ class CompanionEngine:
             ],
             subtext=subtext.memory if subtext else None,
         )
-        text = sanitize_chat_text(await self.conversation_core.reply(
-            message,
-            next_state,
-            recent_lines,
-            context,
-            context_package.memory_lines,
-            attachment_lines,
-            self_core_block=self_core_block,
-            context_block=turn_plan.prompt_block(),
-        ))
+        text = sanitize_chat_text(
+            await self.conversation_core.reply(
+                message,
+                next_state,
+                recent_lines,
+                context,
+                context_package.memory_lines,
+                attachment_lines,
+                self_core_block=self_core_block,
+                context_block=turn_plan.prompt_block(),
+            )
+        )
         text = _ensure_observable_legacy_boundary(text, event.kind)
         text_parts = split_reply_text(text, next_state)
         suggested_reaction = select_character_reaction(message.text, next_state)
@@ -2022,7 +2240,9 @@ class CompanionEngine:
             sticker_path=str(sticker.path) if sticker else None,
             image_path=str(generated_image_path) if generated_image_path else None,
             suggested_reaction=(
-                suggested_reaction.reaction_id if suggested_reaction and suggested_reaction.probability >= 0.25 else None
+                suggested_reaction.reaction_id
+                if suggested_reaction and suggested_reaction.probability >= 0.25
+                else None
             ),
             delivery_id=delivery_id,
             turn_trace_id=turn_trace_id,
@@ -2040,8 +2260,8 @@ class CompanionEngine:
         skip_reply: bool,
         defer_delivery: bool,
         resume_action_id: str | None,
-        lifecycle_observer: Callable[[str], None] | None = None,
         cadence: ConversationCadence | None = None,
+        lifecycle_observer: Callable[[str], None] | None = None,
         complete_by_observed_at: datetime | None = None,
     ) -> CompanionReply | None:
         """World-mode turn path; legacy state tables are not behavioural inputs here."""
@@ -2060,6 +2280,16 @@ class CompanionEngine:
                 lifecycle_observer(stage)
             except Exception:
                 logger.debug("turn lifecycle observer failed at %s", stage, exc_info=True)
+
+        preferences = load_media_preferences(self.store, canonical_user_id)
+        updated_preferences = update_media_preferences_from_text(message.text, preferences)
+        if updated_preferences is not None:
+            persist_media_preferences(
+                self.store,
+                canonical_user_id,
+                updated_preferences,
+                source=f"{message.platform}:{message.message_id or 'turn'}",
+            )
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
             is_life_share = bool(action.get("trace", {}).get("life_share"))
             if action["kind"] == "decision_review" and action["status"] == "scheduled":
@@ -2067,8 +2297,10 @@ class CompanionEngine:
                 if decision_id:
                     self._submit_world_with_retry(
                         {
-                            "type": "resolve_deferred_decision", "world_id": self.world_id,
-                            "decision_id": decision_id, "outcome": "abandoned",
+                            "type": "resolve_deferred_decision",
+                            "world_id": self.world_id,
+                            "decision_id": decision_id,
+                            "outcome": "abandoned",
                             "reason": "new_user_turn_superseded_deferred_impulse",
                             "idempotency_key": f"decision-user-return:{decision_id}:{message.message_id}",
                         }
@@ -2077,8 +2309,10 @@ class CompanionEngine:
             if action["kind"] == "message_attention" and action["status"] == "scheduled":
                 self._submit_world_with_retry(
                     {
-                        "type": "cancel_action", "world_id": self.world_id,
-                        "action_id": action_id, "reason": "newer_user_message_observed",
+                        "type": "cancel_action",
+                        "world_id": self.world_id,
+                        "action_id": action_id,
+                        "reason": "newer_user_message_observed",
                         "idempotency_key": f"attention-supersede:{action_id}:{message.message_id}",
                     }
                 )
@@ -2089,7 +2323,12 @@ class CompanionEngine:
                 and action_id != resume_action_id
             ):
                 if is_life_share:
-                    self.world_kernel.cancel_life_share_delivery(self.world_id, action_id, reason="new_user_turn", expected_revision=self.world_kernel.revision(self.world_id))
+                    self.world_kernel.cancel_life_share_delivery(
+                        self.world_id,
+                        action_id,
+                        reason="new_user_turn",
+                        expected_revision=self.world_kernel.revision(self.world_id),
+                    )
                     continue
                 self._submit_world_with_retry(
                     {
@@ -2126,8 +2365,10 @@ class CompanionEngine:
             # ranked candidates remain durable diagnostic/advisory context.
             self._submit_world_with_retry(
                 {
-                    "type": "set_message_attention", "world_id": self.world_id,
-                    "message_id": message.message_id, "attention": "seen",
+                    "type": "set_message_attention",
+                    "world_id": self.world_id,
+                    "message_id": message.message_id,
+                    "attention": "seen",
                     "reason": f"model_advisory:{communication_decision.reason}",
                     "candidates": attention_candidates,
                     "rule_version": self.world_behavior_policy.RULE_VERSION,
@@ -2245,18 +2486,12 @@ class CompanionEngine:
             commitment_id = f"commitment:{violation_id}"
             repair_cases = repair_snapshot.get("repair_cases", {})
             repair_case = (
-                repair_cases.get(violation_id, {})
-                if isinstance(repair_cases, dict)
-                else {}
+                repair_cases.get(violation_id, {}) if isinstance(repair_cases, dict) else {}
             )
             commitments = (
-                repair_case.get("commitments", {})
-                if isinstance(repair_case, dict)
-                else {}
+                repair_case.get("commitments", {}) if isinstance(repair_case, dict) else {}
             )
-            has_committed_repair = (
-                isinstance(commitments, dict) and commitment_id in commitments
-            )
+            has_committed_repair = isinstance(commitments, dict) and commitment_id in commitments
             if (
                 violation_id
                 and has_committed_repair
@@ -2289,7 +2524,10 @@ class CompanionEngine:
                 appraisal = "repair_specific"
         if appraisal == "ordinary_message" and isinstance(history, list) and len(history) >= 2:
             preceding = history[-2] if isinstance(history[-2], dict) else {}
-            if preceding.get("direction") == "out" and preceding.get("outgoing_direction") == "proactive":
+            if (
+                preceding.get("direction") == "out"
+                and preceding.get("outgoing_direction") == "proactive"
+            ):
                 feedback = classify_proactive_feedback(message.text)
                 appraisal = {
                     "warm": "warmth_received",
@@ -2297,7 +2535,9 @@ class CompanionEngine:
                     "thin_or_busy": "availability_drop",
                     "answered": "ordinary_message",
                 }[feedback.kind]
-        for thread_id, raw_thread in self.world_kernel.snapshot(self.world_id).get("conversation_threads", {}).items():
+        for thread_id, raw_thread in (
+            self.world_kernel.snapshot(self.world_id).get("conversation_threads", {}).items()
+        ):
             thread = raw_thread if isinstance(raw_thread, dict) else {}
             if thread.get("status") != "open" or thread.get("user_id") != user_id:
                 continue
@@ -2308,8 +2548,11 @@ class CompanionEngine:
             if response:
                 self._submit_world_with_retry(
                     {
-                        "type": "resolve_conversation_thread", "world_id": self.world_id,
-                        "thread_id": thread_id, "outcome": response.kind, "reason": response.memory,
+                        "type": "resolve_conversation_thread",
+                        "world_id": self.world_id,
+                        "thread_id": thread_id,
+                        "outcome": response.kind,
+                        "reason": response.memory,
                         "idempotency_key": f"thread-response:{thread_id}:{message.message_id}",
                     }
                 )
@@ -2379,9 +2622,7 @@ class CompanionEngine:
             )
             turn_frame_delta = turn_frame.prompt_delta()
             inner_advisories = self.turn_frame_compiler.advisories(turn_frame)
-            affective_advisory = await self.affective_advisory_engine.advise(
-                turn_frame
-            )
+            affective_advisory = await self.affective_advisory_engine.advise(turn_frame)
         except Exception:
             logger.exception(
                 "turn-frame advisory unavailable; continuing world reply without it",
@@ -2406,14 +2647,11 @@ class CompanionEngine:
         context = projection.conversation_context
         fact_sources = list(context["referencable_facts"])[-8:]
         experience_sources = list(context["referencable_experiences"])[-6:]
-        attachment_insight_sources = list(
-            context.get("referencable_attachment_insights", [])
-        )[-6:]
+        attachment_insight_sources = list(context.get("referencable_attachment_insights", []))[-6:]
         recent_sources = list(context["referencable_conversation"])[-8:]
         retrieved_sources = projection.retrieved_sources
         source_by_id = {
-            str(item["source_id"]): item
-            for item in [*recent_sources, *retrieved_sources]
+            str(item["source_id"]): item for item in [*recent_sources, *retrieved_sources]
         }
         conversation_sources = list(source_by_id.values())[-12:]
         recent_conversation = [
@@ -2432,13 +2670,9 @@ class CompanionEngine:
         modulation = behavior["emotion_modulation"]
         deliberation = snapshot.get("last_deliberation", {})
         chosen_stance = (
-            str(deliberation.get("stance") or "")
-            if isinstance(deliberation, dict)
-            else ""
+            str(deliberation.get("stance") or "") if isinstance(deliberation, dict) else ""
         )
-        query_source_ids = {
-            str(item.get("source_id") or "") for item in retrieved_sources
-        }
+        query_source_ids = {str(item.get("source_id") or "") for item in retrieved_sources}
         retrieved_context_sources: list[dict[str, object]] = []
         for raw_source in [
             *fact_sources,
@@ -2476,8 +2710,7 @@ class CompanionEngine:
                     "source": str(raw_source.get("source") or source_id),
                     "source_type": source_type,
                     "subject": str(
-                        raw_source.get("subject")
-                        or (user_id if speaker == "user" else "zhizhi")
+                        raw_source.get("subject") or (user_id if speaker == "user" else "zhizhi")
                     ),
                     "logical_at": str(
                         raw_source.get("logical_at")
@@ -2487,9 +2720,7 @@ class CompanionEngine:
                     ),
                     "purpose": str(raw_source.get("purpose") or "continuity"),
                     "importance": int(raw_source.get("importance") or default_importance),
-                    "reference_state": str(
-                        raw_source.get("reference_state") or "current"
-                    ),
+                    "reference_state": str(raw_source.get("reference_state") or "current"),
                 }
             )
         context_layers = self.context_assembler.assemble_world_context(
@@ -2555,9 +2786,7 @@ class CompanionEngine:
             query_scope,
             appraisal=appraisal,
             request_kind=(
-                str(last_request.get("kind") or "")
-                if isinstance(last_request, dict)
-                else ""
+                str(last_request.get("kind") or "") if isinstance(last_request, dict) else ""
             ),
             message_text=message.text,
         )
@@ -2569,8 +2798,7 @@ class CompanionEngine:
         circuit_state = self.provider_circuit_state()
         reply_complexity = (
             "cross_turn_relation_repair"
-            if user_affect is not None
-            and user_affect.kind in {"disappointment", "confusion"}
+            if user_affect is not None and user_affect.kind in {"disappointment", "confusion"}
             else "high_pragmatic_ambiguity"
             if appraisal_risk.request_deeper_reasoning
             else "routine"
@@ -2621,8 +2849,7 @@ class CompanionEngine:
                 raise ConnectionError(reply_call_decision.reason)
             reply_model = (
                 self.expressive_model
-                if reply_route.model_tier == "strong"
-                and self.expressive_model is not None
+                if reply_route.model_tier == "strong" and self.expressive_model is not None
                 else self.model
             )
             reservation_id = self._reserve_model_call_budget(
@@ -2647,25 +2874,29 @@ class CompanionEngine:
                 budget_reservation_id=reservation_id,
             ) as scope:
                 raw = await complete_with_timeout(
-                    _complete_structured_model(reply_model, [
-                        {"role": "system", "content": self.companion_system_prompt},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"{context_block}\n\n用户: {message.text}\n"
-                                "MindProposalJSON: 只返回 JSON。旧 WorldReplyJSON 也兼容。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
-                                "claims.text 必须逐字复制来源证据，claims.assertion 必须逐字复制 reply_text 中对应的自然陈述。"
-                                "猜测、建议和问题不是事实声明，不要为它们创建 claim："
-                                "若自然地分成 2–3 段，可额外给 expression_beats，所有 text 必须按顺序精确拼成 reply_text，"
-                                "每段可有 delay_ms(0–20000，首段为0)；不要为了结构而拆句："
-                                "若本轮存在显著且未解决的用户失望/困惑，可额外给 private_impression（仅 kind、summary、confidence），"
-                                "它只是可拒绝的内心猜测，绝不是用户事实："
-                                "若回复自然留下一个开放问题，也可给 private_commitment（仅 intention、priority=50–100），"
-                                "它不是已完成承诺："
-                                '{"reply_text":"...","expression_beats":[{"text":"...","delay_ms":0}],"display_strategy":"...","private_impression":{"kind":"possible_disappointment","summary":"...","confidence":0.6},"private_commitment":{"intention":"...","priority":60},"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
-                            ),
-                        },
-                    ], temperature=0.75),
+                    _complete_structured_model(
+                        reply_model,
+                        [
+                            {"role": "system", "content": self.companion_system_prompt},
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"{context_block}\n\n用户: {message.text}\n"
+                                    "MindProposalJSON: 只返回 JSON。旧 WorldReplyJSON 也兼容。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
+                                    "claims.text 必须逐字复制来源证据，claims.assertion 必须逐字复制 reply_text 中对应的自然陈述。"
+                                    "猜测、建议和问题不是事实声明，不要为它们创建 claim："
+                                    "若自然地分成 2–3 段，可额外给 expression_beats，所有 text 必须按顺序精确拼成 reply_text，"
+                                    "每段可有 delay_ms(0–20000，首段为0)；不要为了结构而拆句："
+                                    "若本轮存在显著且未解决的用户失望/困惑，可额外给 private_impression（仅 kind、summary、confidence），"
+                                    "它只是可拒绝的内心猜测，绝不是用户事实："
+                                    "若回复自然留下一个开放问题，也可给 private_commitment（仅 intention、priority=50–100），"
+                                    "它不是已完成承诺："
+                                    '{"reply_text":"...","expression_beats":[{"text":"...","delay_ms":0}],"display_strategy":"...","private_impression":{"kind":"possible_disappointment","summary":"...","confidence":0.6},"private_commitment":{"intention":"...","priority":60},"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
+                                ),
+                            },
+                        ],
+                        temperature=0.75,
+                    ),
                     timeout_seconds=reply_call_decision.soft_timeout_seconds,
                 )
                 calls_used += 1
@@ -2733,10 +2964,12 @@ class CompanionEngine:
                     "reply_text": f"是真的发生了，不是计划。{occurrence_content}",
                     "mentioned_event_ids": [occurrence_source_id],
                     "proposed_action_ids": [],
-                    "claims": [{
-                        "source_id": occurrence_source_id,
-                        "text": occurrence_content,
-                    }],
+                    "claims": [
+                        {
+                            "source_id": occurrence_source_id,
+                            "text": occurrence_content,
+                        }
+                    ],
                 }
         mentioned_npc_names = {
             str(entity.get("name") or "")
@@ -2748,10 +2981,7 @@ class CompanionEngine:
         related_npc_experiences = [
             item
             for item in experience_sources
-            if any(
-                name and name in str(item.get("content") or "")
-                for name in mentioned_npc_names
-            )
+            if any(name and name in str(item.get("content") or "") for name in mentioned_npc_names)
         ]
         hard_evidence = HardEvidenceContext(
             user_text=message.text,
@@ -2771,9 +3001,7 @@ class CompanionEngine:
                 mind_proposal = parse_mind_proposal(raw)
                 parsed_candidate = mind_proposal.candidate
             except WorldError as parse_error:
-                plain_candidate = _recover_plain_chat_candidate(
-                    raw, user_text=message.text
-                )
+                plain_candidate = _recover_plain_chat_candidate(raw, user_text=message.text)
                 if (
                     plain_candidate is not None
                     and not (
@@ -2790,10 +3018,7 @@ class CompanionEngine:
                 elif (
                     str(parse_error) == "world reply must be JSON"
                     and str(raw or "").strip()
-                    and not (
-                        query_scope.target in {"user", "conversation"}
-                        and retrieved_sources
-                    )
+                    and not (query_scope.target in {"user", "conversation"} and retrieved_sources)
                 ):
                     # Never turn a provider envelope miss into a second full
                     # model wait.  The local fallback is grounded in this turn
@@ -2835,7 +3060,9 @@ class CompanionEngine:
                 )
                 candidate = {
                     "reply_text": availability_text,
-                    "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
+                    "mentioned_event_ids": [],
+                    "proposed_action_ids": [],
+                    "claims": [],
                 }
                 candidate, _ = self._guard_reply_candidate(
                     candidate, user_id=user_id, hard_evidence=hard_evidence
@@ -2867,9 +3094,7 @@ class CompanionEngine:
             )
             if human_violation:
                 quality_signals.append(f"human_reply_contract:{human_violation}")
-            affect_violation = expression_plan.validate(
-                str(candidate.get("reply_text") or "")
-            )
+            affect_violation = expression_plan.validate(str(candidate.get("reply_text") or ""))
             if affect_violation:
                 quality_signals.append(f"expression_plan:{affect_violation}")
             if (
@@ -2879,7 +3104,9 @@ class CompanionEngine:
             ):
                 candidate = {
                     "reply_text": "目前没有可以确认的互动记录，所以顺不顺利我不能乱说。",
-                    "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
+                    "mentioned_event_ids": [],
+                    "proposed_action_ids": [],
+                    "claims": [],
                 }
             if not provider_fallback:
                 candidate_claims = candidate.get("claims", [])
@@ -2893,11 +3120,15 @@ class CompanionEngine:
                             str(item.get("source_id") or "")
                             for item in candidate_claims
                             if isinstance(item, dict)
-                        ) if isinstance(candidate_claims, list) else (),
+                        )
+                        if isinstance(candidate_claims, list)
+                        else (),
                         mentioned_event_ids=tuple(str(item) for item in candidate_mentions)
-                        if isinstance(candidate_mentions, list) else (),
+                        if isinstance(candidate_mentions, list)
+                        else (),
                         proposed_action_ids=tuple(str(item) for item in candidate_actions)
-                        if isinstance(candidate_actions, list) else (),
+                        if isinstance(candidate_actions, list)
+                        else (),
                         has_factual_language=bool(
                             re.search(
                                 r"我(?:刚|今天|昨天|明天|在|去了|从|已经|有个|认识)"
@@ -2913,8 +3144,7 @@ class CompanionEngine:
                     )
                 )
                 grounding_diagnostic_recommended = (
-                    grounding_diagnostic_recommended
-                    or grounding.requires_independent_audit
+                    grounding_diagnostic_recommended or grounding.requires_independent_audit
                 )
         except WorldError as exc:
             fallback_reason = f"reply_validation_failed:{type(exc).__name__}"
@@ -2958,12 +3188,14 @@ class CompanionEngine:
                     )
                     if query_scope.day_part == "上午":
                         records = [
-                            item for item in records
+                            item
+                            for item in records
                             if datetime.fromisoformat(str(item["occurred_at"])).hour < 13
                         ]
                     elif query_scope.day_part == "下午":
                         records = [
-                            item for item in records
+                            item
+                            for item in records
                             if 13 <= datetime.fromisoformat(str(item["occurred_at"])).hour < 19
                         ]
                     grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
@@ -2972,28 +3204,30 @@ class CompanionEngine:
                             "mentioned_event_ids": [
                                 item["experience_id"]
                                 for item in records[
-                                    -1 if query_scope.asks_single_experience else -2:
+                                    -1 if query_scope.asks_single_experience else -2 :
                                 ]
                             ]
                         },
                         user_id=user_id,
                     )
             elif (
-                query_scope.target in {"user", "conversation"}
-                or asks_for_memory_recall(message.text)
-            ) and retrieved_sources:
-                recall_source = best_matching_grounded_source(
-                    message.text, retrieved_sources
+                not query_scope.is_first_person_statement
+                and (
+                    query_scope.target in {"user", "conversation"}
+                    or asks_for_memory_recall(message.text)
                 )
-                grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
-                    self.world_id,
-                    {
-                        "mentioned_event_ids": [
-                            str(recall_source["source_id"])
-                        ]
-                    },
-                    user_id=user_id,
-                ) if recall_source else None
+                and retrieved_sources
+            ):
+                recall_source = best_matching_grounded_source(message.text, retrieved_sources)
+                grounded_fallback = (
+                    self.world_kernel.grounded_reply_from_mentions(
+                        self.world_id,
+                        {"mentioned_event_ids": [str(recall_source["source_id"])]},
+                        user_id=user_id,
+                    )
+                    if recall_source
+                    else None
+                )
             elif asks_for_source_detail(message.text):
                 mentioned_names = {
                     str(entity.get("name") or "")
@@ -3005,17 +3239,21 @@ class CompanionEngine:
                 related = [
                     item
                     for item in experience_sources
-                    if any(name and name in str(item.get("content") or "") for name in mentioned_names)
+                    if any(
+                        name and name in str(item.get("content") or "") for name in mentioned_names
+                    )
                 ]
                 grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
                     self.world_id,
                     {"mentioned_event_ids": [str(item["source_id"]) for item in related[-2:]]},
                     user_id=user_id,
                 )
-            elif query_scope.is_first_person_statement:
+            elif query_scope.is_first_person_statement or only_echoes_user_message(
+                message.text, parsed_candidate
+            ):
                 # The current statement itself is already in the ledger.  Do
-                # not turn a rejected mixed-claim candidate into a quotation
-                # of the same unrelated old claims.
+                # not turn a rejected mixed-claim/echo candidate into a
+                # quotation of the same current user text or old claims.
                 grounded_fallback = None
             else:
                 if grounded_fallback is None:
@@ -3143,13 +3381,9 @@ class CompanionEngine:
             else []
         )
         proposed_delays = (
-            [beat.delay_ms for beat in mind_proposal.expression_beats]
-            if proposed_parts
-            else []
+            [beat.delay_ms for beat in mind_proposal.expression_beats] if proposed_parts else []
         )
-        text_parts = proposed_parts or split_reply_text(
-            text, MoodState(mood=public_mood_value)
-        )
+        text_parts = proposed_parts or split_reply_text(text, MoodState(mood=public_mood_value))
         if not text_parts or "".join(text_parts) != text:
             text_parts = [text]
             proposed_delays = []
@@ -3217,14 +3451,14 @@ class CompanionEngine:
                 {
                     "fallback_reason": fallback_reason,
                     "fallback_plan_hash": sha256(
-                        json.dumps(
-                            fallback_plan, sort_keys=True, separators=(",", ":")
-                        ).encode("utf-8")
+                        json.dumps(fallback_plan, sort_keys=True, separators=(",", ":")).encode(
+                            "utf-8"
+                        )
                     ).hexdigest(),
                     "fallback_context_hash": sha256(
-                        json.dumps(
-                            fallback_context, sort_keys=True, separators=(",", ":")
-                        ).encode("utf-8")
+                        json.dumps(fallback_context, sort_keys=True, separators=(",", ":")).encode(
+                            "utf-8"
+                        )
                     ).hexdigest(),
                 }
             )
@@ -3240,9 +3474,12 @@ class CompanionEngine:
         if private_impression is not None:
             trace["private_impression"] = private_impression
         if question:
-            thread_id = "thread:" + sha256(
-                f"{user_id}|{message.message_id}|{question}".encode("utf-8")
-            ).hexdigest()[:20]
+            thread_id = (
+                "thread:"
+                + sha256(f"{user_id}|{message.message_id}|{question}".encode("utf-8")).hexdigest()[
+                    :20
+                ]
+            )
             trace["conversation_thread"] = {
                 "thread_id": thread_id,
                 "user_id": user_id,
@@ -3255,9 +3492,7 @@ class CompanionEngine:
                     user_id=user_id,
                     question=question,
                     model_proposal=(
-                        mind_proposal.private_commitment
-                        if mind_proposal is not None
-                        else None
+                        mind_proposal.private_commitment if mind_proposal is not None else None
                     ),
                 )
                 trace["private_commitment"] = {
@@ -3329,13 +3564,13 @@ class CompanionEngine:
         if selected_kind in {"approach", "share_small_self_detail", "soft_repair"}:
             limited = text_parts[:3]
             if len(text_parts) > len(limited):
-                limited[-1] = "".join([limited[-1], *text_parts[len(limited):]])
+                limited[-1] = "".join([limited[-1], *text_parts[len(limited) :]])
             delays = [0] + [650] * (len(limited) - 1)
             return limited, delays
         if selected_kind in {"gentle_check_in", "playful_deflect", "care_despite_hurt"}:
             limited = text_parts[:2]
             if len(text_parts) > len(limited):
-                limited[-1] = "".join([limited[-1], *text_parts[len(limited):]])
+                limited[-1] = "".join([limited[-1], *text_parts[len(limited) :]])
             delays = [0] + [450] * (len(limited) - 1)
             return limited, delays
         return text_parts, [0] * len(text_parts)
@@ -3406,7 +3641,15 @@ class CompanionEngine:
         affective_advisory: AffectAdvisory,
         existing_user_affect: UserAffectAppraisal | None,
     ) -> dict[str, object] | None:
-        """Promote only strong, quote-bound advisory readings into user-affect."""
+        """Promote only strong, quote-bound advisory readings into user-affect.
+
+        Advisory is deliberately allowed to be wrong.  This bridge therefore
+        handles the narrow case the older local appraiser can miss: the user
+        explicitly says the companion was perfunctory / failed to attune, but
+        the normal turn-local classifier did not already produce a
+        ``UserAffectAppraisal``.  Smaller or resolved signals remain private
+        impression / expression guidance only.
+        """
         if existing_user_affect is not None or not message.message_id:
             return None
         text = str(message.text or "")
@@ -3458,9 +3701,8 @@ class CompanionEngine:
             intention = model_proposal.intention
             priority = model_proposal.priority
         return {
-            "commitment_id": "commitment:" + sha256(
-                f"{user_id}|{message.message_id}|{question}".encode("utf-8")
-            ).hexdigest()[:20],
+            "commitment_id": "commitment:"
+            + sha256(f"{user_id}|{message.message_id}|{question}".encode("utf-8")).hexdigest()[:20],
             "user_id": user_id,
             "intention": intention,
             "source_event_ids": [f"message:{message.message_id}"],
@@ -3476,9 +3718,7 @@ class CompanionEngine:
     ) -> ConversationCadence:
         """Return observed chat heat without consulting the virtual-life clock."""
         observed_at = observed_at or utc_now()
-        canonical_user_id = self.store.resolve_user(
-            message.platform, message.platform_user_id
-        )
+        canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if not self.world_kernel or not self.world_id:
             recent_messages = [
                 {
@@ -3504,9 +3744,7 @@ class CompanionEngine:
     ) -> FrozenTurnContext:
         """Freeze one cadence observation for adapter, Engine, and usage records."""
         observed_at = observed_at or message.sent_at
-        canonical_user_id = self.store.resolve_user(
-            message.platform, message.platform_user_id
-        )
+        canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         user_id = (
             self._world_user_id(canonical_user_id)
             if self.world_kernel and self.world_id
@@ -3554,7 +3792,9 @@ class CompanionEngine:
         trace_id = self.store.create_turn_trace(
             canonical_user_id,
             appraisal=state.last_interaction_event or "attention_check",
-            expression_policy="等待合适时机再回应" if not decision.read_now else "读取消息，继续判断如何回应",
+            expression_policy="等待合适时机再回应"
+            if not decision.read_now
+            else "读取消息，继续判断如何回应",
             allowed_facts=[],
             short_lived_constraint=None,
             observable_reason=decision.reason,
@@ -3618,13 +3858,20 @@ class CompanionEngine:
         if task_id is not None:
             if self.world_kernel and self.world_id and isinstance(task_id, str):
                 self._submit_world_with_retry(
-                    {"type": "cancel_action", "world_id": self.world_id, "action_id": task_id, "reason": "new_user_turn"}
+                    {
+                        "type": "cancel_action",
+                        "world_id": self.world_id,
+                        "action_id": task_id,
+                        "reason": "new_user_turn",
+                    }
                 )
                 return
             trace_id = self.store.social_task_payload(task_id).get("_turn_trace_id")
             self.store.cancel_social_task(task_id)
             if isinstance(trace_id, int):
-                self.store.resolve_turn_trace(trace_id, status="cancelled", reason="new user turn overtook delay")
+                self.store.resolve_turn_trace(
+                    trace_id, status="cancelled", reason="new user turn overtook delay"
+                )
 
     def complete_deferred_reply_task(self, task_id: int | str | None) -> None:
         if task_id is not None:
@@ -3748,9 +3995,7 @@ class CompanionEngine:
         outgoing action is scheduled, so reliability never creates an
         untracked side channel around the authoritative World ledger.
         """
-        canonical_user_id = self.store.resolve_user(
-            message.platform, message.platform_user_id
-        )
+        canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if not self.world_kernel or not self.world_id:
             delivery_id, trace_id = self.store.queue_outgoing_with_turn_trace(
                 canonical_user_id,
@@ -3814,9 +4059,7 @@ class CompanionEngine:
                 "observable_reason": failure_reason[:240],
                 "fallback_reason": failure_reason[:240],
                 "fallback_plan_hash": sha256(
-                    json.dumps(fallback_plan, sort_keys=True, separators=(",", ":")).encode(
-                        "utf-8"
-                    )
+                    json.dumps(fallback_plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 ).hexdigest(),
                 "fallback_context_hash": sha256(
                     json.dumps(fallback_context, sort_keys=True, separators=(",", ":")).encode(
@@ -3876,9 +4119,7 @@ class CompanionEngine:
                 failure_reason=failure_reason,
             )
 
-    def begin_reply_part_delivery(
-        self, reply: CompanionReply, *, position: int
-    ) -> str | None:
+    def begin_reply_part_delivery(self, reply: CompanionReply, *, position: int) -> str | None:
         """Claim the next world segment immediately before adapter I/O."""
         if not self.world_kernel or not reply.world_action_id or reply.delivery_id is None:
             return None
@@ -3889,9 +4130,7 @@ class CompanionEngine:
         if claimed is None:
             return None
         if claimed.position != position:
-            raise WorldError(
-                f"adapter claimed segment {claimed.position}, expected {position}"
-            )
+            raise WorldError(f"adapter claimed segment {claimed.position}, expected {position}")
         return claimed.segment_id
 
     def confirm_reply_part_delivery(
@@ -3935,7 +4174,9 @@ class CompanionEngine:
         committed = False
         if reply.delivery_id is not None:
             if self.world_kernel and reply.world_action_id:
-                self.world_kernel.settle_outgoing_action(reply.delivery_id, delivered=False, reason=reason)
+                self.world_kernel.settle_outgoing_action(
+                    reply.delivery_id, delivered=False, reason=reason
+                )
                 self.fail_media_delivery(reply, f"text_delivery_failed:{reason}")
                 self.fail_sticker_delivery(reply, f"text_delivery_failed:{reason}")
             else:
@@ -3956,7 +4197,8 @@ class CompanionEngine:
             return
         self._submit_world_with_retry(
             {
-                "type": "record_external_result", "world_id": self.world_id,
+                "type": "record_external_result",
+                "world_id": self.world_id,
                 "action_id": reply.media_action_id,
                 "result": {"kind": "media_delivery", "status": "delivered"},
                 "idempotency_key": f"media-delivered:{reply.media_action_id}",
@@ -3972,7 +4214,8 @@ class CompanionEngine:
             return
         self._submit_world_with_retry(
             {
-                "type": "record_external_result", "world_id": self.world_id,
+                "type": "record_external_result",
+                "world_id": self.world_id,
                 "action_id": reply.media_action_id,
                 "result": {"kind": "media_delivery", "status": "failed", "reason": reason[:300]},
                 "idempotency_key": f"media-failed:{reply.media_action_id}",
@@ -3985,7 +4228,8 @@ class CompanionEngine:
             return
         self._submit_world_with_retry(
             {
-                "type": "record_external_result", "world_id": self.world_id,
+                "type": "record_external_result",
+                "world_id": self.world_id,
                 "action_id": reply.sticker_action_id,
                 "result": {"kind": "sticker_delivery", "status": "delivered"},
                 "idempotency_key": f"sticker-delivered:{reply.sticker_action_id}",
@@ -4003,9 +4247,7 @@ class CompanionEngine:
             or not reply.suggested_reaction
         ):
             return None
-        action_id = (
-            f"reaction:{incoming.platform}:{incoming.message_id}:{reply.suggested_reaction}"
-        )
+        action_id = f"reaction:{incoming.platform}:{incoming.message_id}:{reply.suggested_reaction}"
         self._submit_world_with_retry(
             {
                 "type": "select_reaction",
@@ -4065,7 +4307,8 @@ class CompanionEngine:
             return
         self._submit_world_with_retry(
             {
-                "type": "record_external_result", "world_id": self.world_id,
+                "type": "record_external_result",
+                "world_id": self.world_id,
                 "action_id": reply.sticker_action_id,
                 "result": {"kind": "sticker_delivery", "status": "failed", "reason": reason[:300]},
                 "idempotency_key": f"sticker-failed:{reply.sticker_action_id}",
@@ -4223,8 +4466,7 @@ class CompanionEngine:
                 for item in snapshot.get("experiences", {}).values()
                 if isinstance(item, dict)
                 and any(
-                    name and name in str(item.get("content") or "")
-                    for name in mentioned_npc_names
+                    name and name in str(item.get("content") or "") for name in mentioned_npc_names
                 )
             ]
             afterthought_hard_evidence = HardEvidenceContext(
@@ -4264,7 +4506,9 @@ class CompanionEngine:
                 f"模式: {mode}"
             )
             causation = f"afterthought:{reply_sent_at.isoformat()}:{mode}"
-            model_action_id = self._begin_world_model_call(purpose="afterthought", causation=causation)
+            model_action_id = self._begin_world_model_call(
+                purpose="afterthought", causation=causation
+            )
             try:
                 raw = await self._bounded_world_model_complete(
                     self.model,
@@ -4293,7 +4537,9 @@ class CompanionEngine:
                 # silently detach a pending external Action reference from its
                 # own receipt lifecycle; a later explicit turn can bind it.
                 return None
-            relationship = snapshot.get("relationships", {}).get(self._world_user_id(canonical_user_id), {})
+            relationship = snapshot.get("relationships", {}).get(
+                self._world_user_id(canonical_user_id), {}
+            )
             if isinstance(relationship, dict):
                 soft_violation = human_reply_contract_violation("", candidate, relationship)
                 if soft_violation:
@@ -4310,7 +4556,9 @@ class CompanionEngine:
             return None
         rhythm = human_rhythm_snapshot(state)
         recent_rows = self._recent_dicts(canonical_user_id, limit=8)
-        if rhythm.phase == "deep_night" and not _deep_night_afterthought_allowed(state, recent_rows):
+        if rhythm.phase == "deep_night" and not _deep_night_afterthought_allowed(
+            state, recent_rows
+        ):
             return None
         new_count = self.store.message_count_since(
             canonical_user_id, direction="in", since_iso=reply_sent_at.isoformat()
@@ -4355,7 +4603,12 @@ class CompanionEngine:
             # This entry point is also used by scheduler recovery.  Keep its
             # payload on the same grounded text boundary as normal replies.
             self._guard_reply_candidate(
-                {"reply_text": text, "mentioned_event_ids": [], "proposed_action_ids": [], "claims": []},
+                {
+                    "reply_text": text,
+                    "mentioned_event_ids": [],
+                    "proposed_action_ids": [],
+                    "claims": [],
+                },
                 user_id=self._ensure_world_user(canonical_user_id),
             )
             delivery_id, _, _ = self.world_kernel.queue_outgoing_action(
@@ -4432,7 +4685,6 @@ class CompanionEngine:
         self.store.save_mood_state(canonical_user_id, expressed)
         synchronize_life_runtime(self.store, canonical_user_id, expressed)
 
-
     async def _maybe_generate_requested_image(
         self,
         canonical_user_id: str,
@@ -4441,7 +4693,10 @@ class CompanionEngine:
     ) -> Path | None:
         if not image_requested or not self.image_generator or not self.character_profile:
             return None
-        estimate = ESTIMATES["image_generation"]
+        references = visual_reference_paths(self.visual_identity_path, scene_hint=message.text)
+        estimate = image_render_estimate(
+            reference_count=len(references), attempts=2 if self.image_quality_gate else 1
+        )
         if self.budget_gate:
             decision = self.budget_gate.check(estimate, automatic=True)
             if not decision.allowed:
@@ -4462,16 +4717,21 @@ class CompanionEngine:
             ],
             visual_identity_path=self.visual_identity_path,
         )
-        output_path = self.image_output_dir / f"reply-{canonical_user_id}-{int(utc_now().timestamp())}.png"
+        output_path = (
+            self.image_output_dir / f"reply-{canonical_user_id}-{int(utc_now().timestamp())}.png"
+        )
         generated = await render_character_image(
             self.image_generator,
             payload.prompt,
             output_path=output_path,
-            reference_images=visual_reference_paths(self.visual_identity_path),
+            reference_images=references,
             quality_gate=self.image_quality_gate,
         )
         if self.budget_gate:
-            self.budget_gate.record(estimate, note=f"chat_image:{payload.mode}:{payload.directive[:40]}")
+            self.budget_gate.record(
+                image_render_estimate(reference_count=len(references), attempts=generated.attempts),
+                note=f"chat_image:{payload.mode}:{payload.directive[:40]}:attempts={generated.attempts}",
+            )
         self.store.upsert_memory(
             canonical_user_id,
             kind="generated_image",
@@ -4498,18 +4758,24 @@ class CompanionEngine:
             state,
             last_sent_iso=last_sent,
             incoming_since=(
-                self.store.message_count_since(canonical_user_id, direction="in", since_iso=last_sent)
+                self.store.message_count_since(
+                    canonical_user_id, direction="in", since_iso=last_sent
+                )
                 if last_sent
                 else 0
             ),
         )
-        pending_question = last_unanswered_own_question(self._recent_dicts(canonical_user_id, limit=16))
+        pending_question = last_unanswered_own_question(
+            self._recent_dicts(canonical_user_id, limit=16)
+        )
         state = apply_unanswered_question_waiting(state, pending_question)
         self.store.save_mood_state(canonical_user_id, state)
         synchronize_life_runtime(self.store, canonical_user_id, state)
         return state
 
-    def outreach_block_reason(self, canonical_user_id: str, state: MoodState | None = None) -> str | None:
+    def outreach_block_reason(
+        self, canonical_user_id: str, state: MoodState | None = None
+    ) -> str | None:
         """Return why she should not add another unsolicited bubble yet."""
         state = state or self.store.get_mood_state(canonical_user_id)
         limit = {
@@ -4590,14 +4856,23 @@ class CompanionEngine:
 
     def conversation_pulse_is_active(self, task_id: int | str | None) -> bool:
         if self.world_kernel and self.world_id and isinstance(task_id, str):
-            return self.world_kernel.snapshot(self.world_id)["actions"].get(task_id, {}).get("status") == "scheduled"
+            return (
+                self.world_kernel.snapshot(self.world_id)["actions"].get(task_id, {}).get("status")
+                == "scheduled"
+            )
         return task_id is None or self.store.social_task_is_active(task_id)
 
     def complete_conversation_pulse(self, task_id: int | str | None) -> None:
         if task_id is not None:
             if self.world_kernel and self.world_id and isinstance(task_id, str):
                 self._submit_world_with_retry(
-                    {"type": "record_external_result", "world_id": self.world_id, "action_id": task_id, "result": {"kind": "pulse", "status": "delivered"}, "idempotency_key": f"complete:{task_id}"}
+                    {
+                        "type": "record_external_result",
+                        "world_id": self.world_id,
+                        "action_id": task_id,
+                        "result": {"kind": "pulse", "status": "delivered"},
+                        "idempotency_key": f"complete:{task_id}",
+                    }
                 )
                 return
             self.store.resolve_social_task(task_id)
@@ -4606,7 +4881,12 @@ class CompanionEngine:
         if task_id is not None:
             if self.world_kernel and self.world_id and isinstance(task_id, str):
                 self._submit_world_with_retry(
-                    {"type": "cancel_action", "world_id": self.world_id, "action_id": task_id, "reason": "conversation_changed"}
+                    {
+                        "type": "cancel_action",
+                        "world_id": self.world_id,
+                        "action_id": task_id,
+                        "reason": "conversation_changed",
+                    }
                 )
                 return
             self.store.cancel_social_task(task_id)
@@ -4653,7 +4933,9 @@ class CompanionEngine:
         outreach_block = self.outreach_block_reason(canonical_user_id, state)
         if outreach_block:
             if social_task:
-                self.store.defer_social_task(int(social_task["id"]), due_at=now + timedelta(hours=2))
+                self.store.defer_social_task(
+                    int(social_task["id"]), due_at=now + timedelta(hours=2)
+                )
             decision = ProactiveDecision(
                 canonical_user_id=canonical_user_id,
                 private_thought=outreach_block,
@@ -4699,7 +4981,9 @@ class CompanionEngine:
                     decision.cooldown_minutes,
                 )
                 if social_task:
-                    self.store.defer_social_task(int(social_task["id"]), due_at=now + timedelta(minutes=45))
+                    self.store.defer_social_task(
+                        int(social_task["id"]), due_at=now + timedelta(minutes=45)
+                    )
                 return decision
         raw = await self._reserved_legacy_model_complete(
             self.model,
@@ -4741,7 +5025,10 @@ class CompanionEngine:
                     kind="withheld_impulse",
                     platform="qq",
                     platform_user_id=self.store.platform_user_id(canonical_user_id, "qq") or "",
-                    payload={"trigger_type": impulse.reason, "thought": decision.private_thought[:120]},
+                    payload={
+                        "trigger_type": impulse.reason,
+                        "thought": decision.private_thought[:120],
+                    },
                     reason="有一句主动的话暂时忍住了，等一会儿再重新判断。",
                     due_at=utc_now() + timedelta(minutes=45),
                     expires_at=utc_now() + timedelta(hours=4),
@@ -4760,7 +5047,9 @@ class CompanionEngine:
                 # choice, not a timer that reopens the same thought forever.
                 self.store.resolve_social_task(int(social_task["id"]))
             else:
-                self.store.defer_social_task(int(social_task["id"]), due_at=now + timedelta(minutes=45))
+                self.store.defer_social_task(
+                    int(social_task["id"]), due_at=now + timedelta(minutes=45)
+                )
         decision = self._attach_sticker(decision, state)
         decision = await self._attach_proactive_image(canonical_user_id, decision, state)
         self.store.save_proactive_event(
@@ -4795,13 +5084,9 @@ class CompanionEngine:
             )
         return decision
 
-    def _settle_proactive_generation(
-        self, action_id: str, *, status: str, reason: str
-    ) -> None:
+    def _settle_proactive_generation(self, action_id: str, *, status: str, reason: str) -> None:
         assert self.world_kernel and self.world_id
-        action = self.world_kernel.snapshot(self.world_id).get("actions", {}).get(
-            action_id, {}
-        )
+        action = self.world_kernel.snapshot(self.world_id).get("actions", {}).get(action_id, {})
         if not isinstance(action, dict) or action.get("status") not in {
             "scheduled",
             "sending",
@@ -4845,8 +5130,10 @@ class CompanionEngine:
             if decision_id:
                 self._submit_world_with_retry(
                     {
-                        "type": "resolve_deferred_decision", "world_id": self.world_id,
-                        "decision_id": decision_id, "outcome": "abandoned",
+                        "type": "resolve_deferred_decision",
+                        "world_id": self.world_id,
+                        "decision_id": decision_id,
+                        "outcome": "abandoned",
                         "reason": "logical_review_elapsed_without_new_evidence",
                         "idempotency_key": f"decision-review:{decision_id}",
                     }
@@ -4864,7 +5151,8 @@ class CompanionEngine:
                 should_send=False,
             )
         open_reviews = [
-            action for action in snapshot["actions"].values()
+            action
+            for action in snapshot["actions"].values()
             if action["kind"] == "decision_review" and action["status"] == "scheduled"
         ]
         if open_reviews:
@@ -4917,9 +5205,7 @@ class CompanionEngine:
                     "decision_id": impulse_id,
                     "kind": f"proactive_{selected_stance or 'defer'}",
                     "reason": reason,
-                    "review_at": (
-                        self._world_logical_now() + timedelta(minutes=45)
-                    ).isoformat(),
+                    "review_at": (self._world_logical_now() + timedelta(minutes=45)).isoformat(),
                     "idempotency_key": f"defer:{impulse_id}",
                 }
             )
@@ -4966,7 +5252,9 @@ class CompanionEngine:
             raise
         self._record_world_model_output(
             purpose="proactive",
-            causation=causation, content=raw, action_id=model_action_id,
+            causation=causation,
+            content=raw,
+            action_id=model_action_id,
         )
         modulation = snapshot.get("emotion_modulation", {})
         decision = self._parse_decision(
@@ -5030,8 +5318,10 @@ class CompanionEngine:
             )
             self._submit_world_with_retry(
                 {
-                    "type": "defer_decision", "world_id": self.world_id,
-                    "decision_id": f"impulse:{model_action_id}", "kind": "withheld_impulse",
+                    "type": "defer_decision",
+                    "world_id": self.world_id,
+                    "decision_id": f"impulse:{model_action_id}",
+                    "kind": "withheld_impulse",
                     "reason": decision.private_thought[:160] or "当前不适合主动开口。",
                     "review_at": (self._world_logical_now() + timedelta(minutes=45)).isoformat(),
                     "idempotency_key": f"defer:impulse:{model_action_id}",
@@ -5039,6 +5329,12 @@ class CompanionEngine:
             )
             return decision
         text = sanitize_chat_text(decision.message)
+        await self._maybe_attach_world_proactive_media(
+            canonical_user_id=canonical_user_id,
+            decision=decision,
+            snapshot=snapshot,
+            impulse_id=impulse_id,
+        )
         outbound_override = (
             {
                 "reason": f"deliberation_selected_outreach_despite:{outreach.reason}",
@@ -5046,7 +5342,8 @@ class CompanionEngine:
                 "strike": outreach.override_strike,
                 "gates": [f"outreach:{outreach.reason}"],
             }
-            if outreach.requires_deliberation else None
+            if outreach.requires_deliberation
+            else None
         )
         try:
             delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
@@ -5060,7 +5357,9 @@ class CompanionEngine:
                     "direction": "proactive",
                     "appraisal": decision.trigger_type or "proactive",
                     "expression_policy": "主动消息只轻轻开口，不索取回应。",
-                    "allowed_facts": [str(item["value"]) for item in self._current_world_facts(snapshot)],
+                    "allowed_facts": [
+                        str(item["value"]) for item in self._current_world_facts(snapshot)
+                    ],
                     "short_lived_constraint": None,
                     "observable_reason": decision.private_thought[:160],
                     "outbound_override": outbound_override,
@@ -5097,8 +5396,58 @@ class CompanionEngine:
             generation_action_id, status="delivered", reason="decision_completed"
         )
         return decision.model_copy(
-            update={"message": text, "delivery_id": delivery_id, "turn_trace_id": trace_id, "world_action_id": action_id}
+            update={
+                "message": text,
+                "delivery_id": delivery_id,
+                "turn_trace_id": trace_id,
+                "world_action_id": action_id,
+            }
         )
+
+    async def _maybe_attach_world_proactive_media(
+        self,
+        *,
+        canonical_user_id: str,
+        decision: ProactiveDecision,
+        snapshot: dict[str, object],
+        impulse_id: str,
+    ) -> None:
+        """Schedule an independent QQ photo only after world outreach chose to initiate."""
+        if (
+            decision.platform != "qq"
+            or not self.media_delivery_handler
+            or not self.image_generator
+            or not self.world_kernel
+            or not self.world_id
+        ):
+            return
+        choice = self.world_media_intent_policy.choose(snapshot, request_id=impulse_id)
+        if choice is None:
+            return
+        recipient = self.store.platform_user_id(canonical_user_id, "qq")
+        if not recipient:
+            return
+        directive = {
+            "atmosphere_record": "发一张生活照",
+            "check_in_pose": "发一张打卡照",
+            "companion_candid": "发一张朋友拍的抓拍",
+            "playful_share": "发一张搞怪随手照",
+            "outfit_mirror": "发一张镜子里的穿搭照",
+            "unfiltered_moment": "发一张不太精致的随手照",
+            "private_keepsake": "发一张私密生活照",
+        }[choice.intent]
+        message = IncomingMessage(
+            platform="qq",
+            platform_user_id=recipient,
+            text=directive,
+            message_id=f"{impulse_id}:media:{choice.intent}",
+        )
+        try:
+            await self._maybe_generate_world_image(
+                user_id=self._world_user_id(canonical_user_id), message=message
+            )
+        except Exception:
+            logger.exception("world proactive media scheduling failed: %s", choice.intent)
 
     def _deterministic_life_share_decision(
         self,
@@ -5110,7 +5459,9 @@ class CompanionEngine:
     ) -> ProactiveDecision:
         allowed, reason = proactive_outreach_allowed(runtime)
         if not allowed:
-            self.store.defer_social_task(int(social_task["id"]), due_at=utc_now() + timedelta(minutes=45))
+            self.store.defer_social_task(
+                int(social_task["id"]), due_at=utc_now() + timedelta(minutes=45)
+            )
             return ProactiveDecision(
                 canonical_user_id=canonical_user_id,
                 private_thought=f"已发生的小事暂时不适合分享：{reason}",
@@ -5188,12 +5539,17 @@ class CompanionEngine:
                 )
             else:
                 self.store.resolve_outgoing_and_turn_trace(
-                    decision.delivery_id, decision.turn_trace_id, delivered=False, failure_reason=reason
+                    decision.delivery_id,
+                    decision.turn_trace_id,
+                    delivered=False,
+                    failure_reason=reason,
                 )
         if self.world_kernel and decision.world_action_id:
             return
         if decision.social_task_id is not None:
-            self.store.defer_social_task(decision.social_task_id, due_at=utc_now() + timedelta(minutes=20))
+            self.store.defer_social_task(
+                decision.social_task_id, due_at=utc_now() + timedelta(minutes=20)
+            )
         elif decision.message:
             # Mirror the failed-reply path: keep the failed outbox as fact and let a
             # later decision judge whether reaching out again still feels natural.
@@ -5226,7 +5582,9 @@ class CompanionEngine:
             expires_at=now + timedelta(hours=10),
         )
 
-    def _create_promise_followup(self, canonical_user_id: str, message: IncomingMessage) -> int | None:
+    def _create_promise_followup(
+        self, canonical_user_id: str, message: IncomingMessage
+    ) -> int | None:
         delay = _promise_followup_delay(message.text)
         if delay is None:
             return None
@@ -5305,7 +5663,16 @@ class CompanionEngine:
         """Return the small, source-owned ledger for claims about 知栀 herself."""
         facts: list[str] = []
         if self.character_profile:
-            identity_keys = ("full_name", "english_name", "age", "hometown", "current_city", "school", "major", "year")
+            identity_keys = (
+                "full_name",
+                "english_name",
+                "age",
+                "hometown",
+                "current_city",
+                "school",
+                "major",
+                "year",
+            )
             for key in identity_keys:
                 value = self.character_profile.identity.get(key)
                 if value is None:
@@ -5347,8 +5714,10 @@ class CompanionEngine:
             projection = self.world_kernel.daemon_dashboard_projection(self.world_id)
             recent = [
                 self._format_recent_line(
-                    direction=str(item.get("direction") or "in"), platform=platform,
-                    text=str(item.get("text") or ""), sent_at=str(item.get("sent_at") or ""),
+                    direction=str(item.get("direction") or "in"),
+                    platform=platform,
+                    text=str(item.get("text") or ""),
+                    sent_at=str(item.get("sent_at") or ""),
                 )
                 for item in self.world_kernel.snapshot(self.world_id).get("recent_messages", [])
                 if isinstance(item, dict) and item.get("sent_at")
@@ -5363,15 +5732,20 @@ class CompanionEngine:
             return {
                 "canonical_user_id": canonical_user_id,
                 **projection,
-                "recent_life_events": [], "recent_turn_traces": [], "recent_tool_proposals": [],
+                "recent_life_events": [],
+                "recent_turn_traces": [],
+                "recent_tool_proposals": [],
                 "recent": recent[-16:],
                 "memories": [],
                 "available_memories": [
                     {"kind": "world_fact", "content": str(item.get("value") or "")}
-                    for item in facts.values() if isinstance(item, dict)
-                ] + [
+                    for item in facts.values()
+                    if isinstance(item, dict)
+                ]
+                + [
                     {"kind": "world_experience", "content": str(item.get("content") or "")}
-                    for item in experiences.values() if isinstance(item, dict)
+                    for item in experiences.values()
+                    if isinstance(item, dict)
                 ],
                 "prompt_messages": [],
             }
@@ -5438,15 +5812,28 @@ class CompanionEngine:
             "canonical_user_id": canonical_user_id,
             "state": state.model_dump(mode="json"),
             "life_runtime": runtime.model_dump(mode="json"),
-            "recent_life_events": [dict(row) for row in self.store.recent_life_events(canonical_user_id)],
-            "calendar": calendar_ledger(self.store, canonical_user_id, state, past_days=15, future_days=15),
-            "recent_social_tasks": [dict(row) for row in self.store.recent_social_tasks(canonical_user_id)],
-            "recent_turn_traces": [dict(row) for row in self.store.recent_turn_traces(canonical_user_id)],
-            "recent_tool_proposals": [dict(row) for row in self.store.recent_tool_proposals(canonical_user_id)],
+            "recent_life_events": [
+                dict(row) for row in self.store.recent_life_events(canonical_user_id)
+            ],
+            "calendar": calendar_ledger(
+                self.store, canonical_user_id, state, past_days=15, future_days=15
+            ),
+            "recent_social_tasks": [
+                dict(row) for row in self.store.recent_social_tasks(canonical_user_id)
+            ],
+            "recent_turn_traces": [
+                dict(row) for row in self.store.recent_turn_traces(canonical_user_id)
+            ],
+            "recent_tool_proposals": [
+                dict(row) for row in self.store.recent_tool_proposals(canonical_user_id)
+            ],
             "dashboard": _dashboard_view(
                 state,
                 runtime,
-                [dict(row) for row in self.store.upcoming_life_plan_items(canonical_user_id, now=utc_now())],
+                [
+                    dict(row)
+                    for row in self.store.upcoming_life_plan_items(canonical_user_id, now=utc_now())
+                ],
                 [dict(row) for row in self.store.recent_social_tasks(canonical_user_id)],
             ),
             "recent": recent_lines,
@@ -5472,11 +5859,14 @@ class CompanionEngine:
         sent_at = datetime.fromisoformat(last_sent)
         if (utc_now() - sent_at).total_seconds() > 72 * 60 * 60:
             return False
-        return self.store.message_count_since(
-            canonical_user_id,
-            direction="in",
-            since_iso=last_sent,
-        ) == 0
+        return (
+            self.store.message_count_since(
+                canonical_user_id,
+                direction="in",
+                since_iso=last_sent,
+            )
+            == 0
+        )
 
     def _parse_decision(
         self, canonical_user_id: str, raw: str, state: MoodState
@@ -5531,14 +5921,45 @@ class CompanionEngine:
     ) -> ProactiveDecision:
         if not decision.should_send or decision.message_type not in {"image", "text_image"}:
             return decision
+        preferences = load_media_preferences(self.store, canonical_user_id)
+        if not preferences.allow_proactive_images:
+            return decision.model_copy(
+                update={"message_type": "text" if decision.message else "none"}
+            )
         if not self.image_generator or not self.character_profile:
-            return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
+            return decision.model_copy(
+                update={"message_type": "text" if decision.message else "none"}
+            )
         if state.relationship_stage not in {"friend", "close_friend", "ambiguous", "lover"}:
-            return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
+            return decision.model_copy(
+                update={"message_type": "text" if decision.message else "none"}
+            )
         if state.mood in {"guarded", "hurt"} or state.boundary_level >= 35:
-            return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
+            return decision.model_copy(
+                update={"message_type": "text" if decision.message else "none"}
+            )
 
-        estimate = ESTIMATES["image_generation"]
+        topic = decision.message or decision.private_thought
+        capture_mode = self.world_media_policy.proactive_capture_mode(topic)
+        if capture_mode == "unfiltered" and (
+            not preferences.allow_unfiltered_media
+            or not self._proactive_unfiltered_media_allowed(
+                canonical_user_id, state, cooldown_days=preferences.unfiltered_cooldown_days
+            )
+        ):
+            capture_mode = "handheld_selfie"
+        kind = (
+            "character_media"
+            if state.relationship_stage in {"close_friend", "ambiguous", "lover"}
+            and state.trust >= 55
+            else "life"
+        )
+        references = visual_reference_paths(
+            self.visual_identity_path, scene_hint=f"{capture_mode}:{topic}"
+        )
+        estimate = image_render_estimate(
+            reference_count=len(references), attempts=2 if self.image_quality_gate else 1
+        )
         if self.budget_gate:
             budget_decision = self.budget_gate.check(estimate, automatic=True)
             if not budget_decision.allowed:
@@ -5549,28 +5970,61 @@ class CompanionEngine:
                     source="proactive_tick",
                     confidence=0.8,
                 )
-                return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
+                return decision.model_copy(
+                    update={"message_type": "text" if decision.message else "none"}
+                )
 
-        kind = "selfie" if state.relationship_stage in {"close_friend", "ambiguous", "lover"} and state.trust >= 55 else "life"
-        topic = decision.message or decision.private_thought
-        output_path = self.image_output_dir / f"proactive-{canonical_user_id}-{int(utc_now().timestamp())}.png"
+        output_path = (
+            self.image_output_dir
+            / f"proactive-{canonical_user_id}-{int(utc_now().timestamp())}.png"
+        )
         generated = await render_character_image(
             self.image_generator,
-            life_image_prompt(topic, kind=kind, visual_identity_path=self.visual_identity_path),
+            life_image_prompt(
+                topic,
+                kind=kind,
+                capture_mode=capture_mode,
+                visual_identity_path=self.visual_identity_path,
+            ),
             output_path=output_path,
-            reference_images=visual_reference_paths(self.visual_identity_path),
+            reference_images=references,
             quality_gate=self.image_quality_gate,
         )
         if self.budget_gate:
-            self.budget_gate.record(estimate, note=f"proactive_image:{kind}:{topic[:40]}")
+            self.budget_gate.record(
+                image_render_estimate(reference_count=len(references), attempts=generated.attempts),
+                note=f"proactive_image:{kind}:{topic[:40]}:attempts={generated.attempts}",
+            )
         self.store.upsert_memory(
             canonical_user_id,
             kind="generated_image",
-            content=f"proactive_{kind}: {topic[:120]}",
+            content=f"proactive_{kind}:{capture_mode}: {topic[:120]}",
             source=str(generated.path),
             confidence=0.82,
         )
+        if capture_mode == "unfiltered":
+            self.store.upsert_memory(
+                canonical_user_id,
+                kind="proactive_unfiltered_media",
+                content="shared a low-stakes unfiltered personal media moment",
+                source=str(generated.path),
+                confidence=1.0,
+            )
         return decision.model_copy(update={"image_path": str(generated.path)})
+
+    def _proactive_unfiltered_media_allowed(
+        self, canonical_user_id: str, state: MoodState, *, cooldown_days: int = 7
+    ) -> bool:
+        if state.relationship_stage not in {"close_friend", "ambiguous", "lover"}:
+            return False
+        previous = self.store.latest_memory(canonical_user_id, kind="proactive_unfiltered_media")
+        if previous is None:
+            return True
+        try:
+            previous_at = datetime.fromisoformat(str(previous["updated_at"]))
+        except ValueError:
+            return False
+        return utc_now() - previous_at >= timedelta(days=cooldown_days)
 
 
 def _deep_night_afterthought_allowed(state: MoodState, recent_rows: list[dict[str, str]]) -> bool:
@@ -5643,9 +6097,7 @@ def _afterthought_repeats_recent(text: str, recent_lines: list[str]) -> bool:
             and "刚" in earlier_compact
         ):
             return True
-        if len(earlier_compact) >= 7 and (
-            compact in earlier_compact or earlier_compact in compact
-        ):
+        if len(earlier_compact) >= 7 and (compact in earlier_compact or earlier_compact in compact):
             return True
         if _character_bigram_overlap(compact, earlier_compact) >= 0.58:
             return True
@@ -5745,7 +6197,10 @@ def _dashboard_view(
         "affectionate": "很亲近",
         "curious": "有点好奇",
     }
-    reasons = [f"现在在{runtime.activity}", phone_labels.get(runtime.phone_attention, "手机状态未知")]
+    reasons = [
+        f"现在在{runtime.activity}",
+        phone_labels.get(runtime.phone_attention, "手机状态未知"),
+    ]
     if runtime.user_event_effect:
         reasons.append(runtime.user_event_effect)
     if runtime.state_effect:
@@ -5909,9 +6364,7 @@ def _compact_world_context_layers(
         return layers
     compact: dict[str, dict[str, object]] = {}
     for name, layer in layers.items():
-        char_limit, item_limit = _HOT_CONTEXT_PROMPT_LIMITS.get(
-            name, (600, 3)
-        )
+        char_limit, item_limit = _HOT_CONTEXT_PROMPT_LIMITS.get(name, (600, 3))
         raw_entries = layer.get("entries", [])
         entries = raw_entries if isinstance(raw_entries, list) else []
         used = 0

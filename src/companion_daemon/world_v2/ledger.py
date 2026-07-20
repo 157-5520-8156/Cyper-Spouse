@@ -823,6 +823,7 @@ class WorldLedger:
             raise LedgerIntegrityError("Affect proposal identity has multiple envelopes")
         return candidates[0] if candidates else None
 
+
     def resolve_committed_event_refs(
         self, event_ids: Sequence[str], *, at_world_revision: int
     ) -> dict[str, CommittedWorldEventRef]:

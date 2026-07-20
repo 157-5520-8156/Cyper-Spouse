@@ -14,8 +14,17 @@ from companion_daemon.emotion_programs import EmotionProgramInput, evaluate_emot
 
 
 AFFECT_KEYS = (
-    "hurt", "anger", "sadness", "loneliness", "anxiety", "resentment",
-    "shame", "guilt", "jealousy", "warmth", "joy",
+    "hurt",
+    "anger",
+    "sadness",
+    "loneliness",
+    "anxiety",
+    "resentment",
+    "shame",
+    "guilt",
+    "jealousy",
+    "warmth",
+    "joy",
 )
 RULE_VERSION = "world-affect-v2"
 MAX_PROJECTED_ARCHIVED_EPISODES = 256
@@ -465,10 +474,10 @@ def decay_affect(
         retained: list[dict[str, object]] = []
         resolved: list[dict[str, object]] = []
         for episode in episodes:
-            if (
-                int(episode.get("valence") or 0) < 0
-                and str(episode.get("target") or "") in {"companion", "general"}
-            ):
+            if int(episode.get("valence") or 0) < 0 and str(episode.get("target") or "") in {
+                "companion",
+                "general",
+            }:
                 resolved.append(_archive_episode(episode, logical_at, "repair_completed"))
             else:
                 retained.append(episode)
@@ -673,8 +682,15 @@ def _negative_total(vector: dict[str, int], baseline: dict[str, int]) -> int:
     return sum(
         max(0, vector[key] - baseline[key])
         for key in (
-            "hurt", "anger", "sadness", "loneliness", "anxiety", "resentment",
-            "shame", "guilt", "jealousy",
+            "hurt",
+            "anger",
+            "sadness",
+            "loneliness",
+            "anxiety",
+            "resentment",
+            "shame",
+            "guilt",
+            "jealousy",
         )
     )
 
@@ -778,15 +794,19 @@ def _new_episode(
         half_life = int(profile["warmth_half_life_hours"])
     raw_component_half_lives = profile.get("emotion_half_life_hours", {})
     component_profile = (
-        raw_component_half_lives
-        if isinstance(raw_component_half_lives, dict)
-        else {}
+        raw_component_half_lives if isinstance(raw_component_half_lives, dict) else {}
     )
     component_half_lives = {
         key: max(1, int(component_profile.get(key) or half_life))
         for key in (
-            "anger", "resentment", "anxiety", "sadness", "hurt",
-            "shame", "guilt", "jealousy",
+            "anger",
+            "resentment",
+            "anxiety",
+            "sadness",
+            "hurt",
+            "shame",
+            "guilt",
+            "jealousy",
         )
         if int(affect_vector.get(key, 0)) > 0
     }
@@ -880,9 +900,7 @@ def _decay_episodes(
         initial_vector = initial_vector if isinstance(initial_vector, dict) else {}
         raw_component_half_lives = raw.get("component_half_life_hours")
         component_half_lives = (
-            raw_component_half_lives
-            if isinstance(raw_component_half_lives, dict)
-            else {}
+            raw_component_half_lives if isinstance(raw_component_half_lives, dict) else {}
         )
         current_vector = {
             key: int(
@@ -908,9 +926,7 @@ def _decay_episodes(
             resolved_at = _decay_resolution_at(raw, logical_at, decay_multiplier)
             archived.append(
                 {
-                    **_archive_episode(
-                        raw, resolved_at, "decayed_below_threshold"
-                    ),
+                    **_archive_episode(raw, resolved_at, "decayed_below_threshold"),
                     "intensity": 0,
                     "current_affect_vector": {},
                     "updated_at": resolved_at,
@@ -945,9 +961,14 @@ def _core_affect(
             100,
             int(
                 (
-                    vector["anger"] + vector["anxiety"] + vector["jealousy"]
-                    + vector["joy"] + vector["hurt"] // 2 + vector["shame"] // 2
-                ) / 2
+                    vector["anger"]
+                    + vector["anxiety"]
+                    + vector["jealousy"]
+                    + vector["joy"]
+                    + vector["hurt"] // 2
+                    + vector["shame"] // 2
+                )
+                / 2
             ),
         ),
     )
@@ -955,8 +976,7 @@ def _core_affect(
         -100,
         min(
             100,
-            vector["anger"] - vector["anxiety"] - vector["hurt"] // 2
-            - vector["shame"] // 2,
+            vector["anger"] - vector["anxiety"] - vector["hurt"] // 2 - vector["shame"] // 2,
         ),
     )
     episode_valences = {int(item.get("valence") or 0) for item in episodes}
@@ -1030,9 +1050,7 @@ def _episode_items(value: object) -> tuple[dict[str, object], ...]:
     return tuple(dict(item) for item in value if isinstance(item, dict))
 
 
-def _archive_episode(
-    episode: dict[str, object], logical_at: str, reason: str
-) -> dict[str, object]:
+def _archive_episode(episode: dict[str, object], logical_at: str, reason: str) -> dict[str, object]:
     return {
         **episode,
         "status": "resolved",
@@ -1054,9 +1072,7 @@ def _decay_resolution_at(
         return started.isoformat()
     raw_component_half_lives = episode.get("component_half_life_hours")
     component_half_lives = (
-        raw_component_half_lives
-        if isinstance(raw_component_half_lives, dict)
-        else {}
+        raw_component_half_lives if isinstance(raw_component_half_lives, dict) else {}
     )
     initial_vector = episode.get("affect_vector")
     initial_vector = initial_vector if isinstance(initial_vector, dict) else {}
@@ -1069,11 +1085,7 @@ def _decay_resolution_at(
         relevant_half_lives,
         default=float(episode.get("half_life_hours") or 12),
     )
-    crossing_hours = (
-        slowest_half_life
-        / max(0.25, min(1.5, decay_multiplier))
-        * log2(initial / 7.5)
-    )
+    crossing_hours = slowest_half_life / max(0.25, min(1.5, decay_multiplier)) * log2(initial / 7.5)
     resolved = started + timedelta(hours=max(0.0, crossing_hours))
     try:
         observed = datetime.fromisoformat(logical_at)
@@ -1086,7 +1098,9 @@ def _hours_between(started_at: str, logical_at: str) -> float:
     try:
         return max(
             0.0,
-            (datetime.fromisoformat(logical_at) - datetime.fromisoformat(started_at)).total_seconds()
+            (
+                datetime.fromisoformat(logical_at) - datetime.fromisoformat(started_at)
+            ).total_seconds()
             / 3600.0,
         )
     except (TypeError, ValueError):

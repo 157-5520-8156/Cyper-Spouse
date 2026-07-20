@@ -1,8 +1,8 @@
 """Durably fan out one verified life/clock wake into the media ecology.
 
-This is deliberately the first, narrow Life Ecology vertical.  It does not
-propose, accept, or materialise a life fact.  Its job is to make the boundary
-between a committed wake and the already source-bound media ecology reliable:
+This is the narrow Life Ecology scheduler seam.  It does not itself invent or
+authorize a life fact.  Its job is to make the boundary between a committed
+wake and the installed source-bound ecology reliable:
 the wake is verified at a pinned projection, an injected durable trigger store
 atomically owns or joins the run, and only the owner asks the media ecology to
 scan the resulting committed world.
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import inspect
 from typing import Literal, Protocol
 
 from .life_ecology_contract import (
@@ -55,6 +56,14 @@ class LifeEcologyRunResult(FrozenModel):
     reason_code: str | None = None
     media_followup_status: str | None = None
     activity_followup_status: str | None = None
+    life_author_followup_status: str | None = None
+    future_life_author_followup_status: str | None = None
+    aftermath_followup_status: str | None = None
+    npc_initiative_followup_status: str | None = None
+    aspiration_followup_status: str | None = None
+    shared_private_followup_status: str | None = None
+    open_world_followup_status: str | None = None
+    visual_evidence_followup_status: str | None = None
 
 
 class LifeEcologyTriggerStore(Protocol):
@@ -108,6 +117,60 @@ class ActivityLifecycleFollowup(Protocol):
     ) -> object: ...
 
 
+class LifeAuthorFollowup(Protocol):
+    """Reviewed-seed authoring lane, called only after this wake is owned."""
+
+    async def advance_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object: ...
+
+
+class LifeAftermathFollowup(Protocol):
+    def advance_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object: ...
+
+
+class OpenWorldEventFollowup(Protocol):
+    """Bounded model-authored event lane installed by composition."""
+
+    def advance_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object: ...
+
+
+class NpcInitiativeFollowup(Protocol):
+    """Reviewed NPC-initiated event lane, installed only by composition."""
+
+    async def advance_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object: ...
+
+
+class AspirationFollowup(Protocol):
+    """Reviewed aspiration (low-stakes wish) lane, installed only by composition."""
+
+    async def advance_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object: ...
+
+
+class SharedPrivateInvitationFollowup(Protocol):
+    """Consent-shaped shared_private invitation lane, installed only by composition."""
+
+    async def advance_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object: ...
+
+
+class VisualEvidenceFollowup(Protocol):
+    """Reviewed visual-declaration lane bridging settled life to media candidates."""
+
+    def advance_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object: ...
+
+
 class LifeEcologyRuntime:
     """Advance a single durable wake without becoming a second life writer."""
 
@@ -117,7 +180,15 @@ class LifeEcologyRuntime:
         ledger,
         trigger_store: LifeEcologyTriggerStore,
         media_followup: MediaEcologyFollowup,
+        life_author_followup: LifeAuthorFollowup | None = None,
+        future_life_author_followup: LifeAuthorFollowup | None = None,
         activity_followup: ActivityLifecycleFollowup | None = None,
+        aftermath_followup: LifeAftermathFollowup | None = None,
+        npc_initiative_followup: NpcInitiativeFollowup | None = None,
+        aspiration_followup: AspirationFollowup | None = None,
+        shared_private_followup: SharedPrivateInvitationFollowup | None = None,
+        open_world_followup: OpenWorldEventFollowup | None = None,
+        visual_evidence_followup: VisualEvidenceFollowup | None = None,
         availability: LifeEcologyAvailability,
         actor: str = "worker:life-ecology",
     ) -> None:
@@ -126,7 +197,15 @@ class LifeEcologyRuntime:
         self._ledger = ledger
         self._trigger_store = trigger_store
         self._media_followup = media_followup
+        self._life_author_followup = life_author_followup
+        self._future_life_author_followup = future_life_author_followup
         self._activity_followup = activity_followup
+        self._aftermath_followup = aftermath_followup
+        self._npc_initiative_followup = npc_initiative_followup
+        self._aspiration_followup = aspiration_followup
+        self._shared_private_followup = shared_private_followup
+        self._open_world_followup = open_world_followup
+        self._visual_evidence_followup = visual_evidence_followup
         self._availability = availability
         self._actor = actor
 
@@ -136,13 +215,7 @@ class LifeEcologyRuntime:
     async def advance_once(
         self, *, wake_event_ref: str, trace_id: str, correlation_id: str
     ) -> LifeEcologyRunResult:
-        """Claim exactly one verified wake and execute its media follow-up once.
-
-        Later verticals insert catalog, deliberation and acceptance *between*
-        the ownership claim and follow-up.  Until those lanes exist the valid
-        life result is deliberately ``idle``; a media candidate may still be
-        frozen from prior committed authority.
-        """
+        """Claim one verified wake and execute each installed follow-up once."""
 
         availability = self._availability
         if availability.state != "installed_and_active":
@@ -183,8 +256,25 @@ class LifeEcologyRuntime:
                 reason_code="life_ecology.run_in_progress",
             )
 
+        author_status: str | None = None
+        if self._life_author_followup is not None:
+            # LifeAuthor translates only explicit provider/model failures into
+            # a structured result.  Contract violations and programming bugs
+            # must cross this boundary so monitoring sees them and the durable
+            # trigger remains recoverable instead of being falsely completed.
+            author_result = await self._life_author_followup.advance_once(
+                wake_event_ref=wake_event_ref,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+            author_status = getattr(author_result, "status", None)
+            if not isinstance(author_status, str) or not author_status:
+                raise ValueError("life author result has no stable status")
+
         activity_status: str | None = None
-        if self._activity_followup is not None:
+        # One ecology wake accepts at most one main life family.  A newly
+        # planned activity may only start on a later ClockAdvanced.
+        if self._activity_followup is not None and author_status != "planned":
             try:
                 activity_result = await self._advance_activity_once(
                     wake_event_ref=wake_event_ref,
@@ -202,6 +292,232 @@ class LifeEcologyRuntime:
                     status="failed_safe",
                     trigger_id=claim.trigger_id,
                     reason_code="life_ecology.activity_followup_failed",
+                    life_author_followup_status=author_status,
+                )
+
+        aftermath_status: str | None = None
+        if self._aftermath_followup is not None and author_status != "planned":
+            try:
+                aftermath_result = self._aftermath_followup.advance_once(
+                    wake_event_ref=wake_event_ref,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+                if inspect.isawaitable(aftermath_result):
+                    aftermath_result = await aftermath_result
+                aftermath_status = getattr(aftermath_result, "status", None)
+                if not isinstance(aftermath_status, str) or not aftermath_status:
+                    raise ValueError("life aftermath result has no stable status")
+            except Exception:
+                await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+                return LifeEcologyRunResult(
+                    status="failed_safe", trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.aftermath_followup_failed",
+                    activity_followup_status=activity_status,
+                    life_author_followup_status=author_status,
+                )
+
+        future_author_status: str | None = None
+        # The future calendar lane runs only on wakes whose main life family
+        # is quiet: nothing was just planned for now, no lifecycle transition
+        # happened, and no occurrence work was done.  It shares the life
+        # author's error discipline: only explicit provider failures become a
+        # structured "blocked"; bugs must cross this boundary.
+        if (
+            self._future_life_author_followup is not None
+            and author_status != "planned"
+            and activity_status != "transitioned"
+            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+        ):
+            future_result = await self._future_life_author_followup.advance_once(
+                wake_event_ref=wake_event_ref,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+            future_author_status = getattr(future_result, "status", None)
+            if not isinstance(future_author_status, str) or not future_author_status:
+                raise ValueError("future life author result has no stable status")
+
+        npc_initiative_status: str | None = None
+        # NPC initiative is a quiet-wake lane: it runs only when no main life
+        # family claimed this wake, exactly like the future calendar lane.  A
+        # committed NPC occurrence then becomes this wake's main family.
+        if (
+            self._npc_initiative_followup is not None
+            and author_status != "planned"
+            and activity_status != "transitioned"
+            and future_author_status != "planned"
+            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+        ):
+            try:
+                npc_result = await self._npc_initiative_followup.advance_once(
+                    wake_event_ref=wake_event_ref,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+                npc_initiative_status = getattr(npc_result, "status", None)
+                if not isinstance(npc_initiative_status, str) or not npc_initiative_status:
+                    raise ValueError("npc initiative result has no stable status")
+            except Exception:
+                await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+                return LifeEcologyRunResult(
+                    status="failed_safe",
+                    trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.npc_initiative_followup_failed",
+                    activity_followup_status=activity_status,
+                    life_author_followup_status=author_status,
+                    future_life_author_followup_status=future_author_status,
+                    aftermath_followup_status=aftermath_status,
+                )
+
+        aspiration_status: str | None = None
+        # The aspiration lane shares the quiet-wake discipline but never
+        # becomes a main life family: planting or fading a wish is an inner
+        # event, not an occurrence, so it neither blocks nor claims the wake.
+        if (
+            self._aspiration_followup is not None
+            and author_status != "planned"
+            and activity_status != "transitioned"
+            and future_author_status != "planned"
+            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+        ):
+            try:
+                aspiration_result = await self._aspiration_followup.advance_once(
+                    wake_event_ref=wake_event_ref,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+                aspiration_status = getattr(aspiration_result, "status", None)
+                if not isinstance(aspiration_status, str) or not aspiration_status:
+                    raise ValueError("aspiration result has no stable status")
+            except Exception:
+                await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+                return LifeEcologyRunResult(
+                    status="failed_safe",
+                    trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.aspiration_followup_failed",
+                    activity_followup_status=activity_status,
+                    life_author_followup_status=author_status,
+                    future_life_author_followup_status=future_author_status,
+                    aftermath_followup_status=aftermath_status,
+                    npc_initiative_followup_status=npc_initiative_status,
+                )
+
+        shared_private_status: str | None = None
+        # The shared_private invitation lane shares the quiet-wake discipline
+        # and, like the aspiration lane, never claims the wake as a main life
+        # family: planning-to-ask is an inner event until the user answers.
+        if (
+            self._shared_private_followup is not None
+            and author_status != "planned"
+            and activity_status != "transitioned"
+            and future_author_status != "planned"
+            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+        ):
+            try:
+                shared_private_result = await self._shared_private_followup.advance_once(
+                    wake_event_ref=wake_event_ref,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+                shared_private_status = getattr(shared_private_result, "status", None)
+                if not isinstance(shared_private_status, str) or not shared_private_status:
+                    raise ValueError("shared private invitation result has no stable status")
+            except Exception:
+                await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+                return LifeEcologyRunResult(
+                    status="failed_safe",
+                    trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.shared_private_followup_failed",
+                    activity_followup_status=activity_status,
+                    life_author_followup_status=author_status,
+                    future_life_author_followup_status=future_author_status,
+                    aftermath_followup_status=aftermath_status,
+                    npc_initiative_followup_status=npc_initiative_status,
+                    aspiration_followup_status=aspiration_status,
+                )
+
+        open_world_status: str | None = None
+        # A reviewed aftermath occurrence, a freshly written future plan, or a
+        # committed NPC-initiated occurrence is the main life family for this
+        # wake.  Do not open a second occurrence for the same active plan;
+        # the model-authored lane gets a later wake once that family is done.
+        if (
+            self._open_world_followup is not None
+            and future_author_status != "planned"
+            and npc_initiative_status not in {"committed", "recovered"}
+            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+        ):
+            try:
+                open_world_result = await self._advance_open_world_once(
+                    wake_event_ref=wake_event_ref,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+                open_world_status = getattr(open_world_result, "status", None)
+                if not isinstance(open_world_status, str) or not open_world_status:
+                    raise ValueError("open world result has no stable status")
+            except Exception:
+                await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+                return LifeEcologyRunResult(
+                    status="failed_safe",
+                    trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.open_world_followup_failed",
+                    activity_followup_status=activity_status,
+                    life_author_followup_status=author_status,
+                    future_life_author_followup_status=future_author_status,
+                    aftermath_followup_status=aftermath_status,
+                    npc_initiative_followup_status=npc_initiative_status,
+                    aspiration_followup_status=aspiration_status,
+                    shared_private_followup_status=shared_private_status,
+                )
+            if open_world_status == "deferred":
+                # Keep the durable claim live so a later scheduler wake can
+                # reclaim it after the lease expires.  Completing a model
+                # outage as ``idle`` would permanently erase this wake.
+                return LifeEcologyRunResult(
+                    status="deferred",
+                    trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.open_world_deferred",
+                    activity_followup_status=activity_status,
+                    life_author_followup_status=author_status,
+                    future_life_author_followup_status=future_author_status,
+                    aftermath_followup_status=aftermath_status,
+                    npc_initiative_followup_status=npc_initiative_status,
+                    aspiration_followup_status=aspiration_status,
+                    shared_private_followup_status=shared_private_status,
+                    open_world_followup_status=open_world_status,
+                )
+
+        visual_evidence_status: str | None = None
+        # The visual-declaration lane runs on every owned wake, immediately
+        # before the media ecology scan: a same-wake aftermath settlement is
+        # therefore declarable in the same pass.  Like the aspiration lane it
+        # is texture — it never claims the wake as a main life family.
+        if self._visual_evidence_followup is not None:
+            try:
+                visual_result = await self._advance_visual_evidence_once(
+                    wake_event_ref=wake_event_ref,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+                visual_evidence_status = getattr(visual_result, "status", None)
+                if not isinstance(visual_evidence_status, str) or not visual_evidence_status:
+                    raise ValueError("visual evidence result has no stable status")
+            except Exception:
+                await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+                return LifeEcologyRunResult(
+                    status="failed_safe",
+                    trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.visual_evidence_followup_failed",
+                    activity_followup_status=activity_status,
+                    life_author_followup_status=author_status,
+                    future_life_author_followup_status=future_author_status,
+                    aftermath_followup_status=aftermath_status,
+                    npc_initiative_followup_status=npc_initiative_status,
+                    aspiration_followup_status=aspiration_status,
+                    shared_private_followup_status=shared_private_status,
+                    open_world_followup_status=open_world_status,
                 )
 
         try:
@@ -221,11 +537,36 @@ class LifeEcologyRuntime:
                 trigger_id=claim.trigger_id,
                 reason_code="life_ecology.media_followup_failed",
                 activity_followup_status=activity_status,
+                life_author_followup_status=author_status,
+                future_life_author_followup_status=future_author_status,
+                aftermath_followup_status=aftermath_status,
+                npc_initiative_followup_status=npc_initiative_status,
+                aspiration_followup_status=aspiration_status,
+                shared_private_followup_status=shared_private_status,
+                open_world_followup_status=open_world_status,
+                visual_evidence_followup_status=visual_evidence_status,
             )
 
         try:
             await self._trigger_store.complete(
-                key=key, trigger_id=claim.trigger_id, outcome="idle"
+                key=key,
+                trigger_id=claim.trigger_id,
+                outcome=(
+                    f"aftermath_{aftermath_status}"
+                    if aftermath_status in {
+                        "occurrence_opened", "settled", "recovered_experience"
+                    }
+                    else "author_planned"
+                    if author_status == "planned"
+                    else "future_author_planned"
+                    if future_author_status == "planned"
+                    else "npc_initiative_committed"
+                    if npc_initiative_status in {"committed", "recovered"}
+                    else (
+                        f"author_{author_status}"
+                        if author_status is not None else "idle"
+                    )
+                ),
             )
         except Exception:
             return LifeEcologyRunResult(
@@ -234,12 +575,36 @@ class LifeEcologyRuntime:
                 reason_code="life_ecology.trigger_completion_failed",
                 media_followup_status=media_status,
                 activity_followup_status=activity_status,
+                life_author_followup_status=author_status,
+                future_life_author_followup_status=future_author_status,
+                aftermath_followup_status=aftermath_status,
+                npc_initiative_followup_status=npc_initiative_status,
+                aspiration_followup_status=aspiration_status,
+                shared_private_followup_status=shared_private_status,
+                open_world_followup_status=open_world_status,
+                visual_evidence_followup_status=visual_evidence_status,
             )
         return LifeEcologyRunResult(
-            status="advanced" if activity_status == "transitioned" else "idle",
+            status=(
+                "advanced"
+                if author_status == "planned" or future_author_status == "planned"
+                or activity_status == "transitioned"
+                or aftermath_status in {"occurrence_opened", "settled", "recovered_experience"}
+                or npc_initiative_status in {"committed", "recovered"}
+                or open_world_status in {"committed", "recovered"}
+                else "idle"
+            ),
             trigger_id=claim.trigger_id,
             media_followup_status=media_status,
             activity_followup_status=activity_status,
+            life_author_followup_status=author_status,
+            future_life_author_followup_status=future_author_status,
+            aftermath_followup_status=aftermath_status,
+            npc_initiative_followup_status=npc_initiative_status,
+            aspiration_followup_status=aspiration_status,
+            shared_private_followup_status=shared_private_status,
+            open_world_followup_status=open_world_status,
+            visual_evidence_followup_status=visual_evidence_status,
         )
 
     def _validated_wake(self, *, wake_event_ref: str) -> datetime | None:
@@ -276,7 +641,13 @@ class LifeEcologyRuntime:
             or event.event_type != committed.event_type
             or event.payload_hash != committed.payload_hash
             or event.logical_time != committed.logical_time
-            or getattr(commit, "world_revision", -1) != committed.world_revision
+            # CommitResult exposes the revision after the *whole atomic
+            # batch*.  ClockAdvanced may share that batch with affect decay,
+            # so its event-level committed ref can legitimately be lower.
+            # Bind the exact event to the returned batch and require only
+            # monotonic containment instead of revision equality.
+            or event.event_id not in getattr(commit, "event_ids", ())
+            or getattr(commit, "world_revision", -1) < committed.world_revision
             or committed.world_revision > getattr(projection, "world_revision", -1)
         ):
             return None
@@ -320,6 +691,46 @@ class LifeEcologyRuntime:
             correlation_id=correlation_id,
         )
 
+    async def _advance_visual_evidence_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object:
+        assert self._visual_evidence_followup is not None
+        kwargs = {
+            "wake_event_ref": wake_event_ref,
+            "trace_id": trace_id,
+            "correlation_id": correlation_id,
+        }
+        method = self._visual_evidence_followup.advance_once
+        if inspect.iscoroutinefunction(method):
+            result = method(**kwargs)
+        elif getattr(self._ledger, "blocks_event_loop", False):
+            result = await asyncio.to_thread(method, **kwargs)
+        else:
+            result = method(**kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def _advance_open_world_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> object:
+        assert self._open_world_followup is not None
+        kwargs = {
+            "wake_event_ref": wake_event_ref,
+            "trace_id": trace_id,
+            "correlation_id": correlation_id,
+        }
+        method = self._open_world_followup.advance_once
+        if inspect.iscoroutinefunction(method):
+            result = method(**kwargs)
+        elif getattr(self._ledger, "blocks_event_loop", False):
+            result = await asyncio.to_thread(method, **kwargs)
+        else:
+            result = method(**kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     async def _complete_failed_safe(self, *, key: LifeEcologyRunKey, trigger_id: str) -> None:
         try:
             await self._trigger_store.complete(
@@ -334,6 +745,11 @@ class LifeEcologyRuntime:
 
 __all__ = [
     "ActivityLifecycleFollowup",
+    "AspirationFollowup",
+    "LifeAuthorFollowup",
+    "LifeAftermathFollowup",
+    "NpcInitiativeFollowup",
+    "OpenWorldEventFollowup",
     "LifeEcologyAvailability",
     "LifeEcologyAvailabilityState",
     "LifeEcologyRunClaim",
@@ -342,4 +758,6 @@ __all__ = [
     "LifeEcologyRuntime",
     "LifeEcologyTriggerStore",
     "MediaEcologyFollowup",
+    "SharedPrivateInvitationFollowup",
+    "VisualEvidenceFollowup",
 ]

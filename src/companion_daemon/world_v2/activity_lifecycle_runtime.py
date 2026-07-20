@@ -130,13 +130,18 @@ class ActivityLifecycleProposalRecorder:
 
 
 class _PinnedActivityLifecycleProposal:
-    __slots__ = ("__proposal", "__event", "__cursor", "__issuer")
+    __slots__ = (
+        "__proposal", "__event", "__cursor", "__inherited_matrix_policy_refs",
+        "__issuer",
+    )
 
     def __init__(self, *, proposal: ActivityLifecycleProposalRecordedPayload, event: WorldEvent,
-                 cursor: ProjectionCursor, issuer: object) -> None:
+                 cursor: ProjectionCursor, inherited_matrix_policy_refs: tuple[str, ...],
+                 issuer: object) -> None:
         self.__proposal = proposal
         self.__event = event
         self.__cursor = cursor
+        self.__inherited_matrix_policy_refs = inherited_matrix_policy_refs
         self.__issuer = issuer
 
     def issued_by(self, issuer: object) -> bool:
@@ -193,9 +198,48 @@ class ActivityLifecycleProposalAuthorityReader:
         plan = next((item for item in projection.plans if item.plan_id == proposal.plan_id), None)
         if plan is None or plan.entity_revision != proposal.expected_plan_revision:
             raise ActivityLifecycleRuntimeError("plan_not_current")
-        return _PinnedActivityLifecycleProposal(
-            proposal=proposal, event=event, cursor=cursor, issuer=self._issuer
+        inherited_matrix_policy_refs = self._matrix_policy_refs(
+            projection=projection, plan=plan
         )
+        return _PinnedActivityLifecycleProposal(
+            proposal=proposal, event=event, cursor=cursor,
+            inherited_matrix_policy_refs=inherited_matrix_policy_refs,
+            issuer=self._issuer,
+        )
+
+    def _matrix_policy_refs(self, *, projection, plan) -> tuple[str, ...]:  # type: ignore[no-untyped-def]
+        """Carry only exact, already-accepted matrix coordinates forward."""
+
+        origin = getattr(plan, "authority_origin", None)
+        if origin is None:
+            return ()
+        committed = next(
+            (
+                item for item in projection.committed_world_event_refs
+                if item.event_id == origin.accepted_event_ref
+            ),
+            None,
+        )
+        located = self._ledger.lookup_event_commit(origin.accepted_event_ref)
+        if located is None or committed is None:
+            return ()
+        authority_event, _commit = located
+        if (
+            authority_event.event_id != origin.accepted_event_ref
+            or authority_event.event_type != origin.accepted_event_type
+            or authority_event.payload_hash != origin.accepted_payload_hash
+            or committed.world_revision != origin.accepted_world_revision
+            or committed.payload_hash != origin.accepted_payload_hash
+        ):
+            return ()
+        raw = authority_event.payload()
+        policy_refs = raw.get("policy_refs", ())
+        if not isinstance(policy_refs, (list, tuple)):
+            return ()
+        return tuple(sorted({
+            item for item in policy_refs
+            if isinstance(item, str) and item.startswith("matrix:")
+        }))
 
 
 class ActivityLifecycleAtomicRecorder:
@@ -222,6 +266,23 @@ class ActivityLifecycleAtomicRecorder:
         proposal = object.__getattribute__(handle, "_PinnedActivityLifecycleProposal__proposal")
         proposal_event = object.__getattribute__(handle, "_PinnedActivityLifecycleProposal__event")
         cursor = object.__getattribute__(handle, "_PinnedActivityLifecycleProposal__cursor")
+        inherited_matrix_policy_refs = object.__getattribute__(
+            handle, "_PinnedActivityLifecycleProposal__inherited_matrix_policy_refs"
+        )
+        authority_shape_refs = {
+            "ordinary": (),
+            "user_influence": (
+                "matrix:social:user_relayed", "matrix:source:user_influence",
+            ),
+            "interruption": (
+                "matrix:deviation:change_plan", "matrix:source:interruption",
+            ),
+            "change_plan": ("matrix:deviation:change_plan",),
+            "repair": ("matrix:deviation:repair",),
+            "shared_private": (
+                "matrix:social:shared_private", "matrix:source:user_influence",
+            ),
+        }[proposal.opening_kind]
         if proposal.evaluated_world_revision != cursor.world_revision:
             raise ActivityLifecycleRuntimeError("proposal_stale")
         acceptance_id = "acceptance:activity-lifecycle:" + _digest(
@@ -239,7 +300,10 @@ class ActivityLifecycleAtomicRecorder:
             "transition_id": proposal.transition_id,
             "expected_entity_revision": proposal.expected_plan_revision,
             "evidence_refs": [item.model_dump(mode="json") for item in proposal.evidence_refs],
-            "policy_refs": ("policy:activity-lifecycle.1",),
+            "policy_refs": (
+                "policy:activity-lifecycle.1",
+                *tuple(sorted(set(inherited_matrix_policy_refs) | set(authority_shape_refs))),
+            ),
             "plan_id": proposal.plan_id,
             "transitioned_at": logical_time.isoformat(),
             "reason_ref": proposal_event.event_id,

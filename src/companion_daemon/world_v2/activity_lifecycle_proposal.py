@@ -26,7 +26,7 @@ from .schema_core import EvidenceRef
 from .schemas import LedgerProjection
 
 
-ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_VERSION = "activity-lifecycle-proposal.1"
+ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_VERSION = "activity-lifecycle-proposal.2"
 
 
 def _canonical(value: object) -> str:
@@ -42,8 +42,10 @@ ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_DIGEST = _digest(
         "contract": ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_VERSION,
         "model_can_select": "one_preoffered_opaque_token_or_no_op",
         "source_trigger": "claimed_life_ecology",
-        "evidence": ("active_plan", "committed_world_event:clock_wake"),
-        "forbidden_evidence": "observed_message",
+        "evidence": (
+            "active_plan", "committed_world_event:clock_wake",
+            "optional_exact_observed_message_for_authority_shaped_opening",
+        ),
     }
 )
 
@@ -112,7 +114,7 @@ class ActivityLifecycleProposalCompiler:
             }
         )
         change_id = f"change:activity-lifecycle:{identity}"
-        evidence = (
+        evidence: tuple[EvidenceRef, ...] = (
             EvidenceRef(
                 ref_id=plan.plan_id,
                 evidence_type="active_plan",
@@ -127,6 +129,23 @@ class ActivityLifecycleProposalCompiler:
                 immutable_hash=wake.payload_hash,
             ),
         )
+        if resolved.cause_observation_id is not None:
+            observation = next(
+                (
+                    item for item in projection.message_observations
+                    if item.observation_id == resolved.cause_observation_id
+                ),
+                None,
+            )
+            if observation is None:
+                raise ActivityLifecycleProposalError("cause_observation_not_current")
+            evidence = (*evidence, EvidenceRef(
+                ref_id=observation.observation_id,
+                evidence_type="observed_message",
+                claim_purpose="life_transition",
+                source_world_revision=observation.world_revision,
+                immutable_hash=observation.event_payload_hash,
+            ))
         return ActivityLifecycleProposal(
             proposal_id=f"proposal:activity-lifecycle:{identity}",
             change_id=change_id,
@@ -140,6 +159,8 @@ class ActivityLifecycleProposalCompiler:
             catalog_version=resolved.catalog_version,
             catalog_hash=resolved.catalog_hash,
             opening_token=resolved.opening_token,
+            opening_kind=resolved.opening_kind,
+            cause_kind=resolved.cause_kind,
             plan_id=resolved.plan_id,
             expected_plan_revision=resolved.plan_revision,
             operation=resolved.operation,
@@ -157,6 +178,8 @@ class ActivityLifecycleProposalCompiler:
                 catalog_version=resolved.catalog_version,
                 catalog_hash=resolved.catalog_hash,
                 opening_token=resolved.opening_token,
+                opening_kind=resolved.opening_kind,
+                cause_kind=resolved.cause_kind,
             ),
             evidence_refs=evidence,
             policy_digest=ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_DIGEST,

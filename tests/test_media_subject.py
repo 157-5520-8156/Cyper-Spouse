@@ -60,6 +60,23 @@ def test_catalog_builds_deterministic_coherent_candidates() -> None:
     assert len({item.presentation.subject_signature for item in first}) == len(first)
 
 
+def test_dance_and_pilates_default_to_athletic_outfit_role_when_world_has_no_appearance_state() -> None:
+    for activity_kind in ("dance", "pilates"):
+        snapshot = _snapshot()
+        snapshot["activity"] = {"kind": activity_kind, "description": "训练结束"}
+        candidates = build_subject_candidates(
+            snapshot=snapshot,
+            opportunity_id=f"op:{activity_kind}",
+            capture_mode="mirror",
+            character_visibility="identifiable",
+            config_path=CONFIG,
+            limit=16,
+        )
+
+        assert candidates
+        assert {item.presentation.appearance.outfit_role for item in candidates} == {"athletic"}
+
+
 def test_pre_beat_v1_facial_catalog_uses_bounded_compatibility_matrix(tmp_path: Path) -> None:
     """An installed v1 affinity catalog must not become a planning outage."""
     legacy_catalog = yaml.safe_load(FACIAL_CONFIG.read_text(encoding="utf-8"))

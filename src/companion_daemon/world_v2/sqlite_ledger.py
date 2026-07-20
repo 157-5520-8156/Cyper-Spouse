@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 import hashlib
 import hmac
 import json
+import logging
 from pathlib import Path
 import sqlite3
+import time
 from threading import RLock
 from typing import Literal
 from weakref import WeakKeyDictionary
+
+from pydantic import BaseModel
 
 from .accepted_ledger_batch import (
     AcceptedLedgerBatchHandle,
@@ -56,6 +61,9 @@ from .reducers import (
     REDUCER_BUNDLE_VERSION,
     ReducerState,
     RevisionClass,
+    _expression_beat_semantic_dump,
+    _expression_plan_manifest_semantic_dump,
+    _expression_plan_semantic_dump,
     event_definition,
     make_projection,
     reduce_event,
@@ -68,7 +76,11 @@ from .schemas import (
     ProjectionCursor,
     WorldEvent,
 )
+from .sqlite_coordination import sqlite_write_lock
 from .upcasting import CURRENT_SCHEMA_VERSION, require_target_schema, upcast_event
+
+
+_LOG = logging.getLogger(__name__)
 
 
 _V16_ONLY_STATE_KEYS = frozenset(
@@ -115,6 +127,179 @@ _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
 _MAX_PINNED_OBSERVATION_HISTORY_HANDLES = 1_024
+# ``world_v2_heads.state_json`` holding this sentinel means the head state
+# lives in ``world_v2_head_state_items`` as per-field/per-item canonical JSON
+# fragments.  The sentinel is deliberately not valid state JSON so an older
+# reader fails closed instead of silently projecting an empty world.
+_HEAD_STATE_SENTINEL = "world-v2-head-state-items.1"
+_HEAD_STATE_SCALAR_IDX = -1
+# Incremental semantic-hash support.  For the current reducer bundle almost
+# every ``semantic_payload`` field is the plain ``model_dump(mode="json")`` of
+# the same-named state field, so its canonical JSON fragment is byte-identical
+# to the split-storage state fragment and can be reused without re-dumping.
+# The exceptions are pinned here; ``_warm_semantic_fragment_cache_locked``
+# byte-verifies every field (and the assembled hash) against a full
+# ``semantic_payload`` before the incremental path is allowed to run, so a
+# future divergence in reducers.py disables the fast path instead of ever
+# producing different bytes.
+_SEMANTIC_HEADER_FIELDS = frozenset(
+    {"schema_version", "world_id", "world_revision", "reducer_bundle_version"}
+)
+_SEMANTIC_CUSTOM_FIELDS = frozenset(
+    {
+        "logical_time",
+        "expression_plans",
+        "expression_beats",
+        "expression_plan_manifests",
+    }
+)
+# Semantic-payload keys whose presence toggles with field emptiness.
+_SEMANTIC_CONDITIONAL_FIELDS = frozenset(
+    {
+        "appearance_states",
+        "visible_physical_states",
+        "aspirations",
+        "expression_payload_descriptors",
+    }
+)
+
+
+def _canonical_fragment(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _json_ready_item(item: object) -> object:
+    """JSON-mode value of one tuple element, matching a whole-state dump.
+
+    Reducer-state tuples hold either frozen Pydantic models or plain JSON
+    scalars, and a direct ``model_dump`` of an element is byte-identical to
+    the same element inside ``state.model_dump(mode="json")``.  Anything else
+    fails closed rather than risking a fragment that diverges from the
+    canonical whole-document encoding.
+    """
+
+    if isinstance(item, BaseModel):
+        return item.model_dump(mode="json")
+    if item is None or isinstance(item, (str, int, float, bool)):
+        return item
+    raise LedgerIntegrityError("state tuple element cannot be serialized incrementally")
+
+
+def _split_array_fragment_items(fragment: str) -> tuple[str, ...]:
+    """Split one canonical JSON array fragment into canonical item fragments."""
+
+    parsed = json.loads(fragment)
+    if not isinstance(parsed, list):
+        raise LedgerIntegrityError("head state array fragment is not a JSON array")
+    return tuple(_canonical_fragment(item) for item in parsed)
+
+
+def _assemble_state_json_from_fragments(fragments: dict[str, str]) -> str:
+    """Rebuild the exact canonical (sorted-key) state JSON from field fragments."""
+
+    return (
+        "{"
+        + ",".join(
+            json.dumps(field_name, ensure_ascii=False) + ":" + fragments[field_name]
+            for field_name in sorted(fragments)
+        )
+        + "}"
+    )
+
+
+def _head_state_item_rows_from_fragments(
+    fragments: dict[str, str],
+) -> list[tuple[str, int, str]]:
+    """Expand field fragments into their per-item storage rows.
+
+    Non-empty JSON arrays are stored one row per element (``idx`` = position)
+    so a commit that appends or replaces single elements rewrites only those
+    rows.  Every other fragment (objects, scalars, ``null`` and the empty
+    array) is stored whole under ``idx`` = -1.
+    """
+
+    rows: list[tuple[str, int, str]] = []
+    for field_name, fragment in fragments.items():
+        if fragment.startswith("[") and fragment != "[]":
+            for index, item_fragment in enumerate(_split_array_fragment_items(fragment)):
+                rows.append((field_name, index, item_fragment))
+        else:
+            rows.append((field_name, _HEAD_STATE_SCALAR_IDX, fragment))
+    return rows
+
+
+def _head_state_fragments_from_item_rows(
+    rows: Sequence[tuple[str, int, str]],
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    """Reassemble field fragments (and per-item fragments) from storage rows."""
+
+    grouped: dict[str, list[tuple[int, str]]] = {}
+    for field_name, index, item_json in rows:
+        grouped.setdefault(field_name, []).append((int(index), item_json))
+    fragments: dict[str, str] = {}
+    item_fragments: dict[str, tuple[str, ...]] = {}
+    for field_name, entries in grouped.items():
+        entries.sort(key=lambda entry: entry[0])
+        indexes = [index for index, _ in entries]
+        if indexes == [_HEAD_STATE_SCALAR_IDX]:
+            fragments[field_name] = entries[0][1]
+            continue
+        if indexes != list(range(len(entries))):
+            raise LedgerIntegrityError(
+                f"head state items for field {field_name!r} are not contiguous"
+            )
+        items = tuple(item_json for _, item_json in entries)
+        fragments[field_name] = "[" + ",".join(items) + "]"
+        item_fragments[field_name] = items
+    return fragments, item_fragments
+
+
+def load_head_state_json(connection: sqlite3.Connection, world_id: str) -> str:
+    """Return one world head's full state JSON regardless of storage format.
+
+    This is the shared read seam for diagnostics and tests: it understands
+    both the legacy single-column format and the split per-item format, and
+    always returns the complete state document as one JSON object string.
+    """
+
+    row = connection.execute(
+        "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (world_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"world head {world_id!r} does not exist")
+    state_json = row[0]
+    if not isinstance(state_json, str):
+        raise LedgerIntegrityError("head state is invalid")
+    if state_json != _HEAD_STATE_SENTINEL:
+        return state_json
+    item_rows = tuple(
+        (str(item[0]), int(item[1]), str(item[2]))
+        for item in connection.execute(
+            "SELECT field, idx, item_json FROM world_v2_head_state_items "
+            "WHERE world_id = ? ORDER BY field, idx",
+            (world_id,),
+        )
+    )
+    if not item_rows:
+        raise LedgerIntegrityError("split head state has no stored fields")
+    fragments, _ = _head_state_fragments_from_item_rows(item_rows)
+    return _assemble_state_json_from_fragments(fragments)
+
+
+@dataclass(frozen=True, slots=True)
+class _HeadStateWriteOps:
+    """The exact per-item SQL mutations that persist one commit's state delta.
+
+    ``full_rewrite`` replaces every stored row (legacy-format heads and
+    non-incremental encodes).  Otherwise ``field_deletes`` drops fields whose
+    representation changed or that left the canonical dump, ``tail_deletes``
+    trims shrunken arrays, and ``upserts`` writes only changed rows.
+    """
+
+    full_rewrite: bool
+    field_deletes: tuple[str, ...]
+    tail_deletes: tuple[tuple[str, int], ...]
+    upserts: tuple[tuple[str, int, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +489,41 @@ def _upcast_legacy_experience(raw_event: dict[str, object]) -> dict[str, object]
     }
 
 
+@dataclass(frozen=True, slots=True)
+class SQLiteProjectionPerformanceCounters:
+    """Non-authoritative evidence about projection access shape.
+
+    The counters never affect reads or writes.  Phase-8 performance tests use
+    them to distinguish one-row persisted-head projection from historical
+    event replay instead of inferring incrementality from wall-clock speed.
+    """
+
+    head_projection_reads: int
+    head_projection_cache_hits: int
+    project_at_head_hits: int
+    historical_replay_calls: int
+    total_replay_calls: int
+
+
+@dataclass(frozen=True, slots=True)
+class SQLiteWalMaintenanceResult:
+    """One bounded, non-authoritative WAL maintenance attempt.
+
+    SQLite's ``wal_checkpoint(PASSIVE)`` never waits for readers.  It may
+    still find an active writer and leave frames in the WAL; callers should
+    treat ``busy`` as a retry signal, not as a failed ledger operation.
+    ``skipped`` means the WAL was below the threshold or the maintenance
+    interval had not elapsed.  No result here changes World authority.
+    """
+
+    status: Literal["skipped", "checkpointed", "busy"]
+    wal_bytes_before: int
+    wal_bytes_after: int
+    log_frames: int = 0
+    checkpointed_frames: int = 0
+    busy: bool = False
+
+
 class SQLiteWorldLedger:
     """Independent crash-consistent persistence adapter for a single World v2 world."""
 
@@ -313,6 +533,7 @@ class SQLiteWorldLedger:
         path: str | Path,
         world_id: str,
         accepted_batch_issuer: AcceptedLedgerBatchIssuer | None = None,
+        latency_recorder: object | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -323,19 +544,107 @@ class SQLiteWorldLedger:
             raise TypeError("accepted batch issuer must use its exact capability type")
         self._world_id = world_id
         self._accepted_batch_issuer = accepted_batch_issuer
+        self._latency_recorder = latency_recorder
+        self._database_path = Path(path).expanduser().absolute()
+        self._last_wal_maintenance_monotonic = 0.0
         self._thread_lock = RLock()
+        self._database_write_lock = sqlite_write_lock(self._database_path)
+        self._head_projection_reads = 0
+        self._head_projection_cache_hits = 0
+        self._project_at_head_hits = 0
+        self._historical_replay_calls = 0
+        self._total_replay_calls = 0
+        self._head_projection_cache: LedgerProjection | None = None
+        self._head_projection_cache_row_identity: tuple[object, ...] | None = None
+        # A same-turn advisory may authenticate a proposal at the immediately
+        # preceding cursor, then rebase it after Appraisal acceptance.  Those
+        # two reads are immutable historical snapshots; retain a small bounded
+        # cache so the second authority pass does not replay the full ledger.
+        self._historical_projection_cache: dict[tuple[int, int, int], LedgerProjection] = {}
+        self._head_state_cache: ReducerState | None = None
+        self._head_state_cache_identity: tuple[int, int, int, str, str] | None = None
+        # Canonical JSON fragments of the last committed state, keyed by its
+        # state hash: per-field fragments plus per-item fragments for fields
+        # stored as arrays.  They let the next commit re-serialize only the
+        # items it changed instead of re-dumping the whole growing state.
+        self._state_fragment_cache: (
+            tuple[str, dict[str, str], dict[str, tuple[str, ...]]] | None
+        ) = None
+        # UTF-8 encodings of the state fragments above, keyed by the same
+        # state hash.  The historical state-hash material is a 13MB+ byte
+        # string; keeping per-field bytes lets a commit hash it by joining
+        # unchanged chunks instead of re-encoding the whole document.
+        self._state_fragment_bytes: tuple[str, dict[str, bytes]] | None = None
+        # Canonical fragments of the current-bundle semantic payload keyed by
+        # the head's semantic hash, plus the open-time proof that every plain
+        # field is byte-identical to its state fragment.  Populated only after
+        # ``_warm_semantic_fragment_cache_locked`` verified the assembly
+        # against the persisted semantic hash.
+        self._semantic_fragment_cache: tuple[str, dict[str, bytes]] | None = None
+        self._semantic_sharing_verified = False
+        # Encode-path diagnostics: regression tests pin that consecutive
+        # commits never fall back to whole-state re-serialization.
+        self._full_state_encode_count = 0
+        self._incremental_state_encode_count = 0
+        self._semantic_full_count = 0
+        self._semantic_incremental_count = 0
+        # Commit-scoped seam between ``_encode_state_and_hash`` and the
+        # durable write: the previous state with its verified fragments, and
+        # the per-item mutations the encode derived from the delta.
+        self._incremental_state_base: (
+            tuple[ReducerState, dict[str, str], dict[str, tuple[str, ...]]] | None
+        ) = None
+        self._pending_head_state_ops: _HeadStateWriteOps | None = None
+        # Event envelopes and their owning CommitResult are immutable.  Keep
+        # verified values process-local so overlapping Context slices/turns do
+        # not re-query, re-project and re-hash the same commit hundreds of
+        # times.  ``lookup_event_commit`` still checks SQLite data_version
+        # before consulting this cache, so an unsupported cross-connection
+        # mutation is rejected by the full-history verifier rather than hidden.
+        self._verified_event_commit_cache: dict[str, tuple[WorldEvent, CommitResult]] = {}
+        self._verified_observation_event_cache: dict[
+            tuple[str, str, str], HistoricalLedgerEvent
+        ] = {}
+        # The cold replay already parses every current event envelope.  Keep
+        # only a small tail so the hot-lookup cache can reuse those exact
+        # model objects instead of reparsing the tail a second time during
+        # startup.
+        self._recent_replay_event_cache: dict[str, WorldEvent] = {}
         connection = sqlite3.connect(
-            path, isolation_level=None, timeout=10, check_same_thread=False
+            self._database_path, isolation_level=None, timeout=10, check_same_thread=False
         )
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
+            # A full reducer snapshot is intentionally written in the same
+            # transaction as its events.  SQLite's default 1,000-page WAL
+            # auto-checkpoint can therefore run a multi-megabyte checkpoint
+            # synchronously on the user's reply path.  WAL frames remain
+            # crash-recoverable without a checkpoint; compaction is handled by
+            # the bounded maintenance seam instead of this commit.
+            connection.execute("PRAGMA wal_autocheckpoint = 0")
             self._connection = connection
             self._create_schema()
             self._ensure_head()
+            source_bundle = str(
+                self._connection.execute(
+                    "SELECT reducer_bundle_version FROM world_v2_heads WHERE world_id = ?",
+                    (self._world_id,),
+                ).fetchone()[0]
+            )
+            # A short-lived v30 HTTP fixture wrote observations with the wall
+            # clock instead of the then-current World Clock.  Keep those
+            # immutable envelopes readable during the one-way migration, but
+            # never permit the exception for newly appended events.
+            self._legacy_clock_compat_event_ids = (
+                self._legacy_clock_compatibility_event_ids(source_bundle)
+                if source_bundle == "world-v2-reducers.30"
+                else frozenset()
+            )
             legacy_prefix_rebuild = self._head_bundle_requires_prefix_rebuild()
             self._migrate_head_bundle()
+            self._migrate_head_state_storage()
             if legacy_prefix_rebuild:
                 self._discard_legacy_prefix_proof_cache()
             # The derived prefix tables live in the same SQLite file as the
@@ -344,13 +653,117 @@ class SQLiteWorldLedger:
             # stream-verify immutable events, commits, revisions and head.
             self._verify_cold_ledger_history()
             self._ensure_or_restore_prefix_proof_state()
+            # Cold start otherwise pays one whole-state re-serialization on
+            # the first commit: pre-warm the per-field fragment caches from
+            # the state the cold verification just validated.
+            self._warm_encode_caches_locked()
+            self._verified_data_version = self._sqlite_data_version_locked()
+            self._verified_ledger_epoch = self._ledger_mutation_epoch_locked()
         except Exception:
             connection.close()
             raise
 
     def close(self) -> None:
-        with self._thread_lock:
+        with self._database_write_lock, self._thread_lock:
             self._connection.close()
+
+    def maintain_wal_if_needed(
+        self,
+        *,
+        threshold_bytes: int = 8 * 1024 * 1024,
+        min_interval_seconds: float = 5.0,
+        blocking: bool = False,
+    ) -> SQLiteWalMaintenanceResult:
+        """Run at most one passive WAL checkpoint when maintenance is due.
+
+        This method is intentionally synchronous because it owns a SQLite
+        connection.  Production callers must invoke it from a scheduler
+        worker (normally via ``asyncio.to_thread``), never while awaiting a
+        visible reply.  A process-local writer lock serializes it with ledger
+        and sidecar commits; SQLite remains the authority across processes.
+
+        ``PASSIVE`` does not wait for readers and returns immediately when a
+        competing writer prevents progress.  By default the process-local
+        locks are also acquired non-blocking: a visible commit wins over
+        maintenance and the next scheduler wake retries.  A blocking call is
+        available for explicit offline maintenance only.
+        """
+
+        if threshold_bytes <= 0:
+            raise ValueError("WAL maintenance threshold must be positive")
+        if min_interval_seconds < 0:
+            raise ValueError("WAL maintenance interval must not be negative")
+        wal_path = Path(str(self._database_path) + "-wal")
+        acquired_database_lock = self._database_write_lock.acquire(blocking=blocking)
+        if not acquired_database_lock:
+            return SQLiteWalMaintenanceResult(
+                status="skipped", wal_bytes_before=0, wal_bytes_after=0
+            )
+        acquired_thread_lock = False
+        try:
+            acquired_thread_lock = self._thread_lock.acquire(blocking=blocking)
+            if not acquired_thread_lock:
+                return SQLiteWalMaintenanceResult(
+                    status="skipped", wal_bytes_before=0, wal_bytes_after=0
+                )
+            now = time.monotonic()
+            try:
+                wal_bytes_before = wal_path.stat().st_size
+            except FileNotFoundError:
+                wal_bytes_before = 0
+            if (
+                wal_bytes_before < threshold_bytes
+                or now - self._last_wal_maintenance_monotonic < min_interval_seconds
+            ):
+                return SQLiteWalMaintenanceResult(
+                    status="skipped",
+                    wal_bytes_before=wal_bytes_before,
+                    wal_bytes_after=wal_bytes_before,
+                )
+            self._last_wal_maintenance_monotonic = now
+            row = self._connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            if row is None or len(row) != 3:
+                raise LedgerIntegrityError("SQLite WAL checkpoint result is unavailable")
+            busy, log_frames, checkpointed_frames = (int(item) for item in row)
+            if busy == 0 and checkpointed_frames >= log_frames and wal_bytes_before > (
+                4 * threshold_bytes
+            ):
+                # Every frame is already backfilled, yet the file itself only
+                # shrinks via TRUNCATE, which needs a reader-free instant.  A
+                # brief bounded attempt on the scheduler lane opportunistically
+                # reclaims a bloated WAL during quiet gaps; when a reader is
+                # present it gives up within the timeout and the passive
+                # result above still stands.
+                self._connection.execute("PRAGMA busy_timeout = 300")
+                try:
+                    # The passive counters above remain the reported work;
+                    # truncation only reclaims the file, and a busy result
+                    # simply leaves the fully-checkpointed WAL for later.
+                    self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                finally:
+                    self._connection.execute("PRAGMA busy_timeout = 0")
+            try:
+                wal_bytes_after = wal_path.stat().st_size
+            except FileNotFoundError:
+                wal_bytes_after = 0
+            # SQLite normally reports ``busy=1`` when a reader prevents a
+            # passive checkpoint, but a concurrent writer may also append
+            # frames between the checkpoint snapshot and its result.  Treat
+            # any uncheckpointed frame count as a retry signal so maintenance
+            # never claims the WAL is fully compacted when it is not.
+            is_busy = busy != 0 or checkpointed_frames < log_frames
+            return SQLiteWalMaintenanceResult(
+                status="busy" if is_busy else "checkpointed",
+                wal_bytes_before=wal_bytes_before,
+                wal_bytes_after=wal_bytes_after,
+                log_frames=log_frames,
+                checkpointed_frames=checkpointed_frames,
+                busy=is_busy,
+            )
+        finally:
+            if acquired_thread_lock:
+                self._thread_lock.release()
+            self._database_write_lock.release()
 
     @property
     def world_id(self) -> str:
@@ -359,6 +772,78 @@ class SQLiteWorldLedger:
     @property
     def blocks_event_loop(self) -> bool:
         return True
+
+    def performance_counters(self) -> SQLiteProjectionPerformanceCounters:
+        """Return a concurrency-consistent diagnostic snapshot."""
+
+        with self._thread_lock:
+            return SQLiteProjectionPerformanceCounters(
+                head_projection_reads=self._head_projection_reads,
+                head_projection_cache_hits=self._head_projection_cache_hits,
+                project_at_head_hits=self._project_at_head_hits,
+                historical_replay_calls=self._historical_replay_calls,
+                total_replay_calls=self._total_replay_calls,
+            )
+
+    def _sqlite_data_version_locked(self) -> int:
+        row = self._connection.execute("PRAGMA data_version").fetchone()
+        if row is None or type(row[0]) is not int:
+            raise LedgerIntegrityError("SQLite data version is unavailable")
+        return int(row[0])
+
+    def _ledger_mutation_epoch_locked(self) -> int:
+        row = self._connection.execute(
+            "SELECT mutation_epoch FROM world_v2_ledger_mutation_epochs WHERE world_id = ?",
+            (self._world_id,),
+        ).fetchone()
+        if row is None or type(row[0]) is not int:
+            raise LedgerIntegrityError("SQLite ledger mutation epoch is unavailable")
+        return int(row[0])
+
+    def _refresh_verified_external_history_locked(self) -> None:
+        """Reverify if another SQLite connection changed this database.
+
+        ``PRAGMA data_version`` is connection-local and changes only for writes
+        committed by a *different* connection. Normal single-writer hot reads
+        remain addressed. A cross-process append or unsupported direct mutation
+        pays one genesis verification before its rows join this process's
+        trusted immutable prefix.
+        """
+
+        current = self._sqlite_data_version_locked()
+        if current == self._verified_data_version:
+            return
+        # Life-content, expression-payload and other immutable sidecars share
+        # the SQLite file but are not ledger authority.  Their commits advance
+        # PRAGMA data_version as well; replaying all ledger history for such a
+        # write caused a multi-second pause immediately before dispatch.  Core
+        # ledger tables maintain a separate mutation epoch, so sidecar-only
+        # changes can be acknowledged without weakening event/commit checks.
+        if self._ledger_mutation_epoch_locked() == self._verified_ledger_epoch:
+            self._verified_data_version = current
+            return
+        started = time.perf_counter()
+        self._verified_observation_event_cache.clear()
+        # A cross-connection ledger write may have replaced split state item
+        # rows without touching the head row itself; re-derive the head from
+        # durable bytes so the cold verification below cannot vouch for a
+        # stale process-local projection.
+        self._head_projection_cache = None
+        self._head_projection_cache_row_identity = None
+        self._head_state_cache = None
+        self._head_state_cache_identity = None
+        self._state_fragment_cache = None
+        self._state_fragment_bytes = None
+        self._semantic_fragment_cache = None
+        self._verify_cold_ledger_history()
+        self._warm_encode_caches_locked()
+        _LOG.warning(
+            "world v2 cold ledger reverify duration_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
+        )
+        self._ensure_or_restore_prefix_proof_state()
+        self._verified_data_version = self._sqlite_data_version_locked()
+        self._verified_ledger_epoch = self._ledger_mutation_epoch_locked()
 
     def __enter__(self) -> SQLiteWorldLedger:
         return self
@@ -378,6 +863,22 @@ class SQLiteWorldLedger:
                 semantic_hash TEXT NOT NULL,
                 reducer_bundle_version TEXT NOT NULL,
                 state_hash TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS world_v2_ledger_mutation_epochs (
+                world_id TEXT PRIMARY KEY,
+                mutation_epoch INTEGER NOT NULL CHECK (mutation_epoch >= 0)
+            );
+            -- Split storage for the head reducer state: one row per top-level
+            -- field (idx = -1) or per element of a non-empty tuple field
+            -- (idx = 0..n-1).  A commit rewrites only the rows its events
+            -- changed instead of one monotonically growing state_json row.
+            CREATE TABLE IF NOT EXISTS world_v2_head_state_items (
+                world_id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                idx INTEGER NOT NULL CHECK (idx >= -1),
+                item_json TEXT NOT NULL,
+                PRIMARY KEY (world_id, field, idx),
+                FOREIGN KEY (world_id) REFERENCES world_v2_heads(world_id)
             );
             CREATE TABLE IF NOT EXISTS world_v2_commits (
                 world_id TEXT NOT NULL,
@@ -404,10 +905,31 @@ class SQLiteWorldLedger:
                     REFERENCES world_v2_commits(world_id, commit_id)
                     DEFERRABLE INITIALLY DEFERRED
             );
+            -- Commit-addressed event reads run on every ledger commit (prefix
+            -- proof persistence) and on every verified source lookup.  Without
+            -- this index each one was a full scan over all event envelopes,
+            -- growing linearly with ledger history.  The trailing
+            -- ledger_sequence column satisfies the readers' ORDER BY so the
+            -- planner never falls back to the primary key scan for ordering.
+            CREATE INDEX IF NOT EXISTS world_v2_events_commit_lookup
+                ON world_v2_events (world_id, commit_id, ledger_sequence);
             CREATE TABLE IF NOT EXISTS world_v2_legacy_plan_events (
                 world_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
                 source_reducer_bundle TEXT NOT NULL,
+                PRIMARY KEY (world_id, event_id),
+                FOREIGN KEY (world_id, event_id)
+                    REFERENCES world_v2_events(world_id, event_id)
+                DEFERRABLE INITIALLY DEFERRED
+            );
+            -- Explicit provenance for the one historical v30 clock seam.
+            -- This is append-only compatibility metadata; it never changes
+            -- immutable event bytes and is consulted only for those IDs.
+            CREATE TABLE IF NOT EXISTS world_v2_legacy_clock_events (
+                world_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                source_reducer_bundle TEXT NOT NULL,
+                reason TEXT NOT NULL,
                 PRIMARY KEY (world_id, event_id),
                 FOREIGN KEY (world_id, event_id)
                     REFERENCES world_v2_events(world_id, event_id)
@@ -494,7 +1016,72 @@ class SQLiteWorldLedger:
                 checkpoint_count INTEGER NOT NULL,
                 FOREIGN KEY (world_id) REFERENCES world_v2_heads(world_id)
             );
+            CREATE TRIGGER IF NOT EXISTS world_v2_heads_epoch_insert
+            AFTER INSERT ON world_v2_heads BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = NEW.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_heads_epoch_update
+            AFTER UPDATE ON world_v2_heads BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = NEW.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_heads_epoch_delete
+            AFTER DELETE ON world_v2_heads BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = OLD.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_commits_epoch_insert
+            AFTER INSERT ON world_v2_commits BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = NEW.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_commits_epoch_update
+            AFTER UPDATE ON world_v2_commits BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = NEW.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_commits_epoch_delete
+            AFTER DELETE ON world_v2_commits BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = OLD.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_events_epoch_insert
+            AFTER INSERT ON world_v2_events BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = NEW.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_events_epoch_update
+            AFTER UPDATE ON world_v2_events BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = NEW.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_events_epoch_delete
+            AFTER DELETE ON world_v2_events BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = OLD.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_head_state_items_epoch_insert
+            AFTER INSERT ON world_v2_head_state_items BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = NEW.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_head_state_items_epoch_update
+            AFTER UPDATE ON world_v2_head_state_items BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = NEW.world_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS world_v2_head_state_items_epoch_delete
+            AFTER DELETE ON world_v2_head_state_items BEGIN
+                UPDATE world_v2_ledger_mutation_epochs
+                   SET mutation_epoch = mutation_epoch + 1 WHERE world_id = OLD.world_id;
+            END;
             """
+        )
+        self._connection.execute(
+            "INSERT OR IGNORE INTO world_v2_ledger_mutation_epochs (world_id, mutation_epoch) "
+            "VALUES (?, 0)",
+            (self._world_id,),
         )
         columns = {
             str(row["name"])
@@ -507,17 +1094,86 @@ class SQLiteWorldLedger:
             )
         if "state_hash" not in columns:
             self._connection.execute("ALTER TABLE world_v2_heads ADD COLUMN state_hash TEXT")
+        if "storage_epoch" not in columns:
+            # Monotonic per-row write counter.  With split state storage the
+            # head row no longer embodies the state bytes, so this column is
+            # the cheap row identity that invalidates process-local caches
+            # without re-reading (or re-hashing) the multi-megabyte state.
+            self._connection.execute(
+                "ALTER TABLE world_v2_heads ADD COLUMN storage_epoch "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+
+    def _legacy_clock_compatibility_event_ids(self, source_bundle: str) -> frozenset[str]:
+        """Find the bounded v30 observation envelopes with stale wall time.
+
+        This is migration discovery only.  It does not rewrite event bytes or
+        alter the current reducer's clock invariant; the resulting IDs are
+        accepted solely while replaying this pre-v31 history into the current
+        reducer bundle.
+        """
+
+        persisted = {
+            str(row["event_id"])
+            for row in self._connection.execute(
+                "SELECT event_id FROM world_v2_legacy_clock_events WHERE world_id = ?",
+                (self._world_id,),
+            )
+        }
+        if source_bundle != "world-v2-reducers.30":
+            return frozenset(persisted)
+        current_time = None
+        drifted: set[str] = set()
+        rows = self._connection.execute(
+            "SELECT event_id, event_json FROM world_v2_events "
+            "WHERE world_id = ? ORDER BY ledger_sequence",
+            (self._world_id,),
+        )
+        for row in rows:
+            try:
+                raw_event = json.loads(str(row["event_json"]))
+                event = upcast_event(raw_event, target_schema_version=CURRENT_SCHEMA_VERSION)
+            except Exception:
+                continue
+            if event.event_type == "WorldStarted":
+                current_time = event.logical_time
+            elif event.event_type == "ClockAdvanced":
+                payload = event.payload()
+                current_time = payload.get("logical_time_to", event.logical_time)
+            elif (
+                event.event_type == "ObservationRecorded"
+                and current_time is not None
+                and event.logical_time != current_time
+            ):
+                drifted.add(str(row["event_id"]))
+        return frozenset(persisted | drifted)
 
     @staticmethod
-    def _encode_state(state: ReducerState) -> str:
-        return state.model_dump_json()
+    def _state_dump(state: ReducerState) -> dict[str, object]:
+        """Dump reducer state for durable bytes and hashes.
+
+        ``aspirations`` was added to ``ReducerState`` within one bundle
+        version.  Mirroring the semantic payload's conditionality, an empty
+        tuple stays out of the dump entirely so every pre-existing head's
+        persisted state hash remains byte-identical; the key appears only
+        once a world actually plants an aspiration.
+        """
+
+        dumped = state.model_dump(mode="json")
+        if not state.aspirations:
+            dumped.pop("aspirations", None)
+        return dumped
+
+    @classmethod
+    def _encode_state(cls, state: ReducerState) -> str:
+        return json.dumps(cls._state_dump(state), ensure_ascii=False, separators=(",", ":"))
 
     def _state_hash(self, state: ReducerState, cursor: ProjectionCursor) -> str:
         encoded = json.dumps(
             {
                 "cursor": cursor.model_dump(mode="json"),
                 "reducer_bundle_version": REDUCER_BUNDLE_VERSION,
-                "state": state.model_dump(mode="json"),
+                "state": self._state_dump(state),
                 "world_id": self._world_id,
             },
             ensure_ascii=False,
@@ -525,6 +1181,627 @@ class SQLiteWorldLedger:
             separators=(",", ":"),
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def _state_hash_material(
+        self,
+        *,
+        canonical_state: str,
+        cursor: ProjectionCursor,
+        reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
+        world_id: str | None = None,
+    ) -> bytes:
+        """Assemble the exact byte material the historical state hash covers."""
+
+        cursor_json = json.dumps(
+            cursor.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (
+            '{"cursor":'
+            + cursor_json
+            + ',"reducer_bundle_version":'
+            + json.dumps(reducer_bundle_version)
+            + ',"state":'
+            + canonical_state
+            + ',"world_id":'
+            + json.dumps(world_id if world_id is not None else self._world_id, ensure_ascii=False)
+            + "}"
+        ).encode("utf-8")
+
+    def _encode_state_and_hash(
+        self, state: ReducerState, cursor: ProjectionCursor
+    ) -> tuple[str, str]:
+        """Serialize the large reducer state once for both durable artifacts.
+
+        The byte construction is exactly the existing sorted-key state-hash
+        contract; only redundant Pydantic traversals are removed.  When
+        ``_incremental_state_base`` carries the immediately preceding state
+        with its verified canonical fragments, only changed fields — and for
+        tuple fields only changed elements — are re-serialized, and the exact
+        per-item storage mutations are left in ``_pending_head_state_ops``.
+        """
+
+        base = self._incremental_state_base
+        self._incremental_state_base = None
+        if base is None:
+            self._full_state_encode_count += 1
+            fragments = {
+                field_name: _canonical_fragment(value)
+                for field_name, value in self._state_dump(state).items()
+            }
+            item_fragments = {
+                field_name: _split_array_fragment_items(fragment)
+                for field_name, fragment in fragments.items()
+                if fragment.startswith("[") and fragment != "[]"
+            }
+            ops = _HeadStateWriteOps(
+                full_rewrite=True,
+                field_deletes=(),
+                tail_deletes=(),
+                upserts=tuple(_head_state_item_rows_from_fragments(fragments)),
+            )
+        else:
+            previous, fragments, item_fragments = base
+            fragments = dict(fragments)
+            item_fragments = dict(item_fragments)
+            fragments, item_fragments, ops, _ = self._apply_state_delta_to_fragments(
+                previous=previous,
+                state=state,
+                fragments=fragments,
+                item_fragments=item_fragments,
+            )
+        canonical_state = _assemble_state_json_from_fragments(fragments)
+        state_hash = hashlib.sha256(
+            self._state_hash_material(canonical_state=canonical_state, cursor=cursor)
+        ).hexdigest()
+        self._state_fragment_cache = (state_hash, fragments, item_fragments)
+        self._state_fragment_bytes = (
+            state_hash,
+            {name: fragment.encode("utf-8") for name, fragment in fragments.items()},
+        )
+        self._pending_head_state_ops = ops
+        return canonical_state, state_hash
+
+    def _state_bytes_map_for(
+        self, state_hash: str, fragments: dict[str, str]
+    ) -> dict[str, bytes]:
+        """Return (building lazily) the UTF-8 chunks of one fragment set."""
+
+        cached = self._state_fragment_bytes
+        if cached is not None and cached[0] == state_hash:
+            return cached[1]
+        bytes_map = {name: fragment.encode("utf-8") for name, fragment in fragments.items()}
+        self._state_fragment_bytes = (state_hash, bytes_map)
+        return bytes_map
+
+    def _state_hash_from_fragment_bytes(
+        self, *, fragment_bytes: dict[str, bytes], cursor: ProjectionCursor
+    ) -> str:
+        """Hash the exact ``_state_hash_material`` bytes from per-field chunks.
+
+        UTF-8 encoding distributes over concatenation, so joining the encoded
+        fragments reproduces byte-for-byte the encoding of the assembled
+        document; only fields changed by this commit were re-encoded.
+        """
+
+        cursor_json = json.dumps(
+            cursor.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        state_chunks = b",".join(
+            json.dumps(field_name, ensure_ascii=False).encode("utf-8")
+            + b":"
+            + fragment_bytes[field_name]
+            for field_name in sorted(fragment_bytes)
+        )
+        material = (
+            b'{"cursor":'
+            + cursor_json.encode("utf-8")
+            + b',"reducer_bundle_version":'
+            + json.dumps(REDUCER_BUNDLE_VERSION).encode("utf-8")
+            + b',"state":{'
+            + state_chunks
+            + b'},"world_id":'
+            + json.dumps(self._world_id, ensure_ascii=False).encode("utf-8")
+            + b"}"
+        )
+        return hashlib.sha256(material).hexdigest()
+
+    def _encode_state_delta(
+        self, state: ReducerState, cursor: ProjectionCursor
+    ) -> tuple[str, tuple[str, ...]]:
+        """Incremental commit encode: patch fragments, hash without reassembly.
+
+        Unlike ``_encode_state_and_hash`` this never materializes the
+        multi-megabyte canonical state string: unchanged fields contribute
+        their cached UTF-8 chunks directly to the hash material.  Returns the
+        state hash and the exact top-level fields this commit changed (the
+        driver for the incremental semantic hash and projection reuse).
+        """
+
+        base = self._incremental_state_base
+        self._incremental_state_base = None
+        cache = self._state_fragment_cache
+        if base is None or cache is None:
+            raise LedgerIntegrityError("incremental state encode requires a verified base")
+        previous, base_fragments, base_item_fragments = base
+        previous_bytes = self._state_bytes_map_for(cache[0], base_fragments)
+        fragments, item_fragments, ops, changed_fields = self._apply_state_delta_to_fragments(
+            previous=previous,
+            state=state,
+            fragments=dict(base_fragments),
+            item_fragments=dict(base_item_fragments),
+        )
+        fragment_bytes = dict(previous_bytes)
+        for field_name in changed_fields:
+            fragment = fragments.get(field_name)
+            if fragment is None:
+                fragment_bytes.pop(field_name, None)
+            else:
+                fragment_bytes[field_name] = fragment.encode("utf-8")
+        state_hash = self._state_hash_from_fragment_bytes(
+            fragment_bytes=fragment_bytes, cursor=cursor
+        )
+        self._state_fragment_cache = (state_hash, fragments, item_fragments)
+        self._state_fragment_bytes = (state_hash, fragment_bytes)
+        self._pending_head_state_ops = ops
+        self._incremental_state_encode_count += 1
+        return state_hash, changed_fields
+
+    @staticmethod
+    def _assemble_semantic_material(fragments: dict[str, bytes]) -> bytes:
+        """Reassemble the exact sorted-key semantic JSON from field chunks."""
+
+        return (
+            b"{"
+            + b",".join(
+                b'"' + key.encode("ascii") + b'":' + fragments[key] for key in sorted(fragments)
+            )
+            + b"}"
+        )
+
+    def _semantic_custom_fragment(self, field_name: str, state: ReducerState) -> bytes:
+        """Canonical bytes of the semantic fields that are not plain dumps."""
+
+        if field_name == "logical_time":
+            value: object = state.logical_time.isoformat() if state.logical_time else None
+        elif field_name == "expression_plans":
+            value = tuple(
+                _expression_plan_semantic_dump(
+                    item, reducer_bundle_version=REDUCER_BUNDLE_VERSION
+                )
+                for item in state.expression_plans
+            )
+        elif field_name == "expression_beats":
+            value = tuple(
+                _expression_beat_semantic_dump(
+                    item, reducer_bundle_version=REDUCER_BUNDLE_VERSION
+                )
+                for item in state.expression_beats
+            )
+        elif field_name == "expression_plan_manifests":
+            value = tuple(
+                _expression_plan_manifest_semantic_dump(item)
+                for item in state.expression_plan_manifests
+            )
+        else:
+            raise LedgerIntegrityError(
+                f"semantic field {field_name!r} has no incremental rule"
+            )
+        return _canonical_fragment(value).encode("utf-8")
+
+    def _warm_encode_caches_locked(self) -> None:
+        """Pre-warm per-field encode caches from the verified head state.
+
+        Runs after cold verification (open and cross-connection reverify) so
+        the first commit is already incremental instead of paying one
+        whole-state re-serialization.  Only split heads at the current bundle
+        qualify; every other shape keeps the fail-closed full path.
+        """
+
+        head = self._connection.execute(
+            "SELECT * FROM world_v2_heads WHERE world_id = ?", (self._world_id,)
+        ).fetchone()
+        if (
+            head is None
+            or str(head["reducer_bundle_version"]) != REDUCER_BUNDLE_VERSION
+            or head["state_json"] != _HEAD_STATE_SENTINEL
+        ):
+            return
+        fragment_cache = self._state_fragment_cache
+        if fragment_cache is None or fragment_cache[0] != str(head["state_hash"]):
+            self._load_split_head_fragments_locked(head)
+            fragment_cache = self._state_fragment_cache
+        if fragment_cache is None:
+            return
+        state = self._head_state_cache
+        head_state_identity = (
+            int(head["world_revision"]),
+            int(head["deliberation_revision"]),
+            int(head["ledger_sequence"]),
+            str(head["semantic_hash"]),
+            str(head["state_hash"]),
+        )
+        if state is None or self._head_state_cache_identity != head_state_identity:
+            state = self._decode_state(self._head_state_json_locked(head))
+            self._head_state_cache = state
+            self._head_state_cache_identity = head_state_identity
+        self._state_bytes_map_for(fragment_cache[0], fragment_cache[1])
+        self._warm_semantic_fragment_cache_locked(head=head, state=state)
+
+    def _warm_semantic_fragment_cache_locked(
+        self, *, head: sqlite3.Row, state: ReducerState
+    ) -> None:
+        """Byte-verify and install per-field semantic fragments for the head.
+
+        One full ``semantic_payload`` proves, field by field, that the plain
+        fields reuse the exact state-fragment bytes and the pinned custom
+        fields reproduce their canonical dumps, then proves the assembled
+        document hashes to the persisted semantic hash.  Any mismatch leaves
+        incremental semantic hashing disabled rather than ever risking
+        different bytes.
+        """
+
+        self._semantic_fragment_cache = None
+        self._semantic_sharing_verified = False
+        persisted_semantic_hash = head["semantic_hash"]
+        fragment_cache = self._state_fragment_cache
+        if not persisted_semantic_hash or fragment_cache is None:
+            return
+        state_bytes = self._state_bytes_map_for(fragment_cache[0], fragment_cache[1])
+        payload = state.semantic_payload(
+            world_id=self._world_id, world_revision=int(head["world_revision"])
+        )
+        fragments: dict[str, bytes] = {}
+        for key, value in payload.items():
+            candidate = _canonical_fragment(value).encode("utf-8")
+            if key in _SEMANTIC_HEADER_FIELDS:
+                fragments[key] = candidate
+                continue
+            if key in _SEMANTIC_CUSTOM_FIELDS:
+                if self._semantic_custom_fragment(key, state) != candidate:
+                    _LOG.warning(
+                        "world v2 semantic field %r custom rule mismatch; "
+                        "incremental semantic hashing disabled",
+                        key,
+                    )
+                    return
+                fragments[key] = candidate
+                continue
+            if state_bytes.get(key) != candidate:
+                _LOG.warning(
+                    "world v2 semantic field %r diverges from its state fragment; "
+                    "incremental semantic hashing disabled",
+                    key,
+                )
+                return
+            fragments[key] = state_bytes[key]
+        digest = hashlib.sha256(self._assemble_semantic_material(fragments)).hexdigest()
+        if not hmac.compare_digest(digest, str(persisted_semantic_hash)):
+            _LOG.warning(
+                "world v2 semantic fragment assembly does not reproduce the head "
+                "semantic hash; incremental semantic hashing disabled"
+            )
+            return
+        self._semantic_fragment_cache = (digest, fragments)
+        self._semantic_sharing_verified = True
+
+    def _incremental_semantic_hash(
+        self,
+        *,
+        head: sqlite3.Row,
+        state: ReducerState,
+        world_revision: int,
+        changed_fields: tuple[str, ...],
+    ) -> str | None:
+        """Patch the verified semantic fragments with one commit's delta.
+
+        Requires the cached fragments to be exactly the pre-commit head's
+        semantic document and the freshly encoded state fragments to belong to
+        the state being committed; otherwise the caller falls back to the full
+        ``make_projection`` computation.
+        """
+
+        cache = self._semantic_fragment_cache
+        if cache is None or not self._semantic_sharing_verified:
+            return None
+        previous_hash, previous_fragments = cache
+        if not hmac.compare_digest(previous_hash, str(head["semantic_hash"])):
+            return None
+        state_bytes_entry = self._state_fragment_bytes
+        fragment_cache = self._state_fragment_cache
+        if (
+            state_bytes_entry is None
+            or fragment_cache is None
+            or state_bytes_entry[0] != fragment_cache[0]
+        ):
+            return None
+        state_bytes = state_bytes_entry[1]
+        fragments = dict(previous_fragments)
+        for field_name in changed_fields:
+            if field_name in _SEMANTIC_CUSTOM_FIELDS:
+                fragments[field_name] = self._semantic_custom_fragment(field_name, state)
+            elif field_name in _SEMANTIC_CONDITIONAL_FIELDS:
+                if getattr(state, field_name):
+                    new_bytes = state_bytes.get(field_name)
+                    if new_bytes is None:
+                        return None
+                    fragments[field_name] = new_bytes
+                else:
+                    fragments.pop(field_name, None)
+            elif field_name in fragments:
+                new_bytes = state_bytes.get(field_name)
+                if new_bytes is None:
+                    return None
+                fragments[field_name] = new_bytes
+            # Fields outside the semantic payload (trigger bookkeeping,
+            # proposal audit lanes, ...) do not affect the semantic hash.
+        fragments["world_revision"] = str(int(world_revision)).encode("ascii")
+        digest = hashlib.sha256(self._assemble_semantic_material(fragments)).hexdigest()
+        self._semantic_fragment_cache = (digest, fragments)
+        self._semantic_incremental_count += 1
+        return digest
+
+    def _projection_for_commit(
+        self,
+        *,
+        head: sqlite3.Row,
+        state: ReducerState,
+        world_revision: int,
+        deliberation_revision: int,
+        ledger_sequence: int,
+        changed_fields: tuple[str, ...] | None,
+    ) -> LedgerProjection:
+        """Build the post-commit projection, reusing the previous head's work.
+
+        When this commit was encoded incrementally and the process-local head
+        projection matches the row this transaction verified, the projection
+        is a bounded ``model_copy`` of the previous one plus an incremental
+        semantic hash.  The projection's own integrity validators still run
+        explicitly.  Every other shape falls back to ``make_projection``.
+        """
+
+        if changed_fields is not None:
+            semantic_hash_value = self._incremental_semantic_hash(
+                head=head,
+                state=state,
+                world_revision=world_revision,
+                changed_fields=changed_fields,
+            )
+            base = self._head_projection_cache
+            raw_state = head["state_json"]
+            expected_identity = (
+                int(head["world_revision"]),
+                int(head["deliberation_revision"]),
+                int(head["ledger_sequence"]),
+                str(head["semantic_hash"]),
+                str(head["state_hash"]),
+                (
+                    int(head["storage_epoch"])
+                    if raw_state == _HEAD_STATE_SENTINEL
+                    else hashlib.sha256(raw_state.encode("utf-8")).digest()
+                ),
+            )
+            if (
+                semantic_hash_value is not None
+                and base is not None
+                and self._head_projection_cache_row_identity == expected_identity
+            ):
+                update: dict[str, object] = {
+                    name: getattr(state, name)
+                    for name in changed_fields
+                    if name in LedgerProjection.model_fields
+                }
+                update["world_revision"] = world_revision
+                update["deliberation_revision"] = deliberation_revision
+                update["ledger_sequence"] = ledger_sequence
+                update["semantic_hash"] = semantic_hash_value
+                projection = base.model_copy(update=update)
+                # ``model_copy`` skips validation; replay the projection's own
+                # integrity validators so a reducer bug still fails the commit
+                # exactly like a full construction would.
+                projection.datetimes_are_timezone_aware()
+                projection.pending_index_matches_actions()
+                return projection
+        self._semantic_full_count += 1
+        projection = make_projection(
+            world_id=self._world_id,
+            world_revision=world_revision,
+            deliberation_revision=deliberation_revision,
+            ledger_sequence=ledger_sequence,
+            state=state,
+        )
+        if self._semantic_sharing_verified:
+            # Re-anchor the fragment cache on the full computation so one
+            # fallback commit does not disable the incremental path forever.
+            payload = state.semantic_payload(
+                world_id=self._world_id, world_revision=world_revision
+            )
+            fragments = {
+                key: _canonical_fragment(value).encode("utf-8")
+                for key, value in payload.items()
+            }
+            digest = hashlib.sha256(self._assemble_semantic_material(fragments)).hexdigest()
+            if hmac.compare_digest(digest, projection.semantic_hash):
+                self._semantic_fragment_cache = (digest, fragments)
+            else:
+                self._semantic_fragment_cache = None
+                self._semantic_sharing_verified = False
+                _LOG.warning(
+                    "world v2 semantic fragment reassembly diverged from "
+                    "make_projection; incremental semantic hashing disabled"
+                )
+        return projection
+
+    def _apply_state_delta_to_fragments(
+        self,
+        *,
+        previous: ReducerState,
+        state: ReducerState,
+        fragments: dict[str, str],
+        item_fragments: dict[str, tuple[str, ...]],
+    ) -> tuple[dict[str, str], dict[str, tuple[str, ...]], _HeadStateWriteOps, tuple[str, ...]]:
+        """Patch verified previous-state fragments with one commit's delta.
+
+        Reducers use immutable top-level tuples and typically append or
+        replace single elements, so unchanged fields — and unchanged elements
+        inside a changed tuple — retain object identity across
+        ``model_copy(update=...)``.  The identity/equality prefix comparison
+        finds the exact changed elements; only those values are re-serialized.
+        The final element of the return tuple lists the top-level fields whose
+        canonical fragment actually changed.
+        """
+
+        field_deletes: list[str] = []
+        tail_deletes: list[tuple[str, int]] = []
+        upserts: list[tuple[str, int, str]] = []
+        include_map: dict[str, object] = {}
+        item_changes: dict[str, tuple[int, ...]] = {}
+        changed_fields: list[str] = []
+        for field_name in ReducerState.model_fields:
+            old_value = getattr(previous, field_name)
+            new_value = getattr(state, field_name)
+            if old_value is new_value:
+                continue
+            if field_name == "aspirations" and not state.aspirations:
+                # `_state_dump` keeps an empty aspirations tuple out of the
+                # durable bytes for hash compatibility.
+                if fragments.pop(field_name, None) is not None:
+                    field_deletes.append(field_name)
+                    changed_fields.append(field_name)
+                item_fragments.pop(field_name, None)
+                continue
+            old_items = item_fragments.get(field_name)
+            if (
+                type(old_value) is tuple
+                and type(new_value) is tuple
+                and new_value
+                and old_items is not None
+                and len(old_items) == len(old_value)
+            ):
+                shared = min(len(old_value), len(new_value))
+                changed_indexes = tuple(
+                    index
+                    for index in range(shared)
+                    if old_value[index] is not new_value[index]
+                    and old_value[index] != new_value[index]
+                ) + tuple(range(shared, len(new_value)))
+                if not changed_indexes and len(new_value) == len(old_value):
+                    continue
+                item_changes[field_name] = changed_indexes
+            else:
+                if old_value == new_value:
+                    continue
+                include_map[field_name] = True
+        # A whole-state ``model_dump`` walks every element of every tuple even
+        # under an ``include`` filter, which grows with world age.  Changed
+        # tuple elements are therefore dumped directly; the bounded include
+        # dump remains only for whole-field (non-tuple-delta) changes.
+        dumped: dict[str, object] = (
+            state.model_dump(mode="json", include=include_map) if include_map else {}
+        )
+        for field_name in sorted(set(include_map) | set(item_changes)):
+            new_value = getattr(state, field_name)
+            if field_name in item_changes:
+                changed_indexes = item_changes[field_name]
+                old_items = item_fragments[field_name]
+                new_items = list(old_items[: len(new_value)])
+                new_items.extend([""] * (len(new_value) - len(new_items)))
+                for index in sorted(changed_indexes):
+                    item_fragment = _canonical_fragment(_json_ready_item(new_value[index]))
+                    new_items[index] = item_fragment
+                    upserts.append((field_name, index, item_fragment))
+                if len(new_value) < len(old_items):
+                    tail_deletes.append((field_name, len(new_value)))
+                item_fragments[field_name] = tuple(new_items)
+                fragments[field_name] = "[" + ",".join(new_items) + "]"
+                changed_fields.append(field_name)
+            else:
+                fragment = _canonical_fragment(dumped[field_name])
+                if fragments.get(field_name) == fragment:
+                    continue
+                # The representation may flip between per-item rows and one
+                # whole-fragment row; drop the old rows and rewrite the field.
+                field_deletes.append(field_name)
+                changed_fields.append(field_name)
+                fragments[field_name] = fragment
+                if fragment.startswith("[") and fragment != "[]":
+                    items = _split_array_fragment_items(fragment)
+                    item_fragments[field_name] = items
+                    upserts.extend(
+                        (field_name, index, item) for index, item in enumerate(items)
+                    )
+                else:
+                    item_fragments.pop(field_name, None)
+                    upserts.append((field_name, _HEAD_STATE_SCALAR_IDX, fragment))
+        ops = _HeadStateWriteOps(
+            full_rewrite=False,
+            field_deletes=tuple(field_deletes),
+            tail_deletes=tuple(tail_deletes),
+            upserts=tuple(upserts),
+        )
+        return fragments, item_fragments, ops, tuple(changed_fields)
+
+    def _load_split_head_fragments_locked(
+        self, head: sqlite3.Row
+    ) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+        """Load the per-item fragments of one split head row.
+
+        A current-bundle head must reproduce the durable ``state_hash`` from
+        its reassembled canonical bytes, or the read fails closed.  A head
+        that claims an older reducer bundle cannot be byte-verified here (its
+        hash contract used another bundle string); the bundle migration's
+        semantic-hash check and full replay remain its authority.
+        """
+
+        item_rows = tuple(
+            (str(row["field"]), int(row["idx"]), str(row["item_json"]))
+            for row in self._connection.execute(
+                "SELECT field, idx, item_json FROM world_v2_head_state_items "
+                "WHERE world_id = ? ORDER BY field, idx",
+                (self._world_id,),
+            )
+        )
+        if not item_rows:
+            raise LedgerIntegrityError("split head state has no stored fields")
+        fragments, item_fragments = _head_state_fragments_from_item_rows(item_rows)
+        if str(head["reducer_bundle_version"]) != REDUCER_BUNDLE_VERSION:
+            return fragments, item_fragments
+        cursor = ProjectionCursor(
+            world_revision=int(head["world_revision"]),
+            deliberation_revision=int(head["deliberation_revision"]),
+            ledger_sequence=int(head["ledger_sequence"]),
+        )
+        material = self._state_hash_material(
+            canonical_state=_assemble_state_json_from_fragments(fragments),
+            cursor=cursor,
+        )
+        persisted_state_hash = head["state_hash"]
+        if not persisted_state_hash or not hmac.compare_digest(
+            hashlib.sha256(material).hexdigest(), str(persisted_state_hash)
+        ):
+            raise LedgerIntegrityError("split head state does not match its state hash")
+        self._state_fragment_cache = (
+            str(persisted_state_hash),
+            fragments,
+            item_fragments,
+        )
+        return fragments, item_fragments
+
+    def _head_state_json_locked(self, head: sqlite3.Row) -> str:
+        """Return the head's full state JSON for either storage format."""
+
+        raw_state = head["state_json"]
+        if not isinstance(raw_state, str):
+            raise LedgerIntegrityError("head state is invalid")
+        if raw_state != _HEAD_STATE_SENTINEL:
+            return raw_state
+        fragments, _ = self._load_split_head_fragments_locked(head)
+        return _assemble_state_json_from_fragments(fragments)
 
     @staticmethod
     def _decode_state(value: str) -> ReducerState:
@@ -578,8 +1855,10 @@ class SQLiteWorldLedger:
 
         with self._thread_lock:
             connection = self._connection
+            owns_transaction = not connection.in_transaction
             try:
-                connection.execute("BEGIN")
+                if owns_transaction:
+                    connection.execute("BEGIN")
                 head = self._project_locked()
                 rebuilt = self._replay_locked(
                     target_cursor=None,
@@ -599,6 +1878,34 @@ class SQLiteWorldLedger:
                         (self._world_id,),
                     ).fetchone()[0]
                 )
+                # Cold verification must remain fail-closed, but it does not
+                # need to issue a new SQLite query for every commit and every
+                # legacy-event membership check.  These rows are loaded inside
+                # the same read transaction as the replay, so the batch is
+                # still one immutable snapshot; only the query shape changes.
+                commit_rows = {
+                    str(row["commit_id"]): row
+                    for row in connection.execute(
+                        "SELECT commit_id, request_hash, result_json "
+                        "FROM world_v2_commits WHERE world_id = ?",
+                        (self._world_id,),
+                    )
+                }
+                event_rows_by_commit: dict[str, list[sqlite3.Row]] = {}
+                for event_row in connection.execute(
+                    "SELECT * FROM world_v2_events WHERE world_id = ? ORDER BY ledger_sequence",
+                    (self._world_id,),
+                ):
+                    event_rows_by_commit.setdefault(str(event_row["commit_id"]), []).append(
+                        event_row
+                    )
+                legacy_plan_event_ids = {
+                    str(row["event_id"])
+                    for row in connection.execute(
+                        "SELECT event_id FROM world_v2_legacy_plan_events WHERE world_id = ?",
+                        (self._world_id,),
+                    )
+                }
                 previous_last_sequence = 0
                 verified_commit_count = 0
                 for row in connection.execute(
@@ -616,8 +1923,26 @@ class SQLiteWorldLedger:
                         or last_sequence - first_sequence + 1 != int(row["event_count"])
                     ):
                         raise LedgerIntegrityError("commit event rows are not contiguous")
+                    commit_id = str(row["commit_id"])
                     self._verify_cold_commit_locked(
-                        str(row["commit_id"]), expected_cursor=head_cursor
+                        commit_id,
+                        expected_cursor=head_cursor,
+                        commit_row=commit_rows.get(commit_id),
+                        event_rows=tuple(event_rows_by_commit.get(commit_id, ())),
+                        legacy_plan_event_ids=legacy_plan_event_ids,
+                    )
+                    self._cache_verified_commit_rows_locked(
+                        commit_id,
+                        commit_row=commit_rows.get(commit_id),
+                        event_rows=tuple(event_rows_by_commit.get(commit_id, ())),
+                        # Context's recent-dialogue and authority slices are
+                        # bounded by item count, but their source events are
+                        # not necessarily the last physical ledger rows (a
+                        # long action/settlement tail can sit between two
+                        # observations).  Keep a bounded, useful prefix of
+                        # verified envelopes so a hot Context build does not
+                        # re-verify one old commit per retained message.
+                        minimum_sequence=max(0, head_cursor.ledger_sequence - 4096),
                     )
                     previous_last_sequence = last_sequence
                     verified_commit_count += 1
@@ -625,22 +1950,73 @@ class SQLiteWorldLedger:
                     raise LedgerIntegrityError(
                         "prefix proof rebuild found an empty or orphaned commit"
                     )
-                connection.commit()
+                if owns_transaction:
+                    connection.commit()
             except sqlite3.DatabaseError as exc:
-                try:
-                    connection.rollback()
-                except sqlite3.DatabaseError:
-                    pass
+                if owns_transaction:
+                    try:
+                        connection.rollback()
+                    except sqlite3.DatabaseError:
+                        pass
                 raise LedgerIntegrityError("cold ledger verification failed") from exc
             except Exception:
-                try:
-                    connection.rollback()
-                except sqlite3.DatabaseError:
-                    pass
+                if owns_transaction:
+                    try:
+                        connection.rollback()
+                    except sqlite3.DatabaseError:
+                        pass
                 raise
 
+    def _cache_verified_commit_rows_locked(
+        self,
+        commit_id: str,
+        *,
+        commit_row: sqlite3.Row | None,
+        event_rows: tuple[sqlite3.Row, ...],
+        minimum_sequence: int = 0,
+    ) -> None:
+        """Install current-format cold-verified rows for exact hot lookups.
+
+        Context compilation repeatedly asks for the same recent observation,
+        expression, and source events.  Cold verification has already checked
+        every envelope and commit/result binding, so reparsing the owning
+        commit once per source during a hot turn adds no authority.  Legacy
+        envelopes deliberately stay uncached and continue through the normal
+        migration-aware lookup path.
+        """
+
+        if commit_row is None or not event_rows:
+            return
+        event_rows = tuple(
+            row for row in event_rows if int(row["ledger_sequence"]) >= minimum_sequence
+        )
+        if not event_rows:
+            return
+        try:
+            events = tuple(
+                self._recent_replay_event_cache.get(str(row["event_id"]))
+                or WorldEvent.model_validate_json(str(row["event_json"]))
+                for row in event_rows
+            )
+            if any(event.schema_version != CURRENT_SCHEMA_VERSION for event in events):
+                return
+            result = CommitResult.model_validate_json(str(commit_row["result_json"]))
+        except Exception:
+            # The preceding cold verifier is authoritative.  This cache is
+            # merely an optimization and must never turn a verified reopen
+            # into a startup failure.
+            return
+        for event in events:
+            self._verified_event_commit_cache[event.event_id] = (event, result)
+
     def _verify_cold_commit_locked(
-        self, commit_id: str, *, expected_cursor: ProjectionCursor
+        self,
+        commit_id: str,
+        *,
+        expected_cursor: ProjectionCursor,
+        commit_row: sqlite3.Row | None = None,
+        event_rows: tuple[sqlite3.Row, ...] | None = None,
+        legacy_plan_event_ids: set[str] | None = None,
     ) -> None:
         """Verify a persisted commit without reinterpreting legacy event bytes.
 
@@ -651,18 +2027,23 @@ class SQLiteWorldLedger:
         path performs a documented upcast before validation.
         """
 
-        commit_row = self._connection.execute(
-            """SELECT request_hash, result_json FROM world_v2_commits
-               WHERE world_id = ? AND commit_id = ?""",
-            (self._world_id, commit_id),
-        ).fetchone()
+        if commit_row is None:
+            commit_row = self._connection.execute(
+                """SELECT request_hash, result_json FROM world_v2_commits
+                   WHERE world_id = ? AND commit_id = ?""",
+                (self._world_id, commit_id),
+            ).fetchone()
         if commit_row is None:
             raise LedgerIntegrityError("event owning commit is missing")
-        rows = tuple(
-            self._connection.execute(
-                """SELECT * FROM world_v2_events WHERE world_id = ? AND commit_id = ?
-                   ORDER BY ledger_sequence""",
-                (self._world_id, commit_id),
+        rows = (
+            event_rows
+            if event_rows is not None
+            else tuple(
+                self._connection.execute(
+                    """SELECT * FROM world_v2_events WHERE world_id = ? AND commit_id = ?
+                       ORDER BY ledger_sequence""",
+                    (self._world_id, commit_id),
+                )
             )
         )
         if not rows:
@@ -713,14 +2094,17 @@ class SQLiteWorldLedger:
                         # audit records to inert legacy events.  Their old
                         # request hash cannot be checked using v18 bytes.
                         legacy_bytes_present = True
-                if (
-                    self._connection.execute(
+                is_legacy_plan_event = (
+                    str(event_id) in legacy_plan_event_ids
+                    if legacy_plan_event_ids is not None
+                    else self._connection.execute(
                         """SELECT 1 FROM world_v2_legacy_plan_events
-                       WHERE world_id = ? AND event_id = ?""",
+                           WHERE world_id = ? AND event_id = ?""",
                         (self._world_id, str(event_id)),
                     ).fetchone()
                     is not None
-                ):
+                )
+                if is_legacy_plan_event:
                     # v15 ownerless plan lifecycle rows are rewritten only by
                     # the documented migration replay policy.  Their source
                     # request hash binds pre-migration event bytes.
@@ -1420,7 +2804,7 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("head cursor is invalid") from exc
             persisted_state_hash = head["state_hash"]
             if installed == REDUCER_BUNDLE_VERSION and persisted_state_hash:
-                state = self._decode_state(str(head["state_json"]))
+                state = self._decode_state(self._head_state_json_locked(head))
                 if not hmac.compare_digest(
                     self._state_hash(state, cursor), str(persisted_state_hash)
                 ):
@@ -1469,25 +2853,61 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError(
                     f"head reducer bundle {installed!r} has no migration path"
                 )
+            rebuilt: LedgerProjection | None = None
             if installed != REDUCER_BUNDLE_VERSION:
                 legacy_hash = self._legacy_semantic_hash(
-                    state_json=str(head["state_json"]),
+                    state_json=self._head_state_json_locked(head),
                     world_revision=world_revision,
                     reducer_bundle_version=installed,
                 )
                 if not hmac.compare_digest(legacy_hash, str(head["semantic_hash"])):
-                    raise LedgerIntegrityError("legacy head semantic hash is invalid")
+                    if installed != "world-v2-reducers.30":
+                        raise LedgerIntegrityError("legacy head semantic hash is invalid")
+                    # v30's HTTP fixture persisted a derived head hash from a
+                    # pre-release semantic payload.  Do not trust or repair
+                    # that cache in place: replay the immutable event history
+                    # first, with only the discovered stale-clock envelopes
+                    # admitted by the bounded compatibility seam below.  If
+                    # replay fails, the old head remains a hard integrity
+                    # failure just like every other bundle.
+                    try:
+                        rebuilt = self._replay_locked(
+                            target_cursor=cursor,
+                            target_schema_version=CURRENT_SCHEMA_VERSION,
+                            reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                        )
+                    except Exception as exc:
+                        raise LedgerIntegrityError("legacy head semantic hash is invalid") from exc
                 self._mark_legacy_ownerless_plan_events_locked(installed)
-            rebuilt = self._replay_locked(
-                target_cursor=cursor,
-                target_schema_version=CURRENT_SCHEMA_VERSION,
-                reducer_bundle_version=REDUCER_BUNDLE_VERSION,
-            )
+            if rebuilt is None:
+                rebuilt = self._replay_locked(
+                    target_cursor=cursor,
+                    target_schema_version=CURRENT_SCHEMA_VERSION,
+                    reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                )
+            if installed == "world-v2-reducers.30" and self._legacy_clock_compat_event_ids:
+                connection.executemany(
+                    """INSERT OR IGNORE INTO world_v2_legacy_clock_events
+                       (world_id, event_id, source_reducer_bundle, reason)
+                       VALUES (?, ?, ?, ?)""",
+                    (
+                        (self._world_id, event_id, installed, "observation_logical_time_drift")
+                        for event_id in self._legacy_clock_compat_event_ids
+                    ),
+                )
             rebuilt_state = self._state_from_projection(rebuilt)
+            # The bundle migration writes one legacy full-text head; stale
+            # split rows from the previous bundle must not survive next to
+            # it.  The storage migration re-splits this row immediately after
+            # inside its own transaction.
+            connection.execute(
+                "DELETE FROM world_v2_head_state_items WHERE world_id = ?",
+                (self._world_id,),
+            )
             updated = connection.execute(
                 """UPDATE world_v2_heads
                    SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?,
-                       state_hash = ?
+                       state_hash = ?, storage_epoch = storage_epoch + 1
                    WHERE world_id = ? AND world_revision = ?
                      AND deliberation_revision = ? AND ledger_sequence = ?
                      AND reducer_bundle_version = ?""",
@@ -1505,6 +2925,126 @@ class SQLiteWorldLedger:
             )
             if updated.rowcount != 1:
                 raise ConcurrencyConflict("world head changed during bundle migration")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _migrate_head_state_storage(self) -> None:
+        """Split legacy full-row head states into per-item rows, atomically.
+
+        The split representation re-canonicalizes each top-level field with
+        the exact sorted-key contract the state hash covers, so a row is only
+        converted when its reassembled bytes reproduce the durable
+        ``state_hash`` under that row's own reducer bundle version.  This
+        ledger's world fails closed on a mismatch; other worlds sharing the
+        file are converted opportunistically and left legacy when they cannot
+        be verified (their own ledger migrates or rejects them on open).
+        """
+
+        connection = self._connection
+        candidates = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT world_id FROM world_v2_heads WHERE state_json != ?",
+                (_HEAD_STATE_SENTINEL,),
+            )
+        ]
+        if not candidates:
+            return
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for world_id in candidates:
+                head = connection.execute(
+                    "SELECT * FROM world_v2_heads WHERE world_id = ?", (world_id,)
+                ).fetchone()
+                if head is None:
+                    continue
+                raw_state = head["state_json"]
+                persisted_state_hash = head["state_hash"]
+                own_world = world_id == self._world_id
+                if (
+                    not isinstance(raw_state, str)
+                    or raw_state == _HEAD_STATE_SENTINEL
+                    or not persisted_state_hash
+                ):
+                    if own_world:
+                        raise LedgerIntegrityError(
+                            "world head cannot be split without a verified state hash"
+                        )
+                    continue
+                cursor = ProjectionCursor(
+                    world_revision=int(head["world_revision"]),
+                    deliberation_revision=int(head["deliberation_revision"]),
+                    ledger_sequence=int(head["ledger_sequence"]),
+                )
+
+                def _verified_fragments(fragments: dict[str, str]) -> bool:
+                    material = self._state_hash_material(
+                        canonical_state=_assemble_state_json_from_fragments(fragments),
+                        cursor=cursor,
+                        reducer_bundle_version=str(head["reducer_bundle_version"]),
+                        world_id=world_id,
+                    )
+                    return hmac.compare_digest(
+                        hashlib.sha256(material).hexdigest(), str(persisted_state_hash)
+                    )
+
+                fragments: dict[str, str] | None = None
+                try:
+                    parsed = json.loads(raw_state)
+                    if isinstance(parsed, dict):
+                        candidate = {
+                            field_name: _canonical_fragment(value)
+                            for field_name, value in parsed.items()
+                        }
+                        if _verified_fragments(candidate):
+                            fragments = candidate
+                except Exception:
+                    fragments = None
+                if fragments is None and own_world:
+                    # The raw bytes could not be re-canonicalized to the exact
+                    # hash contract (they may predate canonical persistence).
+                    # This world is already at the current bundle, so derive
+                    # the fragments from the validated model instead.
+                    state = self._decode_state(raw_state)
+                    candidate = {
+                        field_name: _canonical_fragment(value)
+                        for field_name, value in self._state_dump(state).items()
+                    }
+                    if _verified_fragments(candidate):
+                        fragments = candidate
+                if fragments is None:
+                    if own_world:
+                        raise LedgerIntegrityError(
+                            "legacy head state does not match its state hash"
+                        )
+                    continue
+                item_rows = _head_state_item_rows_from_fragments(fragments)
+                connection.execute(
+                    "DELETE FROM world_v2_head_state_items WHERE world_id = ?",
+                    (world_id,),
+                )
+                connection.executemany(
+                    "INSERT INTO world_v2_head_state_items "
+                    "(world_id, field, idx, item_json) VALUES (?, ?, ?, ?)",
+                    (
+                        (world_id, field_name, index, item_json)
+                        for field_name, index, item_json in item_rows
+                    ),
+                )
+                connection.execute(
+                    "UPDATE world_v2_heads SET state_json = ?, "
+                    "storage_epoch = storage_epoch + 1 WHERE world_id = ?",
+                    (_HEAD_STATE_SENTINEL, world_id),
+                )
+                _LOG.info(
+                    "world v2 head state split world_id=%s fields=%d item_rows=%d bytes=%d",
+                    world_id,
+                    len(fragments),
+                    len(item_rows),
+                    len(raw_state),
+                )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -2063,13 +3603,23 @@ class SQLiteWorldLedger:
         commit_id: str | None = None,
     ) -> CommitResult:
         events = _preflight_commit_events(events)
-        with self._thread_lock:
-            return self._commit_locked(
-                events,
-                expected_world_revision=expected_world_revision,
-                expected_deliberation_revision=expected_deliberation_revision,
-                commit_id=commit_id,
-            )
+        with self._database_write_lock, self._thread_lock:
+            with self._measure_commit(events):
+                started = time.perf_counter()
+                result = self._commit_locked(
+                    events,
+                    expected_world_revision=expected_world_revision,
+                    expected_deliberation_revision=expected_deliberation_revision,
+                    commit_id=commit_id,
+                )
+                elapsed = (time.perf_counter() - started) * 1000
+                if elapsed >= 1000:
+                    _LOG.warning(
+                        "world v2 ledger commit duration_ms=%.1f events=%s",
+                        elapsed,
+                        ",".join(event.event_type for event in events),
+                    )
+                return result
 
     def commit_at_cursor(
         self,
@@ -2079,14 +3629,24 @@ class SQLiteWorldLedger:
         commit_id: str | None = None,
     ) -> CommitResult:
         events = _preflight_commit_events(events)
-        with self._thread_lock:
-            return self._commit_locked(
-                events,
-                expected_world_revision=expected_cursor.world_revision,
-                expected_deliberation_revision=expected_cursor.deliberation_revision,
-                expected_ledger_sequence=expected_cursor.ledger_sequence,
-                commit_id=commit_id,
-            )
+        with self._database_write_lock, self._thread_lock:
+            with self._measure_commit(events):
+                started = time.perf_counter()
+                result = self._commit_locked(
+                    events,
+                    expected_world_revision=expected_cursor.world_revision,
+                    expected_deliberation_revision=expected_cursor.deliberation_revision,
+                    expected_ledger_sequence=expected_cursor.ledger_sequence,
+                    commit_id=commit_id,
+                )
+                elapsed = (time.perf_counter() - started) * 1000
+                if elapsed >= 1000:
+                    _LOG.warning(
+                        "world v2 ledger commit_at_cursor duration_ms=%.1f events=%s",
+                        elapsed,
+                        ",".join(event.event_type for event in events),
+                    )
+                return result
 
     def commit_accepted(
         self,
@@ -2101,15 +3661,23 @@ class SQLiteWorldLedger:
             handle=batch, world_id=self._world_id, expected_cursor=expected_cursor
         )
         events = _preflight_commit_events(events)
-        with self._thread_lock:
-            return self._commit_locked(
-                events,
-                expected_world_revision=expected_cursor.world_revision,
-                expected_deliberation_revision=expected_cursor.deliberation_revision,
-                expected_ledger_sequence=expected_cursor.ledger_sequence,
-                accepted_manifest_v3_authorized=True,
-                commit_id=commit_id,
-            )
+        with self._database_write_lock, self._thread_lock:
+            with self._measure_commit(events):
+                return self._commit_locked(
+                    events,
+                    expected_world_revision=expected_cursor.world_revision,
+                    expected_deliberation_revision=expected_cursor.deliberation_revision,
+                    expected_ledger_sequence=expected_cursor.ledger_sequence,
+                    accepted_manifest_v3_authorized=True,
+                    commit_id=commit_id,
+                )
+
+    def _measure_commit(self, events: Sequence[WorldEvent]):
+        get = getattr(self._latency_recorder, "get", None)
+        trace_ids = {event.trace_id for event in events}
+        trace = get(next(iter(trace_ids))) if callable(get) and len(trace_ids) == 1 else None
+        measure = getattr(trace, "measure_sync", None)
+        return measure("ledger_commit") if callable(measure) else nullcontext()
 
     def _commit_locked(
         self,
@@ -2141,6 +3709,14 @@ class SQLiteWorldLedger:
             validate_event_identity(event)
 
         connection = self._connection
+        phase_started = time.perf_counter()
+        # A different connection may have advanced or mutated the file since
+        # this process installed its state cache.  Verify that change before
+        # the write transaction; same-connection commits leave data_version
+        # unchanged and retain their already-verified head state.
+        self._refresh_verified_external_history_locked()
+        refresh_ms = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         connection.execute("BEGIN IMMEDIATE")
         try:
             existing = connection.execute(
@@ -2160,14 +3736,24 @@ class SQLiteWorldLedger:
                 expected_world_revision=expected_world_revision,
                 accepted_manifest_v3_authorized=accepted_manifest_v3_authorized,
             )
+            validate_ms = (time.perf_counter() - phase_started) * 1000
+            phase_started = time.perf_counter()
 
+            # Two separate probes let SQLite answer each from its covering
+            # unique index.  The combined ``OR`` form degraded to a full scan
+            # of every event row (including multi-KB envelopes), which grew
+            # linearly with ledger history on the reply-critical path.
             placeholders = ",".join("?" for _ in events)
             duplicate = connection.execute(
-                f"""SELECT event_id, idempotency_key FROM world_v2_events
-                    WHERE world_id = ? AND
-                    (event_id IN ({placeholders}) OR idempotency_key IN ({placeholders}))
+                f"""SELECT event_id FROM world_v2_events
+                    WHERE world_id = ? AND event_id IN ({placeholders})
                     LIMIT 1""",
-                (self._world_id, *event_ids, *idempotency_keys),
+                (self._world_id, *event_ids),
+            ).fetchone() or connection.execute(
+                f"""SELECT idempotency_key FROM world_v2_events
+                    WHERE world_id = ? AND idempotency_key IN ({placeholders})
+                    LIMIT 1""",
+                (self._world_id, *idempotency_keys),
             ).fetchone()
             if duplicate is not None:
                 raise IdempotencyConflict("event identity already exists under another commit")
@@ -2199,7 +3785,22 @@ class SQLiteWorldLedger:
             world_revision = int(head["world_revision"])
             deliberation_revision = int(head["deliberation_revision"])
             ledger_sequence = int(head["ledger_sequence"])
-            state = self._decode_state(head["state_json"])
+            head_is_split = head["state_json"] == _HEAD_STATE_SENTINEL
+            head_state_identity = (
+                int(head["world_revision"]),
+                int(head["deliberation_revision"]),
+                int(head["ledger_sequence"]),
+                str(head["semantic_hash"]),
+                str(head["state_hash"]),
+            )
+            if (
+                self._head_state_cache is not None
+                and self._head_state_cache_identity == head_state_identity
+            ):
+                state = self._head_state_cache
+            else:
+                state = self._decode_state(self._head_state_json_locked(head))
+            previous_state = state
             staged: list[tuple[WorldEvent, int, int, int, str, str]] = []
             for event, definition in zip(events, definitions, strict=True):
                 ledger_sequence += 1
@@ -2220,6 +3821,8 @@ class SQLiteWorldLedger:
                         event_hash,
                     )
                 )
+            reduce_ms = (time.perf_counter() - phase_started) * 1000
+            phase_started = time.perf_counter()
 
             result = CommitResult(
                 world_revision=world_revision,
@@ -2264,35 +3867,108 @@ class SQLiteWorldLedger:
                 request_hash=request_hash,
                 result=result,
             )
-            projection = make_projection(
-                world_id=self._world_id,
+            prefix_ms = (time.perf_counter() - phase_started) * 1000
+            phase_started = time.perf_counter()
+            cursor = ProjectionCursor(
                 world_revision=world_revision,
                 deliberation_revision=deliberation_revision,
                 ledger_sequence=ledger_sequence,
-                state=state,
             )
+            fragment_cache = self._state_fragment_cache
+            if head_is_split and (
+                fragment_cache is None or fragment_cache[0] != str(head["state_hash"])
+            ):
+                # The process-local base is stale or absent: rebuild it from
+                # the durable item rows inside this same transaction instead
+                # of re-dumping the whole model graph.
+                self._load_split_head_fragments_locked(head)
+                fragment_cache = self._state_fragment_cache
+            changed_fields: tuple[str, ...] | None = None
+            if (
+                head_is_split
+                and fragment_cache is not None
+                and fragment_cache[0] == str(head["state_hash"])
+            ):
+                self._incremental_state_base = (
+                    previous_state,
+                    fragment_cache[1],
+                    fragment_cache[2],
+                )
+            try:
+                if self._incremental_state_base is not None:
+                    state_hash, changed_fields = self._encode_state_delta(state, cursor)
+                else:
+                    _, state_hash = self._encode_state_and_hash(state, cursor)
+            finally:
+                self._incremental_state_base = None
+            state_ops = self._pending_head_state_ops
+            self._pending_head_state_ops = None
+            if state_ops is None:
+                raise LedgerIntegrityError("state encode produced no storage operations")
+            if not head_is_split:
+                # A legacy full-row head has no item rows to patch; splitting
+                # it is part of this same crash-consistent transaction.
+                _, new_fragments, _ = self._state_fragment_cache
+                state_ops = _HeadStateWriteOps(
+                    full_rewrite=True,
+                    field_deletes=(),
+                    tail_deletes=(),
+                    upserts=tuple(_head_state_item_rows_from_fragments(new_fragments)),
+                )
+            projection = self._projection_for_commit(
+                head=head,
+                state=state,
+                world_revision=world_revision,
+                deliberation_revision=deliberation_revision,
+                ledger_sequence=ledger_sequence,
+                changed_fields=changed_fields,
+            )
+            encode_ms = (time.perf_counter() - phase_started) * 1000
+            phase_started = time.perf_counter()
+            if state_ops.full_rewrite:
+                connection.execute(
+                    "DELETE FROM world_v2_head_state_items WHERE world_id = ?",
+                    (self._world_id,),
+                )
+            else:
+                for field_name in state_ops.field_deletes:
+                    connection.execute(
+                        "DELETE FROM world_v2_head_state_items "
+                        "WHERE world_id = ? AND field = ?",
+                        (self._world_id, field_name),
+                    )
+                for field_name, from_index in state_ops.tail_deletes:
+                    connection.execute(
+                        "DELETE FROM world_v2_head_state_items "
+                        "WHERE world_id = ? AND field = ? AND idx >= ?",
+                        (self._world_id, field_name, from_index),
+                    )
+            if state_ops.upserts:
+                connection.executemany(
+                    "INSERT OR REPLACE INTO world_v2_head_state_items "
+                    "(world_id, field, idx, item_json) VALUES (?, ?, ?, ?)",
+                    (
+                        (self._world_id, field_name, index, item_json)
+                        for field_name, index, item_json in state_ops.upserts
+                    ),
+                )
+            storage_epoch = int(head["storage_epoch"]) + 1
             updated = connection.execute(
                 """UPDATE world_v2_heads
                    SET world_revision = ?, deliberation_revision = ?, ledger_sequence = ?,
                        state_json = ?, semantic_hash = ?, reducer_bundle_version = ?,
-                       state_hash = ?
+                       state_hash = ?, storage_epoch = ?
                    WHERE world_id = ? AND world_revision = ?
                      AND deliberation_revision = ? AND ledger_sequence = ?""",
                 (
                     world_revision,
                     deliberation_revision,
                     ledger_sequence,
-                    self._encode_state(state),
+                    _HEAD_STATE_SENTINEL,
                     projection.semantic_hash,
                     REDUCER_BUNDLE_VERSION,
-                    self._state_hash(
-                        state,
-                        ProjectionCursor(
-                            world_revision=world_revision,
-                            deliberation_revision=deliberation_revision,
-                            ledger_sequence=ledger_sequence,
-                        ),
-                    ),
+                    state_hash,
+                    storage_epoch,
                     self._world_id,
                     head["world_revision"],
                     head["deliberation_revision"],
@@ -2302,6 +3978,48 @@ class SQLiteWorldLedger:
             if updated.rowcount != 1:
                 raise ConcurrencyConflict("world head changed during commit")
             connection.commit()
+            commit_ms = (time.perf_counter() - phase_started) * 1000
+            total_ms = refresh_ms + validate_ms + reduce_ms + prefix_ms + encode_ms + commit_ms
+            if total_ms >= 1000:
+                _LOG.warning(
+                    "world v2 ledger commit phases events=%s refresh_ms=%.1f validate_ms=%.1f reduce_ms=%.1f prefix_ms=%.1f encode_ms=%.1f sqlite_commit_ms=%.1f total_ms=%.1f",
+                    ",".join(event.event_type for event in events),
+                    refresh_ms,
+                    validate_ms,
+                    reduce_ms,
+                    prefix_ms,
+                    encode_ms,
+                    commit_ms,
+                    total_ms,
+                )
+            self._verified_ledger_epoch = self._ledger_mutation_epoch_locked()
+            self._verified_data_version = self._sqlite_data_version_locked()
+            for event in events:
+                self._verified_event_commit_cache[event.event_id] = (event, result)
+            # This exact projection produced the state bytes and hashes that
+            # were atomically committed above.  Seed the process-local head so
+            # the next Context build does not decode and revalidate the entire
+            # growing state.  Every read still compares the durable row
+            # identity (cursor, hashes and the monotonic storage epoch), so an
+            # external append or mutation cannot reuse it as authority for a
+            # different head.
+            self._head_projection_cache = projection
+            self._head_projection_cache_row_identity = (
+                world_revision,
+                deliberation_revision,
+                ledger_sequence,
+                projection.semantic_hash,
+                state_hash,
+                storage_epoch,
+            )
+            self._head_state_cache = state
+            self._head_state_cache_identity = (
+                world_revision,
+                deliberation_revision,
+                ledger_sequence,
+                projection.semantic_hash,
+                state_hash,
+            )
             return result
         except sqlite3.IntegrityError as exc:
             connection.rollback()
@@ -2558,12 +4276,27 @@ class SQLiteWorldLedger:
             if cursor.ledger_sequence > head.ledger_sequence:
                 raise ValueError("requested projection cursor is outside the ledger range")
             if cursor == head_cursor:
+                self._project_at_head_hits += 1
                 return head
-            return self._replay_locked(
+            cache_key = (
+                cursor.world_revision,
+                cursor.deliberation_revision,
+                cursor.ledger_sequence,
+            )
+            cached = self._historical_projection_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            self._historical_replay_calls += 1
+            projection = self._replay_locked(
                 target_cursor=cursor,
                 target_schema_version=CURRENT_SCHEMA_VERSION,
                 reducer_bundle_version=REDUCER_BUNDLE_VERSION,
             )
+            self._historical_projection_cache[cache_key] = projection
+            # Keep memory bounded even during long-running multi-turn audits.
+            if len(self._historical_projection_cache) > 8:
+                self._historical_projection_cache.pop(next(iter(self._historical_projection_cache)))
+            return projection
 
     def _pin_observation_history_proof(
         self, *, cursor: ProjectionCursor
@@ -2982,6 +4715,10 @@ class SQLiteWorldLedger:
             connection = self._connection
             try:
                 connection.execute("BEGIN")
+                # Keep the history read one explicit snapshot.  The refresh
+                # runs after BEGIN so tracing/observability still sees the
+                # transaction boundary as the first statement.
+                self._refresh_verified_external_history_locked()
                 result = self._observation_events_at_locked(validated, cursor=cursor)
                 connection.commit()
                 return result
@@ -3032,6 +4769,28 @@ class SQLiteWorldLedger:
                     boundary_events,
                     boundary_result,
                 )
+            cached_by_identity: dict[str, HistoricalLedgerEvent] = {}
+            cached_candidates: list[tuple[str, HistoricalLedgerEvent]] = []
+            uncached: list[ObservationEventLocator] = []
+            for locator in validated:
+                hit = self._verified_observation_event_cache.get(
+                    (locator.observation_id, locator.event_type, locator.idempotency_key)
+                )
+                if hit is None or hit.event_cursor.ledger_sequence > cursor.ledger_sequence:
+                    uncached.append(locator)
+                else:
+                    cached_by_identity[locator.idempotency_key] = hit
+                    cached_candidates.append((locator.observation_id, hit))
+            if not uncached:
+                cached = sorted(
+                    cached_by_identity.values(),
+                    key=lambda item: (item.event.event_id, item.event.event_type),
+                )
+                return tuple(cached)
+            # The immutable prefix cache is intentionally partial: a new Fact
+            # source should cost one proof lookup, not re-open every older
+            # message retained in the same Context slice.
+            validated = tuple(uncached)
             rows = tuple(
                 self._connection.execute(
                     f"""SELECT * FROM world_v2_events
@@ -3050,7 +4809,7 @@ class SQLiteWorldLedger:
             candidate_commit_ids = tuple(sorted({str(row["commit_id"]) for row in rows}))
             self._require_observation_commit_budget_locked(candidate_commit_ids)
             by_idempotency = {locator.idempotency_key: locator for locator in validated}
-            candidates: list[tuple[str, HistoricalLedgerEvent]] = []
+            candidates: list[tuple[str, HistoricalLedgerEvent]] = cached_candidates
             for row in rows:
                 locator = by_idempotency.get(str(row["idempotency_key"]))
                 if locator is None:
@@ -3108,7 +4867,20 @@ class SQLiteWorldLedger:
             candidates.sort(
                 key=lambda item: (item[0], item[1].event.event_type, item[1].event.event_id)
             )
-            return tuple(candidate for _, candidate in candidates)
+            result = tuple(candidate for _, candidate in candidates)
+            candidate_by_identity = {
+                historical.event.idempotency_key: historical for _, historical in candidates
+            }
+            for locator in validated:
+                historical = candidate_by_identity.get(locator.idempotency_key)
+                if historical is not None:
+                    self._verified_observation_event_cache[
+                        (locator.observation_id, locator.event_type, locator.idempotency_key)
+                    ] = historical
+            if len(self._verified_observation_event_cache) > 512:
+                for key in tuple(self._verified_observation_event_cache)[:128]:
+                    self._verified_observation_event_cache.pop(key, None)
+            return result
 
     def _require_observation_commit_budget_locked(self, commit_ids: Sequence[str]) -> None:
         identities = tuple(sorted(set(commit_ids)))
@@ -3137,6 +4909,10 @@ class SQLiteWorldLedger:
         """Return verified persisted bytes and the result of their original commit."""
 
         with self._thread_lock:
+            self._refresh_verified_external_history_locked()
+            cached = self._verified_event_commit_cache.get(event_id)
+            if cached is not None:
+                return cached
             row = self._connection.execute(
                 """SELECT commit_id FROM world_v2_events
                    WHERE world_id = ? AND event_id = ?""",
@@ -3144,7 +4920,38 @@ class SQLiteWorldLedger:
             ).fetchone()
             if row is None:
                 return None
-            events, result, _ = self._verified_commit_locked(str(row["commit_id"]))
+            # Startup verifies the immutable event/commit history from genesis,
+            # and every later append updates the authenticated prefix in the
+            # same SQLite transaction.  Bind this addressed lookup to that
+            # already-verified process prefix.  Replaying genesis-to-predecessor
+            # for every source ref made Context compilation O(commits * history)
+            # while adding no new evidence: the event rows below are still
+            # independently envelope-hashed and checked against their owning
+            # commit/result bytes by ``_verified_commit_locked``.
+            # ``_refresh_verified_external_history_locked`` above has already
+            # bound this process to the current SQLite data_version.  Startup,
+            # external refresh, and same-connection commit all install the
+            # exact verified head projection.  Re-reading and hashing the
+            # multi-megabyte state_json once per source ref made a cold Context
+            # build O(required refs * full head size), despite every read being
+            # reported as a cache hit.
+            head = self._head_projection_cache
+            if head is None:
+                head = self._project_locked()
+            verified_prefix_cursor = ProjectionCursor(
+                world_revision=head.world_revision,
+                deliberation_revision=head.deliberation_revision,
+                ledger_sequence=head.ledger_sequence,
+            )
+            events, result, _ = self._verified_commit_locked(
+                str(row["commit_id"]),
+                verified_prefix_cursor=verified_prefix_cursor,
+            )
+            for verified_event in events:
+                self._verified_event_commit_cache[verified_event.event_id] = (
+                    verified_event,
+                    result,
+                )
             event = next((item for item in events if item.event_id == event_id), None)
             if event is None:
                 raise LedgerIntegrityError("event is absent from its owning commit")
@@ -3394,6 +5201,7 @@ class SQLiteWorldLedger:
         return tuple(events), rebuilt_result, persisted_request_hash
 
     def _project_locked(self) -> LedgerProjection:
+        self._head_projection_reads += 1
         try:
             head = self._connection.execute(
                 "SELECT * FROM world_v2_heads WHERE world_id = ?", (self._world_id,)
@@ -3402,7 +5210,28 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("world head disappeared")
             if head["reducer_bundle_version"] != REDUCER_BUNDLE_VERSION:
                 raise LedgerIntegrityError("world head reducer bundle is not installed")
-            state = self._decode_state(head["state_json"])
+            raw_state = head["state_json"]
+            if not isinstance(raw_state, str):
+                raise LedgerIntegrityError("head state is invalid")
+            row_identity = (
+                int(head["world_revision"]),
+                int(head["deliberation_revision"]),
+                int(head["ledger_sequence"]),
+                str(head["semantic_hash"]),
+                str(head["state_hash"]),
+                (
+                    int(head["storage_epoch"])
+                    if raw_state == _HEAD_STATE_SENTINEL
+                    else hashlib.sha256(raw_state.encode("utf-8")).digest()
+                ),
+            )
+            if (
+                self._head_projection_cache is not None
+                and self._head_projection_cache_row_identity == row_identity
+            ):
+                self._head_projection_cache_hits += 1
+                return self._head_projection_cache
+            state = self._decode_state(self._head_state_json_locked(head))
             cursor = ProjectionCursor(
                 world_revision=int(head["world_revision"]),
                 deliberation_revision=int(head["deliberation_revision"]),
@@ -3422,6 +5251,16 @@ class SQLiteWorldLedger:
             )
             if projection.semantic_hash != head["semantic_hash"]:
                 raise LedgerIntegrityError("head semantic hash does not match persisted state")
+            self._head_projection_cache = projection
+            self._head_projection_cache_row_identity = row_identity
+            self._head_state_cache = state
+            self._head_state_cache_identity = (
+                cursor.world_revision,
+                cursor.deliberation_revision,
+                cursor.ledger_sequence,
+                projection.semantic_hash,
+                str(persisted_state_hash),
+            )
             return projection
         except LedgerIntegrityError:
             raise
@@ -3662,6 +5501,7 @@ class SQLiteWorldLedger:
         target_schema_version: str,
         reducer_bundle_version: str,
     ) -> LedgerProjection:
+        self._total_replay_calls += 1
         require_reducer_bundle(reducer_bundle_version)
         require_target_schema(target_schema_version)
         state = ReducerState()
@@ -3740,6 +5580,10 @@ class SQLiteWorldLedger:
             except Exception as exc:
                 raise LedgerIntegrityError("persisted event is invalid") from exc
             ledger_sequence += 1
+            if target_cursor is None and event.schema_version == CURRENT_SCHEMA_VERSION:
+                self._recent_replay_event_cache[event.event_id] = event
+                if len(self._recent_replay_event_cache) > 128:
+                    self._recent_replay_event_cache.pop(next(iter(self._recent_replay_event_cache)))
             try:
                 definition = event_definition(event.event_type)
             except Exception as exc:
@@ -3759,6 +5603,9 @@ class SQLiteWorldLedger:
                     state,
                     event,
                     allow_legacy_plan_owner=event.event_id in legacy_plan_event_ids,
+                    allow_legacy_clock_drift=(
+                        event.event_id in self._legacy_clock_compat_event_ids
+                    ),
                 )
             except Exception as exc:
                 raise LedgerIntegrityError("persisted event cannot be reduced") from exc

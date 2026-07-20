@@ -58,6 +58,7 @@ class AppraisalAuthorizedMutationPayload(AppraisalMutationPayload):
     accepted_change_hash: str = Field(min_length=64, max_length=64)
     trigger_id: str = Field(min_length=1)
 
+
 class AppraisalAcceptedPayload(AppraisalAuthorizedMutationPayload):
     appraisal: AppraisalProjection
 
@@ -105,8 +106,7 @@ class AppraisalExpiredPayload(AppraisalMutationPayload):
     def expiry_is_timezone_aware(self) -> AppraisalExpiredPayload:
         _require_aware(self.expired_at, "expired_at")
         if not all(
-            ref.evidence_type == "clock_observation"
-            and ref.claim_purpose == "current_fact"
+            ref.evidence_type == "clock_observation" and ref.claim_purpose == "current_fact"
             for ref in self.evidence_refs
         ):
             raise ValueError("appraisal expiry requires clock evidence")
