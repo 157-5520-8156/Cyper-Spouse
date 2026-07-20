@@ -1,9 +1,11 @@
-"""Authenticated, read-only browser shell for the World v2 Dashboard.
+"""Local-first, read-only browser shell for the World v2 Dashboard.
 
 The module contains no World/Engine reader and no deployment registry.  It
 renders static HTML/JavaScript that can consume only the already-redacted
 Dashboard and Room DTO endpoints.  Authentication and host availability stay
-in the ASGI composition.
+in the ASGI composition.  The loopback daemon panel opens directly; the
+legacy session helper remains available for non-loopback compatibility and
+privileged DTO routes.
 """
 
 from __future__ import annotations
@@ -79,16 +81,16 @@ h1{font-size:20px}label,input,button{display:block;width:100%}input,button{margi
 UNAVAILABLE_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>World v2 Dashboard unavailable</title></head><body>
-<main><h1>World v2 Dashboard unavailable</h1><p>只读 World v2 host 尚未初始化或 operator token 未配置。不会回退到旧运行时。</p></main>
+<main><h1>World v2 Dashboard unavailable</h1><p>只读 World v2 host 尚未初始化。不会回退到旧运行时。</p></main>
 </body></html>"""
 
 
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>知栀的小屋 · World v2</title><style>
-:root{font-family:"PingFang SC",system-ui,sans-serif;color:#3f342d;background:#d9cdbc}*{box-sizing:border-box}body{margin:0}.bar{padding:16px 24px;background:#4d3b34;color:#fff8ea;display:flex;justify-content:space-between;align-items:center}.bar h1{font-size:18px;margin:0}.bar form{margin:0}.bar button{background:#6f8e84;color:white;border:1px solid #d6c7a5;padding:7px 10px}.wrap{max-width:1180px;margin:auto;padding:22px;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,.7fr);gap:18px}.room,.panel{background:#f7eedf;border:3px solid #684f42;box-shadow:5px 5px 0 #b79c84}.room{padding:10px}.room img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;image-rendering:pixelated;background:#211b1a}.panel{padding:16px}.value{font-size:20px;color:#557f78}.muted{color:#80685b;font-size:12px}.agenda{padding:0;list-style:none}.agenda li{padding:9px 0;border-bottom:1px solid #decfbd}.error{color:#9c4545}@media(max-width:760px){.wrap{grid-template-columns:1fr}}
-</style></head><body><header class="bar"><h1>知栀的小屋 · World v2</h1><form method="post" action="/world-v2/dashboard/logout"><button type="submit">退出</button></form></header>
-<main class="wrap"><section class="room"><img id="roomVisual" src="/assets/dashboard/zhizhi-room-isometric-v2.png" alt="知栀的小屋"><p id="roomRoute" class="muted">正在读取场景状态…</p></section>
+:root{font-family:"PingFang SC",system-ui,sans-serif;color:#3f342d;background:#d9cdbc}*{box-sizing:border-box}body{margin:0}.bar{padding:16px 24px;background:#4d3b34;color:#fff8ea;display:flex;justify-content:space-between;align-items:center}.bar h1{font-size:18px;margin:0}.bar form{margin:0}.bar button{background:#6f8e84;color:white;border:1px solid #d6c7a5;padding:7px 10px}.wrap{max-width:1180px;margin:auto;padding:22px;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,.7fr);gap:18px}.room,.panel{background:#f7eedf;border:3px solid #684f42;box-shadow:5px 5px 0 #b79c84}.room{padding:10px}.room iframe{display:block;width:100%;aspect-ratio:4/3;border:0;background:#211b1a;image-rendering:pixelated}.panel{padding:16px}.value{font-size:20px;color:#557f78}.muted{color:#80685b;font-size:12px}.agenda{padding:0;list-style:none}.agenda li{padding:9px 0;border-bottom:1px solid #decfbd}.error{color:#9c4545}@media(max-width:760px){.wrap{grid-template-columns:1fr}}
+</style></head><body><header class="bar"><h1>知栀的小屋 · World v2</h1></header>
+<main class="wrap"><section class="room"><iframe id="roomVisual" src="/pixel-home/index.html" title="知栀的小屋"></iframe><p id="roomRoute" class="muted">正在读取场景状态…</p></section>
 <aside><section class="panel"><h2>她现在在做什么</h2><div id="lifeNow" class="value">读取中</div><p id="lifeDetail" class="muted"></p><p id="lifeNext" class="muted"></p><p id="lifeLast" class="muted"></p><p id="lifeMood" class="muted"></p></section><section class="panel"><h2>日历 · 未来几天</h2><ul id="calendar" class="agenda"></ul><p id="calendarEmpty" class="muted"></p></section><section class="panel"><h2>今天的生活</h2><ul id="today" class="agenda"></ul><p id="todayEmpty" class="muted"></p></section><section class="panel"><h2>今天的经历</h2><ul id="experiences" class="agenda"></ul><p id="experiencesEmpty" class="muted"></p></section><section class="panel"><h2>情绪 · 逐条</h2><ul id="affectEpisodes" class="agenda"></ul><p id="affectEpisodesEmpty" class="muted"></p></section><section class="panel"><h2>情绪变化阶段</h2><ul id="changePhases" class="agenda"></ul><p id="changePhasesEmpty" class="muted"></p></section><section class="panel"><h2>她记住的你 · 用户事实</h2><ul id="userFacts" class="agenda"></ul><p id="userFactsEmpty" class="muted"></p></section><section class="panel"><h2>记忆</h2><ul id="memories" class="agenda"></ul><p id="memoriesEmpty" class="muted"></p></section><section class="panel"><h2>私下印象</h2><ul id="impressions" class="agenda"></ul><p id="impressionsEmpty" class="muted"></p></section><section class="panel"><h2>憧憬</h2><ul id="aspirations" class="agenda"></ul><p id="aspirationsEmpty" class="muted"></p></section><section class="panel"><h2>和你的关系</h2><ul id="userRelationship" class="agenda"></ul><p id="userRelationshipEmpty" class="muted"></p></section><section class="panel"><h2>她与身边人</h2><ul id="npcRelationships" class="agenda"></ul><p id="npcRelationshipsEmpty" class="muted"></p></section><section class="panel"><h2>内在机制</h2><ul id="mechanisms" class="agenda"></ul><p id="status" class="muted">只读 · QQ 世界</p></section></aside></main>
 <script src="/world-v2/dashboard/app.js" defer></script></body></html>"""
 
@@ -156,6 +158,36 @@ const ASPIRATION_STATUS_LABELS={active:'还惦记着',crystallized:'已经写进
 const STAGE_LABELS={stranger:'陌生',acquaintance:'认识了',friend:'朋友',close_friend:'很熟的朋友',ambiguous:'有点暧昧',lover:'恋人'};
 const REL_VAR_LABELS={trust_bp:'信任',closeness_bp:'亲近',respect_bp:'尊重',reliability_bp:'可靠',mutuality_bp:'相互',repair_confidence_bp:'修复信心'};
 const NPC_NAMES={'literature-fan':'范予安','roommate-lin':'林晚','roommate-qiao':'乔宁','mother-shen':'沈岚','father-shen':'陈远','photography-zhou':'周栩','hometown-xu':'徐青禾'};
+// --- pixel-home room bridge -------------------------------------------------
+// The embedded /pixel-home iframe renders her room; every life-state poll is
+// relayed to it as a versioned postMessage.  bridge.js inside the prototype
+// maps the message onto the engine; the room stays fully usable standalone.
+const ROOM_SCENE_STATE_TYPE='zhizhi-scene-state';
+// Her own dorm room is the only life-state location that maps onto the home
+// diorama; every other location_ref means she is out.
+const HOME_LOCATION_REF='location:ecnu-dorm-room';
+const activityIsAtHome=active=>!active||!active.location_ref||active.location_ref===HOME_LOCATION_REF;
+const localHourOf=value=>{const when=value?new Date(value):null;return when&&!Number.isNaN(when.getTime())?when.getHours()+when.getMinutes()/60:null;};
+const buildRoomSceneState=(active,logicalTime)=>({
+  type:ROOM_SCENE_STATE_TYPE,v:1,
+  active:active?{activity_kind:active.activity_kind||null,location_ref:active.location_ref||null}:null,
+  at_home:activityIsAtHome(active),
+  local_hour:localHourOf(logicalTime),
+});
+const roomFrame=document.getElementById('roomVisual');
+let roomSceneState=null;
+let roomClockInitialized=false;
+function pushRoomSceneState(){
+  if(roomSceneState&&roomFrame&&roomFrame.contentWindow)roomFrame.contentWindow.postMessage(roomSceneState,window.location.origin);
+}
+function syncRoomClock(){
+  // The engine only accepts a start-of-day hour via its ?hour= URL parameter,
+  // so the world clock is applied once by reloading the iframe with it.
+  if(roomClockInitialized||!roomFrame||!roomSceneState||roomSceneState.local_hour===null)return;
+  roomClockInitialized=true;
+  roomFrame.src='/pixel-home/index.html?hour='+roomSceneState.local_hour.toFixed(2);
+}
+if(roomFrame)roomFrame.addEventListener('load',pushRoomSceneState);
 function fillList(listId,emptyId,rows,emptyText){
   const list=document.getElementById(listId);list.replaceChildren();
   for(const row of rows){const li=document.createElement('li');li.textContent=row;list.appendChild(li);}
@@ -170,6 +202,9 @@ async function loadLifeState(){
     const situation=mech.current_situation||{};
     const affect=mech.affect||{};
     const active=(situation.active_activities||[])[0];
+    roomSceneState=buildRoomSceneState(active||null,situation.logical_time);
+    syncRoomClock();
+    pushRoomSceneState();
     if(active){
       text('lifeNow',activityLabel(active.activity_kind));
       const since=active.last_transitioned_at?`从 ${fmtClock(active.last_transitioned_at)} 开始`:'';
