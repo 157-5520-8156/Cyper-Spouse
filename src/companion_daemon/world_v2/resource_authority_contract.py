@@ -1,4 +1,11 @@
-"""Immutable event routing for the `.16.0` ResourceAuthority seam."""
+"""Immutable event routing for the `.16.0` ResourceAuthority seam.
+
+DORMANT — no producer: no production ledger holds a committed ``V2Resource*``
+event and no runtime constructs these payloads.  Before wiring a producer,
+read the Producer-First Authority rule in CONTEXT.md and record the
+activation verdict in ``configs/mechanism_closure.yaml``
+(``v16-situation-constituents``).
+"""
 
 from __future__ import annotations
 

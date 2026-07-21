@@ -178,6 +178,11 @@ A sourced and expiring conversational commitment, question, concern, or unresolv
 
 A truth, Action, delivery, safety, privacy, legal, or consent rule that personality and user preference cannot override.
 
+## Producer-First Authority
+
+Any new authority — an event type with its reducers and acceptance chain — must land in the same delivery as its first real producer and its first consumer. An authority that nothing produces must not merge: it is inventory that every schema migration and grammar-coverage assertion then has to carry. An already-merged authority whose producer never arrived must be explicitly marked dormant in `configs/mechanism_closure.yaml`, and activating it later requires a recorded producer verdict first.
+_Avoid_: Speculative authority, dormant-by-default inventory
+
 ## Inner Advisory
 
 A sourced, bounded, and non-authoritative signal about what may be influencing the companion, such as an Appraisal, Drive, Affect tendency, repair need, or candidate Stance. It may shape a Proposal but cannot write World truth or veto expression.

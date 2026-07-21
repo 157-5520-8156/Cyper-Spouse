@@ -554,6 +554,11 @@ class FailoverChatModel:
         # consumed the installed fallback so it never calls that same provider
         # a second time for one turn.
         self.last_attempt_used_fallback = False
+        # This instance is shared by many concurrent cognition lanes, so the
+        # boolean above can be stale by the time another lane reads it.  The
+        # monotonic timestamp lets readers restrict "already used" to fallback
+        # activity recent enough to belong to their own turn.
+        self.last_fallback_used_at: float | None = None
 
     async def complete(
         self, messages: list[dict[str, str]], *, temperature: float = 0.8
@@ -584,6 +589,7 @@ class FailoverChatModel:
             if not _is_failover_eligible_provider_failure(exc):
                 raise
             self.last_attempt_used_fallback = True
+            self.last_fallback_used_at = monotonic()
             self.last_provider = str(getattr(self.fallback, "provider", "fallback"))
             self.last_model = str(getattr(self.fallback, "model", type(self.fallback).__name__))
             result = await self._call(

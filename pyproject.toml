@@ -25,13 +25,6 @@ dev = [
 [project.scripts]
 companion-daemon = "companion_daemon.app:main"
 companion-sim = "companion_daemon.cli:main"
-companion-qq-ws = "companion_daemon.qq_websocket:main"
-companion-proactive = "companion_daemon.proactive_cli:main"
-companion-send-sticker = "companion_daemon.qq_sticker_cli:main"
-companion-proactive-scheduler = "companion_daemon.proactive_scheduler:main"
-companion-life-event = "companion_daemon.life_event:main"
-companion-eval-dialogue = "companion_daemon.dialogue_eval:main"
-companion-eval-experience = "companion_daemon.experience_evaluation_cli:main"
 companion-napcat = "companion_daemon.napcat_cli:main"
 companion-onebot = "companion_daemon.napcat_cli:onebot_main"
 companion-world-v2-test-economy = "companion_daemon.world_v2.test_economy_cli:main"

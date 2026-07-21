@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>像素小屋 · Pixel Home</title>
 <link rel="stylesheet" href="style.css">
+<style>body.embed{display:block;padding:0;gap:0;overflow:hidden}body.embed header,body.embed .toolbar,body.embed #iobox{display:none}body.embed .stage-wrap{width:100%;border:0;border-radius:0;box-shadow:none}body.embed canvas#stage{pointer-events:none}</style>
 </head>
 <body>
   <header>
@@ -28,7 +29,7 @@
     <button id="export">导出布局</button>
     <button id="import">导入布局</button>
     <button id="reset">重置</button>
-    <p id="edit-hint">编辑模式：左键选中/放下家具，从下面的清单添加新家具，右键删除或取消。布局自动保存到浏览器。</p>
+    <p id="edit-hint">编辑模式：左键选中/放下家具，从下面的清单添加新家具；<strong>右键点家具直接删除</strong>，右键点空地取消当前选择；<strong>按 R 翻转朝向</strong>（选中或待放置时）。布局自动保存到浏览器。</p>
   </div>
 
   <div id="iobox">
@@ -42,10 +43,11 @@
     </div>
   </div>
 
-  <script src="js/pixel.js"></script>
-  <script src="js/sprites.js"></script>
-  <script src="js/actor.js"></script>
-  <script src="js/engine.js"></script>
-  <script src="js/main.js"></script>
+  <script src="js/pixel.js?v=9"></script>
+  <script src="js/sprites.js?v=9"></script>
+  <script src="js/actor.js?v=9"></script>
+  <script src="js/engine.js?v=9"></script>
+  <script src="js/main.js?v=9"></script>
+  <script src="js/bridge.js?v=9"></script>
 </body>
 </html>

@@ -12,6 +12,8 @@ import hashlib
 import re
 from typing import Literal
 
+from .production_reliability_metrics import record_claim_free_reply
+
 
 WorldProbeIntent = Literal["current", "recent", "setting", "general"]
 
@@ -102,6 +104,7 @@ def recover_without_world_evidence(
 ) -> str:
     """Choose a bounded claim-free expression and avoid recent verbatim reuse."""
 
+    record_claim_free_reply()
     intent = classify_world_probe_intent(trigger_text)
     candidates = _STRATEGIES[intent]
     offset = int.from_bytes(

@@ -272,87 +272,25 @@ def test_http_entry_guard_includes_module_scope_world_authority_imports(
     assert any(item.rule == "world_v2_authority_import" for item in violations)
 
 
-def test_http_v2_module_defers_archive_engine_construction_until_an_archive_route_uses_it() -> None:
-    import companion_daemon.app as app_module
+def test_default_asgi_graph_registers_no_legacy_ingress() -> None:
+    """The archived runtime is gone; no composition may re-register its routes."""
 
-    assert type(app_module.engine).__name__ == "_LazyArchiveEngine"
-    assert app_module.engine._instance is None
-
-
-def test_selected_http_v2_route_does_not_resolve_the_archive_engine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
     from fastapi.testclient import TestClient
 
     import companion_daemon.app as app_module
 
-    class _V2CaptureOnly:
-        async def respond(self, **_kwargs: object):
-            return type(
-                "Result",
-                (),
-                {
-                    "status": "action_authorized",
-                    "action_id": "action:v2:guard",
-                    "text": "这是 v2 回复。",
-                    "canonical_user_id": "geoff",
-                },
-            )()
-
-        async def aclose(self) -> None:
-            return None
-
-    assert type(app_module.engine).__name__ == "_LazyArchiveEngine"
-    monkeypatch.setattr(app_module, "http_v2_capture", _V2CaptureOnly())
-    with TestClient(app_module.app) as client:
-        response = client.post(
-            "/messages",
-            json={
-                "platform": "simulator",
-                "platform_user_id": "geoff",
-                "message_id": "message:reverse-guard",
-                "text": "在吗？",
-            },
-        )
-
-    assert response.status_code == 200
-    assert app_module.engine._instance is None
-
-
-def test_default_asgi_graph_excludes_every_legacy_ingress_and_never_closes_engine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from fastapi.testclient import TestClient
-
-    import companion_daemon.app as app_module
-
-    class _ExplodingLegacyAuthority:
-        def __getattr__(self, name: str) -> object:
-            raise AssertionError(f"default app touched legacy authority: {name}")
-
-        async def aclose(self) -> None:
-            raise AssertionError("default app closed legacy authority")
-
-    monkeypatch.setattr(app_module, "engine", _ExplodingLegacyAuthority())
     default_paths = {str(getattr(route, "path", "")) for route in app_module.app.routes}
-    archive_paths = {
-        str(getattr(route, "path", "")) for route in app_module.archive_app.routes
-    }
 
     assert {
         "/proactive/{canonical_user_id}",
         "/world/{world_id}/commands",
         "/world-runtime/overview",
         "/qq/webhook",
+        "/world-console",
     }.isdisjoint(default_paths)
-    assert {
-        "/proactive/{canonical_user_id}",
-        "/world/{world_id}/commands",
-        "/world-runtime/overview",
-        "/qq/webhook",
-    } <= archive_paths
     assert "/messages" in default_paths
-    assert "/messages" not in archive_paths
+    assert not hasattr(app_module, "engine")
+    assert not hasattr(app_module, "archive_app")
 
     with TestClient(app_module.app) as client:
         assert client.get("/health").status_code == 200
@@ -360,17 +298,3 @@ def test_default_asgi_graph_excludes_every_legacy_ingress_and_never_closes_engin
         assert client.post("/proactive/geoff").status_code == 404
         assert client.post("/world/demo/commands", json={}).status_code == 404
         assert client.get("/world-runtime/overview").status_code == 404
-
-
-def test_archive_factory_is_explicit_and_has_no_world_v2_ingress() -> None:
-    import companion_daemon.app as app_module
-
-    archived = app_module.create_archive_asgi_app()
-    paths = {str(getattr(route, "path", "")) for route in archived.routes}
-
-    assert archived.state.owns_archive_engine is True
-    assert "/qq/webhook" in paths
-    assert "/world/{world_id}/commands" in paths
-    assert "/messages" not in paths
-    assert not any(path.startswith("/world-v2/") for path in paths)
-    assert not any(path.startswith("/internal/world-v2/") for path in paths)

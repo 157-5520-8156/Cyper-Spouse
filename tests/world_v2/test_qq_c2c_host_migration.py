@@ -1022,13 +1022,6 @@ def test_programmatic_napcat_factory_uses_the_same_compatible_v2_default(
         "companion_daemon.world_v2.qq_c2c_onebot_app.create_qq_c2c_onebot_app",
         _build_v2,
     )
-    monkeypatch.setattr(
-        napcat_cli,
-        "build_companion_engine",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("compatible programmatic default built archive Engine")
-        ),
-    )
 
     result = napcat_cli.create_app(adapter="napcat", use_fake_model=True)
 
@@ -1173,11 +1166,6 @@ def test_napcat_v2_branch_never_builds_legacy_engine_and_normalizes_supported_sh
         NAPCAT_ACCEPT_UNAUTHENTICATED_LOCAL_EVENTS="false",
     )
     monkeypatch.setattr(napcat_cli, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        napcat_cli,
-        "build_companion_engine",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy engine must not be built")),
-    )
     monkeypatch.setattr(onebot_v2, "build_qq_c2c_host", lambda **_kwargs: host)
 
     app = napcat_cli.create_app(adapter="napcat", use_fake_model=True, world_v2_c2c=True)

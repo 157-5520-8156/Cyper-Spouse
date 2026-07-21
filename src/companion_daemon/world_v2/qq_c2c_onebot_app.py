@@ -25,6 +25,7 @@ from companion_daemon.onebot_adapter import (
 )
 
 from .platform_action_executor import MediaProviderTransport
+from .production_reliability_metrics import reliability_snapshot
 from .production_turn_application import MediaPreviewDeployment
 from .qq_attachment_archive import QQOneBotAttachmentArchiver
 from .qq_c2c_host import QQC2CHost, build_qq_c2c_host, qq_c2c_world_id
@@ -325,12 +326,19 @@ def create_qq_c2c_onebot_app(
     @app.get("/health")
     async def health():
         world = await host.world_health_diagnostics()
+        scheduler_view = scheduler.snapshot(now=datetime.now(UTC), world=world)
+        # Rolling process-local reliability counters (24h window): visible
+        # inbound replies, local failsafe engagements, corrective repairs,
+        # claim-free boundary lines, and backup-provider recoveries.  The
+        # ledger stays the durable audit; this makes the failsafe rate
+        # checkable at a glance without a ledger scan.
+        scheduler_view["reliability"] = reliability_snapshot()
         return {
             "status": "running",
             "adapter": adapter,
             "world_v2": True,
             "mode": "c2c-normalized-ingress",
-            "scheduler": scheduler.snapshot(now=datetime.now(UTC), world=world),
+            "scheduler": scheduler_view,
         }
 
     def _media_observer_access(token: str | None) -> JSONResponse | None:

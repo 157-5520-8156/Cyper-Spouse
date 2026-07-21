@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import base64
 from datetime import UTC, datetime
 import hashlib
-import json
 from pathlib import Path
 
 import pytest

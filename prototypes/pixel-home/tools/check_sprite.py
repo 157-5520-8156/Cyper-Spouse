@@ -20,7 +20,9 @@ from pathlib import Path
 
 from PIL import Image
 
-HX, HY = 16, 8
+import make_sprite
+
+HX, HY = make_sprite.HX, make_sprite.HY
 
 
 def bottom_profile(img: Image.Image) -> dict[int, int]:
@@ -77,9 +79,9 @@ def check(name: str, meta: dict, path: Path) -> None:
 
     print(f"{name}: {ow}x{oh}  footprint {w_tiles}x{d_tiles}")
     print(f"  base slopes  left {fmt(slope_l)} (want +0.500)   right {fmt(slope_r)} (want -0.500)")
-    print(f"  opaque width {ow}px vs diamond {expected_w}px  ({ow - expected_w:+d}px overhang)")
+    print(f"  opaque width {ow}px vs diamond {expected_w:.0f}px  ({ow - expected_w:+.0f}px overhang)")
     print(f"  south tip at ({south_x:.1f}, {south_y})  expected ({expect_south[0]}, {expect_south[1]})"
-          f"  delta ({south_x - expect_south[0]:+.1f}, {south_y - expect_south[1]:+d})")
+          f"  delta ({south_x - expect_south[0]:+.1f}, {south_y - expect_south[1]:+.0f})")
 
 
 def main() -> None:

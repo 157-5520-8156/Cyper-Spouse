@@ -33,14 +33,25 @@ from companion_daemon.world_v2.recent_dialogue import (
     DialogueSourceClaim,
     RecentDialogueItem,
 )
+from companion_daemon.world_v2.character_core_reducers import CHARACTER_CORE_POLICY_REFS
 from companion_daemon.world_v2.schemas import (
+    CHARACTER_CORE_COORDINATE_CATALOG_DIGEST,
     AffectEpisodeProjection,
     BudgetAccount,
     CapabilityStateProjection,
+    CharacterCoreAxis,
+    CharacterCoreImmutableIdentity,
+    CharacterCoreOperatorGoverned,
+    CharacterCoreOrigin,
+    CharacterCoreProjection,
+    CharacterCoreSlowEvolving,
+    CharacterCoreValuePriority,
+    CharacterCoreValues,
     FactProjection,
     MemoryCandidateProjection,
     PrivateImpressionProjection,
     ThreadProjection,
+    character_core_semantic_fingerprint,
 )
 from companion_daemon.world_v2.situation_compiler import (
     AttentionSlice,
@@ -105,6 +116,7 @@ def _item_ref(value) -> str:
         "fact_id",
         "grant_id",
         "impression_id",
+        "core_id",
     ):
         if hasattr(value, field):
             return str(getattr(value, field))
@@ -980,6 +992,396 @@ def test_malformed_metadata_identity_sets_fail_as_value_errors() -> None:
     missing = valid.model_copy(update={"item_metadata": (valid.item_metadata[0],)})
     with pytest.raises(ValueError, match="metadata does not cover"):
         compile_context_capsule(_request(action_budget=missing))
+
+
+def _large_memory_retrievals(*, count: int = 2, text_characters: int = 3_000):
+    items: list[MemoryRetrievalItem] = []
+    refs: list[tuple[str, ...]] = []
+    for index in range(count):
+        ref = f"event:memory-source:overflow:{index}"
+        digest = hashlib.sha256(ref.encode()).hexdigest()
+        text = f"记忆{index}" + ("长" * text_characters)
+        refs.append((ref,))
+        items.append(
+            MemoryRetrievalItem(
+                candidate_id=f"memory:overflow:{index}",
+                cue_kind="future_utility",
+                retention_rationales=("future_utility",),
+                privacy_ceiling="personal",
+                retrieval_strength_bp=5_000,
+                source_excerpts=(
+                    MemorySourceExcerpt(
+                        source_kind="fact",
+                        source_id=f"fact:overflow:{index}",
+                        source_entity_revision=1,
+                        authority_event_ref=ref,
+                        authority_world_revision=7,
+                        authority_payload_hash=digest,
+                        source_values_hash=HASH_A,
+                        excerpt_ref=f"observation:overflow:{index}",
+                        excerpt_payload_hash=hashlib.sha256(text.encode()).hexdigest(),
+                        text=text,
+                        truncated=False,
+                    ),
+                ),
+                truncated=False,
+            )
+        )
+    return _typed_bound(
+        tuple(items),
+        slice_name="active_memory_candidates",
+        source_refs_by_item=tuple(refs),
+    )
+
+
+def test_protected_floor_overflow_fails_soft_with_explicit_degradation() -> None:
+    """Inputs that previously raised the global whole-item ValueError now
+    produce a legal capsule whose degradation is visible in the log."""
+
+    policy = ContextCapsuleBudgetPolicy(
+        hard_max_characters=4_000,
+        active_memory_candidates=SliceBudget(
+            max_items=8, max_fields=128, max_characters=16_000
+        ),
+    )
+
+    capsule = compile_context_capsule(
+        _request(active_memory_candidates=_large_memory_retrievals()),
+        policy=policy,
+    )
+
+    assert capsule.budget.used_characters <= 4_000
+    assert capsule.budget.used_characters == len(capsule.model_content_json)
+    assert any(
+        entry.slice_name == "active_memory_candidates"
+        and entry.reason == "global_character_budget"
+        for entry in capsule.budget.truncation_log
+    )
+    # The emptied envelope was collapsed rather than left as proof-only noise.
+    assert capsule.active_memory_candidates.items == ()
+    assert capsule.active_memory_candidates.truncated is True
+    slices = json.loads(capsule.model_content_json)["slices"]
+    assert slices["active_memory_candidates"] == {
+        "availability": "available",
+        "content_omitted": True,
+        "truncated": True,
+    }
+
+
+def test_tiny_global_budget_terminates_with_truncated_mandatory_head() -> None:
+    """Even a budget below every whole-item floor terminates and keeps an
+    explicitly character-truncated current_situation view."""
+
+    policy = ContextCapsuleBudgetPolicy(hard_max_characters=2_500)
+
+    capsule = compile_context_capsule(_request(), policy=policy)
+
+    assert capsule.budget.used_characters <= 2_500
+    assert any(
+        entry.slice_name == "current_situation"
+        and entry.reason == "global_character_budget"
+        for entry in capsule.budget.truncation_log
+    )
+    # The trusted item keeps its complete payload and hash closure; only the
+    # model-facing view is bounded.
+    assert len(capsule.current_situation.items) == 1
+    assert capsule.current_situation.items[0].value_hash == canonical_value_hash(
+        _situation()
+    )
+    model_view = json.loads(capsule.current_situation.model_content_json)
+    assert model_view["truncated"] is True
+    assert model_view["items"][0]["item_ref"] == "actor:companion"
+    assert "value_preview" in model_view["items"][0]
+
+
+def test_fail_soft_tiers_do_not_change_within_budget_compilations() -> None:
+    """The ordinary in-budget path stays byte-identical: no degraded views,
+    no global omissions, stable capsule identity."""
+
+    first = compile_context_capsule(_request())
+    second = compile_context_capsule(_request())
+
+    assert first.model_dump_json() == second.model_dump_json()
+    assert first.budget.truncation_log == ()
+    assert "content_omitted" not in first.model_content_json
+    assert "value_preview" not in first.model_content_json
+    assert first.current_situation.truncated is False
+
+
+def _character_core_bound():
+    values = CharacterCoreValues(
+        immutable_identity=CharacterCoreImmutableIdentity(
+            canonical_identity_refs=("identity:companion",),
+            continuity_anchor_refs=("continuity:world",),
+        ),
+        operator_governed=CharacterCoreOperatorGoverned(
+            role_refs=("role:virtual-companion",),
+            non_negotiable_value_refs=("value:agency",),
+            hard_boundary_refs=("boundary:no-coercion",),
+        ),
+        slow_evolving=CharacterCoreSlowEvolving(
+            coordinate_catalog_version="character-core-coordinate-catalog.1",
+            coordinate_catalog_digest=CHARACTER_CORE_COORDINATE_CATALOG_DIGEST,
+            trait_axes=(
+                CharacterCoreAxis(axis_code="assertiveness", value_bp=5000),
+                CharacterCoreAxis(axis_code="curiosity", value_bp=5000),
+            ),
+            value_priorities=(
+                CharacterCoreValuePriority(value_ref="value:autonomy", priority_bp=7000),
+            ),
+            preference_refs=("preference:quiet_reflection",),
+            autonomy_style="self_directed",
+            attachment_tendency="balanced",
+            conflict_style="deliberative",
+            privacy_tendency="selective",
+        ),
+        privacy_class="private",
+    )
+    core = CharacterCoreProjection(
+        core_id="core:companion",
+        actor_ref="actor:companion",
+        entity_revision=1,
+        semantic_fingerprint=character_core_semantic_fingerprint(
+            core_id="core:companion",
+            actor_ref="actor:companion",
+            values=values,
+            policy_refs=CHARACTER_CORE_POLICY_REFS,
+        ),
+        values=values,
+        origin=CharacterCoreOrigin(
+            change_id="change:core:1",
+            transition_id="transition:core:1",
+            policy_refs=CHARACTER_CORE_POLICY_REFS,
+            accepted_event_ref="event:core:1",
+        ),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    return _bound(
+        core,
+        privacies=("withhold",),
+        slice_name="character_core",
+        source_ref="event:core:1",
+    )
+
+
+def test_tiny_budget_truncates_both_mandatory_heads_and_keeps_authority() -> None:
+    """With a real character core present, an extreme budget truncates both
+    mandatory head views while their trusted items keep complete payloads."""
+
+    capsule = compile_context_capsule(
+        _request(character_core=_character_core_bound()),
+        policy=ContextCapsuleBudgetPolicy(hard_max_characters=1_600),
+    )
+
+    assert capsule.budget.used_characters <= 1_600
+    for name in ("character_core", "current_situation"):
+        assert any(
+            entry.slice_name == name and entry.reason == "global_character_budget"
+            for entry in capsule.budget.truncation_log
+        ), name
+    # Authority is untouched: complete item payloads, hashes and proof stay.
+    core_item = capsule.character_core.items[0]
+    assert core_item.character_count == len(core_item.payload_json)
+    assert capsule.character_core.resolver_proof is not None
+    core_view = json.loads(capsule.character_core.model_content_json)
+    assert core_view["truncated"] is True
+    assert core_view["items"][0]["value_preview"]
+
+
+def test_budget_below_structural_floor_terminates_with_explicit_error() -> None:
+    """A deployment budget below the capsule's fixed representation cost
+    cannot produce a legal capsule; it must terminate with the explicit
+    envelope error rather than loop or emit an over-budget packet."""
+
+    with pytest.raises(ValueError, match="minimum whole-item budget"):
+        compile_context_capsule(
+            _request(character_core=_character_core_bound()),
+            policy=ContextCapsuleBudgetPolicy(hard_max_characters=500),
+        )
+
+
+def test_proactive_opportunity_outlives_other_slices_under_emergency_budget() -> None:
+    """In the proactive lane the opportunity advisory survives ordinary recall
+    context and is only evicted at the very last optional tier."""
+
+    trigger_ref = "event:observation:1"
+    proactive = InnerAdvisoryProjection(
+        advisory_id="advisory:proactive:opportunity",
+        kind="proactive_opportunity",
+        source_refs=(trigger_ref,),
+        candidate_refs=("spontaneous_contact:observation:1",),
+        candidates=(
+            InnerAdvisoryCandidate(
+                candidate_ref="spontaneous_contact:observation:1",
+                value="The latest inbound message left a live conversational opening.",
+                weight_bp=10_000,
+                confidence_bp=10_000,
+            ),
+        ),
+        confidence_bp=100,
+        expiry=NOW + timedelta(minutes=1),
+        producer_version="test-proactive-matrix.1",
+    )
+    request = _request(
+        advisories=_bound((proactive,), source_ref=trigger_ref, ranks=(100,)),
+        active_memory_candidates=_large_memory_retrievals(),
+    )
+    generous = compile_context_capsule(
+        _request(advisories=_bound((proactive,), source_ref=trigger_ref, ranks=(100,)))
+    )
+    advisory_view_cost = generous.advisories.budget.used_characters
+
+    capsule = compile_context_capsule(
+        request,
+        policy=ContextCapsuleBudgetPolicy(
+            hard_max_characters=4_000 + advisory_view_cost,
+            active_memory_candidates=SliceBudget(
+                max_items=8, max_fields=128, max_characters=16_000
+            ),
+        ),
+    )
+
+    # Large recall context lost the emergency competition; the proactive
+    # opportunity kept its complete source-bound matrix.
+    assert [item.item_ref for item in capsule.advisories.items] == [
+        proactive.advisory_id
+    ]
+    assert capsule.active_memory_candidates.items == ()
+    assert capsule.budget.used_characters <= 4_000 + advisory_view_cost
+
+
+def test_advisory_block_degrades_by_rank_and_keeps_proactive_last() -> None:
+    """Under floor exhaustion the advisory matrix leaves whole-block retention
+    and evicts item-by-item; the proactive opportunity survives longest."""
+
+    trigger_ref = "event:observation:1"
+    proactive = InnerAdvisoryProjection(
+        advisory_id="advisory:zz-proactive",
+        kind="proactive_opportunity",
+        source_refs=(trigger_ref,),
+        candidate_refs=("spontaneous_contact:observation:1",),
+        candidates=(
+            InnerAdvisoryCandidate(
+                candidate_ref="spontaneous_contact:observation:1",
+                value="Verified latest inbound message before the idle gap.",
+                weight_bp=10_000,
+                confidence_bp=10_000,
+            ),
+        ),
+        confidence_bp=100,
+        expiry=NOW + timedelta(minutes=1),
+        producer_version="test-proactive-matrix.1",
+    )
+    optional = InnerAdvisoryProjection(
+        advisory_id="advisory:aa-optional",
+        kind="appraisal_candidate",
+        source_refs=(trigger_ref,),
+        candidate_refs=("candidate:optional",),
+        confidence_bp=10_000,
+        expiry=NOW + timedelta(minutes=1),
+        producer_version="test-optional-matrix.1",
+    )
+    bound = _bound(
+        (optional, proactive), source_ref=trigger_ref, ranks=(10_000, 100)
+    )
+    generous = compile_context_capsule(_request(advisories=bound))
+    assert len(generous.advisories.items) == 2
+    over_floor = generous.budget.used_characters - 400
+
+    capsule = compile_context_capsule(
+        _request(advisories=bound),
+        policy=ContextCapsuleBudgetPolicy(hard_max_characters=over_floor),
+    )
+
+    assert capsule.budget.used_characters <= over_floor
+    assert [item.item_ref for item in capsule.advisories.items] == [
+        proactive.advisory_id
+    ]
+    assert any(
+        entry.slice_name == "advisories"
+        and entry.reason == "global_character_budget"
+        for entry in capsule.budget.truncation_log
+    )
+
+
+def test_protected_slices_reach_one_before_advisory_rank_degradation() -> None:
+    """Emergency pressure reduces protected continuity floors to one before
+    it starts removing advisory alternatives, regardless of cross-slice rank."""
+
+    trigger_ref = "event:observation:1"
+    proactive = InnerAdvisoryProjection(
+        advisory_id="advisory:proactive",
+        kind="proactive_opportunity",
+        source_refs=(trigger_ref,),
+        candidate_refs=("spontaneous_contact:observation:1",),
+        candidates=(
+            InnerAdvisoryCandidate(
+                candidate_ref="spontaneous_contact:observation:1",
+                value="Keep the verified conversational opening available.",
+                weight_bp=10_000,
+                confidence_bp=10_000,
+            ),
+        ),
+        confidence_bp=10_000,
+        expiry=NOW + timedelta(minutes=1),
+        producer_version="test-proactive-matrix.1",
+    )
+    optional = InnerAdvisoryProjection(
+        advisory_id="advisory:optional",
+        kind="appraisal_candidate",
+        source_refs=(trigger_ref,),
+        candidate_refs=("candidate:optional",),
+        confidence_bp=10_000,
+        expiry=NOW + timedelta(minutes=1),
+        producer_version="test-optional-matrix.1",
+    )
+    memories = _large_memory_retrievals()
+    high_rank_metadata = tuple(
+        item.model_copy(update={"rank_score_bp": 10_000})
+        for item in memories.item_metadata
+    )
+    memories = memories.model_copy(
+        update={
+            "item_metadata": high_rank_metadata,
+            "resolver_proof": memories.resolver_proof.model_copy(
+                update={
+                    "result_set_hash": resolved_result_set_hash(
+                        "active_memory_candidates", high_rank_metadata
+                    )
+                }
+            ),
+        }
+    )
+    request = _request(
+        active_memory_candidates=memories,
+        advisories=_bound(
+            (optional, proactive),
+            source_ref=trigger_ref,
+            ranks=(100, 10_000),
+        ),
+    )
+    slice_policy = SliceBudget(max_items=8, max_fields=128, max_characters=16_000)
+    generous = compile_context_capsule(
+        request,
+        policy=ContextCapsuleBudgetPolicy(
+            active_memory_candidates=slice_policy,
+        ),
+    )
+
+    capsule = compile_context_capsule(
+        request,
+        policy=ContextCapsuleBudgetPolicy(
+            hard_max_characters=generous.budget.used_characters - 1_000,
+            active_memory_candidates=slice_policy,
+        ),
+    )
+
+    assert len(capsule.active_memory_candidates.items) == 1
+    assert [item.item_ref for item in capsule.advisories.items] == [
+        proactive.advisory_id,
+        optional.advisory_id,
+    ]
 
 
 @pytest.mark.parametrize(

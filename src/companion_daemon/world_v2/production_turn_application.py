@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, UTC
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 import time
 from typing import Literal, Mapping
@@ -208,8 +209,11 @@ from .expression_draft import QQ_NAPCAT_EXPRESSION_CAPABILITIES
 from .social_action_acceptance import SocialDeferredPolicy
 from .social_action_worker import SocialActionRunResult, SocialActionWorker
 from .quick_reaction import QuickReactionWorker
+from .quick_reaction_vertical import QuickReactionVerticalWorker
 from .chat_model_deliberation_adapter import ChatCompletionModel, CompanionIdentityFrame
 from .afterthought_author import AfterthoughtAuthorRuntime, AfterthoughtRunResult
+from .afterthought_author_vertical import AfterthoughtVerticalRuntime
+from .vertical_registry import assert_bounded_vertical_coverage
 from .proactive_action import (
     ProactiveActionRuntime,
     ProactiveDeliberationTurn,
@@ -2369,6 +2373,10 @@ def build_sqlite_world_v2_turn_application(
         raise ValueError("media auto-delivery requires the render/inspection continuation")
     if outcome_model is not None and outcome_draft_model is not None:
         raise ValueError("inject either an outcome proposal adapter or an outcome draft model, not both")
+    # Refuse to start when the vertical registry and the scattered process-kind
+    # enumerations disagree: a missing reviewer/owner must fail here by name,
+    # not surface later as an Opened-only trigger backlog in the ledger.
+    assert_bounded_vertical_coverage()
     build_started = time.perf_counter()
     issuer = AcceptedLedgerBatchIssuer()
     latency = latency_recorder or ProductionLatencyRecorder()
@@ -2485,16 +2493,21 @@ def build_sqlite_world_v2_turn_application(
                 main_model=main_model,
                 quick_recovery=quick_recovery,
                 # The main budget carries one full provider completion plus,
-                # on a world-claim near-miss, one bounded corrective retry.
-                # Observed steady-state provider latency is 3-8s; the old 6s
-                # cap regularly cancelled an otherwise complete honest answer
-                # and then spent *more* wall time delivering a canned
-                # failsafe.  A real reply ten seconds late reads human; a
-                # scripted acknowledgement eight seconds late does not.
-                # Recovery stays compact: when the primary misses even this
-                # deadline, another long provider wait would not help.
+                # on a structural near-miss, one bounded corrective retry.
+                # Measured steady-state: successful chat completions are
+                # p50≈4.3s / p95≈8.5s (ledger-verified single-attempt turns,
+                # 07-16..07-20); the corrective retry is now deadline-aware,
+                # so 12s covers p95 plus one fitted repair without letting a
+                # repair overrun cancel an already-honest answer.
                 main_timeout_seconds=12.0,
-                quick_timeout_seconds=1.0,
+                # 2026-07-20 latency audit: a 1s quick budget was a dead
+                # letter — no provider completion fits, so every main failure
+                # deterministically became the local canned failsafe (audits:
+                # 28× main_timeout on this lane, recoveries only local).  8s
+                # fits the bounded backup completion (fallback provider,
+                # ≤900 tokens, measured 3-6s) and the pre-failsafe corrective
+                # retry, while keeping the worst failed-turn tail at 12+8s.
+                quick_timeout_seconds=8.0,
                 expression_action_kinds=config.expression_action_kinds,
             ),
             companion_actor_ref=config.companion_actor_ref,
@@ -2584,7 +2597,18 @@ def build_sqlite_world_v2_turn_application(
             # The afterthought lane rides the same background model and the
             # proactive budget/grammar: its one optional tail is a ``followup``
             # Action whose due window the generic pump owns.
-            afterthought_runtime = AfterthoughtAuthorRuntime(
+            #
+            # BoundedDecisionVertical pilot switch: the framework edition is
+            # the default; WORLD_V2_BDV_PILOT_DISABLED=1 hot-rolls back to the
+            # frozen hand-written implementation (kept in tree one release
+            # cycle).  Both editions are proven byte-equivalent by the shadow
+            # replay suite before this default was flipped.
+            afterthought_class = (
+                AfterthoughtAuthorRuntime
+                if _bdv_pilot_disabled()
+                else AfterthoughtVerticalRuntime
+            )
+            afterthought_runtime = afterthought_class(
                 ledger=ledger,
                 model=proactive_model,
                 policy=ExpressionPlanBudgetPolicy(
@@ -3000,8 +3024,12 @@ def build_sqlite_world_v2_turn_application(
         # client); tests may inject a fixture model directly.
         if quick_reaction_model is None:
             quick_reaction_model = getattr(appraisal_model, "local_appraisal_model", None)
+        # BoundedDecisionVertical pilot switch (see the afterthought site).
+        quick_reaction_class = (
+            QuickReactionWorker if _bdv_pilot_disabled() else QuickReactionVerticalWorker
+        )
         quick_reaction_worker = (
-            QuickReactionWorker(
+            quick_reaction_class(
                 ledger=ledger,
                 model=quick_reaction_model,
                 capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
@@ -3495,6 +3523,23 @@ def build_sqlite_world_v2_turn_application(
         media_payload_store.close()
         ledger.close()
         raise
+
+
+def _bdv_pilot_disabled() -> bool:
+    """Environment-level hot rollback for the BoundedDecisionVertical pilots.
+
+    ``WORLD_V2_BDV_PILOT_DISABLED=1`` routes quick-reaction and afterthought
+    through the frozen hand-written implementations.  Identity strings are
+    proven byte-equal between both editions, so flipping this switch never
+    forks ledger history.
+    """
+
+    return os.environ.get("WORLD_V2_BDV_PILOT_DISABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def build_platform_action_executor(

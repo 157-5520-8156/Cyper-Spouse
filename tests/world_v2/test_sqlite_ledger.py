@@ -132,12 +132,27 @@ def test_projection_performance_counters_distinguish_head_reads_from_history_rep
     assert hot.historical_replay_calls == startup.historical_replay_calls
     assert hot.total_replay_calls == startup.total_replay_calls
 
+    # The commit remembered the projection it displaced, so the pre-commit
+    # cursor is served from memory rather than a replay.
     zero = ProjectionCursor(world_revision=0, deliberation_revision=0, ledger_sequence=0)
     assert ledger.project_at(zero).ledger_sequence == 0
-    historical = ledger.performance_counters()
-    assert historical.historical_replay_calls == hot.historical_replay_calls + 1
-    assert historical.total_replay_calls == hot.total_replay_calls + 1
+    remembered = ledger.performance_counters()
+    assert remembered.historical_projection_hits == hot.historical_projection_hits + 1
+    assert remembered.historical_replay_calls == hot.historical_replay_calls
+    assert remembered.total_replay_calls == hot.total_replay_calls
     ledger.close()
+
+    # A fresh adapter has no in-memory history, so the same historical read
+    # is the genuine replay the counters must distinguish.
+    reopened = SQLiteWorldLedger(
+        path=tmp_path / "projection-shape.sqlite3", world_id="world-sqlite-test"
+    )
+    baseline = reopened.performance_counters()
+    assert reopened.project_at(zero).ledger_sequence == 0
+    historical = reopened.performance_counters()
+    assert historical.historical_replay_calls == baseline.historical_replay_calls + 1
+    assert historical.total_replay_calls == baseline.total_replay_calls + 1
+    reopened.close()
 
 
 def test_commit_seeded_head_cache_invalidates_on_external_append(tmp_path) -> None:

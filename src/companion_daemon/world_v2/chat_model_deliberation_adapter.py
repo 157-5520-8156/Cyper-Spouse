@@ -20,7 +20,12 @@ from pydantic import Field
 from companion_daemon.llm import model_call_scope
 
 from .affect_expression_matrix import affect_expression_matrix
-from .deliberation import ModelInput, ModelOutput, ModelUsageProvenance
+from .deliberation import (
+    ModelInput,
+    ModelOutput,
+    ModelUsageProvenance,
+    fit_secondary_call_timeout,
+)
 from .expression_draft import (
     ExpressionDraft,
     ExpressionDraftCapabilities,
@@ -44,6 +49,7 @@ from .no_world_evidence_recovery import (
     recent_companion_texts,
     recover_without_world_evidence,
 )
+from .production_reliability_metrics import record_claim_repair, record_shape_repair
 from .proposal_envelope import (
     CanonicalTypedPayload,
     MinimalProposal,
@@ -66,6 +72,55 @@ _CURRENT_ACTIVITY_WORDS = (
     "出门", "散步", "跑步", "运动", "上课", "工作", "开会", "写字",
     "画画", "打扫", "购物", "做实验",
 )
+
+
+def claim_repair_instruction(violation: str, *, shape_line: str | None = None) -> str:
+    """Corrective prompt for a world-claim bookkeeping near-miss.
+
+    The exact violation is quoted so the model fixes the offending clause
+    instead of guessing which part of the reply was classified as an
+    occurrence.  ``shape_line`` lets the paired cognition pass request its
+    two-key wrapper without duplicating the claim contract text.
+    """
+
+    shape = shape_line or "one corrected JSON object of the same shape"
+    return (
+        "Your draft failed world-claim validation with this exact violation: "
+        f"{violation[:640]}\n"
+        f"Return {shape} with the visible reply "
+        "preserved as closely as honesty allows, fixing only the problem: the claim "
+        "field is named source_refs; grounded scopes (current_world, past_world, "
+        "shared_history, factual stable_identity) require source_refs copied verbatim "
+        "from a matching Context item. shared_history claims cite recent_dialogue or "
+        "recent_experiences item refs; current_world/past_world cite "
+        "current_situation, world_life, or recent_experiences item refs; "
+        "stable_identity cites character_core item refs. If no Context item backs an "
+        "asserted occurrence, rephrase that exact offending clause so it no longer "
+        "asserts the occurrence, or mark truly subjective inner-life statements as "
+        "scope=subjective_or_hypothetical with empty source_refs. Do not invent refs."
+    )
+
+
+def shape_repair_instruction(violation: str, *, shape_line: str | None = None) -> str:
+    """Corrective prompt for a non-claim structural draft violation.
+
+    Covers the measured rejection classes that arrive attached to an
+    otherwise sound reply: ExpressionDraft field/beat shape, the one-beat
+    later contract, timing_choice values, and malformed JSON wrappers.
+    """
+
+    shape = shape_line or "one corrected JSON object of the same shape"
+    return (
+        "Your draft failed structural validation with this exact violation: "
+        f"{violation[:640]}\n"
+        f"Return {shape} that fixes only this problem while preserving the visible "
+        "reply text as closely as possible. Follow the contract already given in this "
+        "conversation exactly: a text beat is {\"modality\":\"text\",\"text\":\"...\"}; "
+        "timing_choice is now, later, or silent; later carries exactly one text beat "
+        "plus delay_seconds and expires_after_seconds; silent carries an empty beats "
+        "array; world_claims is always present (an empty array when there are none). "
+        "Return raw JSON only, never Markdown fences or commentary."
+    )
 
 
 async def _bounded_review_call(
@@ -224,15 +279,29 @@ class ChatModelDeliberationAdapter:
             )
         except (TypeError, ValueError) as exc:
             violation = str(exc)
-            if quick_recovery or not is_world_claim_violation(violation):
+            if quick_recovery:
                 raise
-            # A claim-bookkeeping near-miss (wrong scope, missing or lane-
-            # foreign refs) regularly rides on a perfectly good visible reply.
+            # A structural near-miss (claim bookkeeping, beat shape, later
+            # contract) regularly rides on a perfectly good visible reply.
             # One corrective call naming the exact violation preserves the
             # honest answer; the corrected draft still passes the full
-            # materializer, so the claim gate is never loosened.
-            raw = await self._repair_world_claims(
-                messages=messages, raw=raw, violation=violation
+            # materializer, so no validation gate is loosened.  The retry is
+            # deadline-aware: when the Deliberation attempt budget cannot fit
+            # another completion, skip it so the recovery lane (which the
+            # host will actually deliver) gets the remaining time instead.
+            repair_timeout = fit_secondary_call_timeout(_WORLD_CLAIM_REPAIR_TIMEOUT_SECONDS)
+            if repair_timeout is None:
+                logger.warning(
+                    "structural corrective retry skipped: attempt budget exhausted "
+                    "violation=%s",
+                    violation[:200],
+                )
+                raise
+            raw = await self._repair_structural_violation(
+                messages=messages,
+                raw=raw,
+                violation=violation,
+                timeout_seconds=repair_timeout,
             )
             raw_proposal = _proposal_from_model_text(
                 raw=raw,
@@ -249,39 +318,40 @@ class ChatModelDeliberationAdapter:
             usage=usage,
         )
 
-    async def _repair_world_claims(
-        self, *, messages: list[dict[str, str]], raw: str, violation: str
+    async def _repair_structural_violation(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        raw: str,
+        violation: str,
+        timeout_seconds: float = _WORLD_CLAIM_REPAIR_TIMEOUT_SECONDS,
     ) -> str:
+        is_claim = is_world_claim_violation(violation)
         corrective = [
             *messages,
             {"role": "assistant", "content": raw},
             {
                 "role": "user",
                 "content": (
-                    "Your draft failed world-claim validation with this exact violation: "
-                    f"{violation[:640]}\n"
-                    "Return one corrected JSON object of the same shape with the visible reply "
-                    "preserved as closely as honesty allows, fixing only the problem: the claim "
-                    "field is named source_refs; grounded scopes (current_world, past_world, "
-                    "shared_history, factual stable_identity) require source_refs copied verbatim "
-                    "from a matching Context item. shared_history claims cite recent_dialogue or "
-                    "recent_experiences item refs; current_world/past_world cite "
-                    "current_situation, world_life, or recent_experiences item refs; "
-                    "stable_identity cites character_core item refs. If no Context item backs an "
-                    "asserted occurrence, rephrase that exact offending clause so it no longer "
-                    "asserts the occurrence, or mark truly subjective inner-life statements as "
-                    "scope=subjective_or_hypothetical with empty source_refs. Do not invent refs."
+                    claim_repair_instruction(violation)
+                    if is_claim
+                    else shape_repair_instruction(violation)
                 ),
             },
         ]
-        async with asyncio.timeout(_WORLD_CLAIM_REPAIR_TIMEOUT_SECONDS):
+        async with asyncio.timeout(timeout_seconds):
             complete_json = getattr(self._model, "complete_json", None)
             corrected = await (
                 complete_json(corrective, temperature=0.25)
                 if callable(complete_json)
                 else self._model.complete(corrective, temperature=0.25)
             )
-        logger.warning("world-claim corrective retry produced a corrected draft")
+        if is_claim:
+            logger.warning("world-claim corrective retry produced a corrected draft")
+            record_claim_repair()
+        else:
+            logger.warning("draft-shape corrective retry produced a corrected draft")
+            record_shape_repair()
         return corrected
 
     async def _review_identity_and_counterpart_if_needed(
@@ -1455,4 +1525,6 @@ __all__ = [
     "ChatModelDeliberationAdapter",
     "CompanionIdentityFrame",
     "RoutedChatModelDeliberationAdapter",
+    "claim_repair_instruction",
+    "shape_repair_instruction",
 ]

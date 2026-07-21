@@ -13,6 +13,7 @@ import asyncio
 from collections import OrderedDict
 import json
 import logging
+from time import monotonic
 from typing import Any
 
 from .appraisal_chat_model_adapter import (
@@ -27,8 +28,15 @@ from .chat_model_deliberation_adapter import (
     CompanionIdentityFrame,
     RoutedChatModelDeliberationAdapter,
     _proposal_from_model_text as materialize_expression_draft,
+    claim_repair_instruction,
+    shape_repair_instruction,
 )
-from .deliberation import ModelInput, ModelOutput, ModelUsageProvenance
+from .deliberation import (
+    ModelInput,
+    ModelOutput,
+    ModelUsageProvenance,
+    fit_secondary_call_timeout,
+)
 from .expression_draft import (
     ExpressionDraftCapabilities,
     TEXT_ONLY_EXPRESSION_CAPABILITIES,
@@ -41,6 +49,12 @@ from .no_world_evidence_recovery import (
     is_companion_world_evidence_probe,
     recent_companion_texts,
     recover_without_world_evidence,
+)
+from .production_reliability_metrics import (
+    record_backup_recovery,
+    record_claim_repair,
+    record_failsafe,
+    record_shape_repair,
 )
 
 
@@ -134,10 +148,33 @@ def _discover_recovery_model(
     return None
 
 
-def _provider_already_used_fallback(provider: object) -> bool:
-    """Avoid re-calling a FailoverChatModel's fallback in the same turn."""
+# One live turn — main attempt plus its bounded recovery — comfortably fits
+# in this window.  A fallback use older than this belongs to another turn.
+_RECENT_FALLBACK_WINDOW_SECONDS = 30.0
+_MISSING = object()
 
-    return bool(getattr(provider, "last_attempt_used_fallback", False))
+
+def _provider_already_used_fallback(provider: object) -> bool:
+    """Avoid re-calling a FailoverChatModel's fallback in the same turn.
+
+    The production FailoverChatModel is shared by every background cognition
+    lane, so its boolean ``last_attempt_used_fallback`` can stay ``True`` for
+    minutes after an unrelated lane's availability failover.  Trusting that
+    stale flag here silently skipped a legitimate backup attempt and turned a
+    recoverable failure into a canned failsafe (observed in production).  The
+    timestamped ``last_fallback_used_at`` restricts the skip to fallback use
+    recent enough to belong to the current turn; providers without the
+    timestamp keep the conservative boolean semantics.
+    """
+
+    used_at = getattr(provider, "last_fallback_used_at", _MISSING)
+    if used_at is _MISSING:
+        return bool(getattr(provider, "last_attempt_used_fallback", False))
+    return (
+        isinstance(used_at, (int, float))
+        and not isinstance(used_at, bool)
+        and monotonic() - float(used_at) <= _RECENT_FALLBACK_WINDOW_SECONDS
+    )
 
 
 def _requires_remote_appraisal(text: str | None) -> bool:
@@ -162,6 +199,24 @@ class _PendingExpression:
         self.model_id = model_id
         self.route_tier = route_tier
         self.usage = usage
+
+
+class _FailedExpressionDetail:
+    """The exact provider conversation and violation of one structural reject.
+
+    Retained so the post-acceptance expression pass can spend one corrective
+    retry that names the concrete violation before it falls back to a local
+    canned line.  This is bounded evidence for a retry, never accepted state.
+    """
+
+    __slots__ = ("messages", "raw", "violation")
+
+    def __init__(
+        self, *, messages: list[dict[str, str]], raw: str, violation: str
+    ) -> None:
+        self.messages = messages
+        self.raw = raw
+        self.violation = violation
 
 
 class _BoundedKeySet:
@@ -282,6 +337,11 @@ class SingleCallExpressionAdapter:
                     # boundary response rather than silently treating it as a
                     # successful visible expression.
                     raise ValueError("paired_expression_requires_grounded_recovery")
+                repaired = await self._owner._retry_failed_expression_before_failsafe(
+                    request, key
+                )
+                if repaired is not None:
+                    return repaired
                 return self._owner._local_expression_failsafe(request, "combined_cognition_failed")
             try:
                 return await self._owner._fallback_expression.propose(request)
@@ -295,7 +355,9 @@ class SingleCallExpressionAdapter:
                     raise
                 self._owner._recovery_attempted.add(key)
                 async with asyncio.timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS):
-                    return await recovery.propose(request)
+                    output = await recovery.propose(request)
+                record_backup_recovery()
+                return output
         if pending.route_tier != request.route.tier:
             # The post-acceptance capsule may legitimately route differently.
             # Never attribute bytes produced by one tier to another tier's
@@ -325,9 +387,11 @@ class SingleCallExpressionAdapter:
             self._owner._recovery_attempted.add(_cache_key(request))
             try:
                 async with asyncio.timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS):
-                    return await fallback.propose(request)
+                    output = await fallback.propose(request)
             except (TimeoutError, TypeError, ValueError):
                 raise
+            record_backup_recovery()
+            return output
         return ModelOutput(
             model_id=pending.model_id,
             model_version=self._owner.VERSION,
@@ -354,7 +418,7 @@ class SingleCallExpressionAdapter:
         ):
             self._owner._recovery_attempted.add(key)
             try:
-                return await recovery.recover(request, failure_code)
+                output = await recovery.recover(request, failure_code)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -363,6 +427,9 @@ class SingleCallExpressionAdapter:
                     type(exc).__name__,
                     str(exc)[:240],
                 )
+            else:
+                record_backup_recovery()
+                return output
         # The paired pass and the one configured backup model have now spent
         # their provider attempts. Local recovery is deliberately claim-free
         # and only handles identity, evidence, modality, and other safety
@@ -482,6 +549,9 @@ class SingleCallInboundCognition:
         )
         self._pending: OrderedDict[tuple[str, str, str], _PendingExpression] = OrderedDict()
         self._failed_combined = _BoundedKeySet(_MAX_PENDING_DRAFTS)
+        self._failed_details: OrderedDict[
+            tuple[str, str, str], _FailedExpressionDetail
+        ] = OrderedDict()
         self._recovery_attempted = _BoundedKeySet(_MAX_PENDING_DRAFTS)
         self._precomputed_advisory: set[tuple[str, str, str]] = set()
         self.appraisal = SingleCallAppraisalAdapter(self)
@@ -548,12 +618,15 @@ class SingleCallInboundCognition:
         raw: str,
         violation: str,
         combined: bool = True,
+        timeout_seconds: float = _CLAIM_REPAIR_TIMEOUT_SECONDS,
     ) -> str | None:
-        """Spend one corrective call naming the exact world-claim violation.
+        """Spend one corrective call naming the exact structural violation.
 
-        Returns validated expression bytes, or ``None`` when the correction
-        itself fails.  This never loosens the claim gate: the corrected draft
-        still passes the full materializer, and only one attempt is made.
+        Handles both claim-bookkeeping near-misses and non-claim draft-shape
+        rejects (the measured second failure class).  Returns validated
+        expression bytes, or ``None`` when the correction itself fails.  This
+        never loosens any gate: the corrected draft still passes the full
+        materializer, and only one attempt is made.
         """
 
         shape = (
@@ -561,31 +634,19 @@ class SingleCallInboundCognition:
             if combined
             else "one corrected ExpressionDraft JSON object only"
         )
+        is_claim = _is_world_claim_violation(violation)
+        instruction = (
+            claim_repair_instruction(violation, shape_line=shape)
+            if is_claim
+            else shape_repair_instruction(violation, shape_line=shape)
+        )
         corrective = [
             *messages,
             {"role": "assistant", "content": raw},
-            {
-                "role": "user",
-                "content": (
-                    "Your expression_draft failed world-claim validation with this exact "
-                    f"violation: {violation[:640]}\n"
-                    f"Return {shape} "
-                    "with the visible reply preserved as closely as honesty allows, fixing only "
-                    "the problem: the claim field is named source_refs; grounded scopes "
-                    "(current_world, past_world, shared_history, factual stable_identity) require "
-                    "source_refs copied verbatim from a matching Context item. shared_history "
-                    "claims cite recent_dialogue or recent_experiences item refs; "
-                    "current_world/past_world cite current_situation, world_life, or "
-                    "recent_experiences item refs; stable_identity cites character_core item "
-                    "refs. If no Context item backs an asserted occurrence, rephrase that exact "
-                    "offending clause so it no longer asserts the occurrence, or mark truly "
-                    "subjective inner-life statements as scope=subjective_or_hypothetical with "
-                    "empty source_refs. Do not invent refs."
-                ),
-            },
+            {"role": "user", "content": instruction},
         ]
         try:
-            async with asyncio.timeout(_CLAIM_REPAIR_TIMEOUT_SECONDS):
+            async with asyncio.timeout(timeout_seconds):
                 complete_json = getattr(provider, "complete_json", None)
                 corrected_raw = await (
                     complete_json(corrective, temperature=self._temperature)
@@ -609,13 +670,68 @@ class SingleCallInboundCognition:
             raise
         except Exception as exc:
             logger.warning(
-                "world-claim corrective retry failed: %s: %s",
+                "%s corrective retry failed: %s: %s",
+                "world-claim" if is_claim else "draft-shape",
                 type(exc).__name__,
                 str(exc)[:240],
             )
             return None
-        logger.warning("world-claim corrective retry repaired the expression draft")
+        if is_claim:
+            logger.warning("world-claim corrective retry repaired the expression draft")
+            record_claim_repair()
+        else:
+            logger.warning("draft-shape corrective retry repaired the expression draft")
+            record_shape_repair()
         return expression_raw
+
+    async def _retry_failed_expression_before_failsafe(
+        self, request: ModelInput, key: tuple[str, str, str]
+    ) -> ModelOutput | None:
+        """One violation-quoting main-provider retry before any canned line.
+
+        The paired pass failed structurally and its bounded in-attempt repair
+        either did not fit the appraisal-lane budget or itself failed once.
+        The person is now already waiting on the failure path, so spending a
+        few more seconds on one corrective completion that names the exact
+        violation is a better trade than an instant canned acknowledgement.
+        Timeout-class failures never reach here: they leave no remembered
+        violation, so this method returns ``None`` immediately for them.
+        """
+
+        detail = self._failed_details.pop(key, None)
+        if detail is None:
+            return None
+        repair_timeout = fit_secondary_call_timeout(_CLAIM_REPAIR_TIMEOUT_SECONDS)
+        if repair_timeout is None:
+            return None
+        provider = self._selected_provider(request)
+        repaired = await self._repair_expression_claims(
+            request=request,
+            provider=provider,
+            messages=detail.messages,
+            raw=detail.raw,
+            violation=detail.violation,
+            combined=True,
+            timeout_seconds=repair_timeout,
+        )
+        if repaired is None:
+            return None
+        logger.warning(
+            "pre-failsafe corrective retry recovered a genuine expression trigger=%s",
+            request.trigger_message.observation_ref
+            if request.trigger_message is not None
+            else request.trigger_ref,
+        )
+        return ModelOutput(
+            model_id=self._model_id_for_provider(request, provider),
+            model_version=self.VERSION,
+            raw_proposal=materialize_expression_draft(
+                raw=repaired,
+                request=request,
+                capabilities=self._capabilities,
+                quick_recovery=False,
+            ),
+        )
 
     async def _retry_with_recovery_provider(self, request: ModelInput) -> ModelOutput:
         """Run exactly one bounded structural recovery against the backup model."""
@@ -626,6 +742,7 @@ class SingleCallInboundCognition:
         self._pending.pop(key, None)
         self._precomputed_advisory.discard(key)
         self._failed_combined.discard(key)
+        self._failed_details.pop(key, None)
         self._recovery_attempted.add(key)
         try:
             async with asyncio.timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS):
@@ -747,7 +864,7 @@ class SingleCallInboundCognition:
             raise
         try:
             value = _parse_combined(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             if (
                 allow_recovery
                 and self._recovery_model is not None
@@ -755,6 +872,9 @@ class SingleCallInboundCognition:
             ):
                 return await self._retry_with_recovery_provider(request)
             self._failed_combined.add(_cache_key(request))
+            self._remember_failed_expression(
+                _cache_key(request), messages=messages, raw=raw, violation=str(exc)
+            )
             raise
         key = _cache_key(request)
         # Even when the paired expression later fails structural validation,
@@ -811,26 +931,37 @@ class SingleCallInboundCognition:
                     expression_valid = True
         else:
             expression_valid = True
-        if (
-            not expression_valid
-            and violation is not None
-            and _is_world_claim_violation(violation)
-        ):
-            # A near-miss in claim bookkeeping (wrong scope, ref outside its
-            # lane) regularly arrives attached to a perfectly good visible
+        corrective_spent = False
+        if not expression_valid and violation is not None:
+            # A structural near-miss (claim bookkeeping, beat shape, later
+            # contract) regularly arrives attached to a perfectly good visible
             # reply.  Rerunning the identical contract on the backup provider
             # tends to repeat the same mistake, so spend one corrective call
-            # that names the exact violation before falling back.
-            repaired = await self._repair_expression_claims(
-                request=request,
-                provider=provider,
-                messages=messages,
-                raw=raw,
-                violation=violation,
-            )
-            if repaired is not None:
-                expression_raw = repaired
-                expression_valid = True
+            # that names the exact violation before falling back.  The retry
+            # is deadline-aware: when the Deliberation attempt budget cannot
+            # fit another completion, defer the correction to the
+            # post-acceptance expression pass instead of timing out the whole
+            # attempt after the repair already succeeded.
+            repair_timeout = fit_secondary_call_timeout(_CLAIM_REPAIR_TIMEOUT_SECONDS)
+            if repair_timeout is None:
+                logger.warning(
+                    "paired corrective retry deferred: attempt budget exhausted "
+                    "violation=%s",
+                    violation[:200],
+                )
+            else:
+                corrective_spent = True
+                repaired = await self._repair_expression_claims(
+                    request=request,
+                    provider=provider,
+                    messages=messages,
+                    raw=raw,
+                    violation=violation,
+                    timeout_seconds=repair_timeout,
+                )
+                if repaired is not None:
+                    expression_raw = repaired
+                    expression_valid = True
         try:
             appraisal_proposal = materialize_appraisal_draft(raw=appraisal_raw, request=request)
         except (TypeError, ValueError):
@@ -858,15 +989,38 @@ class SingleCallInboundCognition:
         else:
             self._pending.pop(key, None)
             # The appraisal bytes may still be valid even when the paired
-            # expression draft is not.  Preserve a same-trigger marker so the
-            # post-acceptance expression lane emits one local repair instead
-            # of launching a second provider request for the same message.
+            # expression draft is not.  Preserve a same-trigger marker plus
+            # the exact violation so the post-acceptance expression lane can
+            # spend one corrective retry that names the concrete problem
+            # before it falls back to a local canned line.  When the
+            # in-attempt corrective was already spent (and failed once), do
+            # not queue the same correction again: repeating an identical
+            # failed repair only delays the bounded local recovery.
             self._failed_combined.add(key)
+            if violation is not None and not corrective_spent:
+                self._remember_failed_expression(
+                    key, messages=messages, raw=raw, violation=violation
+                )
         return ModelOutput(
             model_id=model_id,
             model_version=self.VERSION,
             raw_proposal=appraisal_proposal,
         )
+
+    def _remember_failed_expression(
+        self,
+        key: tuple[str, str, str],
+        *,
+        messages: list[dict[str, str]],
+        raw: str,
+        violation: str,
+    ) -> None:
+        self._failed_details.pop(key, None)
+        self._failed_details[key] = _FailedExpressionDetail(
+            messages=messages, raw=raw, violation=violation
+        )
+        while len(self._failed_details) > _MAX_PENDING_DRAFTS:
+            self._failed_details.popitem(last=False)
 
     def _local_expression_failsafe(self, request: ModelInput, failure_code: str) -> ModelOutput:
         trigger = request.trigger_message
@@ -880,6 +1034,7 @@ class SingleCallInboundCognition:
             failure_code[:120],
             intent,
         )
+        record_failsafe()
         name = self._identity_frame.companion_name if self._identity_frame is not None else None
         if intent == "world_evidence":
             try:

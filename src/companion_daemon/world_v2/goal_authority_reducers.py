@@ -1,5 +1,11 @@
 """Pure `.16` GoalAuthority reducer.
 
+DORMANT — no producer: no production ledger holds a committed ``V2Goal*``
+event and no runtime constructs these payloads (the tests below guard replay
+semantics only).  Before wiring a producer, read the Producer-First Authority
+rule in CONTEXT.md and record the activation verdict in
+``configs/mechanism_closure.yaml`` (``v16-situation-constituents``).
+
 The interface accepts immutable heads/history plus exact authority projections;
 all lifecycle, provenance, and replay rules stay inside this Module.
 """

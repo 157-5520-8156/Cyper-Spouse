@@ -1,4 +1,12 @@
-"""Closed event routing for the pure `.16.0` AttentionAuthority seam."""
+"""Closed event routing for the pure `.16.0` AttentionAuthority seam.
+
+DORMANT — no producer: no production ledger holds a committed
+``V2Attention*`` event and no runtime constructs these payloads.  The live
+phone-attention need is served by the ``attention_view`` advisory (a pure
+projection, never an event writer).  Before wiring a producer, read the
+Producer-First Authority rule in CONTEXT.md and record the activation
+verdict in ``configs/mechanism_closure.yaml`` (``v16-situation-constituents``).
+"""
 
 from __future__ import annotations
 

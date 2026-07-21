@@ -30,6 +30,7 @@ from .perception_executor import PerceptionTransport
 from .perception_input_source import PerceptionInputSource
 from .platform_host import PlatformClockTick, PlatformInbound, WorldV2PlatformHost
 from .production_latency_trace import ProductionLatencySample
+from .production_reliability_metrics import record_visible_reply
 from .production_turn_application import (
     LifeEcologyComposition,
     MediaPreviewDeployment,
@@ -158,8 +159,17 @@ class QQC2CHost:
         self._lock = asyncio.Lock()
         self._closed = False
         self._last_content_received_at: datetime | None = None
+        self._last_content_text: str | None = None
         self._last_typing_started_at: datetime | None = None
         self._recent_gap_seconds: deque[float] = deque(maxlen=8)
+        # Number of content arrivals currently inside their sender-rhythm
+        # hold.  While it is non-zero a volley is still being absorbed, so
+        # the periodic scheduler claim path (``drain_ingress_once``) yields
+        # instead of slicing the already-due half of the volley into its own
+        # turn; the holding fragment claims the complete batch itself once
+        # the sender goes quiet.  Pure claim-timing courtesy: batch identity
+        # and ledger state never depend on it.
+        self._rhythm_holds = 0
 
     async def inbound_text(
         self,
@@ -191,6 +201,12 @@ class QQC2CHost:
         if self._ingress_store is None:
             raise RuntimeError("QQ C2C ingress store is not configured")
         received_at = self._ingress_now()
+        # A message landing while her visible turn still owns the world lock
+        # cannot be an answer to that turn's reply (she has not spoken yet) —
+        # the sender is provably continuing their own volley, so the composure
+        # gap must respect their just-shown cadence instead of trusting stale
+        # median statistics from an earlier, faster exchange.
+        burst_continuation = self._visible_turn_in_flight()
         previous_received_at = self._last_content_received_at
         submitted = self._ingress_store.submit(fragment, received_at=received_at)
         if submitted.state == "committed":
@@ -213,13 +229,14 @@ class QQC2CHost:
             received_at=received_at, previous_received_at=previous_received_at
         )
         self._last_content_received_at = received_at
+        self._last_content_text = fragment.text
         delay = max(0.0, (submitted.due_at - self._ingress_now()).total_seconds())
         if delay:
             await self._ingress_sleep(delay)
         await self._hold_for_sender_rhythm(
             fragment=fragment,
             received_at=received_at,
-            previous_received_at=previous_received_at,
+            burst_continuation=burst_continuation,
         )
         for _ in range(8):
             # Claim only once the world lock is available.  While an earlier
@@ -228,10 +245,18 @@ class QQC2CHost:
             # batch — one continuous conversation is one turn, not a queue of
             # independent full turns each producing its own reply.
             async with self._lock:
-                async with self._ingress_lock:
-                    batch = self._ingress_store.claim_due(now=self._ingress_now())
-                if batch is not None:
-                    await self._process_ingress_batch_locked(batch)
+                batch = None
+                already = self._ingress_store.submission(fragment.source_event_id)
+                if already is None or already.state != "committed":
+                    async with self._ingress_lock:
+                        batch = self._ingress_store.claim_due(now=self._ingress_now())
+                    if batch is not None:
+                        await self._process_ingress_batch_locked(batch)
+                # else: a sibling's claim already answered this fragment
+                # while it waited for the lock.  It must not claim anything
+                # further: whatever is pending now belongs to a newer volley
+                # whose own fragments are still pacing their claim, and
+                # grabbing it early would slice that volley in half.
             current = self._ingress_store.submission(fragment.source_event_id)
             if current is not None and current.state == "committed":
                 return QQC2CIngressResult(
@@ -259,6 +284,11 @@ class QQC2CHost:
     _DEFAULT_QUIET_GAP_SECONDS = 3.5
     _MIN_QUIET_GAP_SECONDS = 1.2
     _MAX_QUIET_GAP_SECONDS = 12.0
+    # Absolute per-fragment bound on burst absorption.  A person being
+    # flooded keeps reading as long as bubbles keep landing, but after about
+    # half a minute they interject anyway — so the hold keeps rolling while
+    # the volley continues and answers what has arrived once this cap hits.
+    _BURST_HOLD_CAP_SECONDS = 30.0
 
     def _register_content_gap(
         self, *, received_at: datetime, previous_received_at: datetime | None
@@ -277,13 +307,22 @@ class QQC2CHost:
             # is a new thought, not typing rhythm.
             self._recent_gap_seconds.append(gap)
 
-    def _quiet_gap_seconds(self, text: str | None) -> float:
+    def _quiet_gap_seconds(self, text: str | None, *, burst: bool = False) -> float:
         """One adaptive composure gap: cadence base times a content bias.
 
         The base follows how quickly this person has actually been sending
         bubbles right now; the bias reads the message's own shape — a clause
         that ends mid-thought ("而且…", trailing comma) earns more patience
         than a closed question.  Everything stays bounded and deterministic.
+
+        ``burst`` marks a message that provably continues an ongoing volley
+        (it landed during her turn, or during another bubble's hold).  Then
+        the *latest* observed gap sets a floor on the wait: someone who just
+        demonstrated an X-seconds-per-bubble rhythm has not finished talking
+        after less than ~1.2X of silence, however short the median of earlier,
+        faster gaps is and however closed the sentence looks.  The floor
+        never exceeds the ordinary maximum, and gaps slower than that maximum
+        are a lull rather than a rhythm, so they raise nothing.
         """
 
         if self._recent_gap_seconds:
@@ -299,51 +338,73 @@ class QQC2CHost:
                 bias = 0.6
             elif _CONTINUING_TAIL.search(stripped):
                 bias = 1.7
-        return min(max(base * bias, self._MIN_QUIET_GAP_SECONDS), self._MAX_QUIET_GAP_SECONDS)
+        gap = min(max(base * bias, self._MIN_QUIET_GAP_SECONDS), self._MAX_QUIET_GAP_SECONDS)
+        if burst and self._recent_gap_seconds:
+            cadence = self._recent_gap_seconds[-1]
+            if cadence <= self._MAX_QUIET_GAP_SECONDS:
+                gap = max(gap, min(cadence * 1.2, self._MAX_QUIET_GAP_SECONDS))
+        return gap
 
     async def _hold_for_sender_rhythm(
         self,
         *,
         fragment: QQIngressFragment,
         received_at: datetime,
-        previous_received_at: datetime | None,
+        burst_continuation: bool = False,
     ) -> None:
-        """Wait for an adaptive quiet gap so one thought becomes one turn.
+        """Wait for an adaptive quiet gap so one volley becomes one turn.
 
         A person composing consecutive bubbles is telling one continuous
         thought.  Starting a full turn on each bubble answers them one-by-one
         and queues the rest behind long model calls — the exact "机械一一对应"
-        complaint.  Every content message therefore pays a short, bounded
-        composure pause sized by the sender's live cadence, the message's own
-        shape, and any provider "peer is typing" pulse; whatever arrives
-        during the pause joins the same batch and gets one reply.
+        complaint.  Every content message therefore pays a composure pause
+        sized by the sender's live cadence, the message's own shape, and any
+        provider "peer is typing" pulse; whatever arrives during the pause
+        joins the same batch and gets one reply.
+
+        While bubbles keep landing the hold keeps rolling: each newer bubble
+        re-sizes the remaining wait from *its* shape and the live cadence
+        (a volley whose tail trails off earns more patience than one that
+        just closed), and any bubble arriving during a hold is by definition
+        a burst continuation, so the burst floor applies.  A person being
+        flooded does not answer sentence three of six mid-stream — but they
+        do interject after about half a minute, which is what the absolute
+        ``_BURST_HOLD_CAP_SECONDS`` cap (anchored to this fragment's own
+        arrival, and also bounding endless "typing…" pulses) reproduces.
         """
 
-        quiet_gap = self._quiet_gap_seconds(fragment.text)
-        # The deadline is anchored to this fragment, so however long the burst
-        # continues, this message waits at most the bounded maximum before its
-        # claim gathers everything pending so far into one turn.
-        deadline = received_at + timedelta(
-            seconds=min(max(quiet_gap * 3.0, 8.0), 18.0)
-        )
-        while True:
-            now = self._ingress_now()
-            latest = self._last_content_received_at or received_at
-            # A provider "peer is typing" pulse counts as not-quiet: she can
-            # see the person still composing, so she keeps waiting (within
-            # the same bounded deadline) instead of answering half a thought.
-            typing_at = self._last_typing_started_at
-            if typing_at is not None and typing_at > latest:
-                latest = typing_at
-            quiet_for = (now - latest).total_seconds()
-            if quiet_for >= quiet_gap or now >= deadline:
-                return
-            await self._ingress_sleep(
-                min(
-                    max(quiet_gap - quiet_for, 0.05),
-                    max((deadline - now).total_seconds(), 0.05),
+        quiet_gap = self._quiet_gap_seconds(fragment.text, burst=burst_continuation)
+        hard_cap = received_at + timedelta(seconds=self._BURST_HOLD_CAP_SECONDS)
+        self._rhythm_holds += 1
+        try:
+            while True:
+                now = self._ingress_now()
+                latest = self._last_content_received_at or received_at
+                if latest > received_at:
+                    # A newer bubble landed during this hold, so the volley is
+                    # still going: let the newest bubble's shape and the
+                    # just-measured cadence decide how much longer to wait.
+                    quiet_gap = self._quiet_gap_seconds(
+                        self._last_content_text, burst=True
+                    )
+                # A provider "peer is typing" pulse counts as not-quiet: she
+                # can see the person still composing, so she keeps waiting
+                # (within the same absolute cap) instead of answering half a
+                # thought.
+                typing_at = self._last_typing_started_at
+                if typing_at is not None and typing_at > latest:
+                    latest = typing_at
+                quiet_for = (now - latest).total_seconds()
+                if quiet_for >= quiet_gap or now >= hard_cap:
+                    return
+                await self._ingress_sleep(
+                    min(
+                        max(quiet_gap - quiet_for, 0.05),
+                        max((hard_cap - now).total_seconds(), 0.05),
+                    )
                 )
-            )
+        finally:
+            self._rhythm_holds -= 1
 
     def submission_state(self, source_event_id: str) -> str | None:
         """Read-only durable dedupe check for restart-window compensation."""
@@ -370,6 +431,14 @@ class QQC2CHost:
         """Resume one due or previously claimed batch after a restart."""
 
         if self._ingress_store is None:
+            return None
+        if self._rhythm_holds > 0:
+            # A fragment is still absorbing an ongoing volley.  The oldest
+            # bubbles of that volley are already claim-due, so a periodic
+            # scheduler pass claiming here would slice the volley in half;
+            # the holding fragment claims the complete batch itself once the
+            # sender goes quiet.  After a restart no hold exists, so recovery
+            # is never deferred by this courtesy.
             return None
         async with self._lock:
             async with self._ingress_lock:
@@ -420,6 +489,10 @@ class QQC2CHost:
             coalescing_metadata=metadata,
         )
         outcome = await self._host.inbound(inbound)
+        if outcome.status == "action_authorized":
+            # Denominator for the /health failsafe rate: one inbound turn
+            # produced an authorized visible reply (failsafe replies included).
+            record_visible_reply()
         action_id = next(
             iter((*outcome.authorized_action_ids, *outcome.scheduled_action_ids)), None
         )

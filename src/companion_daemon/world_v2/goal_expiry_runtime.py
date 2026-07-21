@@ -1,4 +1,10 @@
-"""Pure mechanical Goal-expiry event construction for ``WorldRuntime.advance``."""
+"""Pure mechanical Goal-expiry event construction for ``WorldRuntime.advance``.
+
+DORMANT in effect — this mechanical lane only fires on existing Goal heads,
+and the Goal authority has no producer, so no production world has ever built
+an expiry event.  Before wiring a Goal producer, read the Producer-First
+Authority rule in CONTEXT.md.
+"""
 
 from __future__ import annotations
 

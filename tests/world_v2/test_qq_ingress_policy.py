@@ -592,6 +592,271 @@ async def test_opening_burst_without_prior_context_still_joins_one_turn() -> Non
     await host.aclose()
 
 
+def _manual_clock(start: datetime):
+    """A shared test clock that only the driving test moves.
+
+    Holds and claims yield through ``idle_sleep`` without touching the clock,
+    so fragment arrival instants and measured cadence gaps are exact instead
+    of drifting with the scheduling order of concurrent hold loops.
+    """
+
+    clock = {"now": start}
+
+    async def idle_sleep(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    async def drive(condition, *, step: float = 0.1, limit_seconds: float = 120.0) -> None:
+        for _ in range(int(limit_seconds / step)):
+            if condition():
+                return
+            await asyncio.sleep(0)
+            if condition():
+                return
+            clock["now"] += timedelta(seconds=step)
+        raise AssertionError("test clock driver exhausted its budget")
+
+    return clock, idle_sleep, drive
+
+
+@pytest.mark.asyncio
+async def test_burst_continuing_through_her_turn_is_not_sliced_by_stale_cadence() -> None:
+    """Replicates the 2026-07-20 13:05 production slice: one volley, one turn.
+
+    A fast opening pair (2s apart) becomes one batch and its turn runs for
+    several seconds.  The third bubble lands mid-turn at a 7s cadence and the
+    fourth follows 7s after the third.  The fast pair used to pollute the
+    cadence median and the closed "…啦" tail shortened it further, so bubbles
+    three and four were answered as two separate turns.  The burst floor now
+    keeps bubble three waiting ~1.2x the just-shown 7s rhythm, and the pair's
+    fragments (already committed) no longer claim the volley early.
+    """
+
+    start = NOW
+    clock, idle_sleep, drive = _manual_clock(start)
+    world = _SlowFirstTurnWorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=idle_sleep,
+    )
+    first = asyncio.create_task(
+        host.inbound_fragment(_text("message:v1", "早上打了羽毛球", observed_at=start))
+    )
+    await asyncio.sleep(0)
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=2))
+    second = asyncio.create_task(
+        host.inbound_fragment(
+            _text("message:v2", "中午就比完啦", observed_at=start + timedelta(seconds=2))
+        )
+    )
+    await asyncio.sleep(0)
+    await drive(lambda: world.first_turn_started.is_set())
+    assert host._visible_turn_in_flight()
+
+    # Third bubble: 7s after the second, while her turn still owns the lock.
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=9))
+    third = asyncio.create_task(
+        host.inbound_fragment(
+            _text("message:v3", "对了教练夸我进步啦", observed_at=start + timedelta(seconds=9))
+        )
+    )
+    await asyncio.sleep(0)
+
+    # The first turn ends inside the old danger window (after the third
+    # bubble's coalescing due, before the fourth bubble arrives).
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=12))
+    world.release_first_turn.set()
+    await drive(lambda: first.done() and second.done())
+    assert len(world.inbounds) == 1
+
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=16))
+    fourth = asyncio.create_task(
+        host.inbound_fragment(
+            _text("message:v4", "晚上一起打游戏呀", observed_at=start + timedelta(seconds=16))
+        )
+    )
+    await drive(lambda: third.done() and fourth.done())
+    results = await asyncio.gather(first, second, third, fourth)
+
+    assert all(item.status == "observed_only" for item in results)
+    assert len(world.inbounds) == 2
+    assert world.inbounds[0].text == "早上打了羽毛球\n中午就比完啦"
+    assert world.inbounds[1].text == "对了教练夸我进步啦\n晚上一起打游戏呀"
+    assert world.inbounds[1].coalescing_metadata["source_event_ids"] == [
+        "message:v3",
+        "message:v4",
+    ]
+    await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sustained_burst_rolls_past_the_old_deadline_into_one_turn() -> None:
+    """A ~3s-cadence volley lasting >18s is absorbed whole, not deadline-cut."""
+
+    start = NOW
+    clock, idle_sleep, drive = _manual_clock(start)
+    world = _WorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=idle_sleep,
+    )
+    texts = (
+        "今天超累",
+        "早八连着三节课",
+        "中午又去帮忙搬器材",
+        "下午实验课还迟到了",
+        "老师让我写检讨",
+        "晚饭还没吃上",
+        "现在才到宿舍",
+        "感觉整个人都空了",
+    )
+    tasks = []
+    for index, text in enumerate(texts):
+        offset = index * 3
+        await drive(lambda: clock["now"] >= start + timedelta(seconds=offset))
+        tasks.append(
+            asyncio.create_task(
+                host.inbound_fragment(
+                    _text(
+                        f"message:roll{index}",
+                        text,
+                        observed_at=start + timedelta(seconds=offset),
+                    )
+                )
+            )
+        )
+        await asyncio.sleep(0)
+    await drive(lambda: all(task.done() for task in tasks))
+    results = await asyncio.gather(*tasks)
+
+    # The old per-fragment deadline (8-18s) would have claimed a partial
+    # batch mid-volley; the rolling hold answers the 21s volley exactly once.
+    assert all(item.status == "observed_only" for item in results)
+    assert len(world.inbounds) == 1
+    assert world.inbounds[0].text == "\n".join(texts)
+    assert world.inbounds[0].coalescing_metadata["source_event_ids"] == [
+        f"message:roll{index}" for index in range(len(texts))
+    ]
+    assert host._rhythm_holds == 0
+    await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_burst_hold_hard_cap_answers_a_never_quiet_volley_at_thirty_seconds() -> None:
+    """However long bubbles keep landing, the first one speaks by +30s."""
+
+    start = NOW
+    clock, idle_sleep, drive = _manual_clock(start)
+
+    class _StampingWorldHost(_WorldHost):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inbound_at: list[datetime] = []
+
+        async def inbound(self, inbound):  # type: ignore[no-untyped-def]
+            self.inbound_at.append(clock["now"])
+            return await super().inbound(inbound)
+
+    world = _StampingWorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=idle_sleep,
+    )
+    # Every tail trails off, so the adaptive quiet gap (~8.8s) always exceeds
+    # the 4s cadence and quiet alone would never end the hold.
+    texts = (
+        "刚才那个事我还没说完，",
+        "就是上次说的那个比赛，",
+        "教练今天突然说要加练，",
+        "而且",
+        "然后周末还要集训，",
+        "我周六可能去不了了，",
+        "本来都跟你约好了，",
+        "就很烦，",
+    )
+    tasks = []
+    for index, text in enumerate(texts):
+        offset = index * 4
+        await drive(lambda: clock["now"] >= start + timedelta(seconds=offset))
+        tasks.append(
+            asyncio.create_task(
+                host.inbound_fragment(
+                    _text(
+                        f"message:cap{index}",
+                        text,
+                        observed_at=start + timedelta(seconds=offset),
+                    )
+                )
+            )
+        )
+        await asyncio.sleep(0)
+    assert world.inbounds == []
+    await drive(lambda: all(task.done() for task in tasks))
+    await asyncio.gather(*tasks)
+
+    assert len(world.inbounds) == 1
+    assert world.inbounds[0].text == "\n".join(texts)
+    cap_elapsed = (world.inbound_at[0] - start).total_seconds()
+    assert 30.0 <= cap_elapsed <= 31.5
+    await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_ingress_pass_yields_while_a_rhythm_hold_absorbs_a_volley() -> None:
+    """A periodic drain must not slice a claim-due batch out of a live hold."""
+
+    start = NOW
+    clock, idle_sleep, drive = _manual_clock(start)
+    world = _WorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=idle_sleep,
+    )
+    first = asyncio.create_task(
+        host.inbound_fragment(_text("message:hold1", "刚到家", observed_at=start))
+    )
+    await asyncio.sleep(0)
+    # The coalescing window has closed (the batch is claim-due), but the
+    # fragment is still holding for the sender's rhythm.
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=1.5))
+    assert host._rhythm_holds == 1
+    assert await host.drain_ingress_once() is None
+    assert world.inbounds == []
+
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=2.5))
+    second = asyncio.create_task(
+        host.inbound_fragment(
+            _text("message:hold2", "还买了奶茶", observed_at=start + timedelta(seconds=2.5))
+        )
+    )
+    await drive(lambda: first.done() and second.done())
+    left, right = await asyncio.gather(first, second)
+
+    # The deferred claim stayed with the volley: one batch, claimed by the
+    # holding fragment itself once the sender went quiet.
+    assert left == right
+    assert len(world.inbounds) == 1
+    assert world.inbounds[0].text == "刚到家\n还买了奶茶"
+    assert host._rhythm_holds == 0
+    assert await host.drain_ingress_once() is None
+    await host.aclose()
+
+
 def test_adaptive_quiet_gap_follows_cadence_and_message_shape() -> None:
     host = QQC2CHost(
         host=_WorldHost(),  # type: ignore[arg-type]
@@ -610,6 +875,24 @@ def test_adaptive_quiet_gap_follows_cadence_and_message_shape() -> None:
     host._recent_gap_seconds.extend([20.0, 25.0, 30.0])
     assert host._quiet_gap_seconds("嗯") == pytest.approx(8.0)
     assert host._quiet_gap_seconds("而且") == pytest.approx(12.0)
+    # Burst continuation: the just-shown cadence floors the wait, so a fast
+    # historical median and a closed tail cannot slice an ongoing volley.
+    host._recent_gap_seconds.clear()
+    host._recent_gap_seconds.extend([2.0, 7.0])
+    assert host._quiet_gap_seconds("中午就比完啦") == pytest.approx(8.0 * 0.6)
+    assert host._quiet_gap_seconds("中午就比完啦", burst=True) == pytest.approx(7.0 * 1.2)
+    # The floor is a floor, not a discount: a trailing-off tail still waits.
+    assert host._quiet_gap_seconds("而且", burst=True) == pytest.approx(12.0)
+    # The floor never exceeds the bounded maximum.
+    host._recent_gap_seconds.append(11.0)
+    assert host._quiet_gap_seconds("好啦", burst=True) == pytest.approx(12.0)
+    # A last gap slower than the maximum is a lull, not a rhythm: no lift.
+    host._recent_gap_seconds.clear()
+    host._recent_gap_seconds.extend([20.0, 25.0, 30.0])
+    assert host._quiet_gap_seconds("嗯", burst=True) == pytest.approx(8.0)
+    # Without cadence samples the burst flag alone changes nothing.
+    host._recent_gap_seconds.clear()
+    assert host._quiet_gap_seconds("你吃饭了吗？", burst=True) == pytest.approx(3.5 * 0.6)
 
 
 @pytest.mark.asyncio

@@ -1202,7 +1202,10 @@ async def test_grounded_context_does_not_trigger_a_third_provider_call_after_fai
     proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
     assert proposal.response_text
     assert output.model_version == "local-expression-failsafe.1"
-    assert len(provider.calls) == 1
+    # The paired pass plus its one bounded structural corrective retry; the
+    # grounded memory question then forces the Deliberation recovery audit
+    # without any further provider call.
+    assert len(provider.calls) == 2
 
 
 @pytest.mark.asyncio

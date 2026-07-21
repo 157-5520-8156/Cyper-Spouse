@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 from typing import Iterator
 
 import pytest
@@ -467,14 +468,27 @@ def test_sqlite_routing_field_tamper_is_still_located_and_fails_closed(
 def test_sqlite_tampered_unique_index_column_fails_during_cursor_proof(
     tmp_path: Path,
 ) -> None:
-    ledger = SQLiteWorldLedger(path=tmp_path / "idempotency-tamper.sqlite3", world_id=WORLD)
+    """A cross-connection index-column rewrite is caught before the read.
+
+    The hot read no longer replays genesis per call; instead any foreign
+    ledger-table mutation advances the durable mutation epoch and forces the
+    full stream re-verification at the read's entry, which fails closed on
+    the forged row.
+    """
+
+    path = tmp_path / "idempotency-tamper.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
     event = _event("event:target", "ObservationRecorded", {"observation_id": "target"})
     _commit(ledger, (event,))
     tail = _commit(ledger, (_tail_event("event:tail"),))
-    ledger._connection.execute(  # noqa: SLF001
-        "UPDATE world_v2_events SET idempotency_key = ? WHERE event_id = ?",
-        ("forged:index-key", event.event_id),
-    )
+    foreign = sqlite3.connect(path, isolation_level=None)
+    try:
+        foreign.execute(
+            "UPDATE world_v2_events SET idempotency_key = ? WHERE event_id = ?",
+            ("forged:index-key", event.event_id),
+        )
+    finally:
+        foreign.close()
 
     with pytest.raises(LedgerIntegrityError, match="ledger row"):
         ledger.observation_events_at((_locator(event),), cursor=tail)
@@ -491,10 +505,10 @@ def test_sqlite_verifies_each_candidate_commit_only_once(
     original = ledger._verified_commit_locked  # noqa: SLF001
     calls = 0
 
-    def counted(commit_id: str):
+    def counted(commit_id: str, **kwargs):
         nonlocal calls
         calls += 1
-        return original(commit_id)
+        return original(commit_id, **kwargs)
 
     monkeypatch.setattr(ledger, "_verified_commit_locked", counted)
 
@@ -506,6 +520,13 @@ def test_sqlite_verifies_each_candidate_commit_only_once(
 def test_sqlite_boundary_verification_prevents_candidate_prefix_replays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The whole read binds to the already re-verified process prefix.
+
+    Historically the boundary commit paid one genesis replay and the
+    candidates reused it; the boundary now anchors on the verified prefix as
+    well, so a hot observation read performs no history replay at all.
+    """
+
     ledger = SQLiteWorldLedger(path=tmp_path / "prefix-cache.sqlite3", world_id=WORLD)
     first = _event("event:prefix:first", "ObservationRecorded", {"observation_id": "first"})
     _commit(ledger, (first,))
@@ -527,7 +548,7 @@ def test_sqlite_boundary_verification_prevents_candidate_prefix_replays(
 
     ledger.observation_events_at(locators, cursor=tail)
 
-    assert replay_calls == 1
+    assert replay_calls == 0
 
 
 def test_sqlite_adds_no_observation_schema(tmp_path: Path) -> None:

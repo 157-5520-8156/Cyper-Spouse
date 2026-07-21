@@ -115,6 +115,7 @@ const ActorSprites = (() => {
   // otherwise the hand-drawn pixel maps above remain the fallback.
 
   const AI_FRAMES = {};
+  const AI_META = {};
   const AI_REQUIRED = ['front-stand', 'front-stride', 'front-sit',
                        'back-stand', 'back-stride', 'back-sit'];
 
@@ -123,17 +124,12 @@ const ActorSprites = (() => {
       const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) return;
       const manifest = await res.json();
-      await Promise.all(Object.entries(manifest).map(([name, meta]) => new Promise(resolve => {
-        const img = new Image();
-        img.onload = () => {
-          const sf = new Surface(img.width, img.height);
-          sf.ctx.drawImage(img, 0, 0);
-          AI_FRAMES[name] = sf;
-          resolve();
-        };
-        img.onerror = () => resolve();
-        img.src = `${meta.url}?t=${Date.now()}`;
-      })));
+      // loadImageSurface (engine.js) retries dropped requests so the chibi
+      // doesn't silently degrade to the procedural pixel-map fallback
+      await Promise.all(Object.entries(manifest).map(async ([name, meta]) => {
+        const sf = await loadImageSurface(meta.url);
+        if (sf) { AI_FRAMES[name] = sf; AI_META[name] = meta; }
+      }));
     } catch (err) {
       console.warn('actor sprite overrides unavailable', err);
     }
@@ -152,10 +148,12 @@ const ActorSprites = (() => {
     dirs.downRight = mirrorDir(dirs.downLeft);
     dirs.upLeft = mirrorDir(dirs.upRight);
     return {
-      dirs, sleepHead: bakeSleepHead(),
+      dirs, sleepHead: bakeSleepHead().scaled(2),
+      // full sleeping figure (duvet + head on pillow); headAt anchors it
+      sleepOverlay: F.sleep ? { surface: F.sleep, headAt: (AI_META.sleep && AI_META.sleep.headAt) || [F.sleep.w >> 1, F.sleep.h >> 1] } : null,
       height: F['front-stand'].h, sitHeight: F['front-sit'].h,
       // px the seated frame sinks below the seat-top anchor, per facing
-      sitDrop: { downLeft: 7, downRight: 7, upRight: 4, upLeft: 4 },
+      sitDrop: { downLeft: 14, downRight: 14, upRight: 8, upLeft: 8 },
     };
   }
 

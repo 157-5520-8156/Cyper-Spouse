@@ -1,4 +1,12 @@
-"""Single routing contract for the `.16.0` LocationAuthority event family."""
+"""Single routing contract for the `.16.0` LocationAuthority event family.
+
+DORMANT — no producer: no production ledger holds a committed ``V2Location*``
+event and no runtime constructs these payloads (current location reaches
+deliberation through active Plan heads instead).  Before wiring a producer,
+read the Producer-First Authority rule in CONTEXT.md and record the
+activation verdict in ``configs/mechanism_closure.yaml``
+(``v16-situation-constituents``).
+"""
 
 from __future__ import annotations
 

@@ -124,11 +124,43 @@ def append_clock_transition(
     event: WorldEvent,
     current_logical_time: datetime | None,
     computed_world_revision: int,
+    prefix_validated: bool = False,
 ) -> tuple[ClockTransitionProjection, ...]:
-    validate_clock_history(
-        history,
-        current_logical_time=current_logical_time,
-    )
+    """Append one ClockAdvanced authority entry after full validation.
+
+    ``prefix_validated=True`` is an opt-in for the reducer chain only.  There
+    the ``history`` tuple is provably already valid: every ``ReducerState``
+    is either fully validated on construction (``validate_clock_history``
+    runs in its model validator when the persisted head state is decoded, and
+    a replay starts from the empty state) or produced by a previous
+    ``append_clock_transition`` whose incremental checks below preserve every
+    invariant of :func:`validate_clock_history` over the immutable prefix:
+
+    - per-entry legality (timezone-aware interval, ``to > from``, installed
+      policy pair) holds for the prefix by induction and is checked for the
+      new entry here;
+    - strictly increasing unique world revisions and unique event refs hold
+      for the prefix by induction and are extended by the explicit
+      last-revision and whole-history uniqueness checks below;
+    - pairwise non-overlap holds inside the prefix by induction and is
+      checked for the one new adjacent pair below;
+    - the "history is not ahead of logical time / latest must be current"
+      bound only ever constrains the last entry and is checked below.
+
+    Callers outside the reducer chain keep the default full validation.
+    """
+
+    if prefix_validated:
+        if history and (
+            current_logical_time is None
+            or history[-1].logical_time_to > current_logical_time
+        ):
+            raise ValueError("clock authority history is ahead of logical time")
+    else:
+        validate_clock_history(
+            history,
+            current_logical_time=current_logical_time,
+        )
     if event.event_type != "ClockAdvanced":
         raise ValueError("clock authority only accepts ClockAdvanced")
     payload = event.payload()
@@ -184,11 +216,27 @@ def append_clock_transition(
         installed_policy_digest=resolved_policy_digest,
     )
     updated = (*history, projection)
-    validate_clock_history(
-        updated,
-        current_logical_time=target,
-        require_current=True,
-    )
+    if prefix_validated:
+        # The new entry's own legality was fully established above (aware
+        # interval, forward movement, installed policy, unique revision and
+        # ref).  The only whole-history conditions a valid prefix can still
+        # violate involve the one new adjacent pair and the new last entry.
+        if history and (
+            projection.logical_time_from < history[-1].logical_time_to
+            or projection.logical_time_to <= history[-1].logical_time_to
+        ):
+            raise ValueError("clock authority history overlaps or moves backward")
+        if not clock_policy_is_installed(
+            version=projection.installed_policy_version,
+            digest=projection.installed_policy_digest,
+        ):
+            raise ValueError("clock authority history contains an invalid authority entry")
+    else:
+        validate_clock_history(
+            updated,
+            current_logical_time=target,
+            require_current=True,
+        )
     return updated
 
 

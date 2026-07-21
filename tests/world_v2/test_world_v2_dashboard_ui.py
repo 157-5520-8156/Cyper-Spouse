@@ -112,7 +112,8 @@ def test_hot_dashboard_uses_only_v2_dtos_and_static_room_resources(tmp_path: Pat
     assert page.headers["cache-control"] == "no-store"
     assert "/world-v2/dashboard/app.js" in page.text
     # The room visual is the live pixel-home prototype, not a static render.
-    assert "/pixel-home/index.html" in page.text
+    assert "/pixel-home/index.html?embed=1" in page.text
+    assert "/pixel-home/index.html?edit=1" in page.text
     assert "zhizhi-room-isometric" not in page.text
     assert script.status_code == 200
     # The browser shell renders her factual life exclusively from the QQ

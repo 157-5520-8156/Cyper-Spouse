@@ -892,7 +892,7 @@ def test_http_dashboard_room_route_is_operator_gated_and_returns_only_the_v2_pub
         def __getattr__(self, name: str) -> object:
             raise AssertionError(f"v2 dashboard route touched legacy Engine attribute {name!r}")
 
-    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    assert not hasattr(app_module, "engine")
     monkeypatch.setattr(app_module, "http_v2_capture", host)
     monkeypatch.setattr(
         app_module,
@@ -952,7 +952,7 @@ def test_http_public_room_route_is_read_only_v2_dto_without_engine_or_bootstrap(
         def __getattr__(self, name: str) -> object:
             raise AssertionError(f"public v2 room route touched legacy Engine attribute {name!r}")
 
-    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    assert not hasattr(app_module, "engine")
     monkeypatch.setattr(app_module, "http_v2_capture", host)
     try:
         response = TestClient(app_module.app).get("/world-v2/room")
@@ -989,7 +989,7 @@ def test_http_dashboard_public_route_is_operator_gated_cacheable_and_never_reads
         def __getattr__(self, name: str) -> object:
             raise AssertionError(f"public dashboard route touched legacy Engine {name!r}")
 
-    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    assert not hasattr(app_module, "engine")
     monkeypatch.setattr(app_module, "http_v2_capture", host)
     monkeypatch.setattr(
         app_module,
@@ -1063,7 +1063,7 @@ def test_http_dashboard_public_route_never_bootstraps_or_falls_back_to_legacy(
     def _must_not_compose(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("dashboard public GET must not construct a writable World v2 host")
 
-    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    assert not hasattr(app_module, "engine")
     monkeypatch.setattr(app_module, "http_v2_capture", None)
     monkeypatch.setattr(app_module, "build_http_v2_capture_host", _must_not_compose)
     monkeypatch.setattr(
@@ -1096,7 +1096,7 @@ def test_http_public_room_route_never_bootstraps_or_falls_back_to_legacy(
     def _must_not_compose(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("public room GET must not construct a writable World v2 host")
 
-    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    assert not hasattr(app_module, "engine")
     monkeypatch.setattr(app_module, "http_v2_capture", None)
     monkeypatch.setattr(app_module, "build_http_v2_capture_host", _must_not_compose)
 
@@ -1125,7 +1125,7 @@ def test_http_dashboard_room_route_never_falls_back_to_legacy_when_v2_capture_la
         def __getattr__(self, name: str) -> object:
             raise AssertionError(f"dashboard fallback touched legacy Engine {name!r}")
 
-    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    assert not hasattr(app_module, "engine")
     monkeypatch.setattr(app_module, "http_v2_capture", _CaptureWithoutDashboard())
     monkeypatch.setattr(
         app_module,
@@ -1157,7 +1157,7 @@ def test_http_dashboard_room_route_does_not_bootstrap_a_cold_v2_host(
     def _must_not_compose(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("dashboard GET must not construct a writable World v2 host")
 
-    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    assert not hasattr(app_module, "engine")
     monkeypatch.setattr(app_module, "http_v2_capture", None)
     monkeypatch.setattr(app_module, "build_http_v2_capture_host", _must_not_compose)
     monkeypatch.setattr(

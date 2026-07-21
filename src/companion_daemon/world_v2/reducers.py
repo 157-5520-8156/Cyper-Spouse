@@ -5531,6 +5531,11 @@ def _clock_advanced(state: ReducerState, event: WorldEvent) -> ReducerState:
         event=event,
         current_logical_time=state.logical_time,
         computed_world_revision=len(state.committed_world_event_refs) + 1,
+        # Reducer states are fully validated on construction and every append
+        # in between runs these same incremental checks, so re-walking the
+        # whole multi-thousand-entry history on each ClockAdvanced only
+        # repeated already-proven invariants on the reply-critical path.
+        prefix_validated=True,
     )
     return state.model_copy(update={"logical_time": target, "clock_transition_history": history})
 

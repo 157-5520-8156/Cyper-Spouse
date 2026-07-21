@@ -91,6 +91,8 @@ from .interaction_bid_trigger_runtime import (
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
 from .afterthought_author import AfterthoughtAuthorRuntime, AfterthoughtRunResult
+from .afterthought_author_vertical import AfterthoughtVerticalRuntime
+from .bounded_decision_vertical import AnchoredRunResult, InlineOnceRunResult
 from .expression_reconsideration import expression_reconsideration_events_for_observation
 from .expression_reconsideration_runtime import (
     ExpressionReconsiderationReviewer,
@@ -120,6 +122,7 @@ from .quick_reaction import (
     QuickReactionRunResult,
     QuickReactionWorker,
 )
+from .quick_reaction_vertical import QuickReactionVerticalWorker
 from .proactive_action import ProactiveActionRunResult, ProactiveActionRuntime
 from .memory_withdrawal_review import (
     MemoryWithdrawalReviewRunResult,
@@ -309,9 +312,9 @@ class WorldRuntime:
         expression_reconsideration_owner: str | None = None,
         expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
         social_action_worker: SocialActionWorker | None = None,
-        quick_reaction_worker: QuickReactionWorker | None = None,
+        quick_reaction_worker: QuickReactionWorker | QuickReactionVerticalWorker | None = None,
         proactive_action_runtime: ProactiveActionRuntime | None = None,
-        afterthought_author: AfterthoughtAuthorRuntime | None = None,
+        afterthought_author: AfterthoughtAuthorRuntime | AfterthoughtVerticalRuntime | None = None,
         memory_withdrawal_review: MemoryWithdrawalReviewRuntime | None = None,
         external_result_owner: str | None = None,
         external_result_deliberator: ToolResultDeliberator | None = None,
@@ -588,6 +591,7 @@ class WorldRuntime:
         | MemoryWithdrawalReviewRunResult
         | ProactiveActionRunResult
         | AfterthoughtRunResult
+        | AnchoredRunResult
         | None
     ):
         """Run one low-priority mental-state job without delaying an interactive turn.
@@ -1488,7 +1492,11 @@ class WorldRuntime:
             # any reply cursor is pinned: its world-revision writes must land
             # before the reply deliberation evaluates the world, otherwise
             # the reply Acceptance would become legitimately stale.
-            quick_reaction_task: asyncio.Task[QuickReactionRunResult] | None = None
+            quick_reaction_task: (
+                asyncio.Task[QuickReactionRunResult]
+                | asyncio.Task[InlineOnceRunResult]
+                | None
+            ) = None
             if self._quick_reaction_worker is not None:
                 quick_reaction_task = asyncio.create_task(
                     self._quick_reaction_worker.run_observation(
@@ -1522,7 +1530,7 @@ class WorldRuntime:
                     gate=self._immediate_emotion_semantic_gate,
                 )
             )
-            quick_reaction: QuickReactionRunResult | None = None
+            quick_reaction: QuickReactionRunResult | InlineOnceRunResult | None = None
             if quick_reaction_task is not None:
                 # The worker owns hard internal budgets and never raises; this
                 # await is bounded by the local gate timeout plus one provider

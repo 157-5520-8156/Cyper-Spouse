@@ -1722,6 +1722,68 @@ def _context_model_content(
     return _canonical_json(material)
 
 
+def _replace_model_content(compiled: CapsuleSlice, content: str) -> CapsuleSlice:
+    """Swap only the model-facing view of an available slice.
+
+    Every authority field (items, hashes, resolver proof) is retained exactly;
+    the degraded view is a presentation decision under the global character
+    budget, never a change to what this capsule can prove.
+    """
+
+    return compiled.model_copy(
+        update={
+            "model_content_json": content,
+            "budget": compiled.budget.model_copy(update={"used_characters": len(content)}),
+            "truncated": True,
+        }
+    )
+
+
+def _collapsed_slice_view(compiled: CapsuleSlice) -> CapsuleSlice:
+    """Collapse an emptied available slice to an explicit minimal model view.
+
+    After the global envelope evicted every item, the remaining resolver
+    proof/source envelope carries no conversational content.  The collapsed
+    view keeps the omission visible to the model while the slice retains its
+    full source authority for auditing.
+    """
+
+    content = _canonical_json(
+        {
+            "availability": "available",
+            "content_omitted": True,
+            "truncated": True,
+        }
+    )
+    return _replace_model_content(compiled, content)
+
+
+def _character_truncated_head_view(
+    compiled: CapsuleSlice, *, preview_characters: int
+) -> CapsuleSlice:
+    """Bound a mandatory head slice by characters as the final degradation.
+
+    The trusted CapsuleItem keeps its complete payload and hash closure; only
+    the model-facing view is reduced to a bounded payload prefix so prompt
+    construction can always terminate inside the global budget.
+    """
+
+    material: dict[str, object] = {
+        "availability": "available",
+        "truncated": True,
+        "items": [
+            {
+                "item_ref": item.item_ref,
+                "rank_score_bp": item.rank_score_bp,
+                "privacy_class": item.privacy_class,
+                "value_preview": item.payload_json[: max(0, preview_characters)],
+            }
+            for item in compiled.items
+        ],
+    }
+    return _replace_model_content(compiled, _canonical_json(material))
+
+
 def _evict_last_item(
     *,
     slice_name: SliceName,
@@ -1839,45 +1901,88 @@ def _compile_resolved_context(
         json.loads(item.payload_json).get("kind") == "proactive_opportunity"
         for item in slices["advisories"].items
     )
-    while len(model_content) > active_policy.hard_max_characters:
+    # Character-truncation state for the mandatory head slices (final tier).
+    # ``None`` means the head still shows its ordinary whole-item view; a
+    # non-negative number is the current bounded payload preview length.
+    head_preview_characters: dict[SliceName, int | None] = {
+        "character_core": None,
+        "current_situation": None,
+    }
+    collapse_attempted: set[SliceName] = set()
+
+    def _floor_eviction_candidate() -> SliceName | None:
+        """Tier 1: the pre-existing rank eviction above continuity floors.
+
+        Every compilation this tier can satisfy follows the historical
+        eviction order and produces the same capsule.
+        """
+
         candidates = [
             (slice_.items[-1].rank_score_bp, name)
             for name, slice_ in slices.items()
             if len(slice_.items) > minimum_retained_items.get(name, 0)
         ]
+        if candidates:
+            return min(candidates, key=lambda item: (item[0], item[1]))[1]
+        return None
+
+    def _collapse_candidate() -> SliceName | None:
+        """Tier 3: the largest emptied available envelope not yet collapsed.
+
+        An emptied available slice still spends hundreds of characters on its
+        resolver-proof/source envelope.  That envelope carries no content the
+        model could use, so collapsing its view is the cheapest degradation
+        once ordinary eviction has nothing left to remove.
+        """
+
+        candidates = [
+            (slice_.budget.used_characters, name)
+            for name, slice_ in slices.items()
+            if slice_.availability == "available"
+            and not slice_.items
+            and name not in collapse_attempted
+        ]
         if not candidates:
-            # A deliberately tiny deployment budget, or several maximum-size
-            # continuity heads at once, must still fail soft.  Core identity
-            # and current situation remain mandatory; continuity floors then
-            # compete by their ordinary rank only after every non-floor item
-            # has gone.  This emergency tier prevents prompt construction from
-            # blocking the visible reply while making the omission explicit.
-            emergency_protected = {
-                "character_core",
-                "current_situation",
-                "active_memory_candidates",
-                "relevant_facts",
-            }
-            if proactive_advisory_present:
-                # In this lane the exact opportunity is the request itself.
-                # Under the emergency cap it outranks otherwise useful recall
-                # context; those items remain present whenever the ordinary
-                # 32k envelope can represent them.
-                emergency_protected = {
-                    "character_core",
-                    "current_situation",
-                    "advisories",
-                }
-            candidates = [
-                (slice_.items[-1].rank_score_bp, name)
-                for name, slice_ in slices.items()
-                if name not in emergency_protected and slice_.items
-            ]
-            if not candidates:
-                raise ValueError(
-                    "global Context Capsule budget cannot represent required whole-item envelopes"
-                )
-        _, selected_name = min(candidates, key=lambda item: (item[0], item[1]))
+            return None
+        return max(candidates, key=lambda item: (item[0], item[1]))[1]
+
+    def _deep_eviction_candidate() -> SliceName | None:
+        """Tiers 4-6: degrade the protected continuity set itself.
+
+        Tier 4 takes every protected non-head, non-advisory slice down to one
+        item. Tier 5 then degrades advisories item-by-item by rank; the
+        per-slice sort keeps a proactive_opportunity advisory at the head, so
+        it is the last advisory standing. Tier 6 allows zero items everywhere
+        except the mandatory heads; a remaining
+        proactive_opportunity advisory is the semantic subject of its lane,
+        so it outlasts every other optional single item.
+        """
+
+        candidates = [
+            (slice_.items[-1].rank_score_bp, name)
+            for name, slice_ in slices.items()
+            if name not in {"character_core", "current_situation"}
+            and name != "advisories"
+            and len(slice_.items) > 1
+        ]
+        if candidates:
+            return min(candidates, key=lambda item: (item[0], item[1]))[1]
+        if len(slices["advisories"].items) > 1:
+            return "advisories"
+        last_candidates = [
+            (
+                1 if name == "advisories" and proactive_advisory_present else 0,
+                slice_.items[-1].rank_score_bp,
+                name,
+            )
+            for name, slice_ in slices.items()
+            if name not in {"character_core", "current_situation"} and slice_.items
+        ]
+        if last_candidates:
+            return min(last_candidates)[2]
+        return None
+
+    def _evict(selected_name: SliceName) -> None:
         selected_bound = bounds[selected_name]
         if selected_bound is None:  # pragma: no cover - guarded by available items
             raise RuntimeError("available Capsule slice lost its resolved authority")
@@ -1889,6 +1994,61 @@ def _compile_resolved_context(
             model_content_profile=model_content_profile,
         )
         global_omissions[selected_name] = global_omissions.get(selected_name, 0) + 1
+
+    while len(model_content) > active_policy.hard_max_characters:
+        selected_name = _floor_eviction_candidate()
+        if selected_name is not None:
+            _evict(selected_name)
+            model_content = _context_model_content(request, slices, relationship_evaluation)
+            continue
+        collapse_name = _collapse_candidate()
+        if collapse_name is not None:
+            collapse_attempted.add(collapse_name)
+            collapsed = _collapsed_slice_view(slices[collapse_name])
+            if collapsed.budget.used_characters < slices[collapse_name].budget.used_characters:
+                slices[collapse_name] = collapsed
+                global_omissions[collapse_name] = global_omissions.get(collapse_name, 0) + 1
+                model_content = _context_model_content(
+                    request, slices, relationship_evaluation
+                )
+            continue
+        selected_name = _deep_eviction_candidate()
+        if selected_name is not None:
+            _evict(selected_name)
+            model_content = _context_model_content(request, slices, relationship_evaluation)
+            continue
+        # Tier 7: every optional envelope is gone and only the mandatory
+        # heads remain.  Bound their model views by characters (halving the
+        # payload preview each pass) so the loop provably terminates with a
+        # legal, explicitly truncated capsule instead of raising on this
+        # required prompt-construction path.
+        truncatable = [
+            (slices[name].budget.used_characters, name)
+            for name, preview in head_preview_characters.items()
+            if slices[name].items and (preview is None or preview > 0)
+        ]
+        if not truncatable:
+            # Structural floor: the framing plus minimal slice views alone
+            # exceed the configured budget.  No resolved data can reach this
+            # branch; only a deployment budget below the capsule's fixed
+            # representation cost does.
+            raise ValueError(
+                "global Context Capsule budget is below the minimum whole-item budget "
+                "for required envelopes"
+            )
+        _, head_name = max(truncatable, key=lambda item: (item[0], item[1]))
+        current_preview = head_preview_characters[head_name]
+        if current_preview is None:
+            next_preview = max(
+                len(item.payload_json) for item in slices[head_name].items
+            ) // 2
+        else:
+            next_preview = current_preview // 2
+        head_preview_characters[head_name] = next_preview
+        slices[head_name] = _character_truncated_head_view(
+            slices[head_name], preview_characters=next_preview
+        )
+        global_omissions[head_name] = global_omissions.get(head_name, 0) + 1
         model_content = _context_model_content(request, slices, relationship_evaluation)
     truncation_log.extend(
         TruncationEntry(

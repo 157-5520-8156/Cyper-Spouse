@@ -503,6 +503,7 @@ class SQLiteProjectionPerformanceCounters:
     project_at_head_hits: int
     historical_replay_calls: int
     total_replay_calls: int
+    historical_projection_hits: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,12 +555,16 @@ class SQLiteWorldLedger:
         self._project_at_head_hits = 0
         self._historical_replay_calls = 0
         self._total_replay_calls = 0
+        self._historical_projection_hits = 0
         self._head_projection_cache: LedgerProjection | None = None
         self._head_projection_cache_row_identity: tuple[object, ...] | None = None
         # A same-turn advisory may authenticate a proposal at the immediately
         # preceding cursor, then rebase it after Appraisal acceptance.  Those
         # two reads are immutable historical snapshots; retain a small bounded
         # cache so the second authority pass does not replay the full ledger.
+        # Every commit also remembers the head projection it displaces here,
+        # because "the head from a few commits ago" is exactly the audit
+        # cursor same-turn appraisal/affect workers re-read.
         self._historical_projection_cache: dict[tuple[int, int, int], LedgerProjection] = {}
         self._head_state_cache: ReducerState | None = None
         self._head_state_cache_identity: tuple[int, int, int, str, str] | None = None
@@ -783,6 +788,7 @@ class SQLiteWorldLedger:
                 project_at_head_hits=self._project_at_head_hits,
                 historical_replay_calls=self._historical_replay_calls,
                 total_replay_calls=self._total_replay_calls,
+                historical_projection_hits=self._historical_projection_hits,
             )
 
     def _sqlite_data_version_locked(self) -> int:
@@ -3725,7 +3731,28 @@ class SQLiteWorldLedger:
                 (self._world_id, commit_id),
             ).fetchone()
             if existing is not None:
-                _, result, persisted_request_hash = self._verified_commit_locked(commit_id)
+                # ``_refresh_verified_external_history_locked`` above already
+                # bound this process to the current durable history, so the
+                # persisted head row is a verified prefix bound.  Replaying
+                # genesis-to-predecessor here made an idempotent retry of an
+                # old commit O(full history).
+                verified_head = connection.execute(
+                    """SELECT world_revision, deliberation_revision, ledger_sequence
+                       FROM world_v2_heads WHERE world_id = ?""",
+                    (self._world_id,),
+                ).fetchone()
+                _, result, persisted_request_hash = self._verified_commit_locked(
+                    commit_id,
+                    verified_prefix_cursor=(
+                        ProjectionCursor(
+                            world_revision=int(verified_head["world_revision"]),
+                            deliberation_revision=int(verified_head["deliberation_revision"]),
+                            ledger_sequence=int(verified_head["ledger_sequence"]),
+                        )
+                        if verified_head is not None
+                        else None
+                    ),
+                )
                 if not hmac.compare_digest(persisted_request_hash, request_hash):
                     raise IdempotencyConflict(f"commit_id {commit_id!r} has different content")
                 connection.commit()
@@ -3996,6 +4023,31 @@ class SQLiteWorldLedger:
             self._verified_data_version = self._sqlite_data_version_locked()
             for event in events:
                 self._verified_event_commit_cache[event.event_id] = (event, result)
+            # The pre-commit head is the historical cursor same-turn workers
+            # re-read most (an audit cursor is typically the head from a few
+            # commits ago).  It was verified while it *was* the head — the
+            # row identity below proves the cached value belongs to exactly
+            # the head row this transaction CAS-checked — so remembering it
+            # avoids a full-history replay on the next ``project_at``.
+            previous_head_projection = self._head_projection_cache
+            if previous_head_projection is not None and (
+                self._head_projection_cache_row_identity
+                == (
+                    int(head["world_revision"]),
+                    int(head["deliberation_revision"]),
+                    int(head["ledger_sequence"]),
+                    str(head["semantic_hash"]),
+                    str(head["state_hash"]),
+                    (
+                        int(head["storage_epoch"])
+                        if head_is_split
+                        else hashlib.sha256(
+                            str(head["state_json"]).encode("utf-8")
+                        ).digest()
+                    ),
+                )
+            ):
+                self._remember_historical_projection(previous_head_projection)
             # This exact projection produced the state bytes and hashes that
             # were atomically committed above.  Seed the process-local head so
             # the next Context build does not decode and revalidate the entire
@@ -4265,6 +4317,28 @@ class SQLiteWorldLedger:
         with self._thread_lock:
             return self._project_locked()
 
+    def _remember_historical_projection(self, projection: LedgerProjection) -> None:
+        """Retain one immutable-by-cursor projection for bounded reuse.
+
+        Consecutive head projections share almost all tuple elements through
+        the incremental commit path, so the marginal memory per entry is the
+        changed fields only.  Insertion order doubles as the eviction order.
+        """
+
+        cache_key = (
+            projection.world_revision,
+            projection.deliberation_revision,
+            projection.ledger_sequence,
+        )
+        self._historical_projection_cache.pop(cache_key, None)
+        self._historical_projection_cache[cache_key] = projection
+        # Keep memory bounded even during long-running multi-turn audits.  The
+        # bound leaves room for an audit cursor to survive the handful of
+        # same-turn commits (compile, acceptance, downstream triggers) plus
+        # interleaved background lanes that land before the rebase re-read.
+        while len(self._historical_projection_cache) > 16:
+            self._historical_projection_cache.pop(next(iter(self._historical_projection_cache)))
+
     def project_at(self, cursor: ProjectionCursor) -> LedgerProjection:
         with self._thread_lock:
             head = self._project_locked()
@@ -4285,6 +4359,7 @@ class SQLiteWorldLedger:
             )
             cached = self._historical_projection_cache.get(cache_key)
             if cached is not None:
+                self._historical_projection_hits += 1
                 return cached
             self._historical_replay_calls += 1
             projection = self._replay_locked(
@@ -4292,10 +4367,7 @@ class SQLiteWorldLedger:
                 target_schema_version=CURRENT_SCHEMA_VERSION,
                 reducer_bundle_version=REDUCER_BUNDLE_VERSION,
             )
-            self._historical_projection_cache[cache_key] = projection
-            # Keep memory bounded even during long-running multi-turn audits.
-            if len(self._historical_projection_cache) > 8:
-                self._historical_projection_cache.pop(next(iter(self._historical_projection_cache)))
+            self._remember_historical_projection(projection)
             return projection
 
     def _pin_observation_history_proof(
@@ -4755,8 +4827,16 @@ class SQLiteWorldLedger:
                     raise ValueError("requested cursor is not a committed batch boundary")
                 boundary_commit_id = str(boundary_row["commit_id"])
                 self._require_observation_commit_budget_locked((boundary_commit_id,))
+                # ``observation_events_at`` re-verified external history at its
+                # entry, so every persisted row at-or-before this cursor is
+                # already inside the process-verified prefix.  Without that
+                # bound the boundary check silently replayed genesis-to-
+                # predecessor on every same-turn appraisal read, which grew
+                # into minutes on a 30k-event production ledger.  The commit's
+                # own envelope hashes, request hash and result bytes are still
+                # fully checked below.
                 boundary_events, boundary_result, _ = self._verified_commit_locked(
-                    boundary_commit_id
+                    boundary_commit_id, verified_prefix_cursor=cursor
                 )
                 boundary_cursor = ProjectionCursor(
                     world_revision=boundary_result.world_revision,

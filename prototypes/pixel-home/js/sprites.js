@@ -445,7 +445,7 @@ const Bakery = (() => {
     return {
       surface: sf, offset: [-ox, -oy], w, d, h,
       front: { surface: front, offset: [-ox, -oy] },
-      emitters: [{ dx: 0.28 + 0.22, dy: 0.3, z: 0.9, r: 26, color: [255, 208, 130], pool: true }],
+      emitters: [{ dx: 0.28 + 0.22, dy: 0.3, z: 0.9, r: 52, color: [255, 208, 130], pool: true }],
     };
   }
 
@@ -695,7 +695,7 @@ const Bakery = (() => {
     sf.rect(bk[0] - 3, bk[1] - 2, 6, 2, PAL.rose);
     return {
       ...base, surface: sf,
-      emitters: [{ dx: 0.5, dy: 0.45, z: 0.98, r: 24, color: [255, 205, 130], pool: true }],
+      emitters: [{ dx: 0.5, dy: 0.45, z: 0.98, r: 48, color: [255, 205, 130], pool: true }],
     };
   }
 
@@ -716,7 +716,7 @@ const Bakery = (() => {
     sf.polyLine([[c[0] - 8, c[1] - 34], [c[0] + 8, c[1] - 34], [c[0] + 6, c[1] - 46], [c[0] - 6, c[1] - 46]], PAL.outline);
     return {
       surface: sf, offset: [-ox, -oy], w, d, h: 1.7,
-      emitters: [{ dx: 0.5, dy: 0.5, z: 2.5, r: 34, color: [255, 210, 140], pool: true }],
+      emitters: [{ dx: 0.5, dy: 0.5, z: 2.5, r: 68, color: [255, 210, 140], pool: true }],
     };
   }
 
@@ -724,7 +724,7 @@ const Bakery = (() => {
     // hanging pendant lamp; the cord fades out upward at the implied ceiling
     // height instead of dangling into the void
     const w = 1, d = 1;
-    const shadeZ = 1.9;                       // bottom rim of the shade
+    const shadeZ = 1.75;                      // bottom rim of the shade
     const cordTop = 2.85;                     // implied ceiling
     const sf = new Surface(TILE_W + 6, (cordTop + 0.4) * HZ);
     const ox = HX + 3, oy = (cordTop + 0.3) * HZ;
@@ -732,22 +732,24 @@ const Bakery = (() => {
     const rim = P(0.5, 0.5, shadeZ);
     const top = P(0.5, 0.5, shadeZ + 0.5);
     const cordEnd = P(0.5, 0.5, cordTop);
-    sf.line(top[0], top[1], cordEnd[0], cordEnd[1] + 4, '#4a4048');
+    sf.line(top[0], top[1], cordEnd[0], cordEnd[1] + 8, '#4a4048');
     // fade the last few cord pixels
-    sf.set(cordEnd[0], cordEnd[1] + 3, 'rgba(74,64,72,0.7)');
-    sf.set(cordEnd[0], cordEnd[1] + 2, 'rgba(74,64,72,0.45)');
-    sf.set(cordEnd[0], cordEnd[1] + 1, 'rgba(74,64,72,0.2)');
-    // brass shade: trapezoid with rim highlight
-    sf.poly([[rim[0] - 7, rim[1]], [rim[0] + 7, rim[1]], [top[0] + 2, top[1]], [top[0] - 2, top[1]]], PAL.gold);
-    sf.line(rim[0] - 7, rim[1], rim[0] + 7, rim[1], '#f4d491');
-    sf.line(rim[0] - 6, rim[1] + 1, rim[0] + 6, rim[1] + 1, shade(PAL.gold, 0.72));
-    sf.polyLine([[rim[0] - 7, rim[1]], [rim[0] + 7, rim[1]], [top[0] + 2, top[1]], [top[0] - 2, top[1]]], PAL.outline);
+    for (let i = 0; i < 7; i += 1) sf.set(cordEnd[0], cordEnd[1] + 7 - i, `rgba(74,64,72,${(0.8 - i * 0.11).toFixed(2)})`);
+    // ceiling rose hint at the top of the cord
+    sf.rect(cordEnd[0] - 2, cordEnd[1], 5, 2, 'rgba(74,64,72,0.5)');
+    // brass shade: trapezoid with rim highlight (2x scale)
+    sf.poly([[rim[0] - 14, rim[1]], [rim[0] + 14, rim[1]], [top[0] + 4, top[1]], [top[0] - 4, top[1]]], PAL.gold);
+    sf.line(rim[0] - 14, rim[1], rim[0] + 14, rim[1], '#f4d491');
+    sf.line(rim[0] - 12, rim[1] + 1, rim[0] + 12, rim[1] + 1, shade(PAL.gold, 0.72));
+    sf.line(rim[0] - 13, rim[1] + 2, rim[0] + 13, rim[1] + 2, shade(PAL.gold, 0.6));
+    sf.polyLine([[rim[0] - 14, rim[1]], [rim[0] + 14, rim[1]], [top[0] + 4, top[1]], [top[0] - 4, top[1]]], PAL.outline);
     // warm bulb under the shade
-    sf.rect(rim[0] - 1, rim[1] + 1, 2, 2, '#ffe9b8');
+    sf.rect(rim[0] - 2, rim[1] + 1, 4, 4, '#ffe9b8');
+    sf.rect(rim[0] - 1, rim[1] + 1, 2, 2, '#fff6da');
     return {
       surface: sf, offset: [-ox, -oy], w, d, h: 0,
       decorOccupancy: true,
-      emitters: [{ dx: 0.5, dy: 0.5, z: shadeZ - 0.1, r: 40, color: [255, 214, 150], pool: true }],
+      emitters: [{ dx: 0.5, dy: 0.5, z: shadeZ - 0.1, r: 80, color: [255, 214, 150], pool: true }],
     };
   }
 
@@ -998,7 +1000,7 @@ const Bakery = (() => {
         if (k % 2 === 0 && k < 6) {
           sf.rect(p[0] - 1, p[1] + 1, 2, 3, '#ffd98a');
           sf.set(p[0] - 1, p[1] + 1, '#fff3cf');
-          glowPts.push({ x: p[0] - ox, y: p[1] + 2 - oy, r: 5, color: [255, 214, 140] });
+          glowPts.push({ x: p[0] - ox, y: p[1] + 2 - oy, r: 10, color: [255, 214, 140] });
         }
       }
     }

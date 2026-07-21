@@ -9,7 +9,6 @@ from companion_daemon.emotion_core import (
     text_emotion_deltas,
 )
 from companion_daemon.models import MoodState
-from companion_daemon.relationship import emotion_ghost_window_hours, life_event_probability
 from companion_daemon.time import utc_now
 
 
@@ -62,11 +61,3 @@ def test_emotion_context_contains_behavioral_guidance() -> None:
     assert "情绪向量" in line
     assert "情绪指导" in line
     assert emotion_snapshot(state).dominant == "sadness"
-
-
-def test_aversion_emotion_suppresses_proactive_probability() -> None:
-    warm = MoodState(relationship_stage="friend", emotion_vector={"love": 50, "trust": 55, "anticipation": 50})
-    angry = MoodState(relationship_stage="friend", emotion_vector={"anger": 75, "disgust": 55})
-
-    assert emotion_ghost_window_hours(angry) > 0
-    assert life_event_probability(angry) < life_event_probability(warm)

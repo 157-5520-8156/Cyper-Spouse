@@ -22,6 +22,9 @@
     { name: 'walk-upLeft', label: '走路（朝上左）', walk: 'upLeft' },
     { name: 'walk-upRight', label: '走路（朝上右）', walk: 'upRight' },
     { name: 'idle', label: '站立发呆', idle: true },
+    // regression: standing in the gap between plantBig (NW of her, must be
+    // occluded) and the sofa (SE of her, must occlude her shoulder)
+    { name: 'between', label: '夹缝站位（前遮后挡）', idle: true, pos: [5.5, 4.5] },
   ];
 
   const ZOOM = 4;           // crop zoom factor
@@ -40,10 +43,10 @@
       engine.actor.state = 'walk';
       engine.actor.facing = scenario.walk;
       engine.actor.walked = 0.35;          // mid-step frame
-      engine.actor.pos = [6, 5];
-      engine.actor.path = [[6, 5]];        // keeps walk state on render
+      engine.actor.pos = [4, 5];
+      engine.actor.path = [[4, 5]];        // keeps walk state on render
     } else if (scenario.idle) {
-      engine.actor.pos = [6, 5];
+      engine.actor.pos = scenario.pos || [4, 5];
     } else {
       const it = engine.interactions[scenario.name];
       if (!it) continue;

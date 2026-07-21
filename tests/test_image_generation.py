@@ -16,8 +16,6 @@ from companion_daemon.image_generation import (
     life_image_prompt,
     visual_reference_paths,
 )
-from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
-from companion_daemon.character import load_character
 from companion_daemon.visual_identity import load_visual_identity
 
 
@@ -105,31 +103,6 @@ def test_visual_identity_loads_anchor() -> None:
     assert "不要复用真实公众人物" in identity.negative_prompt
     assert identity.reference_assets("everyday_selfie")[0].endswith("08-cafe-phone-canonical.png")
     assert any("02-bedtime-close-selfie" in path for path in identity.reference_assets("relationship_private"))
-
-
-def test_build_image_prompt_keeps_character_identity_for_selfie() -> None:
-    payload = build_image_prompt(
-        "给我发一张水彩风格自拍看看",
-        character=load_character("configs/character.yaml"),
-    )
-
-    assert payload.mode == "character"
-    assert "Character identity anchor" in payload.prompt
-    assert "watercolor" in payload.prompt
-    assert "自然黑色中长发" in payload.prompt
-
-
-def test_build_image_prompt_resolves_recent_visual_context() -> None:
-    payload = build_image_prompt(
-        "那张发我看看",
-        character=load_character("configs/character.yaml"),
-        recent_messages=[
-            ChatImageMessage("我刚在图书馆靠窗的位置拍了一张梧桐叶的照片。", is_user=False),
-        ],
-    )
-
-    assert payload.used_context
-    assert "梧桐叶" in payload.directive
 
 
 @pytest.mark.asyncio

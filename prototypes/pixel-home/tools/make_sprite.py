@@ -24,7 +24,7 @@ from pathlib import Path
 
 from PIL import Image
 
-HX, HY, HZ = 16, 8, 16
+HX, HY, HZ = 32, 16, 32
 
 # Mirror of the engine palette (pixel.js PAL) plus the shade() ramp used by
 # the procedural bakes, so AI sprites land on the same colors.
@@ -127,7 +127,7 @@ def quantize_to_palette(img: Image.Image, palette: list[tuple[int, int, int]]) -
     return out
 
 
-OVERSAMPLE = 4          # rectify at 4x final scale, then nearest-downscale
+OVERSAMPLE = 2          # rectify at 2x final scale, then nearest-downscale
 MARGIN = 256            # canonical canvas padding for overhanging parts
 
 
@@ -169,9 +169,18 @@ def solve3(m: list[list[float]], rhs: list[float]) -> list[float]:
     return out
 
 
-def rectify(img: Image.Image, pts, w: int, d: int) -> tuple[Image.Image, tuple[int, int]]:
-    """Affine-warp the render so its ground plane matches the exact iso basis
-    at OVERSAMPLE x the final scale.  Returns (canonical image, north corner)."""
+def rectify(img: Image.Image, pts, w: int, d: int,
+            plumb: bool = False) -> tuple[Image.Image, tuple[int, int]]:
+    """Warp the render so its ground plane matches the exact iso basis at
+    OVERSAMPLE x the final scale.  Returns (canonical image, north corner).
+
+    plumb=False: exact 3-point affine (corners land exactly, but if the raw
+    base was rotated the warp shears verticals off plumb).
+    plumb=True: constrained affine with NO horizontal shear (x' = a*x): raw
+    vertical lines stay exactly vertical; the two base-edge SLOPES are made
+    exactly +-0.5 via vertical shear, and the south corner lands exactly.
+    Corner x-positions may then be off by a few px (reported as overhang),
+    which reads far better than leaning furniture."""
     hx, hy = HX * OVERSAMPLE, HY * OVERSAMPLE
     hz = HZ * OVERSAMPLE
     canvas_w = round((w + d) * hx) + MARGIN * 2
@@ -181,21 +190,50 @@ def rectify(img: Image.Image, pts, w: int, d: int) -> tuple[Image.Image, tuple[i
     def target(gx, gy, gz=0.0):
         return (north[0] + (gx - gy) * hx, north[1] + (gx + gy) * hy - gz * hz)
 
-    src_mat = [[px, py, 1.0] for _, _, _, px, py in pts]
-    dst = [target(gx, gy, gz) for gx, gy, gz, _, _ in pts]
-    ax = solve3(src_mat, [p[0] for p in dst])       # forward affine, x row
-    ay = solve3(src_mat, [p[1] for p in dst])       # forward affine, y row
-    # invert [[a,b,c],[d,e,f],[0,0,1]] for PIL (output->input mapping)
-    a, b, c = ax
-    dd, e, f = ay
-    det = a * e - b * dd
-    if abs(det) < 1e-12:
-        raise SystemExit("degenerate affine from --pts")
-    ia, ib = e / det, -b / det
-    idd, ie = -dd / det, a / det
-    ic = -(ia * c + ib * f)
-    if_ = -(idd * c + ie * f)
-    coeffs = (ia, ib, ic, idd, ie, if_)
+    if plumb:
+        # expects the three pts to be W, S, E of the base structure (any z)
+        (wgx, wgy, wgz, wpx, wpy), (sgx, sgy, sgz, spx, spy), (egx, egy, egz, epx, epy) = pts
+        wt, st, et = target(wgx, wgy, wgz), target(sgx, sgy, sgz), target(egx, egy, egz)
+        a = (et[0] - wt[0]) / (epx - wpx)
+        # left edge W->S must get slope +0.5, right edge S->E slope -0.5:
+        #   (c*dx + dvert*dy) / (a*dx) = k   for each edge
+        l_dx, l_dy = spx - wpx, spy - wpy
+        r_dx, r_dy = epx - spx, epy - spy
+        kl = (st[1] - wt[1]) / (st[0] - wt[0])
+        kr = (et[1] - st[1]) / (et[0] - st[0])
+        det = l_dx * r_dy - r_dx * l_dy
+        if abs(det) < 1e-9:
+            raise SystemExit("base edges are collinear; cannot plumb-rectify")
+        bl, br = kl * a * l_dx, kr * a * r_dx
+        c = (bl * r_dy - br * l_dy) / det
+        dv = (br * l_dx - bl * r_dx) / det
+        if dv <= 0:
+            raise SystemExit("plumb solve flipped the sprite; check the pts order (W S E)")
+        # translation: south corner lands exactly
+        tx = st[0] - a * spx
+        ty = st[1] - (c * spx + dv * spy)
+        fdet = a * dv
+        ia, ib = 1.0 / a, 0.0
+        idd, ie = -c / fdet, a / fdet
+        ic = -(ia * tx)
+        if_ = -(idd * tx + ie * ty)
+        coeffs = (ia, ib, ic, idd, ie, if_)
+    else:
+        src_mat = [[px, py, 1.0] for _, _, _, px, py in pts]
+        dst = [target(gx, gy, gz) for gx, gy, gz, _, _ in pts]
+        ax = solve3(src_mat, [p[0] for p in dst])       # forward affine, x row
+        ay = solve3(src_mat, [p[1] for p in dst])       # forward affine, y row
+        # invert [[a,b,c],[d,e,f],[0,0,1]] for PIL (output->input mapping)
+        a, b, c = ax
+        dd, e, f = ay
+        det = a * e - b * dd
+        if abs(det) < 1e-12:
+            raise SystemExit("degenerate affine from --pts")
+        ia, ib = e / det, -b / det
+        idd, ie = -dd / det, a / det
+        ic = -(ia * c + ib * f)
+        if_ = -(idd * c + ie * f)
+        coeffs = (ia, ib, ic, idd, ie, if_)
     warped = img.transform((canvas_w, canvas_h), Image.Transform.AFFINE, coeffs,
                            resample=Image.Resampling.BICUBIC, fillcolor=(0, 0, 0, 0))
     return warped, north
@@ -215,6 +253,9 @@ def main() -> None:
                     help="three reference corners 'gx,gy[,z]:px,py' x3 in raw pixels "
                          "(z = height in HZ units); enables exact iso rectification "
                          "+ anchoring")
+    ap.add_argument("--plumb", action="store_true",
+                    help="with --pts (order W S E): keep verticals plumb, fix base "
+                         "slopes to +-0.5 exactly; corner x may drift a few px")
     ap.add_argument("--pad-bottom", type=int, default=0,
                     help="(legacy path) extra px below the footprint south corner")
     ap.add_argument("--width-scale", type=float, default=1.0,
@@ -230,7 +271,7 @@ def main() -> None:
 
     if args.pts:
         pts = parse_pts(args.pts)
-        warped, north = rectify(img, pts, args.w, args.d)
+        warped, north = rectify(img, pts, args.w, args.d, plumb=args.plumb)
         bbox = content_bbox(warped)
         # snap the crop so the north corner stays on the downscale lattice
         cx = bbox[0] - ((north[0] - bbox[0]) % OVERSAMPLE)

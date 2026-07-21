@@ -35,6 +35,9 @@ async function initPixelHome() {
         actionsEl.appendChild(btn);
       }
     },
+    onEditStateChanged() {
+      [...paletteEl.children].forEach(b => b.classList.toggle('active', b.dataset.type === engine.ghost));
+    },
   };
 
   const engine = new Engine(canvas, ui);
@@ -52,6 +55,12 @@ async function initPixelHome() {
     });
     paletteEl.appendChild(btn);
   }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'r' || e.key === 'R') {
+      if (engine.rotateSelection()) e.preventDefault();
+    }
+  });
 
   modeBtn.addEventListener('click', () => {
     engine.mode = engine.mode === 'live' ? 'edit' : 'live';

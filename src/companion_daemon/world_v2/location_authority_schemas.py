@@ -408,7 +408,8 @@ def validate_v2_location_authority_state(
                 or getattr(authority, "policy_version", None)
                 != "actor-authority-policy.2"
                 or getattr(authority, "policy_digest", None)
-                != "b6ef98db3e5313349fad22179af3a0a079a126b9aafb374f9c16fe3783b2a4ce"
+                # ACTOR_AUTHORITY_V2_POLICY_DIGEST after the 2026-07-20 production-2 root rotation.
+                != "a4648e30df25bbb3b8a709ceb579ab5ea8cc2f292bfc1a5fbc02e3e34cbdf19f"
                 or getattr(authority, "policy_digest", None)
                 != operator.authority_policy_digest
                 or authority_values.principal_ref != operator.principal_ref
@@ -680,7 +681,8 @@ def validate_v2_location_authority_state(
             or getattr(authority, "policy_version", None)
             != "actor-authority-policy.2"
             or getattr(authority, "policy_digest", None)
-            != "b6ef98db3e5313349fad22179af3a0a079a126b9aafb374f9c16fe3783b2a4ce"
+            # ACTOR_AUTHORITY_V2_POLICY_DIGEST after the 2026-07-20 production-2 root rotation.
+            != "a4648e30df25bbb3b8a709ceb579ab5ea8cc2f292bfc1a5fbc02e3e34cbdf19f"
             or getattr(authority, "policy_digest", None)
             != operator.authority_policy_digest
             or values.principal_ref != operator.principal_ref

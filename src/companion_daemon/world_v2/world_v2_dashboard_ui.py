@@ -88,9 +88,9 @@ UNAVAILABLE_HTML = """<!doctype html>
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>知栀的小屋 · World v2</title><style>
-:root{font-family:"PingFang SC",system-ui,sans-serif;color:#3f342d;background:#d9cdbc}*{box-sizing:border-box}body{margin:0}.bar{padding:16px 24px;background:#4d3b34;color:#fff8ea;display:flex;justify-content:space-between;align-items:center}.bar h1{font-size:18px;margin:0}.bar form{margin:0}.bar button{background:#6f8e84;color:white;border:1px solid #d6c7a5;padding:7px 10px}.wrap{max-width:1180px;margin:auto;padding:22px;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,.7fr);gap:18px}.room,.panel{background:#f7eedf;border:3px solid #684f42;box-shadow:5px 5px 0 #b79c84}.room{padding:10px}.room iframe{display:block;width:100%;aspect-ratio:4/3;border:0;background:#211b1a;image-rendering:pixelated}.panel{padding:16px}.value{font-size:20px;color:#557f78}.muted{color:#80685b;font-size:12px}.agenda{padding:0;list-style:none}.agenda li{padding:9px 0;border-bottom:1px solid #decfbd}.error{color:#9c4545}@media(max-width:760px){.wrap{grid-template-columns:1fr}}
+:root{font-family:"PingFang SC",system-ui,sans-serif;color:#3f342d;background:#d9cdbc}*{box-sizing:border-box}body{margin:0}.bar{padding:16px 24px;background:#4d3b34;color:#fff8ea;display:flex;justify-content:space-between;align-items:center}.bar h1{font-size:18px;margin:0}.bar form{margin:0}.bar button{background:#6f8e84;color:white;border:1px solid #d6c7a5;padding:7px 10px}.wrap{max-width:1180px;margin:auto;padding:22px;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,.7fr);gap:18px}.room,.panel{background:#f7eedf;border:3px solid #684f42;box-shadow:5px 5px 0 #b79c84}.room{position:relative;overflow:hidden}.room iframe{display:block;width:100%;aspect-ratio:7/4;border:0;background:#211b1a;image-rendering:pixelated;pointer-events:none}.room-edit{position:absolute;z-index:1;top:10px;right:10px;padding:7px 10px;border:1px solid #fff3d5;border-radius:6px;background:rgba(77,59,52,.88);color:#fff8ea;font-size:12px;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.28)}.room-edit:focus-visible{outline:3px solid #e8c568;outline-offset:2px}.panel{padding:16px}.value{font-size:20px;color:#557f78}.muted{color:#80685b;font-size:12px}.agenda{padding:0;list-style:none}.agenda li{padding:9px 0;border-bottom:1px solid #decfbd}.error{color:#9c4545}@media(max-width:760px){.wrap{grid-template-columns:1fr}}
 </style></head><body><header class="bar"><h1>知栀的小屋 · World v2</h1></header>
-<main class="wrap"><section class="room"><iframe id="roomVisual" src="/pixel-home/index.html" title="知栀的小屋"></iframe><p id="roomRoute" class="muted">正在读取场景状态…</p></section>
+<main class="wrap"><section class="room"><iframe id="roomVisual" src="/pixel-home/index.html?embed=1" title="知栀的小屋日常画面" aria-label="知栀的小屋日常画面" scrolling="no"></iframe><a class="room-edit" href="/pixel-home/index.html?edit=1" target="_blank" rel="noopener" aria-label="在独立页面编辑小屋">✎ 编辑小屋</a></section>
 <aside><section class="panel"><h2>她现在在做什么</h2><div id="lifeNow" class="value">读取中</div><p id="lifeDetail" class="muted"></p><p id="lifeNext" class="muted"></p><p id="lifeLast" class="muted"></p><p id="lifeMood" class="muted"></p></section><section class="panel"><h2>日历 · 未来几天</h2><ul id="calendar" class="agenda"></ul><p id="calendarEmpty" class="muted"></p></section><section class="panel"><h2>今天的生活</h2><ul id="today" class="agenda"></ul><p id="todayEmpty" class="muted"></p></section><section class="panel"><h2>今天的经历</h2><ul id="experiences" class="agenda"></ul><p id="experiencesEmpty" class="muted"></p></section><section class="panel"><h2>情绪 · 逐条</h2><ul id="affectEpisodes" class="agenda"></ul><p id="affectEpisodesEmpty" class="muted"></p></section><section class="panel"><h2>情绪变化阶段</h2><ul id="changePhases" class="agenda"></ul><p id="changePhasesEmpty" class="muted"></p></section><section class="panel"><h2>她记住的你 · 用户事实</h2><ul id="userFacts" class="agenda"></ul><p id="userFactsEmpty" class="muted"></p></section><section class="panel"><h2>记忆</h2><ul id="memories" class="agenda"></ul><p id="memoriesEmpty" class="muted"></p></section><section class="panel"><h2>私下印象</h2><ul id="impressions" class="agenda"></ul><p id="impressionsEmpty" class="muted"></p></section><section class="panel"><h2>憧憬</h2><ul id="aspirations" class="agenda"></ul><p id="aspirationsEmpty" class="muted"></p></section><section class="panel"><h2>和你的关系</h2><ul id="userRelationship" class="agenda"></ul><p id="userRelationshipEmpty" class="muted"></p></section><section class="panel"><h2>她与身边人</h2><ul id="npcRelationships" class="agenda"></ul><p id="npcRelationshipsEmpty" class="muted"></p></section><section class="panel"><h2>内在机制</h2><ul id="mechanisms" class="agenda"></ul><p id="status" class="muted">只读 · QQ 世界</p></section></aside></main>
 <script src="/world-v2/dashboard/app.js" defer></script></body></html>"""
 
@@ -185,7 +185,7 @@ function syncRoomClock(){
   // so the world clock is applied once by reloading the iframe with it.
   if(roomClockInitialized||!roomFrame||!roomSceneState||roomSceneState.local_hour===null)return;
   roomClockInitialized=true;
-  roomFrame.src='/pixel-home/index.html?hour='+roomSceneState.local_hour.toFixed(2);
+  roomFrame.src='/pixel-home/index.html?embed=1&hour='+roomSceneState.local_hour.toFixed(2);
 }
 if(roomFrame)roomFrame.addEventListener('load',pushRoomSceneState);
 function fillList(listId,emptyId,rows,emptyText){
@@ -270,13 +270,6 @@ async function loadLifeState(){
     fillList('npcRelationships','npcRelationshipsEmpty',(relationship2.npc_states||[]).map(npc=>
       `${NPC_NAMES[npc.npc_id]||npc.npc_id}：亲近 ${pct(npc.closeness_bp)} · 熟悉 ${pct(npc.familiarity_bp)} · 摩擦 ${pct(npc.friction_bp)} · 一起经历 ${npc.settled_shared_count} 件事${npc.last_shared_at?` · 上次 ${fmtDay(npc.last_shared_at)}`:''}`
     ),'她身边还没有留下相处痕迹的人。');
-    if(active){
-      text('roomRoute',`她在：${activityLabel(active.activity_kind)} · ${(active.location_ref||'').replace('location:','')}`);
-    }else if(last){
-      text('roomRoute',`小屋安静着 · 上一件事：${activityLabel(last.activity_kind)}`);
-    }else{
-      text('roomRoute','小屋安静着');
-    }
     const rows=[];
     const eco=mech.life_ecology||{};
     if(eco.plans_by_status){const parts=Object.entries(eco.plans_by_status).map(([k,v])=>`${statusLabel(k)} ${v}`).join(' · ');rows.push(`生活计划：${parts||'无'}`);}

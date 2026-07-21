@@ -112,11 +112,35 @@ mechanisms:
       - tests/world_v2/test_character_core_authority.py::test_ledger_character_core_initialize_is_typed_replayable_and_zero_cascade
       - tests/world_v2/test_http_v2_host_migration.py::test_http_default_composition_retains_a_fact_and_retrieval_memory_off_reply_path
 
+  # Producer inventory verdict (2026-07-20): all four `.16` situation
+  # authorities are mechanically complete, but no production ledger has ever
+  # committed one of their events and no runtime constructs their payloads.
+  # They stay dormant rather than removed because reducers, typed proposal
+  # families, event catalog, situation compiler and 8k+ test lines form one
+  # shared replay surface (goal_situation_schemas is the cause-authority base
+  # for every v16 domain), so the removal blast radius outweighs the carrying
+  # cost.  Per-domain disposition:
+  # - goal: the honest producer is her own deliberative goal vertical, a full
+  #   delivery.  Seeding world_seed.long_term_goals was rejected: those are
+  #   v1 scheduler inputs whose deadlines have already passed, so
+  #   provisioning them would only manufacture immediate mechanical expiries.
+  #   goal_expiry_runtime stays wired but fires only on existing heads.
+  # - location: current location reaches deliberation through active Plan
+  #   heads; a plan-derived location producer would install a second voice
+  #   for the same truth and needs a real settlement-lane design first.
+  # - resource: one-shot seeding of world_seed energy/attention would freeze
+  #   a never-adjusted number into the capsule; the honest producer is
+  #   activity-settlement resource pressure, again a full delivery.
+  # - attention: the live phone-presence need is served by the attention_view
+  #   advisory (pure projection, landed 2026-07-19); the authority head stays
+  #   dormant until an event-sourced producer is actually required.
+  # Activating any of these requires a new producer verdict recorded here
+  # first; see Producer-First Authority in CONTEXT.md.
   - id: v16-situation-constituents
     phase: 2
     status: closed
     runtime_activation: harness
-    limitations: [availability-in-a-real-user-world-depends-on-installed-authority-heads]
+    limitations: [dormant-no-production-producer-for-any-v16-authority-event, harness-and-tests-are-the-only-writers, situation-compiler-reports-these-domains-as-authoritative-empty]
     sources: [operator-authority, accepted-proposal, logical-clock]
     events: [V2GoalOpened, V2LocationChanged, V2ResourceStateAdjusted, V2AttentionChanged]
     reducers: [src/companion_daemon/world_v2/reducers.py]
@@ -150,6 +174,25 @@ mechanisms:
       - tests/world_v2/test_advisory_compiler.py::test_compiles_source_bound_rejectable_advisory_without_mutation_ports
       - tests/world_v2/test_ledger_context_resolver.py::test_real_ledger_resolves_situation_core_and_authoritative_empty_domains
       - tests/world_v2/test_ledger_context_resolver.py::test_nonempty_context_is_byte_equivalent_across_memory_and_sqlite
+
+  - id: phone-attention-advisory
+    phase: 3
+    status: closed
+    runtime_activation: default
+    limitations: [advisory-only-never-writes-attention-authority-events, derivation-is-a-reviewed-heuristic-over-committed-material-only]
+    sources: [active-plan-heads, active-affect-episodes, pinned-logical-clock]
+    events: [ActivityPlanned, AffectEpisodeOpened, ClockAdvanced]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [PhoneAttentionReading, InnerAdvisory]
+    decision_consumers: [PinnedTurn, expression-timing-choice]
+    actions: []
+    terminal_states: []
+    adapters: [internal]
+    tests:
+      - tests/world_v2/test_attention_view.py::test_sleep_plan_reads_as_away_and_cites_the_plan_authority
+      - tests/world_v2/test_attention_view.py::test_advisory_is_source_bound_bounded_and_labelled
+      - tests/world_v2/test_attention_view.py::test_advisory_without_any_committed_source_is_dropped
+      - tests/world_v2/test_attention_view.py::test_expression_prompt_teaches_the_later_mechanics_and_restraint
 
   - id: appraisal-affect-relationship-impression
     phase: 3
@@ -187,6 +230,24 @@ mechanisms:
       - tests/world_v2/test_outcome_e2e_recovery_replay.py::test_outcome_restart_recovers_full_world_to_affect_and_next_turn_context
       - tests/world_v2/test_outcome_trigger_runtime.py::test_outcome_draft_adapter_selects_only_context_visible_sidecar_candidate
       - tests/world_v2/test_npc_world_appraisal_trigger_runtime.py::test_settled_npc_event_can_create_a_source_bound_companion_appraisal
+
+  - id: open-world-temporary-events
+    phase: 2
+    status: closed
+    runtime_activation: default
+    limitations: [requires-life-ecology-and-an-injected-background-model, model-chooses-only-among-verified-active-plan-situations, no-op-is-a-first-class-durable-decision]
+    sources: [verified-active-plan-situation, bounded-model-draft, committed-life-wake]
+    events: [ProposalRecorded, WorldOccurrenceCommitted, WorldOccurrenceActivated]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [world-occurrences, life-content]
+    decision_consumers: [OpenWorldEventRuntime, LifeEcologyRuntime, OutcomeProposalWorker]
+    actions: []
+    terminal_states: []
+    adapters: [qq-c2c-v2, offline-harness]
+    tests:
+      - tests/world_v2/test_open_world_event_runtime.py::test_open_world_draft_cannot_invent_identity_location_or_extra_authority_fields
+      - tests/world_v2/test_open_world_event_runtime.py::test_open_world_event_is_accepted_into_occurrence_and_replayed_without_recalling_model
+      - tests/world_v2/test_open_world_event_production.py::test_production_open_world_model_turns_active_plan_into_replayable_occurrence
 
   - id: proposal-acceptance-manifests
     phase: 4
@@ -227,6 +288,45 @@ mechanisms:
       - tests/world_v2/test_http_v2_host_migration.py::test_http_production_profile_fails_closed_when_model_selects_unavailable_reaction
       - tests/test_qq_delivery.py::test_napcat_delivery_maps_authorized_expression_tokens_to_exact_endpoints
       - tests/world_v2/test_deferred_reply_runtime.py::test_delivered_reply_later_fulfills_exact_private_commitment
+      - tests/world_v2/test_expression_reconsideration.py::test_ingress_atomically_opens_reconsideration_gate_before_any_new_turn_work
+      - tests/world_v2/test_expression_reconsideration.py::test_only_explicit_reviewer_continuation_releases_expression_gate
+
+  - id: quick-reaction-same-turn-lane
+    phase: 5
+    status: closed
+    runtime_activation: default
+    limitations: [reaction-capability-is-deployment-gated-napcat-only, lane-silently-skips-without-an-injected-local-gate-model, opportunity-not-debt-every-failure-gives-up-without-retry]
+    sources: [committed-observation, recorded-act-hold-draw, bounded-local-model]
+    events: [ObservationRecorded, RandomDrawRecorded, ProposalRecorded, AcceptanceRecorded, ExpressionPlanAccepted, ActionAuthorized]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [expression-plans, actions]
+    decision_consumers: [QuickReactionWorker, ActionPump]
+    actions: [reaction]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [qq-c2c-v2]
+    tests:
+      - tests/world_v2/test_quick_reaction_vertical.py::test_gate_declines_serious_content_and_no_reaction_is_authorized
+      - tests/world_v2/test_quick_reaction_vertical.py::test_hold_draw_never_consults_the_local_model_and_replays_itself
+      - tests/world_v2/test_quick_reaction_vertical.py::test_quick_reaction_reaches_provider_before_the_reply_model_is_consulted
+      - tests/world_v2/test_quick_reaction_vertical.py::test_local_model_failure_gives_up_silently_and_reply_is_unaffected
+
+  - id: afterthought-followup-lane
+    phase: 5
+    status: closed
+    runtime_activation: default
+    limitations: [requires-an-injected-background-model, single-restrained-text-followup-only-most-replies-should-decline, user-answer-inside-the-window-voids-the-opportunity]
+    sources: [reply-execution-receipt, recorded-act-hold-draw, bounded-background-model]
+    events: [ExecutionReceiptRecorded, RandomDrawRecorded, ProposalRecorded, ExpressionPlanAccepted]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [expression-plans, actions]
+    decision_consumers: [AfterthoughtAuthorRuntime, ActionPump, ExpressionReconsiderationRuntime]
+    actions: [followup]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [http-v2, qq-c2c-v2]
+    tests:
+      - tests/world_v2/test_afterthought_author.py::test_act_draw_authorizes_one_followup_with_recorded_mode_and_window
+      - tests/world_v2/test_afterthought_author.py::test_hold_draw_is_terminal_and_never_consults_the_model
+      - tests/world_v2/test_afterthought_author.py::test_user_answering_inside_the_window_voids_the_opportunity
 
   - id: action-budget-receipt-recovery
     phase: 5
@@ -324,6 +424,25 @@ mechanisms:
       - tests/world_v2/test_event_ecology_media.py::test_ecology_is_replay_safe_and_category_cooldown_uses_persisted_opportunities
       - tests/world_v2/test_production_turn_application.py::test_production_ecology_runs_only_after_a_durable_life_wake_and_only_opens_preview_opportunities
       - tests/world_v2/test_visual_fact_media.py::test_object_food_sidecar_is_source_bound_and_replayable_for_ecology
+
+  - id: life-visual-evidence-authorship
+    phase: 6
+    status: closed
+    runtime_activation: default
+    limitations: [declares-only-facts-copied-from-the-reviewed-visual-evidence-annex-and-settled-outcomes, recorded-draw-thresholds-and-daily-rhythm-govern-declarations, a-declaration-is-not-an-opportunity-render-or-delivery]
+    sources: [settled-shareable-occurrence, reviewed-visual-evidence-annex, recorded-uniform-draw, accepted-affect]
+    events: [RandomDrawRecorded, ImageEvidenceDeclared, RecipientScopedImageEvidenceDeclared]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [image-evidence, recipient-scoped-image-evidence, character-media-candidates]
+    decision_consumers: [LifeVisualEvidenceAuthor, EventEcologyMediaCandidateRuntime, MediaPlanningWorker]
+    actions: []
+    terminal_states: []
+    adapters: [production-turn-application-scheduler]
+    tests:
+      - tests/world_v2/test_life_visual_evidence_author.py::test_author_declares_public_evidence_and_opens_character_candidates
+      - tests/world_v2/test_life_visual_evidence_author.py::test_private_transition_declares_recipient_scoped_only_at_close_friend
+      - tests/world_v2/test_life_visual_evidence_author.py::test_a_declared_source_is_never_redeclared
+      - tests/world_v2/test_life_visual_evidence_author.py::test_the_chance_ticket_is_recorded_once_and_stays_stable
 
   - id: http-v2-ingress
     phase: 7

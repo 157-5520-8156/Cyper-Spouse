@@ -6,9 +6,9 @@
 // 32x16 px) and later blitted with nearest-neighbour scaling.
 // ---------------------------------------------------------------------------
 
-const TILE_W = 32, TILE_H = 16;
+const TILE_W = 64, TILE_H = 32;
 const HX = TILE_W / 2, HY = TILE_H / 2;   // half tile in px
-const HZ = 16;                            // 1 unit of height in px
+const HZ = 32;                            // 1 unit of height in px
 
 // --- color helpers ---------------------------------------------------------
 
@@ -170,6 +170,13 @@ class Surface {
 
   blit(surface, x, y) {
     this.ctx.drawImage(surface.canvas, Math.round(x), Math.round(y));
+  }
+
+  scaled(k) {
+    const out = new Surface(this.w * k, this.h * k);
+    out.ctx.imageSmoothingEnabled = false;
+    out.ctx.drawImage(this.canvas, 0, 0, this.w * k, this.h * k);
+    return out;
   }
 
   mirrored() {

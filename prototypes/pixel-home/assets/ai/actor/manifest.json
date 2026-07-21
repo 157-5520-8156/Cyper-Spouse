@@ -1,32 +1,39 @@
 {
   "front-stand": {
     "url": "assets/ai/actor/front-stand.png",
-    "w": 14,
-    "h": 28
+    "w": 27,
+    "h": 56
   },
   "front-stride": {
     "url": "assets/ai/actor/front-stride.png",
-    "w": 13,
-    "h": 28
+    "w": 25,
+    "h": 54
   },
   "back-stand": {
     "url": "assets/ai/actor/back-stand.png",
-    "w": 12,
-    "h": 28
+    "w": 25,
+    "h": 56
   },
   "back-stride": {
     "url": "assets/ai/actor/back-stride.png",
-    "w": 12,
-    "h": 28
+    "w": 22,
+    "h": 53
   },
   "front-sit": {
     "url": "assets/ai/actor/front-sit.png",
-    "w": 13,
-    "h": 27
+    "w": 25,
+    "h": 54
   },
   "back-sit": {
     "url": "assets/ai/actor/back-sit.png",
-    "w": 12,
-    "h": 22
+    "w": 24,
+    "h": 44
+  },
+  "sleep": {
+    "url": "assets/ai/actor/sleep.png",
+    "headAt": [
+      78,
+      24
+    ]
   }
 }

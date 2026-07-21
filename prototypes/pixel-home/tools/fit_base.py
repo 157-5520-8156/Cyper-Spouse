@@ -22,7 +22,7 @@ from PIL import Image
 
 import make_sprite
 
-HX, HZ = 16, 16
+HX, HZ = make_sprite.HX, make_sprite.HZ
 
 
 def robust_fit(points: list[tuple[int, int]], iters: int = 4, tol: float = 4.0):

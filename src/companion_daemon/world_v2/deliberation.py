@@ -8,11 +8,13 @@ the only later authority seam.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from datetime import datetime
 import hashlib
 import json
 import logging
 import math
+import time
 from typing import Any, Awaitable, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -35,6 +37,50 @@ MAX_INFLIGHT_PROVIDER_TASKS = 8
 MAX_INFLIGHT_QUICK_TASKS = 2
 _T = TypeVar("_T")
 _LOG = logging.getLogger(__name__)
+
+# Absolute monotonic deadline of the model attempt currently being awaited.
+# Deliberation owns the attempt budget; adapters that spend bounded secondary
+# calls (semantic reviews, corrective structural retries) read the remaining
+# time through :func:`remaining_attempt_seconds` so a repair that cannot fit
+# is skipped instead of blowing the whole attempt into a timeout after the
+# repair already succeeded.  The variable is advisory-only: the enforcing
+# authority remains ``Deliberation._with_deadline``.
+_ATTEMPT_DEADLINE: ContextVar[float | None] = ContextVar(
+    "world_v2_model_attempt_deadline", default=None
+)
+
+
+def remaining_attempt_seconds() -> float | None:
+    """Seconds left in the current model attempt, or ``None`` outside one."""
+
+    deadline = _ATTEMPT_DEADLINE.get()
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def fit_secondary_call_timeout(
+    default_seconds: float,
+    *,
+    minimum_seconds: float = 2.0,
+    margin_seconds: float = 0.6,
+) -> float | None:
+    """Bound one secondary in-attempt call to the time that actually remains.
+
+    Returns ``default_seconds`` when no attempt deadline is installed (direct
+    adapter use in tests and offline tools), a smaller budget when the attempt
+    is close to its deadline, and ``None`` when no useful call fits any more —
+    callers must then skip the secondary call instead of paying for a result
+    the deadline will discard.
+    """
+
+    remaining = remaining_attempt_seconds()
+    if remaining is None:
+        return default_seconds
+    budget = min(default_seconds, remaining - margin_seconds)
+    if budget < minimum_seconds:
+        return None
+    return budget
 
 _EVENT_EVIDENCE_KIND: dict[str, str] = {
     "ObservationRecorded": "observed_message",
@@ -534,14 +580,18 @@ class Deliberation:
         recovered_status: AuditStatus | None = None
         output: ModelOutput | None = None
         try:
-            output = _checked_output(
-                await self._with_deadline(
-                    self._main.propose(model_input),
-                    timeout=self._main_timeout,
-                    label=call_id,
-                    lane="main",
+            deadline_token = _ATTEMPT_DEADLINE.set(time.monotonic() + self._main_timeout)
+            try:
+                output = _checked_output(
+                    await self._with_deadline(
+                        self._main.propose(model_input),
+                        timeout=self._main_timeout,
+                        label=call_id,
+                        lane="main",
+                    )
                 )
-            )
+            finally:
+                _ATTEMPT_DEADLINE.reset(deadline_token)
             proposal = self._validated_proposal(output, trusted, trigger_evidence=trigger_evidence)
             proposal = self._bind_minimal_model_result(proposal, call_id, output)
             status: AuditStatus = "proposal_validated"
@@ -589,14 +639,20 @@ class Deliberation:
             quick_request_hash = _digest(quick_input.model_dump(mode="json"))
             quick_output: ModelOutput | None = None
             try:
-                quick_output = _checked_output(
-                    await self._with_deadline(
-                        self._quick.recover(quick_input, failure_code or "main_failure"),
-                        timeout=self._quick_timeout,
-                        label=quick_call_id,
-                        lane="quick",
-                    )
+                quick_deadline_token = _ATTEMPT_DEADLINE.set(
+                    time.monotonic() + self._quick_timeout
                 )
+                try:
+                    quick_output = _checked_output(
+                        await self._with_deadline(
+                            self._quick.recover(quick_input, failure_code or "main_failure"),
+                            timeout=self._quick_timeout,
+                            label=quick_call_id,
+                            lane="quick",
+                        )
+                    )
+                finally:
+                    _ATTEMPT_DEADLINE.reset(quick_deadline_token)
                 proposal = self._validated_proposal(
                     quick_output,
                     trusted,
@@ -927,4 +983,6 @@ __all__ = [
     "ProviderHealth",
     "QuickRecoveryAdapter",
     "RouteRequest",
+    "fit_secondary_call_timeout",
+    "remaining_attempt_seconds",
 ]

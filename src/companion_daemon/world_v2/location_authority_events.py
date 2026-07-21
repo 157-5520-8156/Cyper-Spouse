@@ -1,4 +1,11 @@
-"""Typed proposal mutation contract for `.16.0` LocationAuthority."""
+"""Typed proposal mutation contract for `.16.0` LocationAuthority.
+
+DORMANT — no producer: no production ledger holds a committed ``V2Location*``
+event and no runtime constructs these payloads.  Before wiring a producer,
+read the Producer-First Authority rule in CONTEXT.md and record the
+activation verdict in ``configs/mechanism_closure.yaml``
+(``v16-situation-constituents``).
+"""
 
 from __future__ import annotations
 
