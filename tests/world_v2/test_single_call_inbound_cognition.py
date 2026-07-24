@@ -533,6 +533,9 @@ async def test_existing_failover_does_not_call_its_fallback_twice() -> None:
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await cognition.appraisal.propose(request)
 
+    recovered = await cognition.appraisal.recover(request, "main_exception")
+
+    assert recovered.model_version == "single-call-inbound-cognition.1"
     assert len(primary.calls) == 1
     assert not backup.calls
 

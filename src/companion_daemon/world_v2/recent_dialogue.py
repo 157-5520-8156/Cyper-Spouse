@@ -27,9 +27,22 @@ class RecentDialogueItem(FrozenModel):
     delivery_state: Literal["observed", "provider_accepted", "delivered"]
     sequence: int = Field(ge=1)
     privacy_class: PrivacyClass = "private"
-    source_claims: tuple[DialogueSourceClaim, ...] = Field(min_length=1, max_length=4)
+    source_claims: tuple[DialogueSourceClaim, ...] = Field(min_length=1, max_length=5)
+    acknowledges_observation_event_refs: tuple[str, ...] = Field(
+        default=(), max_length=4
+    )
     sidecar_ref: str | None = Field(default=None, min_length=1)
     sidecar_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    continuity_reasons: tuple[
+        Literal[
+            "current_turn",
+            "pending_interaction",
+            "topic_reactivation",
+            "recent_companion",
+            "recent",
+        ],
+        ...,
+    ] = Field(default=(), exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def sidecar_binding_is_complete(self) -> "RecentDialogueItem":
@@ -38,6 +51,10 @@ class RecentDialogueItem(FrozenModel):
         refs = tuple(item.authority_event_ref for item in self.source_claims)
         if len(refs) != len(set(refs)):
             raise ValueError("recent dialogue source claims must be unique")
+        if len(self.acknowledges_observation_event_refs) != len(
+            set(self.acknowledges_observation_event_refs)
+        ):
+            raise ValueError("recent dialogue acknowledgement refs must be unique")
         return self
 
 
@@ -65,7 +82,11 @@ class RecentDialogueCompiler:
         projection: LedgerProjection,
         actor_ref: str,
         subject_refs: frozenset[str],
+        max_user_items: int | None = None,
     ) -> tuple[RecentDialogueItem, ...]:
+        user_limit = self._max_user if max_user_items is None else max_user_items
+        if not self._max_user <= user_limit <= 64:
+            raise ValueError("recent dialogue candidate window is invalid")
         refs = {item.event_id: item for item in projection.committed_world_event_refs}
         observation_event_refs = {
             (item.world_revision, item.payload_hash): item
@@ -85,7 +106,7 @@ class RecentDialogueCompiler:
                 if item.actor != actor_ref and item.actor in subject_refs
             ),
             key=lambda item: (item.world_revision, item.observation_id),
-        )[-self._max_user :]
+        )[-user_limit :]
         for observation_ref in observation_candidates:
             event_ref = observation_event_refs.get(
                 (observation_ref.world_revision, observation_ref.event_payload_hash)
@@ -116,7 +137,7 @@ class RecentDialogueCompiler:
                     source_claims=(self._claim(event_ref),),
                 )
             )
-        inbound = inbound[-self._max_user :]
+        inbound = inbound[-user_limit:]
 
         companion: list[RecentDialogueItem] = []
         plans = {item.plan_id: item for item in projection.expression_plans}
@@ -124,12 +145,22 @@ class RecentDialogueCompiler:
         stored = {item.payload_ref: item for item in projection.stored_message_payloads}
         descriptors = {item.payload_ref: item for item in projection.expression_payload_descriptors}
         receipts = {item.action_id: item for item in projection.execution_receipts}
-        accepted_expressions: list[tuple[str, str, str, list[dict[str, str | None]]]] = []
+        proposal_audits = {
+            item.proposal_id: item for item in projection.proposal_audits
+        }
+        accepted_expressions: list[
+            tuple[str, str, str, str | None, list[dict[str, str | None]]]
+        ] = []
         for manifest in projection.expression_plan_manifests:
+            audit = proposal_audits.get(manifest.proposal_id)
             accepted_expressions.append((
                 manifest.acceptance_id,
                 manifest.plan_id,
                 manifest.acceptance_event_ref,
+                (
+                    manifest.social_source_observation_event_ref
+                    or (audit.trigger_ref if audit is not None else None)
+                ),
                 [
                     {
                         "beat_id": beat.beat_id,
@@ -142,10 +173,12 @@ class RecentDialogueCompiler:
                 ],
             ))
         for manifest in projection.minimal_reply_manifests:
+            audit = proposal_audits.get(manifest.proposal_id)
             accepted_expressions.append((
                 manifest.acceptance_id,
                 manifest.plan_id,
                 manifest.acceptance_event_ref,
+                audit.trigger_ref if audit is not None else None,
                 [{
                     "beat_id": manifest.beat_id,
                     "payload_ref": manifest.message_payload_ref,
@@ -169,7 +202,7 @@ class RecentDialogueCompiler:
         )[: max(1, self._max_companion)]
         candidate_action_ids = {
             str(beat["action_id"])
-            for _, _, _, beats in accepted_expressions
+            for _, _, _, _, beats in accepted_expressions
             for beat in beats
             if isinstance(beat.get("action_id"), str)
         }
@@ -183,7 +216,13 @@ class RecentDialogueCompiler:
             action_id = raw.get("action_id") if isinstance(raw, dict) else None
             if isinstance(receipt_id, str) and action_id in candidate_action_ids:
                 receipt_events[receipt_id] = ref
-        for acceptance_id, plan_id, acceptance_event_ref, beats in accepted_expressions:
+        for (
+            acceptance_id,
+            plan_id,
+            acceptance_event_ref,
+            acknowledged_event_ref,
+            beats,
+        ) in accepted_expressions:
             acceptance = refs.get(acceptance_event_ref)
             plan = plans.get(plan_id)
             if acceptance is None or plan is None:
@@ -270,9 +309,21 @@ class RecentDialogueCompiler:
                                     self._claim(acceptance),
                                     self._claim(payload_event_ref),
                                     *(self._claim(item) for item in delivery_refs),
+                                    *(
+                                        (self._claim(refs[acknowledged_event_ref]),)
+                                        if acknowledged_event_ref in refs
+                                        else ()
+                                    ),
                                 ),
                                 key=lambda item: item.authority_event_ref,
                             )
+                        ),
+                        acknowledges_observation_event_refs=(
+                            (acknowledged_event_ref,)
+                            if acknowledged_event_ref in refs
+                            and refs[acknowledged_event_ref].event_type
+                            == "ObservationRecorded"
+                            else ()
                         ),
                         sidecar_ref=sidecar_ref,
                         sidecar_hash=sidecar_hash,

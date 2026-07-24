@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+import hashlib
+
+from companion_daemon.world_v2.conversation_continuity import (
+    ContinuityRetrievalCandidate,
+    ConversationContinuityCompiler,
+)
+from companion_daemon.world_v2.recent_dialogue import DialogueSourceClaim, RecentDialogueItem
+
+
+NOW = datetime(2026, 7, 25, 17, 8, tzinfo=UTC)
+
+
+def _dialogue(
+    suffix: str,
+    text: str,
+    *,
+    speaker: str,
+    at: datetime,
+    sequence: int,
+    acknowledges: tuple[str, ...] = (),
+) -> RecentDialogueItem:
+    ref = f"event:dialogue:{suffix}"
+    return RecentDialogueItem(
+        dialogue_id=f"dialogue:{suffix}",
+        speaker=speaker,
+        text=text,
+        occurred_at=at,
+        delivery_state="observed" if speaker == "counterpart" else "delivered",
+        sequence=sequence,
+        source_claims=(
+            DialogueSourceClaim(
+                authority_event_ref=ref,
+                authority_world_revision=sequence,
+                authority_payload_hash=hashlib.sha256(ref.encode()).hexdigest(),
+            ),
+        ),
+        acknowledges_observation_event_refs=acknowledges,
+    )
+
+
+def test_compile_separates_pending_interaction_from_replied_history_and_memory() -> None:
+    first = _dialogue(
+        "first",
+        "从深圳回来啦",
+        speaker="counterpart",
+        at=NOW - timedelta(minutes=4),
+        sequence=1,
+    )
+    reply = _dialogue(
+        "reply",
+        "回来啦！深圳怎么样？",
+        speaker="companion",
+        at=NOW - timedelta(minutes=3),
+        sequence=2,
+        acknowledges=("event:dialogue:first",),
+    )
+    pending = _dialogue(
+        "pending",
+        "深圳说实话不是很好玩哈哈哈哈",
+        speaker="counterpart",
+        at=NOW - timedelta(minutes=1),
+        sequence=3,
+    )
+    current = _dialogue(
+        "current",
+        "👀",
+        speaker="counterpart",
+        at=NOW,
+        sequence=4,
+    )
+
+    result = ConversationContinuityCompiler().compile(
+        dialogue=(first, reply, pending, current),
+        trigger_ref="event:dialogue:current",
+        retrieval_candidates=(
+            ContinuityRetrievalCandidate(
+                slice_name="active_memory_candidates",
+                item_ref="memory:shenzhen-trip",
+                texts=("上午说过深圳旅行，回来以后觉得不太好玩。",),
+            ),
+            ContinuityRetrievalCandidate(
+                slice_name="active_memory_candidates",
+                item_ref="memory:coffee",
+                texts=("用户平时喜欢喝手冲咖啡。",),
+            ),
+        ),
+    )
+
+    by_id = {item.dialogue_id: item for item in result.dialogue}
+    assert "pending_interaction" in by_id[pending.dialogue_id].continuity_reasons
+    assert "pending_interaction" not in by_id[first.dialogue_id].continuity_reasons
+    assert (
+        "active_memory_candidates",
+        "memory:shenzhen-trip",
+    ) in result.rank_overrides
+    assert (
+        "active_memory_candidates",
+        "memory:coffee",
+    ) not in result.rank_overrides
+
+
+def test_delayed_reply_does_not_acknowledge_a_newer_stuck_message() -> None:
+    replied = _dialogue(
+        "replied",
+        "上午那件事我处理好了。",
+        speaker="counterpart",
+        at=NOW - timedelta(minutes=4),
+        sequence=1,
+    )
+    stuck = _dialogue(
+        "stuck",
+        "第三条你是不是没看到？",
+        speaker="counterpart",
+        at=NOW - timedelta(minutes=2),
+        sequence=2,
+    )
+    delayed_reply = _dialogue(
+        "delayed-reply",
+        "看到了，上午那件事辛苦了。",
+        speaker="companion",
+        at=NOW - timedelta(minutes=1),
+        sequence=3,
+        acknowledges=("event:dialogue:replied",),
+    )
+    emoji = _dialogue(
+        "emoji",
+        "👀",
+        speaker="counterpart",
+        at=NOW,
+        sequence=4,
+    )
+
+    result = ConversationContinuityCompiler().compile(
+        dialogue=(replied, stuck, delayed_reply, emoji),
+        trigger_ref="event:dialogue:emoji",
+    )
+
+    by_id = {item.dialogue_id: item for item in result.dialogue}
+    assert "pending_interaction" in by_id[stuck.dialogue_id].continuity_reasons
+    assert "pending_interaction" not in by_id[replied.dialogue_id].continuity_reasons
+
+
+def test_common_time_word_alone_does_not_reactivate_an_unrelated_topic() -> None:
+    coffee = _dialogue(
+        "coffee",
+        "今天去喝咖啡。",
+        speaker="counterpart",
+        at=NOW - timedelta(hours=3),
+        sequence=1,
+    )
+    current = _dialogue(
+        "busy",
+        "今天有点忙。",
+        speaker="counterpart",
+        at=NOW,
+        sequence=2,
+    )
+
+    result = ConversationContinuityCompiler().compile(
+        dialogue=(coffee, current),
+        trigger_ref="event:dialogue:busy",
+    )
+
+    by_id = {item.dialogue_id: item for item in result.dialogue}
+    assert "topic_reactivation" not in by_id[coffee.dialogue_id].continuity_reasons

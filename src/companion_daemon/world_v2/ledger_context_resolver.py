@@ -43,6 +43,10 @@ from .context_capsule import (
     resolved_result_set_hash,
     source_bindings_hash,
 )
+from .conversation_continuity import (
+    ContinuityRetrievalCandidate,
+    ConversationContinuityCompiler,
+)
 from .fact_accepted_contracts import rehydrate_fact_commit_materialized_v2_json
 from .context_resolver import (
     ContextCompileQuery,
@@ -411,6 +415,16 @@ def _recency_bp(item: BaseModel, logical_time: datetime | None) -> int:
 
 
 def _signal_bp(slice_name: SliceName, item: BaseModel) -> int:
+    if slice_name == "recent_dialogue" and isinstance(item, RecentDialogueItem):
+        reasons = set(item.continuity_reasons)
+        if "current_turn" in reasons:
+            return 10_000
+        if "pending_interaction" in reasons:
+            return 10_000
+        if "topic_reactivation" in reasons:
+            return 9_900
+        if "recent_companion" in reasons:
+            return 9_800
     values = getattr(item, "values", None)
     direct = (
         getattr(values, "importance_bp", None),
@@ -442,6 +456,7 @@ def _bounded_domain_items(
     slice_name: SliceName,
     items: tuple[BaseModel, ...],
     logical_time: datetime | None,
+    rank_overrides: frozenset[tuple[str, str]] = frozenset(),
 ) -> tuple[BaseModel, ...] | None:
     """Apply the installed bounded selection policy before any ledger lookup."""
 
@@ -451,7 +466,11 @@ def _bounded_domain_items(
         sorted(
             items,
             key=lambda item: (
-                -_rank(slice_name, item, logical_time),
+                -(
+                    max(9_900, _rank(slice_name, item, logical_time))
+                    if (slice_name, _item_ref(slice_name, item)) in rank_overrides
+                    else _rank(slice_name, item, logical_time)
+                ),
                 _item_ref(slice_name, item),
             ),
         )[:MAX_INPUT_ITEMS_PER_SLICE]
@@ -612,6 +631,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         self._recent_dialogue = RecentDialogueCompiler(
             ledger=ledger, expression_payload_store=expression_payload_store
         )
+        self._conversation_continuity = ConversationContinuityCompiler()
         self._world_life = WorldLifeContextCompiler(
             life_content=LifeContentCompiler(store=life_content_store)
         )
@@ -793,10 +813,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
 
         subject_refs = scope.subject_refs
         domain_phase_started = time.perf_counter()
-        recent_dialogue = self._recent_dialogue.compile(
+        dialogue_candidates = self._recent_dialogue.compile(
             projection=projection,
             actor_ref=query.actor_ref,
             subject_refs=subject_refs,
+            max_user_items=64,
         )
         recent_dialogue_ms = (time.perf_counter() - domain_phase_started) * 1000
         domain_phase_started = time.perf_counter()
@@ -857,6 +878,100 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             viewer_privacy_ceiling="private",
             projection=projection,
         )
+        open_threads_for_continuity = tuple(
+            item for item in scoped_threads if item.values.status == "open"
+        )
+        if len(open_threads_for_continuity) > MAX_RESOLVER_DOMAIN_SCAN_ITEMS:
+            open_threads_for_continuity = ()
+        dialogue_text_by_ref: dict[str, str] = {}
+        for item in dialogue_candidates:
+            dialogue_text_by_ref[item.dialogue_id] = item.text
+            if item.dialogue_id.startswith("dialogue:observation:"):
+                dialogue_text_by_ref[item.dialogue_id.removeprefix("dialogue:observation:")] = (
+                    item.text
+                )
+            for claim in item.source_claims:
+                dialogue_text_by_ref[claim.authority_event_ref] = item.text
+        missing_anchor_aliases = {
+            ref.ref_id: observation_aliases.get(ref.ref_id, ref.ref_id)
+            for item in open_threads_for_continuity
+            for ref in item.values.anchor_evidence_refs
+            if ref.ref_id not in dialogue_text_by_ref
+        }
+        # Older open-thread anchors may be outside the 64-message dialogue
+        # candidate window. Resolve a small, deterministic authority set
+        # directly instead of making recency a hidden prerequisite for topic
+        # reactivation.
+        if len(missing_anchor_aliases) <= 64:
+            anchor_events = self._resolve_exact(
+                missing_anchor_aliases.values(), query.world_revision
+            )
+            for original_ref, event_ref in sorted(missing_anchor_aliases.items()):
+                committed = anchor_events.get(event_ref)
+                stored = self._ledger.lookup_event_commit(event_ref)
+                if (
+                    committed is None
+                    or committed.event_type != "ObservationRecorded"
+                    or stored is None
+                ):
+                    continue
+                try:
+                    observation = Observation.model_validate_json(stored[0].payload_json)
+                except ValueError:
+                    continue
+                if observation.text:
+                    dialogue_text_by_ref[original_ref] = observation.text
+                    dialogue_text_by_ref[event_ref] = observation.text
+        facts_for_continuity = (
+            recalled_facts
+            if len(recalled_facts) <= MAX_RESOLVER_DOMAIN_SCAN_ITEMS
+            else ()
+        )
+        memories_for_continuity = (
+            memory_retrievals.items
+            if len(memory_retrievals.items) <= MAX_RESOLVER_DOMAIN_SCAN_ITEMS
+            else ()
+        )
+        continuity = self._conversation_continuity.compile(
+            dialogue=dialogue_candidates,
+            trigger_ref=query.trigger_ref,
+            retrieval_candidates=(
+                *(
+                    ContinuityRetrievalCandidate(
+                        slice_name="relevant_facts",
+                        item_ref=item.fact_id,
+                        texts=(item.source_excerpt,),
+                    )
+                    for item in facts_for_continuity
+                ),
+                *(
+                    ContinuityRetrievalCandidate(
+                        slice_name="active_memory_candidates",
+                        item_ref=item.candidate_id,
+                        texts=tuple(source.text for source in item.source_excerpts),
+                    )
+                    for item in memories_for_continuity
+                ),
+                *(
+                    ContinuityRetrievalCandidate(
+                        slice_name="open_threads",
+                        item_ref=item.thread_id,
+                        texts=tuple(
+                            dialogue_text_by_ref[ref.ref_id]
+                            for ref in item.values.anchor_evidence_refs
+                            if ref.ref_id in dialogue_text_by_ref
+                        ),
+                    )
+                    for item in open_threads_for_continuity
+                    and any(
+                        ref.ref_id in dialogue_text_by_ref
+                        for ref in item.values.anchor_evidence_refs
+                    )
+                ),
+            ),
+        )
+        recent_dialogue = continuity.dialogue
+        continuity_rank_overrides = continuity.rank_overrides
         memory_ms = (time.perf_counter() - domain_phase_started) * 1000
         domain_phase_started = time.perf_counter()
         appraisal_by_id = {item.appraisal_id: item for item in projection.appraisals}
@@ -931,7 +1046,12 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             slice_name: (
                 None
                 if items is None
-                else _bounded_domain_items(slice_name, items, query.logical_time)
+                else _bounded_domain_items(
+                    slice_name,
+                    items,
+                    query.logical_time,
+                    continuity_rank_overrides,
+                )
             )
             for slice_name, items in domains.items()
         }
@@ -987,6 +1107,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 resolved_events,
                 scope,
                 observation_aliases,
+                continuity_rank_overrides,
             )
             resolved[field] = built
 
@@ -1244,6 +1365,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         events: dict[str, CommittedWorldEventRef],
         scope: ContextRelevanceScope,
         observation_aliases: dict[str, str],
+        rank_overrides: frozenset[tuple[str, str]] = frozenset(),
     ) -> ResolvedSlice | None:
         metadata: list[ResolvedItemMetadata] = []
         selected_items: list[BaseModel] = []
@@ -1301,7 +1423,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             metadata.append(
                 ResolvedItemMetadata(
                     item_ref=item_ref,
-                    rank_score_bp=_rank(slice_name, item, query.logical_time),
+                    rank_score_bp=(
+                        max(9_900, _rank(slice_name, item, query.logical_time))
+                        if (slice_name, item_ref) in rank_overrides
+                        else _rank(slice_name, item, query.logical_time)
+                    ),
                     privacy_class=_privacy(slice_name, item),
                     source_bindings=bindings,
                     source_hash=source_bindings_hash(bindings),

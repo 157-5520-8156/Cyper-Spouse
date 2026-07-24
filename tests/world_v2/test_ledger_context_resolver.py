@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -14,14 +16,19 @@ from companion_daemon.world_v2.context_capsule import (
     InnerAdvisoryProjection,
 )
 from companion_daemon.world_v2.context_resolver import query_from_projection
-from companion_daemon.world_v2.ledger import LedgerPort, WorldLedger
+from companion_daemon.world_v2.ledger import LedgerPort, ObservationEventLocator, WorldLedger
 from companion_daemon.world_v2.ledger_context_resolver import (
     ContextRelevanceScope,
     LedgerProjectionContextResolver,
     _bounded_domain_items,
     context_capsule_compiler_from_ledger,
 )
-from companion_daemon.world_v2.schemas import BudgetAccount, BudgetReservation, WorldEvent
+from companion_daemon.world_v2.schemas import (
+    BudgetAccount,
+    BudgetReservation,
+    Observation,
+    WorldEvent,
+)
 from companion_daemon.world_v2.situation_compiler import SituationCompiler
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from test_appraisal_authority import (
@@ -75,10 +82,109 @@ def _observation(world_id: str, index: int) -> WorldEvent:
     )
 
 
+def _message_observation(
+    world_id: str,
+    index: int,
+    text: str,
+    *,
+    received_at: datetime,
+) -> WorldEvent:
+    payload_hash = "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+    observation = Observation(
+        schema_version="world-v2.1",
+        observation_id=f"observation:message:{index}",
+        world_id=world_id,
+        logical_time=NOW,
+        created_at=received_at,
+        trace_id=f"trace:message:{index}",
+        causation_id=f"platform:message:{index}",
+        correlation_id="conversation:continuity",
+        source="platform:test",
+        source_event_id=f"message:{index}",
+        actor="user:primary",
+        channel="qq_c2c",
+        payload_ref=f"payload:message:{index}",
+        payload_hash=payload_hash,
+        text=text,
+        received_at=received_at,
+    )
+    return WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=f"event:message:{index}",
+        world_id=world_id,
+        event_type="ObservationRecorded",
+        logical_time=NOW,
+        created_at=received_at,
+        actor=observation.actor,
+        source=observation.source,
+        trace_id=observation.trace_id,
+        causation_id=observation.causation_id,
+        correlation_id=observation.correlation_id,
+        idempotency_key=ObservationEventLocator.for_message(
+            world_id=world_id,
+            observation_id=observation.observation_id,
+            source=observation.source,
+            source_event_id=observation.source_event_id,
+        ).idempotency_key,
+        payload=observation.model_dump(mode="json"),
+    )
+
+
 def _empty_ledger(kind=WorldLedger.in_memory, *, world_id="world:context-empty"):
     ledger = kind(world_id=world_id)
     ledger.commit([_event(world_id)], expected_world_revision=0, expected_deliberation_revision=0)
     return ledger
+
+
+def test_context_reactivates_related_dialogue_outside_the_recency_tail() -> None:
+    world_id = "world:context-topic-reactivation"
+    ledger = WorldLedger.in_memory(world_id=world_id)
+    morning = NOW.replace(hour=8)
+    messages = [
+        _message_observation(
+            world_id,
+            1,
+            "我今天从深圳回来，晚点再和你说旅行的事。",
+            received_at=morning,
+        )
+    ]
+    messages.extend(
+        _message_observation(
+            world_id,
+            index,
+            f"中间的无关消息 {index}",
+            received_at=morning + timedelta(minutes=index),
+        )
+        for index in range(2, 15)
+    )
+    messages.append(
+        _message_observation(
+            world_id,
+            15,
+            "深圳这件事下午有新进展。",
+            received_at=NOW,
+        )
+    )
+    ledger.commit(
+        [_event(world_id), *messages],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    projection = ledger.project()
+
+    capsule = _compiler(ledger).compile(
+        query_from_projection(
+            projection,
+            actor_ref="actor:companion",
+            trigger_ref="event:message:15",
+        )
+    )
+
+    retained_texts = {
+        json.loads(item.payload_json)["text"] for item in capsule.recent_dialogue.items
+    }
+    assert "深圳这件事下午有新进展。" in retained_texts
+    assert "我今天从深圳回来，晚点再和你说旅行的事。" in retained_texts
 
 
 class CountingLedger:

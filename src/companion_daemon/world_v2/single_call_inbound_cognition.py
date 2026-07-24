@@ -274,8 +274,22 @@ class SingleCallAppraisalAdapter:
         return await self._owner._propose_appraisal(request)
 
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+        key = _cache_key(request)
         if request.trigger_message is not None:
-            self._owner._pending.pop(_cache_key(request), None)
+            self._owner._pending.pop(key, None)
+        # Deliberation may invoke this adapter once for the remote hedge and
+        # again for its reserve-tail local recovery.  The first remote attempt
+        # marks the key in ``_recovery_attempted``; do not spend the same
+        # provider twice when that hedge failed.  The second invocation must
+        # be the synchronous typed fallback the reserve is meant to protect.
+        if (
+            self._owner._recovery_model is not None
+            and key not in self._owner._recovery_attempted
+            and not _provider_already_used_fallback(
+                self._owner._selected_provider(request)
+            )
+        ):
+            return await self._owner._retry_with_recovery_provider(request)
         return ModelOutput(
             model_id=self._owner._model_id_for(request),
             model_version=self._owner.VERSION,

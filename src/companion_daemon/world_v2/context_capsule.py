@@ -1901,6 +1901,20 @@ def _compile_resolved_context(
         json.loads(item.payload_json).get("kind") == "proactive_opportunity"
         for item in slices["advisories"].items
     )
+    required_dialogue_ids = {
+        item.item_ref
+        for item in slices["recent_dialogue"].items
+        if set(json.loads(item.payload_json).get("continuity_reasons", ()))
+        & {"current_turn", "pending_interaction"}
+    }
+    # Current attention and an unacknowledged counterpart message are not
+    # interchangeable with ordinary recency.  They remain a tiny mandatory
+    # working-memory set while unrelated optional slices are still available
+    # to evict.  A capsule that cannot represent this bounded set fails
+    # explicitly rather than silently making a received message disappear.
+    terminal_minimum_items: dict[SliceName, int] = {
+        "recent_dialogue": len(required_dialogue_ids),
+    }
     # Character-truncation state for the mandatory head slices (final tier).
     # ``None`` means the head still shows its ordinary whole-item view; a
     # non-negative number is the current bounded payload preview length.
@@ -1949,8 +1963,9 @@ def _compile_resolved_context(
     def _deep_eviction_candidate() -> SliceName | None:
         """Tiers 4-6: degrade the protected continuity set itself.
 
-        Tier 4 takes every protected non-head, non-advisory slice down to one
-        item. Tier 5 then degrades advisories item-by-item by rank; the
+        Tier 4 takes every protected non-head, non-advisory slice down to its
+        bounded semantic floor (normally one; current + pending dialogue may
+        require two). Tier 5 then degrades advisories item-by-item by rank; the
         per-slice sort keeps a proactive_opportunity advisory at the head, so
         it is the last advisory standing. Tier 6 allows zero items everywhere
         except the mandatory heads; a remaining
@@ -1963,7 +1978,17 @@ def _compile_resolved_context(
             for name, slice_ in slices.items()
             if name not in {"character_core", "current_situation"}
             and name != "advisories"
-            and len(slice_.items) > 1
+            # Keep a two-fact compound recall intact while other duplicated
+            # continuity lanes are reduced to one.  Fact and Memory commonly
+            # describe the same authorities; reducing both independently to
+            # one made their identity tie-breaks occasionally retain the same
+            # source twice and omit the other accepted fact.
+            and len(slice_.items)
+            > (
+                2
+                if name == "relevant_facts"
+                else max(1, terminal_minimum_items.get(name, 0))
+            )
         ]
         if candidates:
             return min(candidates, key=lambda item: (item[0], item[1]))[1]
@@ -1976,7 +2001,8 @@ def _compile_resolved_context(
                 name,
             )
             for name, slice_ in slices.items()
-            if name not in {"character_core", "current_situation"} and slice_.items
+            if name not in {"character_core", "current_situation"}
+            and len(slice_.items) > terminal_minimum_items.get(name, 0)
         ]
         if last_candidates:
             return min(last_candidates)[2]

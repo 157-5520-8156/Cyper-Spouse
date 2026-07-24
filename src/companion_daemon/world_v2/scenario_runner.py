@@ -94,18 +94,26 @@ class ScenarioVerificationError(AssertionError):
 # aspiration crystallization seam.  Capsule advisory content and versioned
 # weight identities legitimately shift the fixed-suite manifest; every fixed
 # scenario predicate still passes unchanged.
-# ``.11`` re-baselines after the phone-attention advisory (attention-view.1)
-# joined the chat and inbound-cognition Pinned Turns: capsules now carry one
-# additional deterministic advisory ("【手机注意力：…】") derived from active
-# Plans, the local civil hour, and active Affect, so capsule/audit identities
-# legitimately shift.  The advisory is texture for timing_choice only; every
-# fixed scenario predicate still passes unchanged.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.11"
+# ``.12`` re-baselines the interactive-turn first-valid coordinator.  Fixed
+# scenario proposals and predicates are unchanged, but their ModelResult
+# audits now carry the explicit primary slot/winner outcome under
+# ``model-result-audit.3`` and therefore have new deterministic identities.
+# ``.13`` records deterministic semantic continuity selection.  Verified
+# current/pending dialogue receives a bounded working-memory floor, related
+# older dialogue and source-bound Fact/Memory/Thread text can be reactivated,
+# and every retained item remains pinned to its original ledger authority.
+# This intentionally changes Context Capsule and downstream proposal/audit
+# identities; the fixed scenario predicates remain the executable gate.
+# ``.14`` binds pending-interaction acknowledgement to the exact source
+# Observation rather than reply delivery time.  Accepted reply authority now
+# contributes that causal claim to recent dialogue, so multi-turn Context and
+# downstream audit identities legitimately shift while predicates stay fixed.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.14"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "ebd4a446f5599758c72d5ddc9497c6b4030803539a9f1b9246052398641f1f3e"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "1e506c9a8deefa1e117bef4f78fb318bb819d54a016803623344a6a1cdb97565"
 
 
 class _FixedScenarioRouter:

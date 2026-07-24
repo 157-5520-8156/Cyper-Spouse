@@ -123,10 +123,17 @@ def _item_ref(value) -> str:
     raise AssertionError(f"test fixture has no Capsule identity: {value!r}")
 
 
-def _typed_bound(value, *, slice_name: str, source_refs_by_item: tuple[tuple[str, ...], ...]):
+def _typed_bound(
+    value,
+    *,
+    slice_name: str,
+    source_refs_by_item: tuple[tuple[str, ...], ...],
+    ranks: tuple[int, ...] | None = None,
+):
     items = value if isinstance(value, tuple) else (value,)
+    ranks = ranks or tuple(5_000 for _ in items)
     metadata = []
-    for item, refs in zip(items, source_refs_by_item, strict=True):
+    for item, refs, rank in zip(items, source_refs_by_item, ranks, strict=True):
         bindings = tuple(
             ResolvedSourceBinding(
                 source_kind="committed_event",
@@ -138,7 +145,7 @@ def _typed_bound(value, *, slice_name: str, source_refs_by_item: tuple[tuple[str
             for ref in refs
         )
         metadata.append(ResolvedItemMetadata(
-            item_ref=_item_ref(item), rank_score_bp=5_000, privacy_class="private",
+            item_ref=_item_ref(item), rank_score_bp=rank, privacy_class="private",
             source_bindings=bindings, source_hash=source_bindings_hash(bindings),
             value_hash=canonical_value_hash(item),
         ))
@@ -1337,6 +1344,22 @@ def test_protected_slices_reach_one_before_advisory_rank_degradation() -> None:
         producer_version="test-optional-matrix.1",
     )
     memories = _large_memory_retrievals()
+    memory_metadata = tuple(
+        item.model_copy(update={"rank_score_bp": 10_000})
+        for item in memories.item_metadata
+    )
+    memories = memories.model_copy(
+        update={
+            "item_metadata": memory_metadata,
+            "resolver_proof": memories.resolver_proof.model_copy(
+                update={
+                    "result_set_hash": resolved_result_set_hash(
+                        "active_memory_candidates", memory_metadata
+                    )
+                }
+            ),
+        }
+    )
     high_rank_metadata = tuple(
         item.model_copy(update={"rank_score_bp": 10_000})
         for item in memories.item_metadata
@@ -1382,6 +1405,104 @@ def test_protected_slices_reach_one_before_advisory_rank_degradation() -> None:
         proactive.advisory_id,
         optional.advisory_id,
     ]
+
+
+def test_global_pressure_preserves_current_turn_and_pending_interaction() -> None:
+    trigger_ref = "event:dialogue:current"
+    dialogue = (
+        RecentDialogueItem(
+            dialogue_id="dialogue:current",
+            speaker="counterpart",
+            text="👀",
+            occurred_at=NOW,
+            delivery_state="observed",
+            sequence=20,
+            source_claims=(
+                DialogueSourceClaim(
+                    authority_event_ref=trigger_ref,
+                    authority_world_revision=7,
+                    authority_payload_hash=hashlib.sha256(trigger_ref.encode()).hexdigest(),
+                ),
+            ),
+            continuity_reasons=("current_turn",),
+        ),
+        RecentDialogueItem(
+            dialogue_id="dialogue:pending",
+            speaker="counterpart",
+            text="深圳说实话不是很好玩哈哈哈哈",
+            occurred_at=NOW - timedelta(minutes=1),
+            delivery_state="observed",
+            sequence=19,
+            source_claims=(
+                DialogueSourceClaim(
+                    authority_event_ref="event:dialogue:pending",
+                    authority_world_revision=7,
+                    authority_payload_hash=hashlib.sha256(
+                        b"event:dialogue:pending"
+                    ).hexdigest(),
+                ),
+            ),
+            continuity_reasons=("pending_interaction",),
+        ),
+        *tuple(
+            RecentDialogueItem(
+                dialogue_id=f"dialogue:ordinary:{index}",
+                speaker="counterpart",
+                text=(f"普通旧对话 {index}。" * 80),
+                occurred_at=NOW - timedelta(minutes=10 + index),
+                delivery_state="observed",
+                sequence=10 - index,
+                source_claims=(
+                    DialogueSourceClaim(
+                        authority_event_ref=f"event:dialogue:ordinary:{index}",
+                        authority_world_revision=7,
+                        authority_payload_hash=hashlib.sha256(
+                            f"event:dialogue:ordinary:{index}".encode()
+                        ).hexdigest(),
+                    ),
+                ),
+                continuity_reasons=("recent",),
+            )
+            for index in range(6)
+        ),
+    )
+    dialogue_refs = tuple(
+        tuple(claim.authority_event_ref for claim in item.source_claims)
+        for item in dialogue
+    )
+    memories = _large_memory_retrievals()
+    request = _request(
+        recent_dialogue=_typed_bound(
+            dialogue,
+            slice_name="recent_dialogue",
+            source_refs_by_item=dialogue_refs,
+            ranks=(10_000, 9_900, 8_000, 8_000, 8_000, 8_000, 8_000, 8_000),
+        ),
+        active_memory_candidates=memories,
+    )
+    slice_policy = SliceBudget(max_items=8, max_fields=128, max_characters=16_000)
+    protected_only_capsule = compile_context_capsule(
+        _request(recent_dialogue=request.recent_dialogue),
+        policy=ContextCapsuleBudgetPolicy(
+            recent_dialogue=SliceBudget(
+                max_items=2,
+                max_fields=128,
+                max_characters=16_000,
+            ),
+        ),
+    )
+
+    capsule = compile_context_capsule(
+        request,
+        policy=ContextCapsuleBudgetPolicy(
+            hard_max_characters=protected_only_capsule.budget.used_characters + 500,
+            recent_dialogue=slice_policy,
+            active_memory_candidates=slice_policy,
+        ),
+    )
+
+    retained = {item.item_ref for item in capsule.recent_dialogue.items}
+    assert retained >= {"dialogue:current", "dialogue:pending"}
 
 
 @pytest.mark.parametrize(
