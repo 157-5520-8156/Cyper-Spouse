@@ -44,6 +44,7 @@ from companion_daemon.world_v2.schemas import (
     BudgetAccount,
     DueWindow,
     EvidenceRef,
+    Observation,
     ProviderReceipt,
     ThreadOrigin,
     ThreadProjection,
@@ -97,8 +98,8 @@ def _seed_due_thread(ledger: WorldLedger) -> None:
         conversation_ref="conversation:proactive", anchor_evidence_refs=(source,),
         source_evidence_refs=(source,), importance_bp=7_000,
         due_window=DueWindow(opens_at=NOW + timedelta(minutes=1),
-                             closes_at=NOW + timedelta(hours=1)),
-        expires_at=NOW + timedelta(hours=2),
+                             closes_at=NOW + timedelta(hours=6)),
+        expires_at=NOW + timedelta(hours=8),
         resolution_contract_ref="resolution:unfinished-thought", privacy_class="private",
     )
     thread = ThreadProjection(
@@ -266,6 +267,16 @@ class _DraftModel:
         assert len(self.messages) == 1
         envelope = json.loads(self.messages[0][1]["content"])
         return json.loads(envelope["request"]["model_content_json"])
+
+
+class _SequenceDraftModel(_DraftModel):
+    def __init__(self, choices: tuple[str, ...]) -> None:
+        super().__init__(choices[0])
+        self._choices = iter(choices)
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        self.choice = next(self._choices)
+        return await super().complete(messages, temperature=temperature)
 
 
 class _MalformedProactiveModel:
@@ -479,7 +490,8 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
     }
     system = model.messages[0][0]["content"]
     assert "semantic anchor" in system
-    assert "generic greeting" in system
+    assert "light relationship-appropriate check-in" in system
+    assert "scripted greetings" in system
     assert "choose silent" in system
     user = json.loads(model.messages[0][1]["content"])
     assert user["proactive_opportunity"]["source_kind"] == "thread"
@@ -642,7 +654,7 @@ async def test_exhausted_proactive_budget_abandons_with_a_durable_terminal_outco
 
 
 @pytest.mark.asyncio
-async def test_two_unparseable_choices_close_as_a_distinct_local_failsafe_silence() -> None:
+async def test_two_unparseable_choices_are_technical_failure_not_character_silence() -> None:
     ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
     malformed = _MalformedProactiveModel()
     runtime, _ = _make_proactive_runtime(
@@ -655,30 +667,68 @@ async def test_two_unparseable_choices_close_as_a_distinct_local_failsafe_silenc
     assert (await runtime.drain_one()).status == "opened"
     result = await runtime.drain_one()
 
-    assert result.status == "silent"
+    assert result.status == "failed_safe"
     assert malformed.calls == 2
     projection = ledger.project()
     assert len(projection.model_result_audits) == 2
-    assert len(projection.proposal_audits) == 1
+    assert len(projection.proposal_audits) == 0
     assert projection.actions == ()
     process = projection.trigger_processes[-1]
     assert process.state == "terminal"
-    assert process.runtime_outcome_ref == "proactive:silent"
-    proposal = json.loads(projection.proposal_audits[-1].proposal_json)
-    assert proposal["proactive_opportunity_decision"] == {
-        "decision_origin": "local_failsafe",
-        "disposition": "silent_after_consideration",
-        "source_event_ref": proposal["trigger_ref"],
-        "source_kind": "thread",
-        "source_payload_hash": proposal["evidence_refs"][0]["immutable_hash"],
-        "source_world_revision": proposal["evidence_refs"][0]["source_world_revision"],
-    }
-    assert (await runtime.drain_one()).status == "idle"
+    assert process.runtime_outcome_ref.startswith("proactive:deliberation-failed:")
+    waiting = await runtime.drain_one()
+    assert waiting.status == "retry_wait"
+    assert waiting.retry_ordinal == 1
+    assert waiting.next_retry_at == projection.logical_time + timedelta(minutes=10)
     assert malformed.calls == 2
 
 
 @pytest.mark.asyncio
-async def test_restart_closes_an_already_audited_local_failsafe_without_retry() -> None:
+async def test_technical_backoff_does_not_starve_a_later_due_opportunity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger, _model, runtime, _turn = _runtime(choice="silent")
+    projection = ledger.project()
+    first = await runtime._next_opportunity(projection)  # noqa: SLF001
+    assert first is not None
+    second = first.model_copy(
+        update={
+            "source_id": "second-due-source",
+            "consideration_id": "consideration:proactive:second-due-source",
+        }
+    )
+
+    async def next_opportunity(  # type: ignore[no-untyped-def]
+        _projection, *, excluded_consideration_ids=frozenset()
+    ):
+        if runtime._consideration_id(first) not in excluded_consideration_ids:  # noqa: SLF001
+            return first
+        if runtime._consideration_id(second) not in excluded_consideration_ids:  # noqa: SLF001
+            return second
+        return None
+
+    def retry_state(*, opportunity, **_kwargs):  # type: ignore[no-untyped-def]
+        if opportunity is first:
+            return 1, projection.logical_time + timedelta(minutes=10)
+        return 0, None
+
+    opened = []
+
+    async def open_process(**kwargs):  # type: ignore[no-untyped-def]
+        opened.append(kwargs["opportunity"])
+
+    monkeypatch.setattr(runtime, "_next_opportunity", next_opportunity)
+    monkeypatch.setattr(runtime, "_retry_state", retry_state)
+    monkeypatch.setattr(runtime, "_open", open_process)
+
+    result = await runtime.drain_one()
+
+    assert result.status == "opened"
+    assert opened == [second]
+
+
+@pytest.mark.asyncio
+async def test_restart_closes_an_audited_technical_failure_then_waits_for_retry() -> None:
     ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
     malformed = _MalformedProactiveModel()
     runtime, turn = _make_proactive_runtime(
@@ -691,18 +741,24 @@ async def test_restart_closes_an_already_audited_local_failsafe_without_retry() 
     projection = ledger.project()
     opportunity = await runtime._next_opportunity(projection)  # noqa: SLF001
     assert opportunity is not None
+    consideration_id = runtime._consideration_id(opportunity)  # noqa: SLF001
     commit = await turn.audit(
         opportunity=opportunity,
         cursor=ProactiveActionRuntime._cursor(projection),
+        attempt_id=runtime._model_attempt_id(  # noqa: SLF001
+            consideration_id=consideration_id,
+            retry_ordinal=0,
+        ),
     )
-    assert commit.proposal_id is not None
+    assert commit.proposal_id is None
     assert malformed.calls == 2
 
     result = await runtime.drain_one()
 
-    assert result.status == "silent"
+    assert result.status == "failed_safe"
     assert malformed.calls == 2
     assert ledger.project().trigger_processes[-1].state == "terminal"
+    assert (await runtime.drain_one()).status == "retry_wait"
 
 
 @pytest.mark.asyncio
@@ -909,10 +965,11 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
             action_pump_owner="worker:actions",
-            social_initiative_policy=SocialInitiativePolicy(
-                spontaneous_idle_seconds=60,
-                spontaneous_expiry_seconds=3_600,
-            ),
+                social_initiative_policy=SocialInitiativePolicy(
+                    spontaneous_idle_seconds=60,
+                    spontaneous_expiry_seconds=3_600,
+                    consideration_band_override_seconds=(60, 60),
+                ),
         ),
         identities=_Identities(),
         router=_Router(),
@@ -953,8 +1010,8 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
         assert draw_event is not None
         draw_payload = json.loads(draw_event[0].payload_json)
         assert draw_payload["sampler_version"] == "random-authority.2"
-        assert draw_payload["weight_policy_version"] == "social-initiative-context.1"
-        assert draw_payload["candidate_refs"] == ["act", "hold"]
+        assert draw_payload["weight_policy_version"] == "social-initiative-context.2"
+        assert draw_payload["candidate_refs"] == ["delay:60"]
         assert (await app.drain_background_once()).status == "authorized"
         assert (await app.drain_actions_once()).status == "settled"
         for _ in range(3):
@@ -967,6 +1024,318 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
         assert "我先去忙一会儿" in json.dumps(capsule, ensure_ascii=False)
         assert "spontaneous_contact" in json.dumps(capsule, ensure_ascii=False)
         assert transport.bodies == ["好，你先忙。", "刚才那件事我又想了一下。"]
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_model_silence_is_reconsidered_in_the_next_cadence_epoch(tmp_path) -> None:
+    proactive = _SequenceDraftModel(("silent", "now"))
+    transport = _DeliveredTransport()
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "social-initiative-reconsider.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id="world:social-initiative-reconsider",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+            social_initiative_policy=SocialInitiativePolicy(
+                spontaneous_idle_seconds=60,
+                spontaneous_expiry_seconds=3_600,
+                consideration_band_override_seconds=(60, 60),
+            ),
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=transport,
+        proactive_model=proactive,
+        now=NOW,
+    )
+    try:
+        await app.inbound(
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:reconsider-source",
+            text="我先忙会儿",
+            observed_at=NOW,
+            trace_id="trace:reconsider-source",
+        )
+        await app.drain_actions_once()
+        await app.tick(
+            tick_id="tick:reconsider:first",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(seconds=61),
+            observed_at=NOW + timedelta(seconds=61),
+            trace_id="trace:reconsider:first",
+            causation_id="scheduler:test",
+            correlation_id="conversation:reconsider",
+            reason="test_idle",
+        )
+        assert (await app.drain_background_once()).status == "opened"
+        assert (await app.drain_background_once()).status == "silent"
+        assert proactive.calls == 1
+        await app.tick(
+            tick_id="tick:reconsider:second",
+            logical_time_from=NOW + timedelta(seconds=61),
+            logical_time_to=NOW + timedelta(seconds=121),
+            observed_at=NOW + timedelta(seconds=121),
+            trace_id="trace:reconsider:second",
+            causation_id="scheduler:test",
+            correlation_id="conversation:reconsider",
+            reason="test_idle",
+        )
+        assert (await app.drain_background_once()).status == "opened"
+        assert (await app.drain_background_once()).status == "authorized"
+        assert proactive.calls == 2
+        assert len(
+            {
+                item.trigger_id
+                for item in app._ledger.project().trigger_processes  # noqa: SLF001
+                if item.process_kind == ProactiveActionRuntime.PROCESS_KIND
+            }
+        ) == 2
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_ambient_presence_clock_can_open_model_owned_contact_after_source_expiry(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    proactive = _DraftModel("now")
+    transport = _DeliveredTransport()
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "social-initiative-ambient.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id="world:social-initiative-ambient",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+            social_initiative_policy=SocialInitiativePolicy(
+                spontaneous_idle_seconds=60,
+                spontaneous_expiry_seconds=120,
+                consideration_band_override_seconds=(60, 60),
+            ),
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=transport,
+        proactive_model=proactive,
+        now=NOW,
+    )
+    try:
+        await app.inbound(
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:ambient-source",
+            text="我先去忙",
+            observed_at=NOW,
+            trace_id="trace:ambient-source",
+        )
+        await app.drain_actions_once()
+        ambient_at = NOW + timedelta(seconds=121)
+        await app.tick(
+            tick_id="tick:ambient",
+            logical_time_from=NOW,
+            logical_time_to=ambient_at,
+            observed_at=ambient_at,
+            trace_id="trace:ambient",
+            causation_id="scheduler:test",
+            correlation_id="conversation:ambient",
+            reason="test_ambient",
+        )
+        assert (await app.drain_background_once()).status == "opened"
+        assert (await app.drain_background_once()).status == "authorized"
+        proposal = json.loads(
+            app._ledger.project().proposal_audits[-1].proposal_json  # noqa: SLF001
+        )
+        assert (
+            proposal["proactive_opportunity_decision"]["source_kind"]
+            == "ambient_presence"
+        )
+        assert proactive.calls == 1
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_technical_failures_retry_at_ten_thirty_then_capped_one_twenty_minutes() -> None:
+    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
+    malformed = _MalformedProactiveModel()
+    runtime, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
+        model=malformed,
+        owner="worker:proactive:retry-backoff",
+    )
+
+    assert (await runtime.drain_one()).status == "opened"
+    assert (await runtime.drain_one()).status == "failed_safe"
+    expected_delays = (600, 1_800, 7_200, 7_200)
+    for retry_ordinal, expected_delay in enumerate(expected_delays, start=1):
+        waiting = await runtime.drain_one()
+        assert waiting.status == "retry_wait"
+        assert waiting.retry_ordinal == retry_ordinal
+        assert waiting.next_retry_at is not None
+        current = ledger.project().logical_time
+        assert current is not None
+        assert (waiting.next_retry_at - current).total_seconds() == expected_delay
+        _commit(
+            ledger,
+            _event(
+                f"event:clock:retry:{retry_ordinal}",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": current.isoformat(),
+                    "logical_time_to": waiting.next_retry_at.isoformat(),
+                },
+                at=waiting.next_retry_at,
+            ),
+        )
+        opened = await runtime.drain_one()
+        assert opened.status == "opened", (
+            ledger.project().logical_time,
+            waiting.next_retry_at,
+            opened,
+        )
+        assert (await runtime.drain_one()).status == "failed_safe"
+
+    assert malformed.calls == 10
+
+
+@pytest.mark.asyncio
+async def test_new_user_observation_supersedes_an_old_technical_retry() -> None:
+    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
+    malformed = _MalformedProactiveModel()
+    runtime, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
+        model=malformed,
+        owner="worker:proactive:retry-superseded",
+    )
+    assert (await runtime.drain_one()).status == "opened"
+    assert (await runtime.drain_one()).status == "failed_safe"
+    current = ledger.project().logical_time
+    assert current is not None
+    observed_at = current + timedelta(minutes=1)
+    observation = Observation(
+        schema_version="world-v2.1",
+        observation_id="new-user-context",
+        world_id=WORLD,
+        logical_time=observed_at,
+        created_at=observed_at,
+        trace_id="trace:proactive",
+        causation_id="cause:proactive",
+        correlation_id="conversation:proactive",
+        source="test",
+        source_event_id="message:new-user-context",
+        actor="system:test",
+        channel="test",
+        payload_ref="payload:new-user-context",
+        payload_hash="sha256:" + "9" * 64,
+        text="我回来了，刚才又发生了一件事。",
+        received_at=observed_at,
+        reply_context={
+            "target": "actor:companion",
+            "platform_message_id": "new-user-context",
+        },
+    )
+    _commit(
+        ledger,
+        _event(
+            "event:clock:new-user-context",
+            "ClockAdvanced",
+            {
+                "logical_time_from": current.isoformat(),
+                "logical_time_to": observed_at.isoformat(),
+            },
+            at=observed_at,
+        ),
+        _event(
+            "event:observation:new-user-context",
+            "ObservationRecorded",
+            observation.model_dump(mode="json"),
+            at=observed_at,
+        ),
+    )
+
+    result = await runtime.drain_one()
+
+    assert result.status == "idle"
+    assert malformed.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    malformed = _MalformedProactiveModel()
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "social-initiative-backoff-epoch.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id="world:social-initiative-backoff-epoch",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+            social_initiative_policy=SocialInitiativePolicy(
+                spontaneous_idle_seconds=60,
+                spontaneous_expiry_seconds=3_600,
+                consideration_band_override_seconds=(60, 60),
+            ),
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=_DeliveredTransport(),
+        proactive_model=malformed,
+        now=NOW,
+    )
+    try:
+        await app.inbound(
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:backoff-epoch",
+            text="我先忙一下",
+            observed_at=NOW,
+            trace_id="trace:backoff-epoch",
+        )
+        await app.drain_actions_once()
+        first_due = NOW + timedelta(seconds=61)
+        await app.tick(
+            tick_id="tick:backoff:first",
+            logical_time_from=NOW,
+            logical_time_to=first_due,
+            observed_at=first_due,
+            trace_id="trace:backoff:first",
+            causation_id="scheduler:test",
+            correlation_id="conversation:backoff",
+            reason="test_idle",
+        )
+        assert (await app.drain_background_once()).status == "opened"
+        assert (await app.drain_background_once()).status == "failed_safe"
+        second_epoch = NOW + timedelta(seconds=121)
+        await app.tick(
+            tick_id="tick:backoff:second-epoch",
+            logical_time_from=first_due,
+            logical_time_to=second_epoch,
+            observed_at=second_epoch,
+            trace_id="trace:backoff:second",
+            causation_id="scheduler:test",
+            correlation_id="conversation:backoff",
+            reason="test_idle",
+        )
+        waiting = await app.drain_background_once()
+        assert waiting.status == "retry_wait"
+        assert waiting.retry_ordinal == 1
+        assert malformed.calls == 2
     finally:
         app.close()
 
@@ -1288,9 +1657,10 @@ async def test_failed_spontaneous_delivery_is_settled_once_and_not_resent(
             world_id="world:social-initiative-failed",
             companion_actor_ref="actor:companion", reply_target="user:primary",
             action_pump_owner="worker:actions",
-            social_initiative_policy=SocialInitiativePolicy(
-                spontaneous_idle_seconds=60, spontaneous_expiry_seconds=3_600,
-            ),
+                social_initiative_policy=SocialInitiativePolicy(
+                    spontaneous_idle_seconds=60, spontaneous_expiry_seconds=3_600,
+                    consideration_band_override_seconds=(60, 60),
+                ),
         ),
         identities=_Identities(), router=_Router(), main_model=chat,
         quick_recovery=chat, transport=transport, proactive_model=proactive, now=NOW,

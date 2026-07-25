@@ -16,7 +16,7 @@ from companion_daemon.world_v2.schemas import WorldEvent
 NOW = datetime(2026, 7, 17, 14, 0, tzinfo=UTC)
 
 
-def test_context_changes_spontaneous_wait_and_act_hold_weight_without_hard_scenarios() -> None:
+def test_context_changes_relationship_aware_consideration_band_without_deciding_speech() -> None:
     policy = SocialInitiativePolicy(
         spontaneous_idle_seconds=1_800,
         spontaneous_expiry_seconds=43_200,
@@ -25,7 +25,15 @@ def test_context_changes_spontaneous_wait_and_act_hold_weight_without_hard_scena
     receptive = SimpleNamespace(
         relationship_states=(
             SimpleNamespace(
-                variables=SimpleNamespace(closeness_bp=8_000, mutuality_bp=8_000)
+                stage="close_friend",
+                variables=SimpleNamespace(
+                    trust_bp=8_000,
+                    closeness_bp=8_000,
+                    respect_bp=8_000,
+                    reliability_bp=8_000,
+                    mutuality_bp=8_000,
+                    repair_confidence_bp=8_000,
+                ),
             ),
         ),
         affect_episodes=(
@@ -39,7 +47,15 @@ def test_context_changes_spontaneous_wait_and_act_hold_weight_without_hard_scena
     guarded = SimpleNamespace(
         relationship_states=(
             SimpleNamespace(
-                variables=SimpleNamespace(closeness_bp=1_000, mutuality_bp=1_000)
+                stage="acquaintance",
+                variables=SimpleNamespace(
+                    trust_bp=1_000,
+                    closeness_bp=1_000,
+                    respect_bp=1_000,
+                    reliability_bp=1_000,
+                    mutuality_bp=1_000,
+                    repair_confidence_bp=1_000,
+                ),
             ),
         ),
         affect_episodes=(
@@ -54,23 +70,21 @@ def test_context_changes_spontaneous_wait_and_act_hold_weight_without_hard_scena
     receptive_profile = compiler.compile(projection=receptive, logical_time=NOW)
     guarded_profile = compiler.compile(
         projection=guarded,
-        logical_time=NOW.replace(hour=2),
+        logical_time=NOW.replace(hour=18),
     )
 
-    assert receptive_profile.not_before_seconds == 1_260
-    assert guarded_profile.not_before_seconds == 4_590
-    assert receptive_profile.candidate_weights["act"] == 8_000
-    assert receptive_profile.candidate_weights["hold"] == 4_000
-    assert guarded_profile.candidate_weights["act"] == 4_500
-    assert guarded_profile.candidate_weights["hold"] == 13_500
+    assert receptive_profile.consideration_band_seconds == (3_600, 7_200)
+    assert guarded_profile.consideration_band_seconds == (10_800, 21_600)
+    assert receptive_profile.delay_candidates_seconds == (3_600, 5_400, 7_200)
+    assert guarded_profile.delay_candidates_seconds == (10_800, 16_200, 21_600)
     assert receptive_profile.reason_codes == (
-        "relationship:close",
+        "relationship:close_friend",
         "affect:approach",
         "activity:available",
         "daypart:day",
     )
     assert guarded_profile.reason_codes == (
-        "relationship:distant",
+        "relationship:acquaintance",
         "affect:guarded",
         "activity:engaged",
         "daypart:overnight",
@@ -99,7 +113,7 @@ def _compiler_fixture(*, receptive: bool):
         world_revision=1,
         deliberation_revision=0,
         ledger_sequence=1,
-        logical_time=NOW + timedelta(seconds=1_260),
+        logical_time=NOW + timedelta(minutes=90),
         actions=(),
         expression_plan_manifests=(),
         message_observations=(
@@ -109,7 +123,15 @@ def _compiler_fixture(*, receptive: bool):
         relationship_states=(
             (
                 SimpleNamespace(
-                    variables=SimpleNamespace(closeness_bp=8_000, mutuality_bp=8_000)
+                    stage="close_friend",
+                    variables=SimpleNamespace(
+                        trust_bp=8_000,
+                        closeness_bp=8_000,
+                        respect_bp=8_000,
+                        reliability_bp=8_000,
+                        mutuality_bp=8_000,
+                        repair_confidence_bp=8_000,
+                    ),
                 ),
             )
             if receptive
@@ -156,19 +178,29 @@ def _compiler_fixture(*, receptive: bool):
 
 
 @pytest.mark.asyncio
-async def test_receptive_context_reaches_draw_before_plain_idle_window() -> None:
+async def test_consideration_draw_selects_only_a_delay_and_never_act_or_hold() -> None:
     receptive, projection, receptive_commits = _compiler_fixture(receptive=True)
-    ordinary, ordinary_projection, ordinary_commits = _compiler_fixture(receptive=False)
+    draws: list[dict[str, object]] = []
 
-    await receptive.next_opportunity(projection)
-    await ordinary.next_opportunity(ordinary_projection)
+    def draw(**kwargs):  # type: ignore[no-untyped-def]
+        draws.append(kwargs)
+        return SimpleNamespace(
+            selected_candidate_ref="delay:5400",
+            draw_id="draw:test-delay",
+        )
 
-    assert [event.event_type for event in receptive_commits] == ["RandomDrawRecorded"]
-    assert ordinary_commits == []
+    receptive._random = SimpleNamespace(draw=draw)  # noqa: SLF001
+    opportunity = await receptive.next_opportunity(projection)
+
+    assert opportunity is not None
+    assert draws[0]["candidate_refs"] == ("delay:3600", "delay:5400", "delay:7200")
+    assert "act" not in draws[0]["candidate_refs"]
+    assert "hold" not in draws[0]["candidate_refs"]
+    del receptive_commits
 
 
 @pytest.mark.asyncio
-async def test_unchanged_context_reuses_one_act_hold_draw_across_scheduler_ticks() -> None:
+async def test_unchanged_context_reuses_one_delay_draw_across_scheduler_ticks() -> None:
     compiler, projection, committed = _compiler_fixture(receptive=True)
 
     first = await compiler.next_opportunity(projection)
@@ -180,42 +212,108 @@ async def test_unchanged_context_reuses_one_act_hold_draw_across_scheduler_ticks
 
 
 @pytest.mark.asyncio
-async def test_held_draw_gates_the_spontaneous_opportunity_without_erasing_evidence() -> None:
-    """``hold`` now really means no check-in impulse under this inner state."""
+async def test_each_due_epoch_reaches_the_model_owned_opportunity() -> None:
+    """Cadence may decide when to consider, never whether the character may speak."""
 
     compiler, projection, committed = _compiler_fixture(receptive=True)
     draws: list[dict[str, object]] = []
 
     def draw(**kwargs):  # type: ignore[no-untyped-def]
         draws.append(kwargs)
-        return SimpleNamespace(selected_candidate_ref="hold", draw_id="draw:test-hold")
+        return SimpleNamespace(
+            selected_candidate_ref="delay:3600", draw_id="draw:test-delay"
+        )
 
     compiler._random = SimpleNamespace(draw=draw)  # noqa: SLF001 - deterministic seam
 
     opportunity = await compiler.next_opportunity(projection)
 
-    assert opportunity is None
-    # The inclination itself is still durable replay evidence, and its
-    # identity binds the compiled mood/relationship profile: a changed inner
-    # state produces a different attempt id and therefore a genuine re-draw.
-    assert draws and draws[0]["candidate_refs"] == ("act", "hold")
+    assert opportunity is not None
+    assert opportunity.source_kind == "spontaneous_contact"
+    assert opportunity.consideration_epoch == 0
+    assert draws and draws[0]["candidate_refs"] == (
+        "delay:3600",
+        "delay:5400",
+        "delay:7200",
+    )
     assert str(draws[0]["attempt_id"]).startswith("social-initiative:")
     del committed
 
 
 @pytest.mark.asyncio
-async def test_acting_draw_still_yields_the_source_bound_opportunity() -> None:
+async def test_completed_consideration_is_not_returned_again_in_the_same_epoch() -> None:
     compiler, projection, _committed = _compiler_fixture(receptive=True)
-    compiler._random = SimpleNamespace(  # noqa: SLF001 - deterministic seam
-        draw=lambda **kwargs: SimpleNamespace(
-            selected_candidate_ref="act", draw_id="draw:test-act"
+    compiler._random = SimpleNamespace(  # noqa: SLF001
+        draw=lambda **_kwargs: SimpleNamespace(
+            selected_candidate_ref="delay:3600",
+            draw_id="draw:completed-epoch",
+        )
+    )
+    first = await compiler.next_opportunity(projection)
+    assert first is not None
+    projection.trigger_processes = (
+        SimpleNamespace(
+            process_kind="proactive_action_deliberation",
+            trigger_ref="proactive-consideration:" + first.consideration_id,
+            source_evidence_ref=first.source_event_ref,
+            state="terminal",
+            runtime_outcome_ref="proactive:silent",
+        ),
+    )
+
+    assert await compiler.next_opportunity(projection) is None
+
+
+@pytest.mark.asyncio
+async def test_expired_message_context_opens_ambient_model_consideration_from_clock() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    clock_at = NOW + timedelta(hours=13)
+    clock = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:clock:ambient",
+        world_id="world:social-context-test",
+        event_type="ClockAdvanced",
+        logical_time=clock_at,
+        created_at=clock_at,
+        actor="system:clock",
+        source="test",
+        trace_id="trace:ambient",
+        causation_id="cause:ambient",
+        correlation_id="conversation:ambient",
+        idempotency_key="clock:ambient",
+        payload={
+            "logical_time_from": NOW.isoformat(),
+            "logical_time_to": clock_at.isoformat(),
+        },
+    )
+    projection.logical_time = clock_at
+    projection.committed_world_event_refs = (
+        SimpleNamespace(
+            event_id=clock.event_id,
+            event_type=clock.event_type,
+            logical_time=clock.logical_time,
+            world_revision=2,
+        ),
+    )
+    original_lookup = compiler._ledger.lookup_event_commit  # noqa: SLF001
+    compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]
+        (clock, SimpleNamespace(world_revision=2))
+        if event_id == clock.event_id
+        else original_lookup(event_id)
+    )
+    compiler._random = SimpleNamespace(  # noqa: SLF001
+        draw=lambda **_kwargs: SimpleNamespace(
+            selected_candidate_ref="delay:3600",
+            draw_id="draw:ambient-delay",
         )
     )
 
     opportunity = await compiler.next_opportunity(projection)
 
     assert opportunity is not None
-    assert opportunity.source_kind == "spontaneous_contact"
+    assert opportunity.source_kind == "ambient_presence"
+    assert opportunity.source_event_ref == clock.event_id
+    assert opportunity.consideration_epoch >= 1
 
 
 @pytest.mark.asyncio
@@ -271,6 +369,17 @@ async def test_unrelated_later_inbound_does_not_cancel_response_gap_opportunity(
         relationship_states=(),
         affect_episodes=(),
         plans=(),
+        trigger_processes=(
+            SimpleNamespace(
+                process_kind="proactive_action_deliberation",
+                trigger_ref="proactive-consideration:failed-idle",
+                source_evidence_ref="event:old-idle",
+                state="terminal",
+                runtime_outcome_ref=(
+                    "proactive:deliberation-failed:model-result:old-idle"
+                ),
+            ),
+        ),
     )
     ledger = SimpleNamespace(
         world_id="world:response-gap-context-test",
@@ -293,3 +402,9 @@ async def test_unrelated_later_inbound_does_not_cancel_response_gap_opportunity(
 
     assert opportunity is not None
     assert opportunity.source_kind == "response_gap"
+    projection.message_observations += (
+        SimpleNamespace(observation_id="message:new-context", world_revision=3),
+    )
+    reconsidered = await compiler.next_opportunity(projection)
+    assert reconsidered is not None
+    assert reconsidered.consideration_id != opportunity.consideration_id

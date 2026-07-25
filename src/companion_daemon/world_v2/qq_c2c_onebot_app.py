@@ -111,6 +111,33 @@ class QQC2CSchedulerDiagnostics:
                 "spontaneous_candidate_due": world.get(
                     "spontaneous_candidate_due", False
                 ),
+                "state": world.get("initiative_state", "waiting_context"),
+                "last_considered_at": world.get(
+                    "initiative_last_considered_at"
+                ),
+                "last_model_decision": world.get(
+                    "initiative_last_model_decision"
+                ),
+                "last_decision_reason": world.get(
+                    "initiative_last_decision_reason"
+                ),
+                "next_consideration_at": world.get(
+                    "initiative_next_consideration_at"
+                ),
+                "cadence_reason_codes": world.get(
+                    "initiative_cadence_reason_codes", []
+                ),
+                "consecutive_technical_failures": world.get(
+                    "initiative_consecutive_technical_failures", 0
+                ),
+                "retry_ordinal": world.get("initiative_retry_ordinal", 0),
+                "last_failure_code": world.get(
+                    "initiative_last_failure_code"
+                ),
+                "warning": world.get("initiative_warning", False),
+                "warning_reasons": world.get(
+                    "initiative_warning_reasons", []
+                ),
             },
             "world_activity": {
                 "life_event_count": world.get("life_event_count", 0),

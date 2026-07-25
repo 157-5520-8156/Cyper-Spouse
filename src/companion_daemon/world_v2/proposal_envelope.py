@@ -828,7 +828,12 @@ class ProactiveExpressionSourceBinding(FrozenModel):
     """Bind a complete visible proactive expression to its causal opportunity."""
 
     source_kind: Literal[
-        "settled_world_event", "thread", "commitment", "spontaneous_contact", "response_gap"
+        "settled_world_event",
+        "thread",
+        "commitment",
+        "spontaneous_contact",
+        "response_gap",
+        "ambient_presence",
     ]
     source_event_ref: BoundedRef
     source_payload_hash: str = Field(pattern=_HASH_PATTERN)
@@ -841,7 +846,12 @@ class ProactiveOpportunityDecision(FrozenModel):
     """Durable proof that a proactive opportunity was evaluated, including silence."""
 
     source_kind: Literal[
-        "settled_world_event", "thread", "commitment", "spontaneous_contact", "response_gap"
+        "settled_world_event",
+        "thread",
+        "commitment",
+        "spontaneous_contact",
+        "response_gap",
+        "ambient_presence",
     ]
     source_event_ref: BoundedRef
     source_payload_hash: str = Field(pattern=_HASH_PATTERN)

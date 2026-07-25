@@ -1223,6 +1223,17 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
         "pending_process_count": 0,
         "pending_action_count": 0,
         "spontaneous_candidate_due": False,
+        "state": "waiting_context",
+        "last_considered_at": None,
+        "last_model_decision": None,
+        "last_decision_reason": None,
+        "next_consideration_at": None,
+        "cadence_reason_codes": [],
+        "consecutive_technical_failures": 0,
+        "retry_ordinal": 0,
+        "last_failure_code": None,
+        "warning": False,
+        "warning_reasons": [],
     }
     assert scheduler["world_activity"] == {
         "life_event_count": 0,
@@ -1261,7 +1272,7 @@ async def test_qq_c2c_scheduler_diagnostics_record_real_pass_progress() -> None:
 
 
 @pytest.mark.asyncio
-async def test_qq_health_does_not_call_a_due_spontaneous_candidate_an_opportunity_without_a_draw(
+async def test_qq_health_reports_a_due_model_consideration_without_mutating_a_draw(
     tmp_path: Path,
 ) -> None:
     host = build_qq_c2c_host(
@@ -1272,6 +1283,11 @@ async def test_qq_health_does_not_call_a_due_spontaneous_candidate_an_opportunit
         delivery=_Delivery(),
     )
     try:
+        host._host._application._social_initiative_policy = SocialInitiativePolicy(  # type: ignore[attr-defined]  # noqa: SLF001
+            spontaneous_idle_seconds=60,
+            spontaneous_expiry_seconds=3_600,
+            consideration_band_override_seconds=(60, 60),
+        )
         await host.inbound_text(
             message_id="qq-health-message",
             recipient_id="10001",
@@ -1281,8 +1297,8 @@ async def test_qq_health_does_not_call_a_due_spontaneous_candidate_an_opportunit
         await host.tick(
             tick_id="tick:qq-health:idle",
             logical_time_from=NOW,
-            logical_time_to=NOW + timedelta(minutes=31),
-            observed_at=NOW + timedelta(minutes=31),
+            logical_time_to=NOW + timedelta(seconds=61),
+            observed_at=NOW + timedelta(seconds=61),
             reason="health_projection_test",
         )
 
@@ -1291,21 +1307,19 @@ async def test_qq_health_does_not_call_a_due_spontaneous_candidate_an_opportunit
         await host.aclose()
 
     assert diagnostics["spontaneous_candidate_due"] is True
-    assert diagnostics["pending_proactive_opportunity_count"] == 0
+    assert diagnostics["pending_proactive_opportunity_count"] == 1
     assert diagnostics["pending_proactive_process_count"] == 0
+    assert diagnostics["initiative_state"] == "consideration_due"
+    assert diagnostics["initiative_next_consideration_at"] is not None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("selected", "expected_opportunities"),
-    (("act", 1), ("hold", 0)),
-)
-async def test_qq_health_counts_only_a_recorded_act_draw_as_spontaneous_opportunity(
-    tmp_path: Path, selected: str, expected_opportunities: int,
+async def test_qq_health_reads_a_recorded_delay_draw_as_model_consideration_cadence(
+    tmp_path: Path,
 ) -> None:
     host = build_qq_c2c_host(
         settings=Settings(
-            database_path=tmp_path / f"qq-health-{selected}-draw.sqlite"
+            database_path=tmp_path / "qq-health-delay-draw.sqlite"
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
@@ -1313,15 +1327,21 @@ async def test_qq_health_counts_only_a_recorded_act_draw_as_spontaneous_opportun
         delivery=_Delivery(),
     )
     try:
+        policy = SocialInitiativePolicy(
+            spontaneous_idle_seconds=60,
+            spontaneous_expiry_seconds=3_600,
+            consideration_band_override_seconds=(60, 60),
+        )
+        host._host._application._social_initiative_policy = policy  # type: ignore[attr-defined]  # noqa: SLF001
         await host.inbound_text(
-            message_id=f"qq-health-{selected}-message",
+            message_id="qq-health-delay-message",
             recipient_id="10001",
             text="我先离开一下。",
             observed_at=NOW,
         )
-        logical_time = NOW + timedelta(minutes=31)
+        logical_time = NOW + timedelta(seconds=61)
         await host.tick(
-            tick_id=f"tick:qq-health:{selected}",
+            tick_id="tick:qq-health:delay",
             logical_time_from=NOW,
             logical_time_to=logical_time,
             observed_at=logical_time,
@@ -1336,25 +1356,22 @@ async def test_qq_health_counts_only_a_recorded_act_draw_as_spontaneous_opportun
             and item.world_revision == projection.message_observations[-1].world_revision
         )
         profile = SocialInitiativeContextPolicy(
-            policy=SocialInitiativePolicy()
+            policy=policy
         ).compile(projection=projection, logical_time=logical_time)
         RandomAuthority(ledger=ledger, source="test:health-random").draw(
             attempt_id=social_initiative_attempt_id(
                 source_event_ref=source.event_id,
                 profile=profile,
             ),
-            candidate_refs=("act", "hold"),
-            candidate_weights={
-                "act": int(selected == "act"),
-                "hold": int(selected == "hold"),
-            },
+            candidate_refs=("delay:60",),
+            candidate_weights={"delay:60": 1},
             weight_policy_version=SocialInitiativeContextPolicy.version,
-            catalog_version="social-initiative-act-hold.1",
+            catalog_version="social-initiative-delay.1",
             logical_time=logical_time,
             seed_instant=source.logical_time,
             actor="system:social-initiative",
-            trace_id=f"trace:health-{selected}",
-            correlation_id=f"correlation:health-{selected}",
+            trace_id="trace:health-delay",
+            correlation_id="correlation:health-delay",
         )
 
         diagnostics = await host.world_health_diagnostics()
@@ -1362,10 +1379,9 @@ async def test_qq_health_counts_only_a_recorded_act_draw_as_spontaneous_opportun
         await host.aclose()
 
     assert diagnostics["spontaneous_candidate_due"] is True
-    assert (
-        diagnostics["pending_proactive_opportunity_count"]
-        == expected_opportunities
-    )
+    assert diagnostics["pending_proactive_opportunity_count"] == 1
+    assert diagnostics["initiative_state"] == "consideration_due"
+    assert diagnostics["initiative_cadence_reason_codes"]
 
 
 def test_qq_c2c_identity_is_one_recipient_to_one_explicit_reply_target() -> None:

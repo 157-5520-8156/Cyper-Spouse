@@ -222,12 +222,15 @@ from .proactive_action import (
     ProactiveDeliberationTurn,
     ProactiveDraftAdapter,
 )
+from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .recent_dialogue import RecentDialogueCompiler
 from .social_initiative import (
     SocialInitiativeCompiler,
     SocialInitiativeContextPolicy,
     SocialInitiativePolicy,
     social_initiative_attempt_id,
+    social_initiative_consideration_id,
+    technical_failure_point,
 )
 from .random_authority import RandomDrawRecordedPayload
 from .memory_withdrawal_review import (
@@ -1653,10 +1656,10 @@ class WorldV2TurnApplication:
     async def world_health_diagnostics(self) -> dict[str, object]:
         """Return deterministic read-only liveness evidence for health checks.
 
-        The projection supplies current state; exact committed draw payloads
-        are looked up only to distinguish a due spontaneous candidate from an
-        already-recorded ``act`` decision.  This seam never deliberates, draws
-        randomness, claims work, or appends ledger events.
+        The projection supplies current state; exact committed cadence draws
+        are read only to report when the next model-owned consideration is
+        due.  This seam never deliberates, draws randomness, claims work, or
+        appends ledger events.
         """
 
         projection = (
@@ -1682,6 +1685,10 @@ class WorldV2TurnApplication:
             and item.settlement_event_ref is not None
         }
         spontaneous_candidate_due = False
+        spontaneous_pending = False
+        initiative_state = "waiting_context"
+        next_consideration_at: datetime | None = None
+        cadence_reason_codes: tuple[str, ...] = ()
         logical_time = projection.logical_time
         if logical_time is not None:
             for thread in projection.threads:
@@ -1798,42 +1805,150 @@ class WorldV2TurnApplication:
                             projection=projection,
                             logical_time=logical_time,
                         )
-                        if (
-                            profile.not_before_seconds
-                            <= idle_seconds
-                            < policy.spontaneous_expiry_seconds
-                        ):
-                            spontaneous_candidate_due = True
-                            expected_attempt_id = social_initiative_attempt_id(
-                                source_event_ref=source_ref.event_id,
-                                profile=profile,
+                        cadence_reason_codes = profile.reason_codes
+                        expected_attempt_id = social_initiative_attempt_id(
+                            source_event_ref=source_ref.event_id,
+                            profile=profile,
+                        )
+                        cadence_draw = None
+                        for draw_ref in reversed(projection.committed_world_event_refs):
+                            if draw_ref.event_type != "RandomDrawRecorded":
+                                continue
+                            located = (
+                                await asyncio.to_thread(
+                                    self._ledger.lookup_event_commit,
+                                    draw_ref.event_id,
+                                )
+                                if self._ledger.blocks_event_loop
+                                else self._ledger.lookup_event_commit(draw_ref.event_id)
                             )
-                            for draw_ref in projection.committed_world_event_refs:
-                                if draw_ref.event_type != "RandomDrawRecorded":
-                                    continue
-                                located = (
-                                    await asyncio.to_thread(
-                                        self._ledger.lookup_event_commit,
-                                        draw_ref.event_id,
+                            if located is None:
+                                continue
+                            draw = RandomDrawRecordedPayload.model_validate_json(
+                                located[0].payload_json
+                            )
+                            if (
+                                draw.attempt_id == expected_attempt_id
+                                and draw.sampler_version == "random-authority.2"
+                                and draw.weight_policy_version
+                                == SocialInitiativeContextPolicy.version
+                                and all(
+                                    item.startswith("delay:")
+                                    for item in draw.candidate_refs
+                                )
+                            ):
+                                cadence_draw = draw
+                                break
+                        delay_seconds = (
+                            int(
+                                cadence_draw.selected_candidate_ref.removeprefix(
+                                    "delay:"
+                                )
+                            )
+                            if cadence_draw is not None
+                            else profile.delay_candidates_seconds[0]
+                        )
+                        epoch = max(0, int(idle_seconds // delay_seconds) - 1)
+                        source_kind = (
+                            "ambient_presence"
+                            if idle_seconds >= policy.spontaneous_expiry_seconds
+                            else "spontaneous_contact"
+                        )
+                        consideration_id = social_initiative_consideration_id(
+                            attempt_id=expected_attempt_id,
+                            delay_seconds=delay_seconds,
+                            epoch=epoch,
+                            source_kind=source_kind,
+                        )
+                        scheduled_for = source_ref.logical_time + timedelta(
+                            seconds=delay_seconds * (epoch + 1)
+                        )
+                        next_consideration_at = scheduled_for
+                        spontaneous_candidate_due = logical_time >= scheduled_for
+                        current_processes = tuple(
+                            item
+                            for item in proactive_processes
+                            if item.trigger_ref
+                            == "proactive-consideration:" + consideration_id
+                        )
+                        current = current_processes[-1] if current_processes else None
+                        if current is None:
+                            initiative_state = (
+                                "consideration_due"
+                                if spontaneous_candidate_due
+                                else "waiting_context"
+                            )
+                            spontaneous_pending = spontaneous_candidate_due
+                        elif current.state != "terminal":
+                            initiative_state = "considering"
+                        elif str(current.runtime_outcome_ref).startswith(
+                            "proactive:deliberation-failed:"
+                        ):
+                            failures = sum(
+                                item.state == "terminal"
+                                and str(item.runtime_outcome_ref).startswith(
+                                    "proactive:deliberation-failed:"
+                                )
+                                for item in current_processes
+                            )
+                            backoff = ProactiveActionRuntime.FAILURE_BACKOFF_SECONDS[
+                                min(
+                                    max(0, failures - 1),
+                                    len(
+                                        ProactiveActionRuntime.FAILURE_BACKOFF_SECONDS
                                     )
-                                    if self._ledger.blocks_event_loop
-                                    else self._ledger.lookup_event_commit(draw_ref.event_id)
+                                    - 1,
                                 )
-                                if located is None:
-                                    continue
-                                draw = RandomDrawRecordedPayload.model_validate_json(
-                                    located[0].payload_json
-                                )
-                                if (
-                                    draw.attempt_id == expected_attempt_id
-                                    and draw.sampler_version == "random-authority.2"
-                                    and draw.weight_policy_version
-                                    == SocialInitiativeContextPolicy.version
-                                    and draw.candidate_refs == ("act", "hold")
-                                    and draw.selected_candidate_ref == "act"
-                                ):
-                                    opportunity_sources.add(source_ref.event_id)
-                                    break
+                            ]
+                            failed_at = (
+                                current.claim_lease.acquired_at
+                                if current.claim_lease is not None
+                                else scheduled_for
+                            )
+                            next_consideration_at = failed_at + timedelta(
+                                seconds=backoff
+                            )
+                            initiative_state = (
+                                "retry_wait"
+                                if logical_time < next_consideration_at
+                                else "consideration_due"
+                            )
+                            spontaneous_pending = (
+                                logical_time >= next_consideration_at
+                            )
+                        elif current.runtime_outcome_ref == "proactive:silent":
+                            initiative_state = "model_silent"
+                            next_consideration_at = source_ref.logical_time + timedelta(
+                                seconds=delay_seconds * (epoch + 2)
+                            )
+                        elif str(current.runtime_outcome_ref).startswith(
+                            "proactive:authorized:"
+                        ):
+                            action_id = str(current.runtime_outcome_ref).removeprefix(
+                                "proactive:authorized:"
+                            )
+                            action = next(
+                                (
+                                    item
+                                    for item in projection.actions
+                                    if item.action_id == action_id
+                                ),
+                                None,
+                            )
+                            initiative_state = (
+                                "action_pending"
+                                if action is not None
+                                and action.state
+                                not in {
+                                    "delivered",
+                                    "failed",
+                                    "cancelled",
+                                    "expired",
+                                }
+                                else "cooldown"
+                            )
+                        else:
+                            initiative_state = "cooldown"
             for commitment in projection.commitments:
                 values = commitment.values
                 if (
@@ -1867,6 +1982,129 @@ class WorldV2TurnApplication:
             status, separator, reason = outcome.partition(":")
             last_status = status.replace("-", "_")
             last_reason = reason if separator else None
+        last_considered_at = (
+            latest.claim_lease.acquired_at
+            if latest is not None and latest.claim_lease is not None
+            else None
+        )
+        last_model_decision = None
+        if latest is not None and latest.runtime_outcome_ref == "proactive:silent":
+            last_model_decision = "silent"
+        elif latest is not None and str(latest.runtime_outcome_ref).startswith(
+            "proactive:deliberation-failed:"
+        ):
+            last_model_decision = "technical_failure"
+            last_reason = None
+        elif latest is not None and str(latest.runtime_outcome_ref).startswith(
+            "proactive:authorized:"
+        ):
+            action_id = str(latest.runtime_outcome_ref).removeprefix(
+                "proactive:authorized:"
+            )
+            action = next(
+                (item for item in projection.actions if item.action_id == action_id),
+                None,
+            )
+            last_model_decision = (
+                "later" if action is not None and action.kind == "followup" else "now"
+            )
+        if (
+            latest is not None
+            and latest.source_evidence_ref is not None
+            and last_model_decision in {"now", "later", "silent"}
+        ):
+            decision_audit = next(
+                (
+                    item
+                    for item in reversed(projection.proposal_audits)
+                    if item.proposal_kind == "decision"
+                    and item.proposal_id.startswith("proposal:proactive:")
+                    and item.trigger_ref == latest.source_evidence_ref
+                ),
+                None,
+            )
+            if decision_audit is not None:
+                try:
+                    decision = validate_proposal_envelope(
+                        json.loads(decision_audit.proposal_json)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    decision = None
+                if isinstance(decision, DecisionProposal):
+                    last_reason = decision.brief_rationale
+        consecutive_technical_failures = 0
+        latest_message_revision = (
+            projection.message_observations[-1].world_revision
+            if projection.message_observations
+            else 0
+        )
+        latest_failure_revision, _latest_failed_at = (
+            technical_failure_point(projection=projection, process=latest)
+            if latest is not None
+            and str(latest.runtime_outcome_ref).startswith(
+                "proactive:deliberation-failed:"
+            )
+            else (None, None)
+        )
+        latest_failure_superseded = (
+            latest_failure_revision is not None
+            and latest_message_revision > latest_failure_revision
+        )
+        if (
+            not latest_failure_superseded
+            and latest is not None
+            and str(latest.runtime_outcome_ref).startswith(
+                "proactive:deliberation-failed:"
+            )
+        ):
+            consecutive_technical_failures = sum(
+                process.trigger_ref == latest.trigger_ref
+                and process.state == "terminal"
+                and str(process.runtime_outcome_ref).startswith(
+                    "proactive:deliberation-failed:"
+                )
+                for process in proactive_processes
+            )
+        last_failure_code = None
+        if (
+            latest is not None
+            and not latest_failure_superseded
+            and str(latest.runtime_outcome_ref).startswith(
+                "proactive:deliberation-failed:"
+            )
+        ):
+            result_ref = str(latest.runtime_outcome_ref).removeprefix(
+                "proactive:deliberation-failed:"
+            )
+            audit = next(
+                (
+                    item
+                    for item in reversed(projection.model_result_audits)
+                    if item.model_result_ref == result_ref
+                ),
+                None,
+            )
+            if audit is not None:
+                try:
+                    audit_value = json.loads(audit.audit_json)
+                except (TypeError, json.JSONDecodeError):
+                    audit_value = {}
+                code = audit_value.get("failure_code")
+                last_failure_code = code if isinstance(code, str) else None
+        warning_reasons: list[str] = []
+        if consecutive_technical_failures and initiative_state not in {
+            "retry_wait",
+            "consideration_due",
+            "considering",
+        }:
+            warning_reasons.append("technical_failure_not_scheduled")
+        if (
+            next_consideration_at is not None
+            and logical_time is not None
+            and logical_time - next_consideration_at > timedelta(minutes=2)
+            and initiative_state == "consideration_due"
+        ):
+            warning_reasons.append("consideration_overdue")
 
         # Registration and proposal/audit records prove infrastructure, not
         # that the character has actually lived through anything.
@@ -2053,7 +2291,8 @@ class WorldV2TurnApplication:
             "initiative_last_reason": last_reason,
             "pending_proactive_opportunity_count": len(
                 opportunity_sources - processed_sources
-            ),
+            )
+            + int(spontaneous_pending),
             "pending_proactive_process_count": sum(
                 item.state != "terminal" for item in proactive_processes
             ),
@@ -2062,6 +2301,27 @@ class WorldV2TurnApplication:
                 for item in projection.pending_actions
             ),
             "spontaneous_candidate_due": spontaneous_candidate_due,
+            "initiative_state": initiative_state,
+            "initiative_last_considered_at": (
+                last_considered_at.isoformat()
+                if last_considered_at is not None
+                else None
+            ),
+            "initiative_last_model_decision": last_model_decision,
+            "initiative_last_decision_reason": last_reason,
+            "initiative_next_consideration_at": (
+                next_consideration_at.isoformat()
+                if next_consideration_at is not None
+                else None
+            ),
+            "initiative_cadence_reason_codes": list(cadence_reason_codes),
+            "initiative_consecutive_technical_failures": (
+                consecutive_technical_failures
+            ),
+            "initiative_retry_ordinal": consecutive_technical_failures,
+            "initiative_last_failure_code": last_failure_code,
+            "initiative_warning": bool(warning_reasons),
+            "initiative_warning_reasons": warning_reasons,
             "life_event_count": life_event_count,
             "occurrence_count": occurrence_count,
             "experience_count": experience_count,
