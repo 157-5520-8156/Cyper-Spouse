@@ -160,6 +160,7 @@ _SEMANTIC_CONDITIONAL_FIELDS = frozenset(
         "visible_physical_states",
         "aspirations",
         "expression_payload_descriptors",
+        "life_ecology_schedule",
     }
 )
 
@@ -504,6 +505,18 @@ class SQLiteProjectionPerformanceCounters:
     historical_replay_calls: int
     total_replay_calls: int
     historical_projection_hits: int = 0
+    historical_prefix_hits: int = 0
+    replayed_events: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoricalReplayPrefix:
+    """Reducer state and migration context at one immutable ledger cursor."""
+
+    cursor: ProjectionCursor
+    state: ReducerState
+    legacy_trigger_sources: dict[str, str]
+    legacy_settlement_sources: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -556,6 +569,8 @@ class SQLiteWorldLedger:
         self._historical_replay_calls = 0
         self._total_replay_calls = 0
         self._historical_projection_hits = 0
+        self._historical_prefix_hits = 0
+        self._replayed_events = 0
         self._head_projection_cache: LedgerProjection | None = None
         self._head_projection_cache_row_identity: tuple[object, ...] | None = None
         # A same-turn advisory may authenticate a proposal at the immediately
@@ -566,6 +581,15 @@ class SQLiteWorldLedger:
         # because "the head from a few commits ago" is exactly the audit
         # cursor same-turn appraisal/affect workers re-read.
         self._historical_projection_cache: dict[tuple[int, int, int], LedgerProjection] = {}
+        # Historical projection objects do not expose their reducer state, so
+        # they cannot by themselves accelerate a nearby cache miss.  Retain a
+        # much smaller set of immutable reducer prefixes: after the first
+        # uncached cursor, later ascending cursors replay only their delta.
+        # Migration maps are part of the prefix because legacy event upcasts
+        # must remain byte-for-byte equivalent to an independent cold replay.
+        self._historical_replay_prefix_cache: dict[
+            tuple[str, str, int, int, int], _HistoricalReplayPrefix
+        ] = {}
         self._head_state_cache: ReducerState | None = None
         self._head_state_cache_identity: tuple[int, int, int, str, str] | None = None
         # Canonical JSON fragments of the last committed state, keyed by its
@@ -789,6 +813,8 @@ class SQLiteWorldLedger:
                 historical_replay_calls=self._historical_replay_calls,
                 total_replay_calls=self._total_replay_calls,
                 historical_projection_hits=self._historical_projection_hits,
+                historical_prefix_hits=self._historical_prefix_hits,
+                replayed_events=self._replayed_events,
             )
 
     def _sqlite_data_version_locked(self) -> int:
@@ -838,6 +864,7 @@ class SQLiteWorldLedger:
         self._head_projection_cache_row_identity = None
         self._head_state_cache = None
         self._head_state_cache_identity = None
+        self._historical_replay_prefix_cache.clear()
         self._state_fragment_cache = None
         self._state_fragment_bytes = None
         self._semantic_fragment_cache = None
@@ -919,6 +946,12 @@ class SQLiteWorldLedger:
             -- planner never falls back to the primary key scan for ordering.
             CREATE INDEX IF NOT EXISTS world_v2_events_commit_lookup
                 ON world_v2_events (world_id, commit_id, ledger_sequence);
+            CREATE INDEX IF NOT EXISTS world_v2_events_created_at_lookup
+                ON world_v2_events (
+                    json_extract(event_json, '$.created_at'),
+                    world_id,
+                    ledger_sequence
+                );
             CREATE TABLE IF NOT EXISTS world_v2_legacy_plan_events (
                 world_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
@@ -2854,6 +2887,8 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.30",
                 "world-v2-reducers.31",
                 "world-v2-reducers.31",
+                "world-v2-reducers.32",
+                "world-v2-reducers.33",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -2861,8 +2896,28 @@ class SQLiteWorldLedger:
                 )
             rebuilt: LedgerProjection | None = None
             if installed != REDUCER_BUNDLE_VERSION:
+                legacy_state_json = self._head_state_json_locked(head)
+                if installed == "world-v2-reducers.33":
+                    canonical_legacy_state = json.dumps(
+                        json.loads(legacy_state_json),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    legacy_state_hash = hashlib.sha256(
+                        self._state_hash_material(
+                            canonical_state=canonical_legacy_state,
+                            cursor=cursor,
+                            reducer_bundle_version=installed,
+                        )
+                    ).hexdigest()
+                    if not hmac.compare_digest(
+                        legacy_state_hash,
+                        str(head["state_hash"]),
+                    ):
+                        raise LedgerIntegrityError("legacy head state hash is invalid")
                 legacy_hash = self._legacy_semantic_hash(
-                    state_json=self._head_state_json_locked(head),
+                    state_json=legacy_state_json,
                     world_revision=world_revision,
                     reducer_bundle_version=installed,
                 )
@@ -3120,6 +3175,26 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            if reducer_bundle_version in {
+                "world-v2-reducers.32",
+                "world-v2-reducers.33",
+            }:
+                state = ReducerState.model_validate_json(
+                    json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
+                    context={"source_reducer_bundle": reducer_bundle_version},
+                )
+                payload = state.semantic_payload(
+                    world_id=self._world_id,
+                    world_revision=world_revision,
+                    reducer_bundle_version=reducer_bundle_version,
+                )
+                encoded = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                return hashlib.sha256(encoded).hexdigest()
             injected_v27_keys = tuple(
                 sorted(
                     key
@@ -3507,6 +3582,8 @@ class SQLiteWorldLedger:
             message_observations=projection.message_observations,
             operator_observations=projection.operator_observations,
             committed_world_event_refs=projection.committed_world_event_refs,
+            appearance_states=projection.appearance_states,
+            visible_physical_states=projection.visible_physical_states,
             clock_transition_history=projection.clock_transition_history,
             goals=projection.goals,
             goal_transitions=projection.goal_transitions,
@@ -3531,6 +3608,13 @@ class SQLiteWorldLedger:
             media_opportunities=projection.media_opportunities,
             media_plans=projection.media_plans,
             media_unrenderable_opportunity_ids=projection.media_unrenderable_opportunity_ids,
+            media_artifacts=projection.media_artifacts,
+            media_inspections=projection.media_inspections,
+            media_previews=projection.media_previews,
+            media_failed_plan_ids=projection.media_failed_plan_ids,
+            media_delivery_approvals=projection.media_delivery_approvals,
+            media_deliveries=projection.media_deliveries,
+            media_thread_proposals=projection.media_thread_proposals,
             budget_accounts=projection.budget_accounts,
             budget_reservations=projection.budget_reservations,
             trigger_processes=projection.trigger_processes,
@@ -3538,8 +3622,10 @@ class SQLiteWorldLedger:
             execution_receipts=projection.execution_receipts,
             budget_settlements=projection.budget_settlements,
             reconciliations=projection.reconciliations,
+            life_ecology_schedule=projection.life_ecology_schedule,
             completed_trigger_ids=projection.completed_trigger_ids,
             npcs=projection.npcs,
+            aspirations=projection.aspirations,
             plans=projection.plans,
             world_occurrences=projection.world_occurrences,
             outcome_observations=projection.outcome_observations,
@@ -3590,12 +3676,19 @@ class SQLiteWorldLedger:
             acceptance_manifests_v2=projection.acceptance_manifests_v2,
             fact_commit_proposal_audits_v2=projection.fact_commit_proposal_audits_v2,
             acceptance_manifests_v3=projection.acceptance_manifests_v3,
+            life_content_descriptors=projection.life_content_descriptors,
             minimal_reply_manifests=projection.minimal_reply_manifests,
             expression_plan_manifests=projection.expression_plan_manifests,
             stored_message_payloads=projection.stored_message_payloads,
             expression_payload_descriptors=projection.expression_payload_descriptors,
             expression_plans=projection.expression_plans,
             expression_beats=projection.expression_beats,
+            interaction_bids=projection.interaction_bids,
+            interaction_bid_proposals=projection.interaction_bid_proposals,
+            perception_requests=projection.perception_requests,
+            perception_results=projection.perception_results,
+            read_only_tool_requests=projection.read_only_tool_requests,
+            tool_results=projection.tool_results,
             acceptance_decisions=projection.acceptance_decisions,
             outcome_proposals=projection.outcome_proposals,
         )
@@ -4336,7 +4429,7 @@ class SQLiteWorldLedger:
         # bound leaves room for an audit cursor to survive the handful of
         # same-turn commits (compile, acceptance, downstream triggers) plus
         # interleaved background lanes that land before the rebase re-read.
-        while len(self._historical_projection_cache) > 16:
+        while len(self._historical_projection_cache) > 32:
             self._historical_projection_cache.pop(next(iter(self._historical_projection_cache)))
 
     def project_at(self, cursor: ProjectionCursor) -> LedgerProjection:
@@ -4360,6 +4453,11 @@ class SQLiteWorldLedger:
             cached = self._historical_projection_cache.get(cache_key)
             if cached is not None:
                 self._historical_projection_hits += 1
+                # Plain dict insertion order is the eviction order. Refresh a
+                # genuine hit so a frequently re-read turn cursor is not
+                # evicted merely because it was first inserted long ago.
+                self._historical_projection_cache.pop(cache_key)
+                self._historical_projection_cache[cache_key] = cached
                 return cached
             self._historical_replay_calls += 1
             projection = self._replay_locked(
@@ -5037,6 +5135,32 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("event is absent from its owning commit")
             return event, result
 
+    def find_trigger_completion(self, trigger_id: str) -> WorldEvent | None:
+        """Find and verify the immutable terminal audit for a compacted trigger."""
+
+        with self._thread_lock:
+            self._refresh_verified_external_history_locked()
+            row = self._connection.execute(
+                """SELECT event_id
+                     FROM world_v2_events
+                    WHERE world_id = ?
+                      AND json_extract(event_json, '$.event_type')
+                          = 'TriggerProcessCompleted'
+                      AND json_extract(
+                            json_extract(event_json, '$.payload_json'),
+                            '$.trigger_id'
+                          ) = ?
+                    ORDER BY ledger_sequence DESC
+                    LIMIT 1""",
+                (self._world_id, trigger_id),
+            ).fetchone()
+            if row is None:
+                return None
+            located = self.lookup_event_commit(str(row["event_id"]))
+            if located is None:
+                raise LedgerIntegrityError("trigger completion lookup lost its event")
+            return located[0]
+
     def _find_appraisal_proposal_event(
         self, *, proposal_id: str, cursor: ProjectionCursor
     ) -> WorldEvent | None:
@@ -5584,12 +5708,31 @@ class SQLiteWorldLedger:
         self._total_replay_calls += 1
         require_reducer_bundle(reducer_bundle_version)
         require_target_schema(target_schema_version)
-        state = ReducerState()
-        world_revision = 0
-        deliberation_revision = 0
-        ledger_sequence = 0
-        legacy_trigger_sources: dict[str, str] = {}
-        legacy_settlement_sources: dict[str, str] = {}
+        prefix: _HistoricalReplayPrefix | None = None
+        if target_cursor is not None:
+            candidates = (
+                value
+                for key, value in self._historical_replay_prefix_cache.items()
+                if key[0] == target_schema_version
+                and key[1] == reducer_bundle_version
+                and value.cursor.ledger_sequence <= target_cursor.ledger_sequence
+            )
+            prefix = max(candidates, key=lambda value: value.cursor.ledger_sequence, default=None)
+        if prefix is None:
+            state = ReducerState()
+            world_revision = 0
+            deliberation_revision = 0
+            ledger_sequence = 0
+            legacy_trigger_sources: dict[str, str] = {}
+            legacy_settlement_sources: dict[str, str] = {}
+        else:
+            self._historical_prefix_hits += 1
+            state = prefix.state
+            world_revision = prefix.cursor.world_revision
+            deliberation_revision = prefix.cursor.deliberation_revision
+            ledger_sequence = prefix.cursor.ledger_sequence
+            legacy_trigger_sources = dict(prefix.legacy_trigger_sources)
+            legacy_settlement_sources = dict(prefix.legacy_settlement_sources)
         legacy_plan_event_ids = {
             str(row["event_id"])
             for row in self._connection.execute(
@@ -5598,9 +5741,10 @@ class SQLiteWorldLedger:
             )
         }
         rows = self._connection.execute(
-            """SELECT * FROM world_v2_events WHERE world_id = ?
+            """SELECT * FROM world_v2_events
+               WHERE world_id = ? AND ledger_sequence > ?
                ORDER BY ledger_sequence""",
-            (self._world_id,),
+            (self._world_id, ledger_sequence),
         )
         for row in rows:
             if (
@@ -5608,6 +5752,7 @@ class SQLiteWorldLedger:
                 and int(row["ledger_sequence"]) > target_cursor.ledger_sequence
             ):
                 break
+            self._replayed_events += 1
             event_json = row["event_json"]
             if not isinstance(event_json, str):
                 raise LedgerIntegrityError("persisted event bytes are invalid")
@@ -5686,6 +5831,13 @@ class SQLiteWorldLedger:
                     allow_legacy_clock_drift=(
                         event.event_id in self._legacy_clock_compat_event_ids
                     ),
+                    # The opening catalogue is executable policy and has
+                    # evolved since these immutable proposals were accepted.
+                    # Cold replay still validates their envelopes, hashes,
+                    # evidence and claimed-trigger binding; only the
+                    # time-sensitive "is current" catalogue check is skipped.
+                    # Live commits never enable this compatibility path.
+                    allow_legacy_activity_opening=True,
                 )
             except Exception as exc:
                 raise LedgerIntegrityError("persisted event cannot be reduced") from exc
@@ -5699,6 +5851,25 @@ class SQLiteWorldLedger:
             != target_cursor
         ):
             raise ValueError("requested projection cursor is not present in the ledger")
+        if target_cursor is not None:
+            prefix_key = (
+                target_schema_version,
+                reducer_bundle_version,
+                target_cursor.world_revision,
+                target_cursor.deliberation_revision,
+                target_cursor.ledger_sequence,
+            )
+            self._historical_replay_prefix_cache.pop(prefix_key, None)
+            self._historical_replay_prefix_cache[prefix_key] = _HistoricalReplayPrefix(
+                cursor=target_cursor,
+                state=state,
+                legacy_trigger_sources=dict(legacy_trigger_sources),
+                legacy_settlement_sources=dict(legacy_settlement_sources),
+            )
+            while len(self._historical_replay_prefix_cache) > 4:
+                self._historical_replay_prefix_cache.pop(
+                    next(iter(self._historical_replay_prefix_cache))
+                )
         return make_projection(
             world_id=self._world_id,
             world_revision=world_revision,

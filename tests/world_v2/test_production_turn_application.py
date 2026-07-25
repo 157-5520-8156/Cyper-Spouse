@@ -651,9 +651,9 @@ async def test_production_life_ecology_profile_claims_one_clock_wake_without_wri
             correlation_id="correlation:life-ecology",
         )
         assert isinstance(first, LifeEcologyRunResult)
-        assert first.status == "joined_existing"
-        assert first.reason_code == "life_ecology.run_completed"
-        assert second.status == "joined_existing"
+        assert first.status == "idle"
+        assert first.reason_code == "life_ecology.cooldown"
+        assert second.status == "idle"
     finally:
         app.close()
 

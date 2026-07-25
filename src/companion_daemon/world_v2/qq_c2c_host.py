@@ -22,6 +22,7 @@ from typing import Awaitable, Callable
 from companion_daemon.config import Settings
 from companion_daemon.qq_delivery import QQDelivery
 
+from .action_due_wake import ActionDueWake
 from .affect_chat_model_adapter import AffectDraftDeliberationAdapter
 from .relationship_draft_deliberation_adapter import RelationshipDraftDeliberationAdapter
 from .chat_model_deliberation_adapter import ChatCompletionModel
@@ -50,6 +51,7 @@ from .semantic_chat_composition import (
     build_semantic_chat_composition,
 )
 from .expression_draft import qq_expression_capabilities
+from .interactive_turn_budget import InteractiveTurnBudgetPolicy
 
 
 _LOG = logging.getLogger(__name__)
@@ -144,6 +146,9 @@ class QQC2CHost:
         ingress_now: Callable[[], datetime] | None = None,
         ingress_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         typing_signal: Callable[[], Awaitable[object]] | None = None,
+        interactive_turn_budget_policy: InteractiveTurnBudgetPolicy | None = None,
+        recorded_cadence_mode: str = "off",
+        idle_heartbeat_seconds: float = 0.0,
     ) -> None:
         if not recipient_id or not canonical_user_id:
             raise ValueError("QQ C2C host requires recipient and canonical user ids")
@@ -155,8 +160,13 @@ class QQC2CHost:
         self._ingress_now = ingress_now or (lambda: datetime.now(UTC))
         self._ingress_sleep = ingress_sleep
         self._typing_signal = typing_signal
+        self._interactive_turn_budget_policy = interactive_turn_budget_policy
+        if idle_heartbeat_seconds < 0:
+            raise ValueError("idle heartbeat seconds must not be negative")
+        self._idle_heartbeat_seconds = idle_heartbeat_seconds
         self._ingress_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
+        self._scheduled_work_lock = asyncio.Lock()
         self._closed = False
         self._last_content_received_at: datetime | None = None
         self._last_content_text: str | None = None
@@ -170,6 +180,27 @@ class QQC2CHost:
         # the sender goes quiet.  Pure claim-timing courtesy: batch identity
         # and ledger state never depend on it.
         self._rhythm_holds = 0
+        action_due_projection = getattr(self._host, "action_due_projection", None)
+        self._action_due_wake = (
+            ActionDueWake(
+                project=action_due_projection,
+                wake=self._wake_due_actions,
+                now=self._ingress_now,
+                sleep=self._ingress_sleep,
+            )
+            if callable(action_due_projection)
+            else None
+        )
+        if self._action_due_wake is not None:
+            try:
+                asyncio.get_running_loop().create_task(
+                    self._action_due_wake.refresh(),
+                    name="qq-c2c-action-due-wake:restart-rebuild",
+                )
+            except RuntimeError:
+                # Synchronous construction is supported by tests/CLI setup;
+                # the first ingress or scheduler pass performs the rebuild.
+                pass
 
     async def inbound_text(
         self,
@@ -473,11 +504,38 @@ class QQC2CHost:
 
         if batch.text is not None or batch.attachment_refs:
             self._pulse_typing()
+        if self._idle_heartbeat_seconds > 0:
+            logical_from = await self._host.current_logical_time()
+            if logical_from is not None and batch.observed_at > logical_from:
+                tick_id = "tick:qq-c2c-inbound:" + batch.batch_id
+                tick_outcome = await self._host.tick(
+                    PlatformClockTick(
+                        tick_id=tick_id,
+                        logical_time_from=logical_from,
+                        logical_time_to=batch.observed_at,
+                        observed_at=batch.observed_at,
+                        trace_id=f"trace:qq-c2c-v2:{tick_id}",
+                        causation_id=f"ingress:qq-c2c-v2:{batch.batch_id}",
+                        correlation_id=f"clock:qq-c2c-v2:{self._recipient_id}",
+                        reason="qq_c2c_inbound",
+                        run_life_ecology=False,
+                    )
+                )
+                if tick_outcome.status not in {"observed_only", "deferred"}:
+                    raise RuntimeError("QQ C2C inbound clock was not accepted")
         metadata = dict(batch.metadata)
         # New stores freeze the first claim instant in the durable batch. Old
         # claimed rows fall back to their already-persisted window close, which
         # is conservative for latency but, critically, stable across recovery.
         metadata.setdefault("processing_started_at", metadata.get("window_closed_at"))
+        processing_started_at = _parse_metadata_time(metadata.get("processing_started_at"))
+        turn_budget = (
+            self._interactive_turn_budget_policy.start(
+                processing_started_at=processing_started_at
+            )
+            if self._interactive_turn_budget_policy is not None
+            else None
+        )
         inbound = PlatformInbound(
             platform="qq",
             platform_user_id=batch.recipient_id,
@@ -489,17 +547,64 @@ class QQC2CHost:
             coalescing_metadata=metadata,
         )
         outcome = await self._host.inbound(inbound)
-        if outcome.status == "action_authorized":
-            # Denominator for the /health failsafe rate: one inbound turn
-            # produced an authorized visible reply (failsafe replies included).
-            record_visible_reply()
         action_id = next(
             iter((*outcome.authorized_action_ids, *outcome.scheduled_action_ids)), None
         )
         if action_id is not None:
-            result = await self._host.drain_action(action_id)
+            dispatch_seconds = (
+                turn_budget.remaining(include_reserve=True)
+                if turn_budget is not None
+                else None
+            )
+            if (
+                dispatch_seconds is not None
+                and turn_budget is not None
+                and dispatch_seconds
+                < turn_budget.acceptance_dispatch_reserve_seconds
+            ):
+                # Cognition may consume the absolute turn deadline, but an
+                # already-authorized visible reply must still get one bounded
+                # provider attempt in this user-owned lane.  Deferring here
+                # strands the reply behind periodic background cognition:
+                # the API reports ``action_authorized`` while QQ only shows
+                # "typing…" and may not receive the message for tens of
+                # seconds.  The policy's reserved interval is therefore a
+                # delivery grace once a concrete Action exists, not grounds
+                # for skipping delivery altogether.
+                dispatch_seconds = turn_budget.acceptance_dispatch_reserve_seconds
+                _LOG.warning(
+                    "world v2 dispatch grace trace=%s reason=turn_budget_exhausted "
+                    "grace_seconds=%.3f",
+                    inbound.trace_id,
+                    dispatch_seconds,
+                )
+            if dispatch_seconds is None:
+                result = await self._host.drain_action(action_id)
+            else:
+                try:
+                    async with asyncio.timeout(dispatch_seconds):
+                        result = await self._host.drain_action(action_id)
+                except TimeoutError:
+                    # The authorized Action remains durable.  ActionPump
+                    # recovery owns any dispatch-started ambiguity; the host
+                    # never fabricates a receipt merely to meet latency.
+                    result = None
+                    _LOG.warning(
+                        "world v2 dispatch deferred trace=%s reason=turn_budget_exhausted",
+                        inbound.trace_id,
+                    )
             if result is not None and result.action_id not in {None, action_id}:
                 raise RuntimeError("targeted QQ C2C drain returned a different Action")
+            if (
+                outcome.status == "action_authorized"
+                and result is not None
+                and result.status == "settled"
+                and result.provider_status in {"provider_accepted", "delivered"}
+            ):
+                # Denominator for the /health failsafe rate: count a visible
+                # reply only after the platform accepted it, never merely
+                # because cognition authorized an Action.
+                record_visible_reply()
             # User-perceived audit line: first fragment arrival to the visible
             # reply's provider dispatch.  The quick-reaction counterpart is
             # logged by the runtime turn as user_perceived_quick_reaction_ms.
@@ -516,11 +621,48 @@ class QQC2CHost:
             outcome_status=outcome.status,
             action_id=action_id,
         )
+        if self._action_due_wake is not None:
+            await self._action_due_wake.refresh()
         return QQC2CIngressResult(
             status=outcome.status,
             action_id=action_id,
             canonical_user_id=self._canonical_user_id,
         )
+
+    async def _wake_due_actions(self) -> None:
+        """Advance only clock + ActionPump; never background cognition."""
+
+        async with self._scheduled_work_lock:
+            await self._wake_due_actions_serialized()
+
+    async def _wake_due_actions_serialized(self) -> None:
+        projection = self._host.action_due_projection()
+        if isinstance(projection, Awaitable):
+            projection = await projection
+        due_at = ActionDueWake.nearest_due(projection)
+        wall_now = self._ingress_now()
+        if due_at is None or due_at > wall_now:
+            # The timer that entered this callback may have been armed for an
+            # earlier Action which another scheduler/process already handled.
+            # Never reinterpret that stale wake as authority to jump the World
+            # Clock to a newly discovered future due; ActionDueWake refreshes
+            # the projection after this callback and arms the replacement.
+            return
+        observed_at = due_at
+        logical_from = await self._host.current_logical_time()
+        if logical_from is not None and observed_at > logical_from:
+            await self.tick(
+                tick_id="tick:qq-c2c-action-due:" + observed_at.isoformat(),
+                logical_time_from=logical_from,
+                logical_time_to=observed_at,
+                observed_at=observed_at,
+                reason="qq_c2c_action_due_wake",
+                run_life_ecology=False,
+            )
+        for _ in range(8):
+            result = await self._host.drain_actions_once()
+            if result is None or getattr(result, "status", None) in {"idle", "not_due"}:
+                break
 
     async def tick(
         self,
@@ -530,6 +672,7 @@ class QQC2CHost:
         logical_time_to: datetime,
         observed_at: datetime,
         reason: str,
+        run_life_ecology: bool = True,
     ) -> str:
         """Advance a caller-owned durable scheduler interval through the v2 host."""
 
@@ -544,6 +687,7 @@ class QQC2CHost:
                     causation_id=f"scheduler:qq-c2c-v2:{tick_id}",
                     correlation_id=f"clock:qq-c2c-v2:{self._recipient_id}",
                     reason=reason,
+                    run_life_ecology=run_life_ecology,
                 )
             )
             return outcome.status
@@ -578,7 +722,30 @@ class QQC2CHost:
 
         return self._host.latency_samples()
 
+    def action_due_wake_diagnostics(self) -> dict[str, float | int | None]:
+        if self._action_due_wake is None:
+            return {
+                "wake_count": 0,
+                "wake_latency_ms_p50": None,
+                "wake_latency_ms_p95": None,
+            }
+        return self._action_due_wake.diagnostics()
+
     async def scheduler_once(
+        self,
+        *,
+        observed_at: datetime,
+        max_action_units: int = 8,
+        max_background_units: int = 8,
+    ) -> QQC2CDrainResult:
+        async with self._scheduled_work_lock:
+            return await self._scheduler_once_serialized(
+                observed_at=observed_at,
+                max_action_units=max_action_units,
+                max_background_units=max_background_units,
+            )
+
+    async def _scheduler_once_serialized(
         self,
         *,
         observed_at: datetime,
@@ -640,18 +807,49 @@ class QQC2CHost:
         # background work above was in flight.
         async with self._lock:
             logical_from = await self._host.current_logical_time()
-            if logical_from is not None and tick_boundary > logical_from:
-                tick_id = "tick:qq-c2c-v2:" + tick_boundary.isoformat()
+            due_projection_reader = getattr(
+                self._host, "action_due_projection", None
+            )
+            nearest_action_due = (
+                ActionDueWake.nearest_due(await due_projection_reader())
+                if callable(due_projection_reader)
+                else None
+            )
+            action_due_target = (
+                nearest_action_due
+                if logical_from is not None
+                and nearest_action_due is not None
+                and logical_from < nearest_action_due <= tick_boundary
+                else None
+            )
+            heartbeat_due = (
+                logical_from is not None
+                and tick_boundary > logical_from
+                and (
+                    self._idle_heartbeat_seconds == 0
+                    or (tick_boundary - logical_from).total_seconds()
+                    >= self._idle_heartbeat_seconds
+                )
+            )
+            if action_due_target is not None or heartbeat_due:
+                tick_target = action_due_target or tick_boundary
+                tick_reason = (
+                    "qq_c2c_action_due_wake"
+                    if action_due_target is not None
+                    else "qq_c2c_scheduler"
+                )
+                tick_id = "tick:qq-c2c-v2:" + tick_target.isoformat()
                 outcome = await self._host.tick(
                     PlatformClockTick(
                         tick_id=tick_id,
                         logical_time_from=logical_from,
-                        logical_time_to=tick_boundary,
+                        logical_time_to=tick_target,
                         observed_at=tick_boundary,
                         trace_id=f"trace:qq-c2c-v2:{tick_id}",
                         causation_id=f"scheduler:qq-c2c-v2:{tick_id}",
                         correlation_id=f"clock:qq-c2c-v2:{self._recipient_id}",
-                        reason="qq_c2c_scheduler",
+                        reason=tick_reason,
+                        run_life_ecology=action_due_target is None,
                     )
                 )
                 if outcome.status not in {"observed_only", "deferred"}:
@@ -749,6 +947,8 @@ class QQC2CHost:
         if self._closed:
             return
         self._closed = True
+        if self._action_due_wake is not None:
+            await self._action_due_wake.aclose()
         self._host.close()
         if self._ingress_store is not None:
             self._ingress_store.close()
@@ -783,7 +983,13 @@ def build_qq_c2c_host(
 
     if not recipient_id:
         raise ValueError("QQ C2C v2 requires one configured private recipient")
-    expression_capabilities = qq_expression_capabilities(settings.qq_adapter)
+    expression_capabilities = qq_expression_capabilities(
+        settings.qq_adapter,
+        recorded_cadence_mode=getattr(
+            settings, "world_v2_recorded_cadence_mode", "off"
+        ),
+    )
+    interactive_turn_budget_policy = InteractiveTurnBudgetPolicy()
     semantic_chat = build_semantic_chat_composition(
         settings=settings,
         flash_model=model,
@@ -821,6 +1027,11 @@ def build_qq_c2c_host(
                 media_preview.auto_delivery if media_preview is not None else None
             ),
             perception_budget_limit=perception_budget_limit,
+            interactive_turn_budget_policy=interactive_turn_budget_policy,
+            expression_episode_mode=settings.world_v2_expression_episode_mode,
+            recorded_cadence_mode=getattr(
+                settings, "world_v2_recorded_cadence_mode", "off"
+            ),
         ),
         identities=QQC2CIdentityResolver(
             recipient_id=recipient_id, canonical_user_id=settings.primary_user_id
@@ -880,6 +1091,11 @@ def build_qq_c2c_host(
         semantic_chat=semantic_chat,
         ingress_store=SQLiteQQIngressStore(Path(settings.database_path)),
         typing_signal=typing_signal,
+        interactive_turn_budget_policy=interactive_turn_budget_policy,
+        recorded_cadence_mode=getattr(
+            settings, "world_v2_recorded_cadence_mode", "off"
+        ),
+        idle_heartbeat_seconds=settings.qq_c2c_idle_heartbeat_seconds,
     )
 
 

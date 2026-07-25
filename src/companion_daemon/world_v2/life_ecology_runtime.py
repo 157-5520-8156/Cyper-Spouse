@@ -230,6 +230,12 @@ class LifeEcologyRuntime:
                 status="rejected", reason_code="life_ecology.wake_not_exactly_committed"
             )
         logical_time = validated
+        schedule = getattr(self._ledger.project(), "life_ecology_schedule", None)
+        if schedule is not None and logical_time < schedule.next_consideration_at:
+            return LifeEcologyRunResult(
+                status="idle",
+                reason_code="life_ecology.cooldown",
+            )
         key = LifeEcologyRunKey(
             world_id=self._ledger.world_id,
             wake_event_ref=wake_event_ref,
@@ -562,6 +568,10 @@ class LifeEcologyRuntime:
                     if future_author_status == "planned"
                     else "npc_initiative_committed"
                     if npc_initiative_status in {"committed", "recovered"}
+                    else "activity_transitioned"
+                    if activity_status == "transitioned"
+                    else "open_world_committed"
+                    if open_world_status in {"committed", "recovered"}
                     else (
                         f"author_{author_status}"
                         if author_status is not None else "idle"

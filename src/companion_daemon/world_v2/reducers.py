@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
 import hashlib
@@ -479,6 +479,7 @@ from .schemas import (
     ThreadProposalProjection,
     ThreadTransitionProjection,
     TriggerProcess,
+    LifeEcologyScheduleProjection,
     ToolResultProjection,
     WorldOccurrenceProjection,
     WorldEvent,
@@ -487,7 +488,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.32"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.34"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}" for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 )
@@ -709,6 +710,7 @@ class ReducerState(FrozenModel):
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
+    life_ecology_schedule: LifeEcologyScheduleProjection | None = None
     pending_external_observations: tuple[ExternalObservation, ...] = ()
     execution_receipts: tuple[ExecutionReceipt, ...] = ()
     budget_settlements: tuple[BudgetSettlement, ...] = ()
@@ -1298,6 +1300,14 @@ class ReducerState(FrozenModel):
         declared_reducer_bundle_version = reducer_bundle_version
         if reducer_bundle_version in {"world-v2-reducers.22", "world-v2-reducers.23"}:
             reducer_bundle_version = "world-v2-reducers.24"
+        elif reducer_bundle_version in {
+            "world-v2-reducers.32",
+            "world-v2-reducers.33",
+        }:
+            # .33 adds only conditional compact ecology scheduler state; .34
+            # folds terminal ecology ids out of head state. Their older
+            # semantic field feature set is otherwise the current one.
+            reducer_bundle_version = REDUCER_BUNDLE_VERSION
         payload = {
             "reducer_bundle_version": declared_reducer_bundle_version,
             "schema_version": "world-v2.1",
@@ -1401,6 +1411,15 @@ class ReducerState(FrozenModel):
             "reconciliations": tuple(
                 reconciliation.model_dump(mode="json") for reconciliation in self.reconciliations
             ),
+            **(
+                {
+                    "life_ecology_schedule": self.life_ecology_schedule.model_dump(
+                        mode="json"
+                    )
+                }
+                if self.life_ecology_schedule is not None
+                else {}
+            ),
             "npcs": tuple(npc.model_dump(mode="json") for npc in self.npcs),
             # Conditional like appearance_states: worlds without aspirations
             # keep byte-identical semantic hashes across this bundle change.
@@ -1498,6 +1517,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.28",
             "world-v2-reducers.29",
             "world-v2-reducers.30",
+            "world-v2-reducers.32",
+            "world-v2-reducers.33",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["provider_media_grants"] = tuple(
@@ -1518,6 +1539,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.28",
             "world-v2-reducers.29",
             "world-v2-reducers.30",
+            "world-v2-reducers.32",
+            "world-v2-reducers.33",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_artifacts"] = tuple(
@@ -1525,7 +1548,12 @@ class ReducerState(FrozenModel):
             )
             payload["media_inspections"] = tuple(
                 item.model_dump(mode="json")
-                if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                if declared_reducer_bundle_version
+                in {
+                    "world-v2-reducers.32",
+                    "world-v2-reducers.33",
+                    REDUCER_BUNDLE_VERSION,
+                }
                 else item.model_dump(mode="json", exclude={"repairable", "repair_scope"})
                 for item in self.media_inspections
             )
@@ -1533,7 +1561,12 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.media_previews
             )
             payload["media_failed_plan_ids"] = self.media_failed_plan_ids
-        if declared_reducer_bundle_version in {"world-v2-reducers.31", REDUCER_BUNDLE_VERSION}:
+        if declared_reducer_bundle_version in {
+            "world-v2-reducers.31",
+            "world-v2-reducers.32",
+            "world-v2-reducers.33",
+            REDUCER_BUNDLE_VERSION,
+        }:
             payload["media_delivery_approvals"] = tuple(
                 item.model_dump(mode="json") for item in self.media_delivery_approvals
             )
@@ -1543,7 +1576,11 @@ class ReducerState(FrozenModel):
             payload["interaction_bids"] = tuple(
                 item.model_dump(mode="json") for item in self.interaction_bids
             )
-            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            if declared_reducer_bundle_version in {
+                "world-v2-reducers.32",
+                "world-v2-reducers.33",
+                REDUCER_BUNDLE_VERSION,
+            }:
                 payload["media_thread_proposals"] = tuple(
                     item.model_dump(mode="json") for item in self.media_thread_proposals
                 )
@@ -1714,7 +1751,12 @@ class ReducerState(FrozenModel):
             payload["minimal_reply_manifests"] = tuple(
                 item.model_dump(mode="json") for item in self.minimal_reply_manifests
             )
-            if declared_reducer_bundle_version in {"world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
+            if declared_reducer_bundle_version in {
+                "world-v2-reducers.24",
+                "world-v2-reducers.32",
+                "world-v2-reducers.33",
+                REDUCER_BUNDLE_VERSION,
+            }:
                 payload["expression_plan_manifests"] = tuple(
                     _expression_plan_manifest_semantic_dump(item)
                     for item in self.expression_plan_manifests
@@ -5476,6 +5518,17 @@ def _observation_recorded(
         and observation.world_id == event.world_id
         and observation.observation_id == observation_id
     )
+    schedule = state.life_ecology_schedule
+    if is_message and schedule is not None:
+        schedule = schedule.model_copy(
+            update={
+                "consecutive_failures": 0,
+                "next_consideration_at": max(
+                    event.logical_time,
+                    schedule.last_completed_at,
+                ),
+            }
+        )
     return state.model_copy(
         update={
             "observation_refs": (*state.observation_refs, observation_id),
@@ -5500,6 +5553,7 @@ def _observation_recorded(
             # Arrival is retained in Observation.created_at/received_at.  It is
             # not Clock authority and therefore cannot advance world time.
             "logical_time": state.logical_time or event.logical_time,
+            "life_ecology_schedule": schedule,
         }
     )
 
@@ -7387,6 +7441,44 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
             "runtime_outcome_ref": event.payload().get("runtime_outcome_ref"),
         }
     )
+    if process.process_kind == "life_ecology":
+        outcome_ref = completed.runtime_outcome_ref
+        if not isinstance(outcome_ref, str) or not outcome_ref:
+            raise ValueError("life ecology completion requires a runtime outcome")
+        prior = state.life_ecology_schedule
+        failures = (
+            (prior.consecutive_failures if prior is not None else 0) + 1
+            if outcome_ref == "life-ecology:failed_safe"
+            else 0
+        )
+        delay_seconds = (
+            (600, 1800, 7200)[min(max(failures, 1), 3) - 1]
+            if failures
+            else 600
+            if outcome_ref
+            in {
+                "life-ecology:idle",
+                "life-ecology:author_no_opening",
+            }
+            else 0
+        )
+        schedule = LifeEcologyScheduleProjection(
+            last_trigger_id=trigger_id,
+            last_wake_event_ref=process.source_evidence_ref or event.causation_id,
+            last_outcome_ref=outcome_ref,
+            last_completed_at=completed_at,
+            next_consideration_at=completed_at + timedelta(seconds=delay_seconds),
+            consecutive_failures=failures,
+        )
+        return state.model_copy(
+            update={
+                "trigger_processes": (
+                    *state.trigger_processes[:process_index],
+                    *state.trigger_processes[process_index + 1 :],
+                ),
+                "life_ecology_schedule": schedule,
+            }
+        )
     return state.model_copy(
         update={
             "trigger_processes": (
@@ -7457,6 +7549,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "expression_reconsideration",
         "life_ecology",
         "memory_candidate_review",
+        "expression_episode",
     }:
         if (
             state.logical_time is None
@@ -7506,6 +7599,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "expression_reconsideration",
         "life_ecology",
         "memory_candidate_review",
+        "expression_episode",
     }:
         raise ValueError("appraisal trigger must be opened before it is claimed")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})
@@ -7548,6 +7642,20 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != f"interaction:{process.source_evidence_ref}"
         ):
             raise ValueError("interaction appraisal trigger identity is not deterministic")
+    if process.process_kind == "expression_episode":
+        if not any(
+            item.observation_id == process.source_evidence_ref
+            for item in state.message_observations
+        ):
+            raise ValueError("expression episode requires an observed message")
+        from .expression_episode_lifecycle import expression_episode_trigger_id
+
+        if (
+            process.trigger_id
+            != expression_episode_trigger_id(event.world_id, process.source_evidence_ref)
+            or process.trigger_ref != f"expression-episode:{process.source_evidence_ref}"
+        ):
+            raise ValueError("expression episode trigger identity is not deterministic")
     if process.process_kind == "interaction_fact":
         if not any(
             item.observation_id == process.source_evidence_ref
@@ -8265,7 +8373,12 @@ def _validate_activity_lifecycle_effect(
         raise ValueError("activity lifecycle effect does not bind accepted proposal")
 
 
-def _activity_lifecycle_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+def _activity_lifecycle_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    allow_legacy_opening: bool = False,
+) -> ReducerState:
     """Validate scheduler proposal authority without changing World facts."""
 
     _require_life_time(state, event)
@@ -8322,7 +8435,7 @@ def _activity_lifecycle_proposal_recorded(state: ReducerState, event: WorldEvent
         wake_event_ref=payload.wake_event_ref,
         opening_token=payload.opening_token,
     )
-    if (
+    if not allow_legacy_opening and (
         resolved is None
         or resolved.catalog_hash != payload.catalog_hash
         or resolved.plan_id != payload.plan_id
@@ -8333,7 +8446,11 @@ def _activity_lifecycle_proposal_recorded(state: ReducerState, event: WorldEvent
     ):
         raise ValueError("activity lifecycle proposal opening is not current")
     cause_evidence = payload.evidence_refs[2] if len(payload.evidence_refs) == 3 else None
-    if resolved.cause_observation_id is None:
+    if resolved is None and allow_legacy_opening:
+        pass
+    elif resolved is None:
+        raise ValueError("activity lifecycle proposal opening is not current")
+    elif resolved.cause_observation_id is None:
         if cause_evidence is not None:
             raise ValueError("ordinary activity lifecycle opening cannot bind message cause")
     else:
@@ -10499,6 +10616,7 @@ def reduce_event(
     *,
     allow_legacy_plan_owner: bool = False,
     allow_legacy_clock_drift: bool = False,
+    allow_legacy_activity_opening: bool = False,
 ) -> ReducerState:
     event_contract(event.event_type).validate_payload(event.payload())
     definition = event_definition(event.event_type)
@@ -10522,6 +10640,15 @@ def reduce_event(
         and allow_legacy_plan_owner
     ):
         reduced = definition.reducer(state, event, allow_legacy_unowned_transition=True)
+    elif (
+        event.event_type == "ActivityLifecycleProposalRecorded"
+        and allow_legacy_activity_opening
+    ):
+        reduced = _activity_lifecycle_proposal_recorded(
+            state,
+            event,
+            allow_legacy_opening=True,
+        )
     else:
         reduced = definition.reducer(state, event)
     if definition.revision_class is RevisionClass.WORLD:
@@ -10650,6 +10777,7 @@ def make_projection(
         budget_accounts=state.budget_accounts,
         budget_reservations=state.budget_reservations,
         trigger_processes=state.trigger_processes,
+        life_ecology_schedule=state.life_ecology_schedule,
         pending_external_observations=state.pending_external_observations,
         execution_receipts=state.execution_receipts,
         budget_settlements=state.budget_settlements,

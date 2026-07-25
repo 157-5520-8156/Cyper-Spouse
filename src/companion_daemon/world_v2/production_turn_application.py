@@ -84,6 +84,7 @@ from .deliberation import (
     QuickRecoveryAdapter,
 )
 from .production_proposal_grammar import compose_production_deliberation
+from .expression_episode import ExpressionEpisodeDiagnostics
 from .ledger_context_resolver import (
     ContextRelevanceScope,
     context_capsule_compiler_from_ledger,
@@ -189,6 +190,7 @@ from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
 from .expression_reconsideration_model_adapter import (
+    AuditedReplacementReconsiderationReviewer,
     ExpressionReconsiderationChatModelAdapter,
 )
 from .expression_reconsideration_runtime import (
@@ -196,6 +198,7 @@ from .expression_reconsideration_runtime import (
     ExpressionReconsiderationRunResult,
 )
 from .pinned_turn import PinnedTurnCompiler
+from .interactive_turn_budget import InteractiveTurnBudgetPolicy
 from .production_latency_trace import (
     ProductionLatencyRecorder,
     ProductionLatencySample,
@@ -417,6 +420,13 @@ class WorldV2TurnApplicationConfig:
     chat_budget_limit: int = 10_000
     reply_budget_amount: int = 10
     reply_recovery_policy: str = "effect_once"
+    interactive_turn_budget_policy: InteractiveTurnBudgetPolicy = (
+        InteractiveTurnBudgetPolicy()
+    )
+    # Generic/test composition is byte-compatible by default. The production
+    # QQ root explicitly selects shadow below; validation may explicitly use on.
+    expression_episode_mode: Literal["off", "shadow", "on"] = "off"
+    recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
     expression_action_kinds: frozenset[str] = frozenset(
         {"reply", "followup", "proactive_message"}
     )
@@ -556,6 +566,10 @@ class WorldV2TurnApplicationConfig:
             raise ValueError("chat budget limits are invalid")
         if not self.reply_recovery_policy:
             raise ValueError("reply recovery policy must not be empty")
+        if self.expression_episode_mode not in {"off", "shadow", "on"}:
+            raise ValueError("expression episode mode must be off, shadow, or on")
+        if self.recorded_cadence_mode not in {"off", "shadow", "on"}:
+            raise ValueError("recorded cadence mode must be off, shadow, or on")
         if not self.expression_action_kinds:
             raise ValueError("expression action capability set must not be empty")
         if not self.tool_account_id or not self.tool_window_id or self.tool_budget_limit < 0:
@@ -840,6 +854,7 @@ class WorldV2TurnApplication:
         reason: str,
         policy_version: str | None = None,
         policy_digest: str | None = None,
+        run_life_ecology: bool = True,
     ) -> RuntimeOutcome:
         """Create a validated clock command without exposing World v2 schema internals."""
 
@@ -860,7 +875,7 @@ class WorldV2TurnApplication:
                 policy_digest=policy_digest,
             )
         )
-        if self._life_ecology is not None:
+        if run_life_ecology and self._life_ecology is not None:
             await self.advance_life_ecology_once(
                 wake_event_ref=f"event:trigger:clock:{tick_id}",
                 trace_id=trace_id,
@@ -1626,6 +1641,15 @@ class WorldV2TurnApplication:
         )
         return projection.logical_time
 
+    async def action_due_projection(self):
+        """Return the read-only authority used to rebuild a process timer."""
+
+        return (
+            await asyncio.to_thread(self._ledger.project)
+            if self._ledger.blocks_event_loop
+            else self._ledger.project()
+        )
+
     async def world_health_diagnostics(self) -> dict[str, object]:
         """Return deterministic read-only liveness evidence for health checks.
 
@@ -1974,6 +1998,11 @@ class WorldV2TurnApplication:
                 "plans_by_status": dict(sorted(plans_by_status.items())),
                 "world_occurrence_count": occurrence_count,
                 "experience_count": experience_count,
+                "schedule": (
+                    projection.life_ecology_schedule.model_dump(mode="json")
+                    if projection.life_ecology_schedule is not None
+                    else None
+                ),
             },
             "affect": {
                 "active_episode_count": sum(
@@ -2037,6 +2066,7 @@ class WorldV2TurnApplication:
             "occurrence_count": occurrence_count,
             "experience_count": experience_count,
             "starved": not (life_event_count or occurrence_count or experience_count),
+            "expression_episode": self._turns.expression_episode_diagnostics(),
             "mechanisms": mechanisms,
         }
 
@@ -2484,6 +2514,9 @@ def build_sqlite_world_v2_turn_application(
             perception_result_reader=perception_transport,
             expression_payload_store=expression_payload_store,
         )
+        expression_episode_diagnostics = ExpressionEpisodeDiagnostics(
+            mode=config.expression_episode_mode
+        )
         pinned = PinnedTurnCompiler(
             ledger=ledger,
             capsule_compiler=chat_capsules,
@@ -2492,23 +2525,11 @@ def build_sqlite_world_v2_turn_application(
                 router=router,
                 main_model=main_model,
                 quick_recovery=quick_recovery,
-                # The main budget carries one full provider completion plus,
-                # on a structural near-miss, one bounded corrective retry.
-                # Measured steady-state: successful chat completions are
-                # p50≈4.3s / p95≈8.5s (ledger-verified single-attempt turns,
-                # 07-16..07-20); the corrective retry is now deadline-aware,
-                # so 12s covers p95 plus one fitted repair without letting a
-                # repair overrun cancel an already-honest answer.
-                main_timeout_seconds=12.0,
-                # 2026-07-20 latency audit: a 1s quick budget was a dead
-                # letter — no provider completion fits, so every main failure
-                # deterministically became the local canned failsafe (audits:
-                # 28× main_timeout on this lane, recoveries only local).  8s
-                # fits the bounded backup completion (fallback provider,
-                # ≤900 tokens, measured 3-6s) and the pre-failsafe corrective
-                # retry, while keeping the worst failed-turn tail at 12+8s.
-                quick_timeout_seconds=8.0,
+                main_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
+                quick_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
                 expression_action_kinds=config.expression_action_kinds,
+                expression_episode_mode=config.expression_episode_mode,
+                expression_episode_diagnostics=expression_episode_diagnostics,
             ),
             companion_actor_ref=config.companion_actor_ref,
             advisory_compiler=advisory_compiler,
@@ -2529,6 +2550,7 @@ def build_sqlite_world_v2_turn_application(
             # presence decision.  Advisory texture only, never a veto.
             attention_advisory=True,
             attention_chronology=LocalChronology(config.local_timezone),
+            recorded_cadence_mode=config.recorded_cadence_mode,
         )
         social_action_worker = SocialActionWorker(
             ledger=ledger,
@@ -2589,8 +2611,20 @@ def build_sqlite_world_v2_turn_application(
         # that carries proactive/fact/memory cognition, unless the caller
         # injected an explicit reviewer (tests do).
         if expression_reconsideration_reviewer is None and proactive_model is not None:
-            expression_reconsideration_reviewer = ExpressionReconsiderationChatModelAdapter(
-                model=proactive_model,
+            async def reconsideration_projection():
+                return (
+                    await asyncio.to_thread(ledger.project)
+                    if ledger.blocks_event_loop
+                    else ledger.project()
+                )
+
+            expression_reconsideration_reviewer = (
+                AuditedReplacementReconsiderationReviewer(
+                    reviewer=ExpressionReconsiderationChatModelAdapter(
+                        model=proactive_model,
+                    ),
+                    project=reconsideration_projection,
+                )
             )
         afterthought_runtime = None
         if config.afterthought_enabled and proactive_model is not None:
@@ -2659,16 +2693,15 @@ def build_sqlite_world_v2_turn_application(
                     router=router,
                     main_model=appraisal_model,
                     quick_recovery=appraisal_model,
-                    # The combined pass drafts both the appraisal and the
-                    # visible expression in one provider call, so its budget
-                    # carries the entire turn: observed steady-state provider
-                    # latency is 3-8s plus one bounded world-claim corrective
-                    # retry, and a 6s cap regularly cut off an otherwise
-                    # complete answer, cascading into a canned failsafe that
-                    # arrived *later* than the honest reply would have.  The
-                    # compact 1s quick budget still avoids a second long wait.
-                    main_timeout_seconds=12.0,
-                    quick_timeout_seconds=1.0,
+                    main_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
+                    quick_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
+                    expression_episode_mode=(
+                        "shadow"
+                        if config.expression_episode_mode == "shadow"
+                        else "off"
+                    ),
+                    expression_action_kinds=config.expression_action_kinds,
+                    expression_episode_diagnostics=expression_episode_diagnostics,
                 ),
                 companion_actor_ref=config.companion_actor_ref,
                 # The combined inbound cognition pass also drafts the later
@@ -3464,7 +3497,12 @@ def build_sqlite_world_v2_turn_application(
             else None
         )
         return WorldV2TurnApplication(
-            turns=WorldTurnRuntime(runtime=runtime, identities=identities),
+            turns=WorldTurnRuntime(
+                runtime=runtime,
+                identities=identities,
+                interactive_turn_budget_policy=config.interactive_turn_budget_policy,
+                latency_recorder=latency,
+            ),
             ledger=ledger,
             life_content_store=life_content_store,
             expression_payload_store=expression_payload_store,

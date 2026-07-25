@@ -494,9 +494,10 @@ async def test_platform_host_forwards_tick_and_close_without_exposing_world_inte
                 "causation_id": "scheduler:tick:1",
                 "correlation_id": "clock:world:1",
                 "reason": "test",
-                "policy_version": None,
-                "policy_digest": None,
-            },
+                    "policy_version": None,
+                    "policy_digest": None,
+                    "run_life_ecology": True,
+                },
         )
     ]
     host.close()

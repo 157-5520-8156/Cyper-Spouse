@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from companion_daemon.config import Settings
 from companion_daemon.llm import FakeCompanionModel
+from companion_daemon.ledger_storage_health import ledger_storage_snapshot
 from companion_daemon.onebot_adapter import (
     event_token_is_valid,
     get_onebot_friend_msg_history,
@@ -26,6 +27,7 @@ from companion_daemon.onebot_adapter import (
 
 from .platform_action_executor import MediaProviderTransport
 from .production_reliability_metrics import reliability_snapshot
+from .durable_reliability import durable_reliability_snapshot
 from .production_turn_application import MediaPreviewDeployment
 from .qq_attachment_archive import QQOneBotAttachmentArchiver
 from .qq_c2c_host import QQC2CHost, build_qq_c2c_host, qq_c2c_world_id
@@ -333,6 +335,19 @@ def create_qq_c2c_onebot_app(
         # ledger stays the durable audit; this makes the failsafe rate
         # checkable at a glance without a ledger scan.
         scheduler_view["reliability"] = reliability_snapshot()
+        try:
+            scheduler_view["reliability_ledger"] = durable_reliability_snapshot(
+                settings.database_path
+            )
+        except Exception as exc:  # health must stay available
+            scheduler_view["reliability_ledger"] = {
+                "source": "ledger",
+                "error": type(exc).__name__,
+            }
+        try:
+            scheduler_view["storage"] = ledger_storage_snapshot(settings.database_path)
+        except Exception as exc:  # health must stay available
+            scheduler_view["storage"] = {"status": "error", "error": type(exc).__name__}
         return {
             "status": "running",
             "adapter": adapter,

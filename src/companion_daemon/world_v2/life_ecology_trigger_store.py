@@ -95,7 +95,44 @@ class LedgerLifeEcologyTriggerStore:
                 (item for item in projection.trigger_processes if item.trigger_id == trigger_id),
                 None,
             )
+            if trigger_id in projection.completed_trigger_ids:
+                return LifeEcologyRunClaim(trigger_id=trigger_id, state="completed")
             if process is None:
+                schedule = getattr(projection, "life_ecology_schedule", None)
+                if schedule is not None and schedule.last_trigger_id == trigger_id:
+                    return LifeEcologyRunClaim(trigger_id=trigger_id, state="completed")
+                wake_revision = next(
+                    (
+                        item.world_revision
+                        for item in projection.committed_world_event_refs
+                        if item.event_id == key.wake_event_ref
+                    ),
+                    None,
+                )
+                watermark_revision = next(
+                    (
+                        item.world_revision
+                        for item in projection.committed_world_event_refs
+                        if schedule is not None
+                        and item.event_id == schedule.last_wake_event_ref
+                    ),
+                    None,
+                )
+                if (
+                    wake_revision is not None
+                    and watermark_revision is not None
+                    and wake_revision <= watermark_revision
+                ):
+                    completed_outcome_ref = await self._completed_outcome_ref(
+                        trigger_id=trigger_id,
+                        projection=projection,
+                    )
+                    if completed_outcome_ref is not None:
+                        return LifeEcologyRunClaim(
+                            trigger_id=trigger_id,
+                            state="completed",
+                        )
+                logical_time = projection.logical_time or source_event.logical_time
                 opened = TriggerProcess(
                     trigger_id=trigger_id,
                     trigger_ref=life_ecology_trigger_ref(
@@ -106,17 +143,42 @@ class LedgerLifeEcologyTriggerStore:
                     source_evidence_ref=key.wake_event_ref,
                     state="open",
                 )
+                attempt_id = "attempt:life-ecology:" + _digest(
+                    {"trigger_id": trigger_id, "attempt": 1}
+                )
+                claimed = opened.model_copy(
+                    update={
+                        "state": "claimed",
+                        "claim_lease": ClaimLease(
+                            owner_id=self._owner_id,
+                            attempt_id=attempt_id,
+                            acquired_at=logical_time,
+                            expires_at=logical_time + timedelta(seconds=self._lease_seconds),
+                        ),
+                        "attempt_ids": (attempt_id,),
+                    }
+                )
                 if await self._try_commit(
-                    self._opened_event(
-                        process=opened,
-                        source_event=source_event,
-                        logical_time=projection.logical_time or source_event.logical_time,
-                        trace_id=trace_id,
-                        correlation_id=correlation_id,
+                    (
+                        self._opened_event(
+                            process=opened,
+                            source_event=source_event,
+                            logical_time=logical_time,
+                            trace_id=trace_id,
+                            correlation_id=correlation_id,
+                        ),
+                        self._claim_event(
+                            process=claimed,
+                            event_type="TriggerProcessClaimed",
+                            source_event=source_event,
+                            logical_time=logical_time,
+                            trace_id=trace_id,
+                            correlation_id=correlation_id,
+                        ),
                     ),
                     projection=projection,
                 ):
-                    continue
+                    return LifeEcologyRunClaim(trigger_id=trigger_id, state="owned")
                 continue
             if process.process_kind != LIFE_ECOLOGY_PROCESS_KIND:
                 raise ValueError("life ecology trigger identity is occupied by another process kind")
@@ -149,13 +211,15 @@ class LedgerLifeEcologyTriggerStore:
                 }
             )
             if await self._try_commit(
-                self._claim_event(
-                    process=claimed,
-                    event_type=event_type,
-                    source_event=source_event,
-                    logical_time=logical_time,
-                    trace_id=trace_id,
-                    correlation_id=correlation_id,
+                (
+                    self._claim_event(
+                        process=claimed,
+                        event_type=event_type,
+                        source_event=source_event,
+                        logical_time=logical_time,
+                        trace_id=trace_id,
+                        correlation_id=correlation_id,
+                    ),
                 ),
                 projection=projection,
             ):
@@ -184,6 +248,51 @@ class LedgerLifeEcologyTriggerStore:
                 (item for item in projection.trigger_processes if item.trigger_id == trigger_id),
                 None,
             )
+            if process is None:
+                schedule = getattr(projection, "life_ecology_schedule", None)
+                if (
+                    schedule is not None
+                    and schedule.last_trigger_id == trigger_id
+                    and schedule.last_outcome_ref == f"life-ecology:{outcome}"
+                ):
+                    return
+                wake_revision = next(
+                    (
+                        item.world_revision
+                        for item in projection.committed_world_event_refs
+                        if item.event_id == key.wake_event_ref
+                    ),
+                    None,
+                )
+                watermark_revision = next(
+                    (
+                        item.world_revision
+                        for item in projection.committed_world_event_refs
+                        if schedule is not None
+                        and item.event_id == schedule.last_wake_event_ref
+                    ),
+                    None,
+                )
+                if (
+                    wake_revision is not None
+                    and watermark_revision is not None
+                    and wake_revision <= watermark_revision
+                ):
+                    completed_outcome_ref = await self._completed_outcome_ref(
+                        trigger_id=trigger_id,
+                        projection=projection,
+                    )
+                    if completed_outcome_ref is None:
+                        raise ValueError("life ecology trigger is unavailable")
+                    if completed_outcome_ref != f"life-ecology:{outcome}":
+                        raise ValueError(
+                            "life ecology terminal outcome conflicts with completion"
+                        )
+                    # Compact scheduling treats completed ecology wakes as a
+                    # prefix. The immutable completion event remains the
+                    # outcome audit; the head only needs the processing
+                    # watermark to make old effect-once retries harmless.
+                    return
             if process is None or process.process_kind != LIFE_ECOLOGY_PROCESS_KIND:
                 raise ValueError("life ecology trigger is unavailable")
             outcome_ref = f"life-ecology:{outcome}"
@@ -224,7 +333,7 @@ class LedgerLifeEcologyTriggerStore:
                 + _digest([key.world_id, process.trigger_id, process.claim_lease.attempt_id]),
                 payload=payload,
             )
-            if await self._try_commit(event, projection=projection):
+            if await self._try_commit((event,), projection=projection):
                 return
         raise ConcurrencyConflict("life ecology trigger completion did not converge")
 
@@ -259,6 +368,24 @@ class LedgerLifeEcologyTriggerStore:
         if located is None or located[0].world_id != self._ledger.world_id:
             raise ValueError("life ecology trigger source is unavailable")
         return located[0]
+
+    async def _completed_outcome_ref(
+        self, *, trigger_id: str, projection
+    ) -> str | None:
+        del projection
+        if self._ledger.blocks_event_loop:
+            event = await asyncio.to_thread(
+                self._ledger.find_trigger_completion,
+                trigger_id,
+            )
+        else:
+            event = self._ledger.find_trigger_completion(trigger_id)
+        if event is None:
+            return None
+        outcome_ref = event.payload().get("runtime_outcome_ref")
+        if not isinstance(outcome_ref, str) or not outcome_ref:
+            raise ValueError("life ecology completion outcome audit is invalid")
+        return outcome_ref
 
     def _opened_event(
         self,
@@ -327,10 +454,10 @@ class LedgerLifeEcologyTriggerStore:
             payload=payload,
         )
 
-    async def _try_commit(self, event: WorldEvent, *, projection) -> bool:
+    async def _try_commit(self, events: tuple[WorldEvent, ...], *, projection) -> bool:
         try:
             await self._commit(
-                (event,),
+                events,
                 world_revision=projection.world_revision,
                 deliberation_revision=projection.deliberation_revision,
             )

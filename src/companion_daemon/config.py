@@ -122,6 +122,11 @@ class Settings(BaseSettings):
         alias="QQ_C2C_SCHEDULER_INTERVAL_SECONDS",
         gt=0,
     )
+    qq_c2c_idle_heartbeat_seconds: float = Field(
+        default=600.0,
+        alias="QQ_C2C_IDLE_HEARTBEAT_SECONDS",
+        ge=60,
+    )
     # Where the daemon's dashboard reads the QQ world's read-only life state.
     # The adapter process owns that world's ledger; the daemon only relays.
     qq_c2c_adapter_url: str = Field(
@@ -189,6 +194,12 @@ class Settings(BaseSettings):
     )
     world_v2_fallback_model: str = Field(
         default="gpt-5.6-luna", alias="WORLD_V2_FALLBACK_MODEL"
+    )
+    world_v2_expression_episode_mode: Literal["off", "shadow", "on"] = Field(
+        default="shadow", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
+    )
+    world_v2_recorded_cadence_mode: Literal["off", "shadow", "on"] = Field(
+        default="shadow", alias="WORLD_V2_RECORDED_CADENCE_MODE"
     )
     multimodal_provider: str = Field(default="auto", alias="MULTIMODAL_PROVIDER")
     vision_model: str = Field(default="gpt-4o-mini", alias="VISION_MODEL")

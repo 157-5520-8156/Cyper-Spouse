@@ -510,11 +510,12 @@ async def test_production_life_author_creates_one_clock_bound_abstract_plan_and_
         )
         assert model.last_author_payload is not None
         assert model.last_author_payload["authoritative_eligibility"]["logical_time"]
-        assert next(
-            item.runtime_outcome_ref
-            for item in projection.trigger_processes
-            if item.source_evidence_ref == wake
-        ) == "life-ecology:author_planned"
+        assert projection.life_ecology_schedule is not None
+        assert projection.life_ecology_schedule.last_wake_event_ref == wake
+        assert (
+            projection.life_ecology_schedule.last_outcome_ref
+            == "life-ecology:author_planned"
+        )
 
         events = app._ledger.export_replay_evidence().events  # noqa: SLF001
         assert [item.event.event_type for item in events].count("RandomDrawRecorded") == 1
@@ -567,7 +568,8 @@ async def test_production_life_author_creates_one_clock_bound_abstract_plan_and_
             trace_id="trace:life-author:restart",
             correlation_id="correlation:life-author",
         )
-        assert joined.status == "joined_existing"
+        assert joined.status == "idle"
+        assert joined.reason_code == "life_ecology.cooldown"
         assert restarted_model.author_calls == 0
         assert len(restarted._ledger.project().plans) == 1  # noqa: SLF001
         assert restarted._ledger.project().semantic_hash == semantic_before_restart  # noqa: SLF001

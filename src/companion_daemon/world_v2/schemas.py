@@ -567,6 +567,7 @@ class TriggerProcess(FrozenModel):
         "memory_candidate_review",
         "proactive_action_deliberation",
         "afterthought_author",
+        "expression_episode",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -602,6 +603,7 @@ class TriggerProcess(FrozenModel):
                 "memory_candidate_review",
                 "proactive_action_deliberation",
                 "afterthought_author",
+                "expression_episode",
             }
             and self.source_evidence_ref is not None
         ):
@@ -616,6 +618,23 @@ class TriggerProcess(FrozenModel):
             raise ValueError("trigger attempt_ids must be unique")
         if self.attempt_ids[-1] != self.claim_lease.attempt_id:
             raise ValueError("active claim lease must reference the latest attempt")
+        return self
+
+
+class LifeEcologyScheduleProjection(FrozenModel):
+    """Compact durable scheduler state; immutable run events remain the audit."""
+
+    last_trigger_id: str = Field(min_length=1)
+    last_wake_event_ref: str = Field(min_length=1)
+    last_outcome_ref: str = Field(min_length=1)
+    last_completed_at: datetime
+    next_consideration_at: datetime
+    consecutive_failures: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def valid_window(self) -> LifeEcologyScheduleProjection:
+        if self.next_consideration_at < self.last_completed_at:
+            raise ValueError("life ecology next consideration cannot precede completion")
         return self
 
 
@@ -4813,7 +4832,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.32"
+    reducer_bundle_version: str = "world-v2-reducers.34"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4877,6 +4896,7 @@ class LedgerProjection(FrozenModel):
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
+    life_ecology_schedule: LifeEcologyScheduleProjection | None = None
     pending_external_observations: tuple[ExternalObservation, ...] = ()
     execution_receipts: tuple[ExecutionReceipt, ...] = ()
     budget_settlements: tuple[BudgetSettlement, ...] = ()

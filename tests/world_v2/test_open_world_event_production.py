@@ -169,7 +169,7 @@ async def test_production_open_world_model_turns_active_plan_into_replayable_occ
             correlation_id="correlation:open-world",
             reason="open-world-settlement",
         )
-        recovery_at = later.replace(minute=21)
+        recovery_at = later.replace(minute=31)
         await app.tick(
             tick_id="open-world:experience",
             logical_time_from=later,

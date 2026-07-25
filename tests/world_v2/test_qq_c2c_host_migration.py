@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from companion_daemon.config import Settings
 from companion_daemon.llm import FakeCompanionModel
+from companion_daemon.world_v2.action_due_wake import ActionDueWake
 from companion_daemon.world_v2.qq_c2c_host import (
     QQC2CDrainResult,
     QQC2CHost,
@@ -23,6 +24,10 @@ from companion_daemon.world_v2.qq_c2c_host import (
 from companion_daemon.world_v2.platform_action_executor import (
     MediaProviderDispatchRequest,
     PlatformDispatchReceipt,
+)
+from companion_daemon.world_v2.action_pump import ActionPumpResult
+from companion_daemon.world_v2.interactive_turn_budget import (
+    InteractiveTurnBudgetPolicy,
 )
 from companion_daemon.world_v2.production_turn_application import (
     MediaPreviewDeployment,
@@ -45,6 +50,274 @@ from companion_daemon.world_v2.social_initiative import (
 
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+
+
+def test_claimed_action_due_timer_waits_for_lease_instead_of_past_not_before() -> None:
+    projection = SimpleNamespace(
+        actions=(
+            SimpleNamespace(
+                state="claimed",
+                not_before=NOW - timedelta(seconds=30),
+                claim_lease=SimpleNamespace(expires_at=NOW + timedelta(minutes=2)),
+            ),
+        )
+    )
+
+    assert ActionDueWake.nearest_due(projection) == NOW + timedelta(minutes=2)
+
+
+@pytest.mark.asyncio
+async def test_action_due_timer_rebuilds_after_transient_wake_failure() -> None:
+    action = SimpleNamespace(
+        state="scheduled",
+        not_before=NOW,
+        claim_lease=None,
+    )
+    attempts = 0
+
+    async def wake() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient")
+        action.state = "delivered"
+
+    async def immediate_sleep(_: float) -> None:
+        await asyncio.sleep(0)
+
+    timer = ActionDueWake(
+        project=lambda: SimpleNamespace(actions=(action,)),
+        wake=wake,
+        now=lambda: NOW,
+        sleep=immediate_sleep,
+        coalesce_seconds=0,
+    )
+    try:
+        await timer.refresh()
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if attempts == 2:
+                break
+        assert attempts == 2
+        assert timer.diagnostics()["failure_count"] == 1
+    finally:
+        await timer.aclose()
+
+
+@pytest.mark.asyncio
+async def test_action_due_timer_rebuilds_after_initial_projection_failure() -> None:
+    reads = 0
+
+    def project() -> SimpleNamespace:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("transient projection failure")
+        return SimpleNamespace(actions=())
+
+    async def immediate_sleep(_: float) -> None:
+        await asyncio.sleep(0)
+
+    timer = ActionDueWake(
+        project=project,
+        wake=lambda: asyncio.sleep(0),
+        now=lambda: NOW,
+        sleep=immediate_sleep,
+    )
+    try:
+        assert await timer.refresh() is None
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if reads == 2:
+                break
+        assert reads == 2
+        assert timer.diagnostics()["failure_count"] == 1
+    finally:
+        await timer.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stale_action_timer_does_not_jump_to_new_future_due() -> None:
+    class Host:
+        def __init__(self) -> None:
+            self.tick_calls = 0
+            self.drain_calls = 0
+
+        async def action_due_projection(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                actions=(
+                    SimpleNamespace(
+                        state="claimed",
+                        not_before=NOW - timedelta(minutes=1),
+                        claim_lease=SimpleNamespace(
+                            expires_at=NOW + timedelta(minutes=2)
+                        ),
+                    ),
+                )
+            )
+
+        async def current_logical_time(self) -> datetime:
+            return NOW
+
+        async def tick(self, _: object) -> None:
+            self.tick_calls += 1
+
+        async def drain_actions_once(self) -> None:
+            self.drain_calls += 1
+
+        def close(self) -> None:
+            return None
+
+    platform = Host()
+    host = QQC2CHost(
+        host=platform,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_now=lambda: NOW,
+    )
+    try:
+        await host._wake_due_actions()  # noqa: SLF001
+        assert platform.tick_calls == 0
+        assert platform.drain_calls == 0
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cognition_seconds", "dispatch_delay_seconds"),
+    ((13.0, 0.0), (11.95, 0.1)),
+)
+async def test_qq_visible_reply_still_reaches_delivery_after_cognition_exhausts_turn_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cognition_seconds: float,
+    dispatch_delay_seconds: float,
+) -> None:
+    monotonic = {"now": 0.0}
+    wall = {"now": NOW}
+    delivered: list[str] = []
+    visible_reply_count = 0
+
+    class _BudgetExhaustingHost:
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            monotonic["now"] += cognition_seconds
+            wall["now"] += timedelta(seconds=cognition_seconds)
+            return SimpleNamespace(
+                status="action_authorized",
+                authorized_action_ids=("action:visible-reply",),
+                scheduled_action_ids=(),
+            )
+
+        async def drain_action(self, action_id: str):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(dispatch_delay_seconds)
+            delivered.append(action_id)
+            return ActionPumpResult(
+                action_id=action_id,
+                status="settled",
+                provider_status="provider_accepted",
+            )
+
+        def close(self) -> None:
+            return None
+
+    async def advance(seconds: float) -> None:
+        monotonic["now"] += seconds
+        wall["now"] += timedelta(seconds=seconds)
+
+    def record_visible_reply() -> None:
+        nonlocal visible_reply_count
+        visible_reply_count += 1
+
+    monkeypatch.setattr(
+        "companion_daemon.world_v2.qq_c2c_host.record_visible_reply",
+        record_visible_reply,
+    )
+    policy = InteractiveTurnBudgetPolicy(
+        total_seconds=12.0,
+        hedge_after_seconds=2.5,
+        acceptance_dispatch_reserve_seconds=1.2,
+        clock=lambda: monotonic["now"],
+        sleep=advance,
+        wall_clock=lambda: wall["now"],
+    )
+    host = QQC2CHost(
+        host=_BudgetExhaustingHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "exhausted-visible-reply.sqlite"),
+        ingress_now=lambda: wall["now"],
+        ingress_sleep=advance,
+        interactive_turn_budget_policy=policy,
+    )
+    try:
+        result = await host.inbound_text(
+            message_id="slow-visible-reply",
+            recipient_id="10001",
+            text="你还在吗？",
+            observed_at=NOW,
+        )
+    finally:
+        await host.aclose()
+
+    assert result.status == "action_authorized"
+    assert delivered == ["action:visible-reply"]
+    assert visible_reply_count == 1
+
+
+@pytest.mark.asyncio
+async def test_qq_authorized_action_without_provider_acceptance_is_not_counted_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visible_reply_count = 0
+    clock = {"now": NOW}
+
+    class _UndeliveredHost:
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                status="action_authorized",
+                authorized_action_ids=("action:not-yet-visible",),
+                scheduled_action_ids=(),
+            )
+
+        async def drain_action(self, _action_id):  # type: ignore[no-untyped-def]
+            return None
+
+        def close(self) -> None:
+            return None
+
+    async def advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    def record_visible_reply() -> None:
+        nonlocal visible_reply_count
+        visible_reply_count += 1
+
+    monkeypatch.setattr(
+        "companion_daemon.world_v2.qq_c2c_host.record_visible_reply",
+        record_visible_reply,
+    )
+    host = QQC2CHost(
+        host=_UndeliveredHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "not-yet-visible.sqlite"),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+    )
+    try:
+        result = await host.inbound_text(
+            message_id="authorized-but-not-delivered",
+            recipient_id="10001",
+            text="你还在吗？",
+            observed_at=NOW,
+        )
+    finally:
+        await host.aclose()
+
+    assert result.status == "action_authorized"
+    assert visible_reply_count == 0
 
 
 @pytest.mark.asyncio
@@ -174,6 +447,125 @@ async def test_qq_scheduler_zero_background_budget_does_not_force_cognition(
     assert platform.background_calls == 0
     assert platform.scheduled_kwargs is not None
     assert platform.scheduled_kwargs["max_background_units"] == 0
+
+
+@pytest.mark.asyncio
+async def test_qq_scheduler_persists_only_one_idle_heartbeat_per_ten_minutes(
+    tmp_path: Path,
+) -> None:
+    class _HeartbeatHost:
+        def __init__(self) -> None:
+            self.logical_time = NOW
+            self.ticks = []
+
+        async def current_logical_time(self):  # type: ignore[no-untyped-def]
+            return self.logical_time
+
+        async def tick(self, tick):  # type: ignore[no-untyped-def]
+            self.ticks.append(tick)
+            self.logical_time = tick.logical_time_to
+            return SimpleNamespace(status="observed_only")
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            return None
+
+        async def drain_scheduled_work(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(action_statuses=(), background_statuses=())
+
+        def close(self) -> None:
+            return None
+
+    platform = _HeartbeatHost()
+    host = QQC2CHost(
+        host=platform,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "idle-heartbeat.sqlite"),
+        ingress_now=lambda: NOW,
+        idle_heartbeat_seconds=600,
+    )
+    try:
+        for seconds in (30, 60, 300, 599):
+            await host.scheduler_once(
+                observed_at=NOW + timedelta(seconds=seconds),
+                max_action_units=0,
+                max_background_units=0,
+            )
+        assert platform.ticks == []
+
+        await host.scheduler_once(
+            observed_at=NOW + timedelta(seconds=600),
+            max_action_units=0,
+            max_background_units=0,
+        )
+        await host.scheduler_once(
+            observed_at=NOW + timedelta(seconds=630),
+            max_action_units=0,
+            max_background_units=0,
+        )
+    finally:
+        await host.aclose()
+
+    assert len(platform.ticks) == 1
+    assert platform.ticks[0].logical_time_to == NOW + timedelta(seconds=600)
+
+
+@pytest.mark.asyncio
+async def test_qq_inbound_advances_stale_world_clock_without_waiting_for_heartbeat(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW + timedelta(minutes=3)}
+
+    class _InboundClockHost:
+        def __init__(self) -> None:
+            self.logical_time = NOW
+            self.ticks = []
+            self.inbounds = []
+
+        async def current_logical_time(self):  # type: ignore[no-untyped-def]
+            return self.logical_time
+
+        async def tick(self, tick):  # type: ignore[no-untyped-def]
+            self.ticks.append(tick)
+            self.logical_time = tick.logical_time_to
+            return SimpleNamespace(status="observed_only")
+
+        async def inbound(self, inbound):  # type: ignore[no-untyped-def]
+            self.inbounds.append(inbound)
+            return SimpleNamespace(
+                status="observed_only", authorized_action_ids=(), scheduled_action_ids=()
+            )
+
+        def close(self) -> None:
+            return None
+
+    async def advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    platform = _InboundClockHost()
+    host = QQC2CHost(
+        host=platform,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "inbound-clock.sqlite"),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+        idle_heartbeat_seconds=600,
+    )
+    try:
+        result = await host.inbound_text(
+            message_id="message:clock-now",
+            recipient_id="10001",
+            text="现在发生的事",
+            observed_at=clock["now"],
+        )
+    finally:
+        await host.aclose()
+
+    assert result.status == "observed_only"
+    assert len(platform.ticks) == 1
+    assert platform.ticks[0].reason == "qq_c2c_inbound"
+    assert platform.ticks[0].logical_time_to == platform.inbounds[0].observed_at
 
 
 def _visible(delivery: "_Delivery") -> list[tuple[str, str]]:
@@ -409,7 +801,11 @@ async def test_qq_shared_reply_audit_reaches_deferred_followup_with_one_main_cal
     model = _LaterQQModel()
     delivery = _Delivery()
     host = build_qq_c2c_host(
-        settings=Settings(database_path=tmp_path / "qq-shared-later.sqlite", PRIMARY_USER_ID="geoff"),
+        settings=Settings(
+            database_path=tmp_path / "qq-shared-later.sqlite",
+            PRIMARY_USER_ID="geoff",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         recipient_id="10001", bootstrap_at=NOW, model=model,
         advisory_model=FakeCompanionModel(), delivery=delivery,
     )
@@ -423,6 +819,8 @@ async def test_qq_shared_reply_audit_reaches_deferred_followup_with_one_main_cal
 
     assert result.status == "deferred" and result.action_id is None
     assert _visible(delivery) == []
+    # This fixture isolates the deferred-plan contract from the independently
+    # covered two-slot shadow race.
     assert model.calls == 1
     assert len(projection.actions) == len(projection.commitments) == 1
     assert projection.actions[0].kind == "followup"
@@ -497,8 +895,11 @@ async def test_qq_c2c_host_runs_text_ingress_and_restart_recovery_without_a_lega
         await restarted.aclose()
 
     assert _visible(second_delivery) == []
-    assert drained.action_statuses
-    assert any("unknown" in status for status in drained.action_statuses), drained
+    # The always-on exact-due timer may recover the action before the explicit
+    # scheduler pass.  If the scheduler wins the race it must still report the
+    # same unknown terminal result.
+    if drained.action_statuses:
+        assert any("unknown" in status for status in drained.action_statuses), drained
 
 
 @pytest.mark.asyncio
@@ -641,7 +1042,7 @@ async def test_napcat_expression_is_selected_by_the_single_main_model_and_reache
         await host.aclose()
 
     assert result.status == "action_authorized"
-    assert model.calls == 1
+    assert model.calls == 2
     assert delivery.sent[-1] == ("10001", expected)
     assert len([item for item in delivery.sent if item[1] != "typing:composing"]) <= 1
     # NapCat's synchronous response proves provider acceptance, not terminal
@@ -682,7 +1083,7 @@ async def test_napcat_main_model_can_refuse_every_available_expression_without_a
         await host.aclose()
 
     assert result.status == "observed_only" and result.action_id is None
-    assert model.calls == 1
+    assert model.calls == 2
     assert _visible(delivery) == [] and projection.actions == ()
     assert projection.proposal_audits[-1].proposal_id.startswith("proposal:expression:")
 

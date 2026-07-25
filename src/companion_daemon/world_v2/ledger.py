@@ -111,6 +111,8 @@ class LedgerPort(Protocol):
 
     def lookup_event_commit(self, event_id: str) -> tuple[WorldEvent, CommitResult] | None: ...
 
+    def find_trigger_completion(self, trigger_id: str) -> WorldEvent | None: ...
+
     def resolve_committed_event_refs(
         self, event_ids: Sequence[str], *, at_world_revision: int
     ) -> dict[str, CommittedWorldEventRef]: ...
@@ -781,6 +783,17 @@ class WorldLedger:
             if event_id in commit.result.event_ids:
                 return stored.event, commit.result
         raise RuntimeError(f"event {event_id!r} has no owning commit")
+
+    def find_trigger_completion(self, trigger_id: str) -> WorldEvent | None:
+        """Find the immutable terminal audit for one compacted trigger."""
+
+        for stored in reversed(tuple(self._by_event_id.values())):
+            event = stored.event
+            if event.event_type != "TriggerProcessCompleted":
+                continue
+            if event.payload().get("trigger_id") == trigger_id:
+                return event
+        return None
 
     def _find_appraisal_proposal_event(
         self, *, proposal_id: str, cursor: ProjectionCursor

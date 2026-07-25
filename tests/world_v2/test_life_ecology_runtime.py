@@ -11,7 +11,11 @@ from companion_daemon.world_v2.life_ecology_runtime import (
     LifeEcologyRunClaim,
     LifeEcologyRuntime,
 )
-from companion_daemon.world_v2.schemas import CommittedWorldEventRef, WorldEvent
+from companion_daemon.world_v2.schemas import (
+    CommittedWorldEventRef,
+    LifeEcologyScheduleProjection,
+    WorldEvent,
+)
 
 
 NOW = datetime(2026, 7, 16, 12, tzinfo=UTC)
@@ -209,6 +213,38 @@ async def test_life_ecology_rejects_a_wake_that_is_not_exactly_committed() -> No
 
 
 @pytest.mark.asyncio
+async def test_life_ecology_skips_a_committed_wake_during_durable_cooldown() -> None:
+    event = _event("clock-during-cooldown")
+    ledger = _Ledger(event)
+    ledger._projection.life_ecology_schedule = LifeEcologyScheduleProjection(
+        last_trigger_id="trigger:previous",
+        last_wake_event_ref="event:previous-clock",
+        last_outcome_ref="life-ecology:failed_safe",
+        last_completed_at=NOW - timedelta(minutes=1),
+        next_consideration_at=NOW + timedelta(minutes=29),
+        consecutive_failures=2,
+    )
+    trigger_store, media = _TriggerStore(), _Media()
+    runtime = LifeEcologyRuntime(
+        ledger=ledger,
+        trigger_store=trigger_store,
+        media_followup=media,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:cooldown",
+        correlation_id="correlation:cooldown",
+    )
+
+    assert result.status == "idle"
+    assert result.reason_code == "life_ecology.cooldown"
+    assert trigger_store.claims == []
+    assert media.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "state",
     [
@@ -293,7 +329,7 @@ async def test_life_ecology_runs_an_explicit_activity_followup_before_media_and_
     assert result.activity_followup_status == "transitioned"
     assert activity.calls[0]["trigger_id"] == f"life-ecology:{event.event_id}"
     assert len(media.calls) == 1
-    assert trigger_store.completed[0][2] == "idle"
+    assert trigger_store.completed[0][2] == "activity_transitioned"
 
 
 @pytest.mark.asyncio

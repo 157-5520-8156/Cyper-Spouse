@@ -81,6 +81,7 @@ class PlatformClockTick:
     reason: str
     policy_version: str | None = None
     policy_digest: str | None = None
+    run_life_ecology: bool = True
 
     def __post_init__(self) -> None:
         _require_nonempty(
@@ -244,6 +245,7 @@ class WorldV2PlatformHost:
             reason=tick.reason,
             policy_version=tick.policy_version,
             policy_digest=tick.policy_digest,
+            run_life_ecology=tick.run_life_ecology,
         )
 
     async def receipt(self, receipt: PlatformReceipt):
@@ -293,6 +295,11 @@ class WorldV2PlatformHost:
         """Advance a specific ingress-authorized Action only."""
 
         return await self._application.drain_action(action_id)
+
+    async def action_due_projection(self):
+        """Read the internal Action projection without exposing a writer."""
+
+        return await self._application.action_due_projection()
 
     async def drain_media_results_once(self, *, logical_time: datetime) -> str | None:
         """Materialize one receipt-bound media result after provider dispatch.
