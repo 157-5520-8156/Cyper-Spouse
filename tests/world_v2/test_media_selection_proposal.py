@@ -30,6 +30,7 @@ from companion_daemon.world_v2.media_v2 import (
 )
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import CommittedWorldEventRef, LedgerProjection, WorldEvent
+from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
 NOW = datetime(2026, 7, 16, 18, tzinfo=UTC)
@@ -184,6 +185,28 @@ def test_media_selection_decline_is_a_deliberation_fact_for_current_candidates()
     )
 
     assert reduced.photo_candidates == state.photo_candidates
+    assert reduced.media_declined_candidate_revisions == candidates
+
+
+def test_bundle_migration_preserves_the_compact_decline_watermark() -> None:
+    declined = (
+        MediaSelectionCandidateRevision(
+            candidate_id="candidate:migration-decline",
+            entity_revision=1,
+        ),
+    )
+    projection = LedgerProjection(
+        world_id=WORLD,
+        world_revision=1,
+        deliberation_revision=1,
+        ledger_sequence=2,
+        media_declined_candidate_revisions=declined,
+        semantic_hash="a" * 64,
+    )
+
+    migrated = SQLiteWorldLedger._state_from_projection(projection)
+
+    assert migrated.media_declined_candidate_revisions == declined
 
 
 def test_media_selection_terminal_attempt_rejects_an_unbound_attempt_identity() -> None:

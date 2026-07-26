@@ -266,7 +266,7 @@ async def test_sqlite_ledger_store_restart_reads_the_same_trigger_process(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_sqlite_migrates_v33_terminal_ecology_head_to_compact_v34(
+async def test_sqlite_migrates_v33_terminal_ecology_head_to_current_bundle(
     tmp_path,
 ) -> None:
     path = tmp_path / "life-ecology-v33.sqlite3"
@@ -351,7 +351,7 @@ async def test_sqlite_migrates_v33_terminal_ecology_head_to_compact_v34(
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
     try:
         projection = migrated.project()
-        assert projection.reducer_bundle_version == "world-v2-reducers.34"
+        assert projection.reducer_bundle_version == "world-v2-reducers.35"
         assert projection.completed_trigger_ids == ()
         assert projection.life_ecology_schedule == compact.life_ecology_schedule
         assert migrated.rebuild() == projection
@@ -495,6 +495,32 @@ async def test_failed_ecology_runs_back_off_for_ten_thirty_then_120_minutes() ->
         )
         logical_time = next_time
         wake_ref = next_ref
+
+
+@pytest.mark.asyncio
+async def test_structured_technical_failure_uses_backoff_and_exposes_its_code() -> None:
+    ledger = _ledger()
+    store = LedgerLifeEcologyTriggerStore(
+        ledger=ledger, owner_id="worker:structured-failure"
+    )
+    key = _key()
+    claim = await store.claim_or_join(
+        key=key,
+        trace_id="trace:structured-failure",
+        correlation_id="correlation:structured-failure",
+    )
+
+    await store.complete(
+        key=key,
+        trigger_id=claim.trigger_id,
+        outcome="technical_failure.media.type_error",
+    )
+
+    schedule = ledger.project().life_ecology_schedule
+    assert schedule is not None
+    assert schedule.consecutive_failures == 1
+    assert schedule.last_failure_code == "media.type_error"
+    assert (schedule.next_consideration_at - schedule.last_completed_at).total_seconds() == 600
 
 
 @pytest.mark.asyncio

@@ -1313,10 +1313,9 @@ class MediaPlanner:
                 # correction is safe: it receives the same frozen candidates
                 # and may not select a new event or change any evidence. This
                 # is intentionally not a creative retry.
-                if isinstance(result, NotRenderable) and result.reason in {
-                    "invalid_classification",
-                    "complete_expression_candidate_conflict",
-                }:
+                if isinstance(result, NotRenderable) and _repairable_planner_failure(
+                    result
+                ):
                     repair_messages = [
                         *messages,
                         {"role": "assistant", "content": raw},
@@ -1326,9 +1325,11 @@ class MediaPlanner:
                                 "Your preceding JSON is structurally invalid: "
                                 f"{result.reason} ({result.details or 'unspecified'}). "
                                 "Return one corrected JSON object only. Keep the same complete_candidate_id, "
-                                "event evidence, and route. For every scalar classification field, choose one "
+                                "event, and route. For every scalar classification field, choose one "
                                 "literal from that selected candidate's legal_* menu; do not echo a menu or add "
-                                "wrapper fields."
+                                "wrapper fields. Evidence pointers may only come from allowed_event_evidence_refs; "
+                                "when regional grounding is explicit, select at least one available /location/country, "
+                                "/location/region, or /location/city pointer."
                             ),
                         },
                     ]
@@ -1344,6 +1345,13 @@ class MediaPlanner:
                     repaired = json.loads(repaired_raw)
                     if not isinstance(repaired, dict):
                         return NotRenderable(opportunity.opportunity_id, "invalid_model_output")
+                    if repaired.get("complete_candidate_id") != proposal.get(
+                        "complete_candidate_id"
+                    ):
+                        return NotRenderable(
+                            opportunity.opportunity_id,
+                            "repair_changed_complete_expression_candidate",
+                        )
                     return _freeze_proposal_v5(
                         opportunity,
                         repaired,
@@ -1378,6 +1386,25 @@ class MediaPlanner:
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             return NotRenderable(opportunity.opportunity_id, "invalid_model_output", str(exc)[:240])
+
+
+def _repairable_planner_failure(result: NotRenderable) -> bool:
+    if result.reason in {
+        "matrix_share_intent_conflict",
+        "unselected_regional_grounding",
+    }:
+        return True
+    if result.reason == "invalid_classification":
+        return result.details not in {"privacy", "route"}
+    if result.reason == "complete_expression_candidate_conflict":
+        return result.details in {
+            "capture_mode",
+            "visual_form",
+            "share_intent",
+            "interaction_bid_id",
+            "character_visibility",
+        }
+    return False
 
 
 class MediaRenderer:

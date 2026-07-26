@@ -78,8 +78,14 @@ class _Ledger:
 
 
 class _TriggerStore:
-    def __init__(self, claims: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        claims: list[str] | None = None,
+        *,
+        complete_raises: bool = False,
+    ) -> None:
         self._claims = iter(claims or ["owned"])
+        self.complete_raises = complete_raises
         self.claims = []
         self.completed = []
 
@@ -91,16 +97,23 @@ class _TriggerStore:
         )
 
     async def complete(self, *, key, trigger_id: str, outcome: str):  # type: ignore[no-untyped-def]
+        if self.complete_raises:
+            raise OSError("trigger store offline")
         self.completed.append((key, trigger_id, outcome))
 
 
 class _Media:
-    def __init__(self, *, status: str = "idle") -> None:
+    def __init__(
+        self, *, status: str = "idle", raises: Exception | None = None
+    ) -> None:
         self.status = status
+        self.raises = raises
         self.calls = []
 
     def drain_once(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append(kwargs)
+        if self.raises is not None:
+            raise self.raises
         return SimpleNamespace(status=self.status)
 
 
@@ -352,6 +365,53 @@ async def test_life_ecology_fails_safe_without_media_when_activity_followup_fail
     assert result.reason_code == "life_ecology.activity_followup_failed"
     assert media.calls == []
     assert trigger_store.completed[0][2] == "failed_safe"
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_persists_a_retryable_media_failure_code() -> None:
+    event = _event("clock-media-failure")
+    trigger_store = _TriggerStore()
+    media = _Media(raises=TypeError("candidate contract mismatch"))
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:media-failure",
+        correlation_id="correlation:media-failure",
+    )
+
+    assert result.status == "failed_safe"
+    assert result.technical_failure_code == "media.type_error"
+    assert result.reason_code == "life_ecology.media_followup_failed.media.type_error"
+    assert trigger_store.completed[0][2] == "technical_failure.media.type_error"
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_does_not_claim_an_unpersisted_failure_code() -> None:
+    event = _event("clock-media-failure-store-offline")
+    trigger_store = _TriggerStore(complete_raises=True)
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=_Media(raises=TypeError("candidate contract mismatch")),
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:media-failure-store-offline",
+        correlation_id="correlation:media-failure-store-offline",
+    )
+
+    assert result.status == "failed_safe"
+    assert result.reason_code == "life_ecology.technical_failure_persistence_failed"
+    assert result.technical_failure_code is None
+    assert trigger_store.completed == []
 
 
 @pytest.mark.asyncio

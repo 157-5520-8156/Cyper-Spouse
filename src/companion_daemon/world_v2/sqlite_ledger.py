@@ -2889,6 +2889,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.31",
                 "world-v2-reducers.32",
                 "world-v2-reducers.33",
+                "world-v2-reducers.34",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -3178,6 +3179,7 @@ class SQLiteWorldLedger:
             if reducer_bundle_version in {
                 "world-v2-reducers.32",
                 "world-v2-reducers.33",
+                "world-v2-reducers.34",
             }:
                 state = ReducerState.model_validate_json(
                     json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
@@ -3605,6 +3607,9 @@ class SQLiteWorldLedger:
             actions=projection.actions,
             pending_actions=projection.pending_actions,
             photo_candidates=projection.photo_candidates,
+            media_declined_candidate_revisions=(
+                projection.media_declined_candidate_revisions
+            ),
             media_opportunities=projection.media_opportunities,
             media_plans=projection.media_plans,
             media_unrenderable_opportunity_ids=projection.media_unrenderable_opportunity_ids,

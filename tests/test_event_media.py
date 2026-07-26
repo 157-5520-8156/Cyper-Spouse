@@ -639,6 +639,26 @@ class V5SelectingModel(FakeModel):
         return json.dumps(payload, ensure_ascii=False)
 
 
+class CorrectingV5SelectingModel(V5SelectingModel):
+    """Return one semantically incompatible choice, then a legal correction."""
+
+    def __init__(
+        self, first_payload: dict[str, object], corrected_payload: dict[str, object]
+    ) -> None:
+        super().__init__(first_payload)
+        self._payloads = (first_payload, corrected_payload)
+
+    async def complete(self, messages, *, temperature=0.8):
+        self.payload = self._payloads[min(self.calls, 1)]
+        planning_message = next(
+            item
+            for item in reversed(messages)
+            if "legal_complete_media_expression_candidates=" in str(item["content"])
+        )
+        rewritten = [*messages[:-1], planning_message]
+        return await super().complete(rewritten, temperature=temperature)
+
+
 @pytest.mark.asyncio
 async def test_v5_freezes_complete_expression_candidate_without_free_direction_text(
     monkeypatch: pytest.MonkeyPatch,
@@ -697,6 +717,56 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert "nose/cheek" in prompt
     assert "action unit" not in prompt.lower()
     assert "facial micro performance v1" not in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_v5_repairs_one_candidate_bound_semantic_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    legal = _proposal(interaction_bid_id="share_presence")
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        legal.pop(field, None)
+    incompatible = dict(legal)
+    incompatible["content_domain"] = "information_screen"
+    model = CorrectingV5SelectingModel(incompatible, legal)
+
+    result = await MediaPlanner(model).plan(_opportunity())
+
+    assert isinstance(result, PlannedMedia)
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_v5_does_not_repair_a_privacy_classification_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    legal = _proposal(interaction_bid_id="share_presence")
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        legal.pop(field, None)
+    invalid = dict(legal)
+    invalid["privacy"] = "model-decides"
+    model = CorrectingV5SelectingModel(invalid, legal)
+
+    result = await MediaPlanner(model).plan(_opportunity())
+
+    assert isinstance(result, NotRenderable)
+    assert result.reason == "invalid_classification"
+    assert result.details == "privacy"
+    assert model.calls == 1
 
 
 def test_moment_capture_quality_gate_requires_a_match_and_repairs_only_that_contract() -> None:

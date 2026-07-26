@@ -221,6 +221,7 @@ async def test_worker_persists_and_recovers_terminal_attempt_at_same_logical_tim
         logical_time=NOW, world_id="world:test", world_revision=3,
         deliberation_revision=0, ledger_sequence=3,
         photo_candidates=(candidate,), proposal_revisions=(),
+        media_declined_candidate_revisions=(),
     )
     events = {}
 
@@ -243,6 +244,11 @@ async def test_worker_persists_and_recovers_terminal_attempt_at_same_logical_tim
             projection.world_revision += 1
         else:
             projection.deliberation_revision += 1
+            payload = json.loads(event.payload_json)
+            if payload.get("outcome") == "declined":
+                projection.media_declined_candidate_revisions = tuple(
+                    SimpleNamespace(**item) for item in payload["candidates"]
+                )
         projection.ledger_sequence += 1
         commit = SimpleNamespace(
             world_revision=projection.world_revision,
@@ -278,6 +284,17 @@ async def test_worker_persists_and_recovers_terminal_attempt_at_same_logical_tim
         event.event_type == "MediaSelectionAttemptRecorded"
         for event, _commit in events.values()
     )
+    if model_type is _Model:
+        projection.logical_time = NOW.replace(minute=10)
+        later = await worker.select_once(
+            logical_time=projection.logical_time,
+            actor="worker",
+            trace_id="trace:later",
+            correlation_id="correlation:later",
+        )
+        assert later.status == "no_op"
+        assert later.reason_code == "media_selection.recovered_decline"
+        assert model.calls == 1
 
 
 @pytest.mark.asyncio

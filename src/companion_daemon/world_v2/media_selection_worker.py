@@ -56,7 +56,7 @@ class MediaSelectionWorker:
         projection = self._ledger.project()
         if projection.logical_time != logical_time:
             return MediaSelectionRunResult(status="blocked", reason_code="media_selection.logical_time_not_current")
-        eligible = tuple(
+        open_candidates = tuple(
             item
             for item in projection.photo_candidates
             if item.status == "available"
@@ -64,6 +64,15 @@ class MediaSelectionWorker:
             and item.expires_at is not None
             and item.expires_at > logical_time
             and item.source_events
+        )
+        declined_revisions = {
+            (item.candidate_id, item.entity_revision)
+            for item in getattr(projection, "media_declined_candidate_revisions", ())
+        }
+        eligible = tuple(
+            item
+            for item in open_candidates
+            if (item.candidate_id, item.entity_revision) not in declined_revisions
         )
         pending = {
             (item.candidate_id, item.expected_candidate_revision): item
@@ -145,7 +154,11 @@ class MediaSelectionWorker:
         if not candidates:
             return MediaSelectionRunResult(
                 status="no_op",
-                reason_code="media_selection.no_available_candidates",
+                reason_code=(
+                    "media_selection.recovered_decline"
+                    if open_candidates and not eligible
+                    else "media_selection.no_available_candidates"
+                ),
             )
         durable_lookup = callable(getattr(self._ledger, "lookup_event_commit", None))
         world_id = getattr(self._ledger, "world_id", getattr(projection, "world_id", None))

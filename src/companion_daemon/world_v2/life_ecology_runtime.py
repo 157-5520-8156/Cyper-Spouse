@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import inspect
+import re
 from typing import Literal, Protocol
 
 from .life_ecology_contract import (
@@ -64,6 +65,7 @@ class LifeEcologyRunResult(FrozenModel):
     shared_private_followup_status: str | None = None
     open_world_followup_status: str | None = None
     visual_evidence_followup_status: str | None = None
+    technical_failure_code: str | None = None
 
 
 class LifeEcologyTriggerStore(Protocol):
@@ -536,12 +538,32 @@ class LifeEcologyRuntime:
             media_status = getattr(media_result, "status", None)
             if not isinstance(media_status, str) or not media_status:
                 raise ValueError("media ecology result has no stable status")
-        except Exception:
-            await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+        except Exception as exc:
+            failure_code = _technical_failure_code("media", exc)
+            persisted = await self._complete_technical_failure(
+                key=key,
+                trigger_id=claim.trigger_id,
+                failure_code=failure_code,
+            )
+            if not persisted:
+                return LifeEcologyRunResult(
+                    status="failed_safe",
+                    trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.technical_failure_persistence_failed",
+                    activity_followup_status=activity_status,
+                    life_author_followup_status=author_status,
+                    future_life_author_followup_status=future_author_status,
+                    aftermath_followup_status=aftermath_status,
+                    npc_initiative_followup_status=npc_initiative_status,
+                    aspiration_followup_status=aspiration_status,
+                    shared_private_followup_status=shared_private_status,
+                    open_world_followup_status=open_world_status,
+                    visual_evidence_followup_status=visual_evidence_status,
+                )
             return LifeEcologyRunResult(
                 status="failed_safe",
                 trigger_id=claim.trigger_id,
-                reason_code="life_ecology.media_followup_failed",
+                reason_code=f"life_ecology.media_followup_failed.{failure_code}",
                 activity_followup_status=activity_status,
                 life_author_followup_status=author_status,
                 future_life_author_followup_status=future_author_status,
@@ -551,6 +573,7 @@ class LifeEcologyRuntime:
                 shared_private_followup_status=shared_private_status,
                 open_world_followup_status=open_world_status,
                 visual_evidence_followup_status=visual_evidence_status,
+                technical_failure_code=failure_code,
             )
 
         try:
@@ -741,16 +764,53 @@ class LifeEcologyRuntime:
             return await result
         return result
 
-    async def _complete_failed_safe(self, *, key: LifeEcologyRunKey, trigger_id: str) -> None:
+    async def _complete_failed_safe(self, *, key: LifeEcologyRunKey, trigger_id: str) -> bool:
+        return await self._complete_outcome(
+            key=key, trigger_id=trigger_id, outcome="failed_safe"
+        )
+
+    async def _complete_technical_failure(
+        self,
+        *,
+        key: LifeEcologyRunKey,
+        trigger_id: str,
+        failure_code: str,
+    ) -> bool:
+        return await self._complete_outcome(
+            key=key,
+            trigger_id=trigger_id,
+            outcome=f"technical_failure.{failure_code}",
+        )
+
+    async def _complete_outcome(
+        self,
+        *,
+        key: LifeEcologyRunKey,
+        trigger_id: str,
+        outcome: str,
+    ) -> bool:
         try:
             await self._trigger_store.complete(
-                key=key, trigger_id=trigger_id, outcome="failed_safe"
+                key=key, trigger_id=trigger_id, outcome=outcome
             )
         except Exception:
             # The result remains fail-safe.  A durable store that could not
             # record this state must surface recovery rather than manufacture
             # a life fact in this runtime.
-            return
+            return False
+        return True
+
+
+def _technical_failure_code(phase: str, exc: Exception) -> str:
+    supplied = getattr(exc, "code", None)
+    if isinstance(supplied, str):
+        normalized = re.sub(r"[^a-z0-9._-]+", "_", supplied.lower()).strip("._-")
+        if normalized:
+            return f"{phase}.{normalized}"[:96]
+    type_name = re.sub(
+        r"(?<!^)(?=[A-Z])", "_", type(exc).__name__
+    ).lower()
+    return f"{phase}.{type_name}"[:96]
 
 
 __all__ = [

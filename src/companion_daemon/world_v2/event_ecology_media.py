@@ -538,7 +538,7 @@ class EventEcologyMediaCandidateRuntime:
             nonlocal daily
             allowed = _bounded_privacy(privacy)
             sources = tuple(sorted(set(source_refs)))
-            if allowed is None or not sources or sources in existing_sources or daily >= self._policy.max_opportunities_per_day:
+            if allowed is None or not sources or daily >= self._policy.max_opportunities_per_day:
                 return
             selected_refs: list[tuple[str, str]] = []
             for source_ref in sources:
@@ -571,6 +571,8 @@ class EventEcologyMediaCandidateRuntime:
             ) or any(item.category == category for item in discovered):
                 return
             source_ids, source_hashes = _canonical_sources(selected_refs)
+            if source_ids in existing_sources:
+                return
             discovered.append(EcologyCandidate(
                 category=category, source_event_refs=source_ids, source_payload_hashes=source_hashes,
                 privacy_ceiling=allowed, observed_at=observed_at, context=context,

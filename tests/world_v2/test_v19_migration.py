@@ -84,7 +84,7 @@ def test_sqlite_migrates_verified_v18_head_without_fabricating_v19_fields(tmp_pa
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
     projection = migrated.project()
     assert projection == expected
-    assert projection.reducer_bundle_version == "world-v2-reducers.34"
+    assert projection.reducer_bundle_version == "world-v2-reducers.35"
     assert projection.fact_commit_proposal_audits_v2 == ()
     assert projection.acceptance_manifests_v3 == ()
     assert migrated.rebuild() == projection
@@ -147,7 +147,7 @@ def test_sqlite_migrates_verified_v19_head_without_fabricating_reply_state(tmp_p
         )
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.34"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.35"
     assert migrated.project().minimal_reply_manifests == ()
     assert migrated.project().stored_message_payloads == ()
     migrated.close()
@@ -206,7 +206,7 @@ def test_sqlite_migrates_verified_v21_head_to_expression_lifecycle_bundle(tmp_pa
         )
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.34"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.35"
     migrated.close()
 
 
@@ -275,5 +275,59 @@ def test_sqlite_migrates_verified_v22_head_without_reinterpreting_existing_proje
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
     assert migrated.project() == expected
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.34"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.35"
+    migrated.close()
+
+
+def test_sqlite_migrates_verified_v34_head_with_empty_media_decline_watermark(
+    tmp_path,
+) -> None:
+    path = tmp_path / "v34-to-v35.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    ledger.commit(
+        [_observation_event()],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    expected = ledger.project()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        legacy_state = json.loads(read_head_state_json(connection, WORLD_ID))
+        legacy_state.pop("media_declined_candidate_revisions")
+        state = ReducerState.model_validate_json(
+            json.dumps(legacy_state, ensure_ascii=False, separators=(",", ":")),
+            context={"source_reducer_bundle": "world-v2-reducers.34"},
+        )
+        payload = state.semantic_payload(
+            world_id=WORLD_ID,
+            world_revision=1,
+            reducer_bundle_version="world-v2-reducers.34",
+        )
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        connection.execute(
+            """UPDATE world_v2_heads
+               SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?,
+                   state_hash = ?
+               WHERE world_id = ?""",
+            (
+                json.dumps(legacy_state, ensure_ascii=False, separators=(",", ":")),
+                legacy_hash,
+                "world-v2-reducers.34",
+                "0" * 64,
+                WORLD_ID,
+            ),
+        )
+
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    assert migrated.project() == expected
+    assert migrated.project().media_declined_candidate_revisions == ()
+    assert migrated.rebuild() == expected
     migrated.close()

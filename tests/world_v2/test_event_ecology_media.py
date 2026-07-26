@@ -196,6 +196,25 @@ def test_production_capable_ecology_requires_one_exact_visual_declaration() -> N
     assert candidate_event.payload()["candidate"]["source_event_refs"] == sorted(
         (source.event_id, declaration.event_id)
     )
+    later = NOW + timedelta(hours=7)
+    clock = _ref("later-clock", "ClockAdvanced", at=later)
+    projection.logical_time = later
+    projection.committed_world_event_refs = (
+        source_ref,
+        _event_ref(declaration, revision=2),
+        clock,
+    )
+
+    repeated = runtime.drain_once(
+        wake_event_ref=clock.event_id,
+        logical_time=later,
+        actor="worker:event-ecology",
+        trace_id="trace:ecology:later",
+        correlation_id="correlation:ecology:later",
+    )
+
+    assert repeated.status == "idle"
+    assert len(with_declaration.commits) == 1
 
 
 def test_taxonomy_preserves_life_matrix_and_real_evidence_gates() -> None:

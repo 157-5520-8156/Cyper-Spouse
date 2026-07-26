@@ -131,6 +131,7 @@ from .life_author_runtime import (
     LifeAvailabilitySnapshotRecordedPayload,
 )
 from .media_selection_attempt import (
+    MediaSelectionCandidateRevision,
     MediaSelectionAttemptRecordedPayload,
     media_selection_attempt_id,
 )
@@ -488,7 +489,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.34"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.35"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}" for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 )
@@ -695,6 +696,7 @@ class ReducerState(FrozenModel):
     appearance_states: tuple[AppearanceStateProjection, ...] = ()
     visible_physical_states: tuple[VisiblePhysicalStateProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
+    media_declined_candidate_revisions: tuple[MediaSelectionCandidateRevision, ...] = ()
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()
     media_unrenderable_opportunity_ids: tuple[str, ...] = ()
@@ -1303,6 +1305,7 @@ class ReducerState(FrozenModel):
         elif reducer_bundle_version in {
             "world-v2-reducers.32",
             "world-v2-reducers.33",
+            "world-v2-reducers.34",
         }:
             # .33 adds only conditional compact ecology scheduler state; .34
             # folds terminal ecology ids out of head state. Their older
@@ -1414,7 +1417,13 @@ class ReducerState(FrozenModel):
             **(
                 {
                     "life_ecology_schedule": self.life_ecology_schedule.model_dump(
-                        mode="json"
+                        mode="json",
+                        exclude=(
+                            {"last_failure_code"}
+                            if declared_reducer_bundle_version
+                            != REDUCER_BUNDLE_VERSION
+                            else None
+                        ),
                     )
                 }
                 if self.life_ecology_schedule is not None
@@ -1519,6 +1528,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.30",
             "world-v2-reducers.32",
             "world-v2-reducers.33",
+            "world-v2-reducers.34",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["provider_media_grants"] = tuple(
@@ -1534,6 +1544,11 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.media_plans
             )
             payload["media_unrenderable_opportunity_ids"] = self.media_unrenderable_opportunity_ids
+            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+                payload["media_declined_candidate_revisions"] = tuple(
+                    item.model_dump(mode="json")
+                    for item in self.media_declined_candidate_revisions
+                )
         if declared_reducer_bundle_version in {
             "world-v2-reducers.27",
             "world-v2-reducers.28",
@@ -1541,6 +1556,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.30",
             "world-v2-reducers.32",
             "world-v2-reducers.33",
+            "world-v2-reducers.34",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_artifacts"] = tuple(
@@ -1552,6 +1568,7 @@ class ReducerState(FrozenModel):
                 in {
                     "world-v2-reducers.32",
                     "world-v2-reducers.33",
+                    "world-v2-reducers.34",
                     REDUCER_BUNDLE_VERSION,
                 }
                 else item.model_dump(mode="json", exclude={"repairable", "repair_scope"})
@@ -1565,6 +1582,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.31",
             "world-v2-reducers.32",
             "world-v2-reducers.33",
+            "world-v2-reducers.34",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_delivery_approvals"] = tuple(
@@ -1579,6 +1597,7 @@ class ReducerState(FrozenModel):
             if declared_reducer_bundle_version in {
                 "world-v2-reducers.32",
                 "world-v2-reducers.33",
+                "world-v2-reducers.34",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_thread_proposals"] = tuple(
@@ -1755,6 +1774,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.24",
                 "world-v2-reducers.32",
                 "world-v2-reducers.33",
+                "world-v2-reducers.34",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["expression_plan_manifests"] = tuple(
@@ -5895,7 +5915,10 @@ def _photo_candidate_unrenderable(state: ReducerState, event: WorldEvent) -> Red
                 candidate_id=candidate.candidate_id,
                 expected_status="available",
                 next_status="unrenderable",
-            )
+            ),
+            "media_declined_candidate_revisions": _without_media_decline(
+                state.media_declined_candidate_revisions, candidate=candidate
+            ),
         }
     )
 
@@ -5926,7 +5949,10 @@ def _photo_candidate_expired(state: ReducerState, event: WorldEvent) -> ReducerS
                 candidate_id=candidate.candidate_id,
                 expected_status="available",
                 next_status="expired",
-            )
+            ),
+            "media_declined_candidate_revisions": _without_media_decline(
+                state.media_declined_candidate_revisions, candidate=candidate
+            ),
         }
     )
 
@@ -6172,7 +6198,21 @@ def _media_selection_attempt_recorded(
         )
     ):
         raise ValueError("media selection decline candidate set is not current")
-    return state
+    if payload.outcome != "declined":
+        return state
+    declined = {
+        (item.candidate_id, item.entity_revision): item
+        for item in state.media_declined_candidate_revisions
+    }
+    for item in payload.candidates:
+        declined[(item.candidate_id, item.entity_revision)] = item
+    return state.model_copy(
+        update={
+            "media_declined_candidate_revisions": tuple(
+                declined[key] for key in sorted(declined)
+            )
+        }
+    )
 
 
 def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -6254,6 +6294,19 @@ def _advance_media_candidate(
     return (*candidates[:index], updated, *candidates[index + 1 :])
 
 
+def _without_media_decline(
+    declined: tuple[MediaSelectionCandidateRevision, ...],
+    *,
+    candidate: PhotoCandidate,
+) -> tuple[MediaSelectionCandidateRevision, ...]:
+    return tuple(
+        item
+        for item in declined
+        if (item.candidate_id, item.entity_revision)
+        != (candidate.candidate_id, candidate.entity_revision)
+    )
+
+
 def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = MediaOpportunityFrozenPayload.model_validate_json(event.payload_json)
     opportunity = payload.opportunity
@@ -6329,6 +6382,9 @@ def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> Reducer
                 candidate_id=candidate.candidate_id,
                 expected_status="available",
                 next_status="selected",
+            ),
+            "media_declined_candidate_revisions": _without_media_decline(
+                state.media_declined_candidate_revisions, candidate=candidate
             ),
             "media_opportunities": (*state.media_opportunities, opportunity),
         }
@@ -7446,10 +7502,21 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
         if not isinstance(outcome_ref, str) or not outcome_ref:
             raise ValueError("life ecology completion requires a runtime outcome")
         prior = state.life_ecology_schedule
+        is_technical_failure = (
+            outcome_ref == "life-ecology:failed_safe"
+            or outcome_ref.startswith("life-ecology:technical_failure.")
+        )
         failures = (
             (prior.consecutive_failures if prior is not None else 0) + 1
-            if outcome_ref == "life-ecology:failed_safe"
+            if is_technical_failure
             else 0
+        )
+        last_failure_code = (
+            outcome_ref.removeprefix("life-ecology:technical_failure.")
+            if outcome_ref.startswith("life-ecology:technical_failure.")
+            else "failed_safe"
+            if outcome_ref == "life-ecology:failed_safe"
+            else None
         )
         delay_seconds = (
             (600, 1800, 7200)[min(max(failures, 1), 3) - 1]
@@ -7469,6 +7536,7 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
             last_completed_at=completed_at,
             next_consideration_at=completed_at + timedelta(seconds=delay_seconds),
             consecutive_failures=failures,
+            last_failure_code=last_failure_code,
         )
         return state.model_copy(
             update={
@@ -10762,6 +10830,7 @@ def make_projection(
         appearance_states=state.appearance_states,
         visible_physical_states=state.visible_physical_states,
         photo_candidates=state.photo_candidates,
+        media_declined_candidate_revisions=state.media_declined_candidate_revisions,
         media_opportunities=state.media_opportunities,
         media_plans=state.media_plans,
         media_unrenderable_opportunity_ids=state.media_unrenderable_opportunity_ids,
