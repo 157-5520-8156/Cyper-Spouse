@@ -1280,6 +1280,25 @@ async def test_qq_c2c_scheduler_diagnostics_record_real_pass_progress() -> None:
 
 
 @pytest.mark.asyncio
+async def test_qq_scheduler_health_is_failing_when_latest_pass_failed() -> None:
+    diagnostics = QQC2CSchedulerDiagnostics(interval_seconds=30)
+    task = asyncio.create_task(asyncio.sleep(60))
+    diagnostics.task = task
+    diagnostics.passes_started = 3
+    diagnostics.passes_completed = 3
+    diagnostics.failures = 2
+    diagnostics.last_success_at = NOW
+    diagnostics.last_completed_at = NOW + timedelta(seconds=30)
+    diagnostics.last_error = "ValueError"
+    try:
+        snapshot = diagnostics.snapshot(now=NOW + timedelta(seconds=31))
+        assert snapshot["status"] == "failing"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_qq_health_reports_a_due_model_consideration_without_mutating_a_draw(
     tmp_path: Path,
 ) -> None:

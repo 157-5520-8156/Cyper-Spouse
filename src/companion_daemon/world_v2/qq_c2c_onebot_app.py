@@ -73,7 +73,10 @@ class QQC2CSchedulerDiagnostics:
             status = "starting"
         elif stale:
             status = "stale"
-        elif self.last_success_at is None:
+        elif self.last_error is not None and (
+            self.last_success_at is None
+            or self.last_completed_at > self.last_success_at
+        ):
             status = "failing"
         else:
             status = "running"

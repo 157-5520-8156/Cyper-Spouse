@@ -165,6 +165,10 @@ def _validate_proactive_grounding(*, draft: ProactiveDraft, request: ModelInput)
             )
 
 
+class _ProactiveSourceBindingError(ValueError):
+    """A claimed proactive opportunity no longer binds committed authority."""
+
+
 class ProactiveDraftAdapter:
     """Materialize a source-bound expression proposal from a model-only draft."""
 
@@ -608,7 +612,6 @@ def _proactive_source_frame(model_content_json: str) -> dict[str, object] | None
             "thread",
             "commitment",
             "spontaneous_contact",
-            "response_gap",
             "ambient_presence",
             "situation_change",
         }:
@@ -641,7 +644,6 @@ class ProactiveOpportunity(FrozenModel):
         "thread",
         "commitment",
         "spontaneous_contact",
-        "response_gap",
         "ambient_presence",
         "situation_change",
     ]
@@ -696,7 +698,9 @@ class ProactiveDeliberationTurn:
             or committed_ref.world_revision != opportunity.source_world_revision
             or stored[1].ledger_sequence > cursor.ledger_sequence
         ):
-            raise ValueError("proactive source is not exact committed authority")
+            raise _ProactiveSourceBindingError(
+                "proactive source is not exact committed authority"
+            )
         projection = await self._project_at(cursor)
         event = stored[0]
         head = None
@@ -824,23 +828,11 @@ class ProactiveDeliberationTurn:
                 )
             )
         else:
-            manifest = next(
-                (
-                    item
-                    for item in projection.expression_plan_manifests
-                    if item.plan_id == opportunity.source_id
-                ),
-                None,
-            )
-            valid_source = (
-                event.event_type == "AcceptanceRecorded"
-                and manifest is not None
-                and manifest.acceptance_event_ref == event.event_id
-                and manifest.acceptance_event_payload_hash == event.payload_hash
-                and manifest.response_expectation is not None
-            )
+            valid_source = False
         if not valid_source:
-            raise ValueError("proactive source does not bind the current domain head")
+            raise _ProactiveSourceBindingError(
+                "proactive source does not bind the current domain head"
+            )
         opportunity_context = (
             "Verified shareable settled occurrence: "
             + _canonical(
@@ -876,21 +868,7 @@ class ProactiveDeliberationTurn:
                         + _canonical(opportunity.stimulus_event_refs)
                     )
                     if opportunity.source_kind == "situation_change"
-                    else
-                    (
-                    "A delivered expression carried an accepted response expectation: "
-                    + _canonical(
-                        {
-                            "hoped_response": manifest.response_expectation.hoped_response,
-                            "pressure_bp": manifest.response_expectation.pressure_bp,
-                            "importance_bp": manifest.response_expectation.importance_bp,
-                        }
-                    )
-                    if opportunity.source_kind == "response_gap"
-                    and manifest is not None
-                    and manifest.response_expectation is not None
                     else "A verified proactive opportunity exists."
-                    )
                     )
                 )
             )
@@ -1160,6 +1138,17 @@ class ProactiveActionRuntime:
                     opportunity=opportunity,
                     cursor=self._cursor(current),
                     attempt_id=model_attempt_id,
+                )
+            except _ProactiveSourceBindingError:
+                await self._complete(
+                    process=active,
+                    opportunity=opportunity,
+                    outcome="source-binding-invalid",
+                )
+                return ProactiveActionRunResult(
+                    status="failed_safe",
+                    source_ref=opportunity.source_event_ref,
+                    reason_code="proactive.source_binding_invalid",
                 )
             except ConcurrencyConflict:
                 return ProactiveActionRunResult(

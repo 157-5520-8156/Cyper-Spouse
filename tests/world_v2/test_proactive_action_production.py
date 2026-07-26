@@ -710,7 +710,13 @@ class _DeliveredExecutor:
 
 
 def _make_proactive_runtime(
-    *, ledger, issuer, model, owner="worker:proactive", identity_frame=None
+    *,
+    ledger,
+    issuer,
+    model,
+    owner="worker:proactive",
+    identity_frame=None,
+    social_initiative=None,
 ):  # type: ignore[no-untyped-def]
     adapter = ProactiveDraftAdapter(
         model=model, target="user:primary", identity_frame=identity_frame
@@ -741,6 +747,7 @@ def _make_proactive_runtime(
             category="proactive",
         ),
         owner_id=owner,
+        social_initiative=social_initiative,
     )
     return runtime, turn
 
@@ -1537,6 +1544,50 @@ async def test_technical_failures_retry_at_ten_thirty_then_capped_one_twenty_min
 
 
 @pytest.mark.asyncio
+async def test_invalid_proactive_source_after_claim_is_terminal_not_a_scheduler_crash() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD, accepted_batch_issuer=issuer)
+    source = _event("event:world:invalid-proactive-source", "WorldStarted", {})
+    _commit(ledger, source)
+    source_ref = next(
+        item
+        for item in ledger.project().committed_world_event_refs
+        if item.event_id == source.event_id
+    )
+    opportunity = ProactiveOpportunity(
+        source_kind="spontaneous_contact",
+        source_id="not-an-observation",
+        source_event_ref=source.event_id,
+        source_event_hash=source.payload_hash,
+        source_world_revision=source_ref.world_revision,
+        trace_id=source.trace_id,
+        correlation_id=source.correlation_id,
+        created_at=source.created_at,
+        consideration_id="consideration:invalid-proactive-source",
+    )
+
+    class FixedInitiative:
+        async def next_opportunity(self, _projection):  # type: ignore[no-untyped-def]
+            return opportunity
+
+    runtime, _turn = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=issuer,
+        model=_DraftModel("silent"),
+        social_initiative=FixedInitiative(),
+    )
+
+    assert (await runtime.drain_one()).status == "opened"
+    result = await runtime.drain_one()
+
+    assert result.status == "failed_safe"
+    assert result.reason_code == "proactive.source_binding_invalid"
+    process = ledger.project().trigger_processes[-1]
+    assert process.state == "terminal"
+    assert process.runtime_outcome_ref == "proactive:source-binding-invalid"
+
+
+@pytest.mark.asyncio
 async def test_new_user_observation_supersedes_an_old_technical_retry() -> None:
     ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
     malformed = _MalformedProactiveModel()
@@ -1663,6 +1714,20 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         assert waiting.status == "retry_wait"
         assert waiting.retry_ordinal == 1
         assert malformed.calls == 2
+        retry_due = first_due + timedelta(minutes=10)
+        await app.tick(
+            tick_id="tick:backoff:retry-due",
+            logical_time_from=second_epoch,
+            logical_time_to=retry_due,
+            observed_at=retry_due,
+            trace_id="trace:backoff:retry-due",
+            causation_id="scheduler:test",
+            correlation_id="conversation:backoff",
+            reason="test_idle",
+        )
+        assert (await app.drain_background_once()).status == "opened"
+        assert (await app.drain_background_once()).status == "failed_safe"
+        assert malformed.calls == 4
     finally:
         app.close()
 

@@ -71,7 +71,6 @@ class SocialInitiativePolicy(FrozenModel):
 class SocialInitiativeOpportunity(FrozenModel):
     source_kind: Literal[
         "spontaneous_contact",
-        "response_gap",
         "ambient_presence",
         "situation_change",
     ]
@@ -505,6 +504,19 @@ class SocialInitiativeCompiler:
         )
         if source_kind is None:
             return None
+        source_id = f"retry:{source_ref.event_id}"
+        if source_kind == "spontaneous_contact":
+            message = next(
+                (
+                    item
+                    for item in projection.message_observations
+                    if item.world_revision == source_ref.world_revision
+                ),
+                None,
+            )
+            if message is None:
+                return None
+            source_id = message.observation_id
         stimulus_event_refs = (
             tuple(
                 item.event_id
@@ -521,7 +533,7 @@ class SocialInitiativeCompiler:
         )
         return await self._from_source(
             source_kind=source_kind,
-            source_id=f"retry:{source_ref.event_id}",
+            source_id=source_id,
             source_event_ref=source_ref.event_id,
             source_world_revision=source_ref.world_revision,
             consideration_id=process.trigger_ref.removeprefix(
@@ -530,86 +542,6 @@ class SocialInitiativeCompiler:
             scheduled_for=source_ref.logical_time,
             cadence_reason_codes=("technical_failure:retry",),
             stimulus_event_refs=stimulus_event_refs,
-        )
-
-    async def _response_gap(self, projection, logical_time: datetime):
-        candidates = []
-        for manifest in projection.expression_plan_manifests:
-            expectation = manifest.response_expectation
-            if expectation is None or not (
-                expectation.not_before <= logical_time < expectation.expires_at
-            ):
-                continue
-            plan = next(
-                (item for item in projection.expression_plans if item.plan_id == manifest.plan_id),
-                None,
-            )
-            beat = next(
-                (item for item in manifest.beats if item.beat_id == expectation.source_beat_id),
-                None,
-            )
-            action = next(
-                (
-                    item
-                    for item in projection.actions
-                    if beat is not None and item.action_id == beat.action.action_id
-                ),
-                None,
-            )
-            accepted_receipt = next(
-                (
-                    item
-                    for item in projection.execution_receipts
-                    if action is not None
-                    and item.action_id == action.action_id
-                    and item.observed_state in {"provider_accepted", "delivered"}
-                ),
-                None,
-            )
-            delivery_ready = (
-                action is not None
-                and accepted_receipt is not None
-                and (
-                    action.state == "delivered"
-                    if expectation.delivery_requirement == "confirmed_delivered"
-                    else action.state in {"provider_accepted", "delivered"}
-                )
-            )
-            if (
-                plan is None
-                or plan.state not in {"authorized", "completed"}
-                or beat is None
-                or not delivery_ready
-            ):
-                continue
-            # A later inbound observation is not, by itself, proof that the
-            # person answered or cancelled the expected continuation.  The
-            # proactive deliberation lane must still be allowed to consider
-            # the source-bound opportunity; it can choose to acknowledge the
-            # new message, continue the earlier thought, defer, or stay
-            # silent.  Treating every later message as an answer makes the
-            # character lose the human case where the other person sends an
-            # unrelated message while she still has something to say.
-            candidates.append((expectation.not_before, manifest))
-        if not candidates:
-            return None
-        _due, manifest = min(candidates, key=lambda item: (item[0], item[1].acceptance_event_ref))
-        context_revision = (
-            projection.message_observations[-1].world_revision
-            if projection.message_observations
-            else manifest.recorded_at_world_revision
-        )
-        return await self._from_source(
-            source_kind="response_gap",
-            source_id=manifest.plan_id,
-            source_event_ref=manifest.acceptance_event_ref,
-            source_world_revision=manifest.recorded_at_world_revision,
-            consideration_id=(
-                "consideration:social-initiative:"
-                + hashlib.sha256(
-                    f"response_gap:{manifest.acceptance_event_ref}:{context_revision}".encode()
-                ).hexdigest()
-            ),
         )
 
     async def _spontaneous_contact(self, projection, logical_time: datetime):
