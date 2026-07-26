@@ -163,6 +163,15 @@ class _IdentityAndCounterpartReview(FrozenModel):
     brief_reason: str = Field(min_length=1, max_length=240)
 
 
+class _ContextualClaimSupportReview(FrozenModel):
+    """Independent semantic closure for one emergency factual explanation."""
+
+    decision: Literal["supported", "unsupported"]
+    unsupported_claim_indexes: tuple[int, ...] = Field(default=(), max_length=8)
+    undeclared_fact_fragments: tuple[str, ...] = Field(default=(), max_length=8)
+    brief_reason: str = Field(min_length=1, max_length=240)
+
+
 class MeteredChatCompletionModel(ChatCompletionModel, Protocol):
     """Optional provider seam for a response plus immutable usage evidence.
 
@@ -198,9 +207,20 @@ class ChatModelDeliberationAdapter:
         expression_capabilities: ExpressionDraftCapabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES,
         identity_frame: CompanionIdentityFrame | None = None,
         semantic_boundary_reviewer: ChatCompletionModel | None = None,
+        recovery_prompt_mode: Literal["ordinary", "contextual_failure"] = "ordinary",
+        contextual_grounding_reviewer: ChatCompletionModel | None = None,
     ) -> None:
         if not 0.0 <= temperature <= 2.0:
             raise ValueError("proposal adapter temperature must be between 0 and 2")
+        if recovery_prompt_mode not in {"ordinary", "contextual_failure"}:
+            raise ValueError("proposal adapter recovery prompt mode is invalid")
+        if (
+            recovery_prompt_mode == "contextual_failure"
+            and contextual_grounding_reviewer is None
+        ):
+            raise ValueError(
+                "contextual failure recovery requires an independent grounding review"
+            )
         inferred = str(getattr(model, "model", "")).strip()
         self._model = model
         self._model_id = (model_id or inferred or type(model).__name__)[:256]
@@ -208,6 +228,8 @@ class ChatModelDeliberationAdapter:
         self._expression_capabilities = expression_capabilities
         self._identity_frame = identity_frame
         self._semantic_boundary_reviewer = semantic_boundary_reviewer
+        self._recovery_prompt_mode = recovery_prompt_mode
+        self._contextual_grounding_reviewer = contextual_grounding_reviewer
 
     async def propose(self, request: ModelInput) -> ModelOutput:
         return await self._complete(
@@ -266,6 +288,12 @@ class ChatModelDeliberationAdapter:
                 complete_json(messages, temperature=temperature)
                 if callable(complete_json)
                 else self._model.complete(messages, temperature=temperature)
+            )
+        if quick_recovery and self._recovery_prompt_mode == "contextual_failure":
+            self._validate_contextual_failure_draft(raw)
+            await self._review_contextual_failure_grounding(
+                request=request,
+                raw=raw,
             )
         episode_disposition = None
         try:
@@ -368,6 +396,136 @@ class ChatModelDeliberationAdapter:
             usage=usage,
             episode_disposition=episode_disposition,
         )
+
+    @staticmethod
+    def _validate_contextual_failure_draft(raw: str) -> None:
+        """Require one actual World-grounded reason before emergency delivery."""
+
+        value = _parse_json_object(raw)
+        wrapped = value.get("expression_draft")
+        if set(value) == {"expression_draft"} and isinstance(wrapped, dict):
+            value = wrapped
+        draft = ExpressionDraft.model_validate_json(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+            strict=True,
+        )
+        if not any(
+            claim.scope in {"current_world", "past_world"}
+            for claim in draft.world_claims
+        ):
+            raise ValueError(
+                "contextual failure recovery requires a current/past World claim"
+            )
+
+    async def _review_contextual_failure_grounding(
+        self,
+        *,
+        request: ModelInput,
+        raw: str,
+    ) -> None:
+        """Reject plausible-but-unsupported excuses even when their refs exist."""
+
+        reviewer = self._contextual_grounding_reviewer
+        if reviewer is None:  # Constructor keeps this fail-closed.
+            raise ValueError("contextual grounding reviewer is unavailable")
+        value = _parse_json_object(raw)
+        wrapped = value.get("expression_draft")
+        if set(value) == {"expression_draft"} and isinstance(wrapped, dict):
+            value = wrapped
+        draft = ExpressionDraft.model_validate_json(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+            strict=True,
+        )
+        claims = draft.world_claims
+        visible_text = "\n".join(
+            beat.text for beat in draft.beats if beat.text is not None
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Independently review the complete visible reply and every supplied factual "
+                    "claim against the cited pinned Context content. Every externally checkable "
+                    "statement about current life, past events, shared history, the counterpart, "
+                    "or stable identity must both be declared as a claim and be directly "
+                    "supported by its cited Context source. Subjective feelings and connective "
+                    "wording do not require claims. A valid source ref alone is not enough: "
+                    "plausible elaboration, an unstated occurrence, changed activity, or invented "
+                    "timing is unsupported. Return exactly one JSON object with decision "
+                    "(supported or unsupported), unsupported_claim_indexes (zero-based), "
+                    "undeclared_fact_fragments (short exact excerpts from visible_text), and "
+                    "brief_reason. Do not rewrite the message."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "claims": tuple(
+                            {
+                                "claim_index": index,
+                                **claim.model_dump(mode="json"),
+                            }
+                            for index, claim in enumerate(claims)
+                        ),
+                        "visible_text": visible_text,
+                        "pinned_context": json.loads(
+                            compact_recovery_model_facing_context(
+                                request.model_content_json
+                            )
+                        ),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+        reviewed_raw = await _bounded_review_call(
+            reviewer,
+            messages,
+            temperature=0.0,
+        )
+        review = _ContextualClaimSupportReview.model_validate_json(
+            json.dumps(
+                _parse_json_object(reviewed_raw),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            strict=True,
+        )
+        indexes = review.unsupported_claim_indexes
+        undeclared = review.undeclared_fact_fragments
+        if (
+            any(
+                isinstance(index, bool)
+                or index < 0
+                or index >= len(claims)
+                for index in indexes
+            )
+            or len(indexes) != len(set(indexes))
+        ):
+            raise ValueError("contextual grounding review returned invalid claim indexes")
+        if (
+            any(
+                not fragment.strip()
+                or fragment not in visible_text
+                for fragment in undeclared
+            )
+            or len(undeclared) != len(set(undeclared))
+        ):
+            raise ValueError(
+                "contextual grounding review returned invalid undeclared fragments"
+            )
+        if review.decision == "supported" and (indexes or undeclared):
+            raise ValueError("supported contextual review cannot reject reply content")
+        if review.decision == "unsupported" and not (indexes or undeclared):
+            raise ValueError(
+                "unsupported contextual review must identify a claim or visible fragment"
+            )
+        if review.decision != "supported":
+            raise ValueError(
+                "contextual failure recovery claim is not supported by pinned World context"
+            )
 
     async def _repair_structural_violation(
         self,
@@ -580,6 +738,15 @@ class ChatModelDeliberationAdapter:
             "fulfilled, superseded, still_pending, or uncertain; do not extend its expiry. "
             "Return JSON only, without Markdown or a wrapper."
         )
+        if quick_recovery and self._recovery_prompt_mode == "contextual_failure":
+            system += (
+                " Emergency contextual recovery is enabled after the ordinary provider routes "
+                "failed. Continue as the same character, not as an error handler. Refer only to "
+                "a source-backed current/recent situation that naturally explains the missed "
+                "beat, and declare the exact current_world or past_world claim source refs. "
+                "If no such source exists, return no invented substitute. Do not mention "
+                "providers, prompts, retries, systems, evidence, or this recovery mode."
+            )
         request_material = request.model_dump(mode="json")
         request_material["model_content_json"] = (
             compact_recovery_model_facing_context(request.model_content_json)
@@ -994,6 +1161,18 @@ def _proposal_from_model_text(
             or draft.response_expectation is not None
         ):
             raise ValueError("quick recovery ExpressionDraft must be one immediate text beat")
+        if draft.world_claims:
+            # A claim-bearing recovery cannot use the legacy MinimalReply
+            # compatibility envelope: that envelope has no place to retain
+            # claim declarations and historically discarded them before
+            # source closure.  Materialize the full proposal so the same
+            # Context-token and capability checks as an ordinary expression
+            # remain authoritative.
+            return materialize_expression_draft(
+                value=value,
+                request=request,
+                capabilities=capabilities,
+            ).model_dump(mode="json")
         value = {
             "response_text": draft.beats[0].text,
             # Expression stance is deliberately open vocabulary.  The legacy

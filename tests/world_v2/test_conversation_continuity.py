@@ -97,6 +97,75 @@ def test_compile_separates_pending_interaction_from_replied_history_and_memory()
     assert result.rank_overrides == frozenset()
 
 
+def test_current_cue_prefetches_only_the_source_bound_associative_memory() -> None:
+    earlier = _dialogue(
+        "earlier",
+        "我最近开始很喜欢喝乌龙茶。",
+        speaker="counterpart",
+        at=NOW - timedelta(hours=5),
+        sequence=1,
+    )
+    current = _dialogue(
+        "current",
+        "你还记得我之前说过喜欢乌龙茶吗？",
+        speaker="counterpart",
+        at=NOW,
+        sequence=2,
+    )
+    candidates = (
+        ContinuityRetrievalCandidate(
+            slice_name="active_memory_candidates",
+            item_ref="memory:oolong",
+            texts=("用户最近开始喜欢喝乌龙茶。",),
+        ),
+        ContinuityRetrievalCandidate(
+            slice_name="active_memory_candidates",
+            item_ref="memory:coffee",
+            texts=("用户平时喜欢喝手冲咖啡。",),
+        ),
+    )
+    compiler = ConversationContinuityCompiler()
+
+    first = compiler.compile(
+        dialogue=(earlier, current),
+        trigger_ref="event:dialogue:current",
+        retrieval_candidates=candidates,
+    )
+    replayed = compiler.compile(
+        dialogue=(earlier, current),
+        trigger_ref="event:dialogue:current",
+        retrieval_candidates=tuple(reversed(candidates)),
+    )
+
+    expected = frozenset({("active_memory_candidates", "memory:oolong")})
+    assert first.rank_overrides == expected
+    assert replayed.rank_overrides == expected
+
+
+def test_one_generic_two_character_overlap_does_not_prefetch_a_memory() -> None:
+    current = _dialogue(
+        "current",
+        "今天有点忙。",
+        speaker="counterpart",
+        at=NOW,
+        sequence=1,
+    )
+
+    result = ConversationContinuityCompiler().compile(
+        dialogue=(current,),
+        trigger_ref="event:dialogue:current",
+        retrieval_candidates=(
+            ContinuityRetrievalCandidate(
+                slice_name="active_memory_candidates",
+                item_ref="memory:coffee",
+                texts=("今天去喝咖啡。",),
+            ),
+        ),
+    )
+
+    assert result.rank_overrides == frozenset()
+
+
 def test_delayed_reply_does_not_acknowledge_a_newer_stuck_message() -> None:
     replied = _dialogue(
         "replied",

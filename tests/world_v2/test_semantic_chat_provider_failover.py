@@ -33,3 +33,13 @@ def test_world_v2_fallback_model_defaults_to_official_high_volume_tier() -> None
     settings = Settings(_env_file=None)
 
     assert settings.world_v2_fallback_model == "gpt-5.6-luna"
+    assert settings.world_v2_contextual_failsafe_enabled is False
+
+
+def test_contextual_failsafe_requires_an_explicit_deployment_switch() -> None:
+    settings = Settings(
+        _env_file=None,
+        WORLD_V2_CONTEXTUAL_FAILSAFE_ENABLED="true",
+    )
+
+    assert settings.world_v2_contextual_failsafe_enabled is True

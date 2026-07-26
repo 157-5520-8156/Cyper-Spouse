@@ -108,12 +108,17 @@ class ScenarioVerificationError(AssertionError):
 # Observation rather than reply delivery time.  Accepted reply authority now
 # contributes that causal claim to recent dialogue, so multi-turn Context and
 # downstream audit identities legitimately shift while predicates stay fixed.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.14"
+# ``.15`` records the first source-bound associative-recall policy identity in
+# the Context rank digest.  The narrow lexical prefetch can change which
+# already-authoritative Fact/Memory/Thread evidence receives the bounded
+# working-context floor; it does not change scenario predicates or grant new
+# fact/action authority.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.15"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "07247dbd6192cde3cf936f7ae06248a607d856d2bcd31116dbddc902a44da6da"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "97c02b97193fb5910c3b8ea95e5c809cc18571d1b7569d7931d72a84df42c968"
 
 
 class _FixedScenarioRouter:

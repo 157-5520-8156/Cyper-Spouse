@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .associative_recall import AssociativeRecallCandidate, AssociativeRecallCompiler
 from .recent_dialogue import RecentDialogueItem
 
 
@@ -20,23 +21,7 @@ class ConversationContinuitySelection:
     rank_overrides: frozenset[tuple[str, str]] = frozenset()
 
 
-@dataclass(frozen=True, slots=True)
-class ContinuityRetrievalCandidate:
-    """One source-bound Context item that can be reactivated by dialogue cues."""
-
-    slice_name: str
-    item_ref: str
-    texts: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        if self.slice_name not in {
-            "open_threads",
-            "relevant_facts",
-            "active_memory_candidates",
-        }:
-            raise ValueError("continuity retrieval candidate has an unsupported slice")
-        if not self.item_ref or not self.texts or any(not text for text in self.texts):
-            raise ValueError("continuity retrieval candidate requires bounded source text")
+ContinuityRetrievalCandidate = AssociativeRecallCandidate
 
 
 class ConversationContinuityCompiler:
@@ -60,8 +45,10 @@ class ConversationContinuityCompiler:
             raise ValueError("conversation continuity companion budget is invalid")
         self._max_items = max_items
         self._max_pending = max_pending_items
-        self._max_reactivated = max_reactivated_items
         self._max_companion = max_companion_items
+        self._associative_recall = AssociativeRecallCompiler(
+            max_items=max_reactivated_items
+        )
 
     def compile(
         self,
@@ -171,14 +158,13 @@ class ConversationContinuityCompiler:
             )
             for item, reasons, _ in ranked
         )
-        # Context facts, memories and threads already carry their own bounded
-        # source authority.  The expression model receives those candidates
-        # as advisory material and decides what is relevant; this compiler
-        # must not promote them by matching surface words.
-        del retrieval_candidates
+        rank_overrides = self._associative_recall.compile(
+            cue_text=current.text,
+            candidates=retrieval_candidates,
+        ).item_refs
         return ConversationContinuitySelection(
             dialogue=selected_dialogue,
-            rank_overrides=frozenset(),
+            rank_overrides=rank_overrides,
         )
 
 

@@ -15,6 +15,7 @@ from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .associative_recall import ASSOCIATIVE_PREFETCH_POLICY_VERSION
 from .context_resolver import (
     ContextCompileQuery,
     TrustedInternalContextResolver,
@@ -171,6 +172,7 @@ RANK_POLICY_DIGEST = _hash(
         "domain_importance_bp": RANK_DOMAIN_IMPORTANCE_BP,
         "weights_bp": RANK_WEIGHT_BP,
         "recency_window_seconds": RANK_RECENCY_WINDOW_SECONDS,
+        "associative_prefetch_policy_version": ASSOCIATIVE_PREFETCH_POLICY_VERSION,
         "tie_break": "item_ref_ascending",
     }
 )

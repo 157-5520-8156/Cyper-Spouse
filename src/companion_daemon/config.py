@@ -195,6 +195,37 @@ class Settings(BaseSettings):
     world_v2_fallback_model: str = Field(
         default="gpt-5.6-luna", alias="WORLD_V2_FALLBACK_MODEL"
     )
+    # Experimental third, local role-model lane after the ordinary primary
+    # and recovery providers both fail.  Keep disabled while reliability
+    # testing needs technical failures to remain directly observable.
+    world_v2_contextual_failsafe_enabled: bool = Field(
+        default=False,
+        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_ENABLED",
+    )
+    world_v2_contextual_failsafe_base_url: str = Field(
+        default="http://127.0.0.1:8188/v1",
+        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_BASE_URL",
+    )
+    world_v2_contextual_failsafe_model: str = Field(
+        default="mlx-community/Qwen3-4B-Instruct-4bit",
+        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_MODEL",
+    )
+    world_v2_contextual_failsafe_api_key: str = Field(
+        default="local",
+        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_API_KEY",
+    )
+    world_v2_contextual_failsafe_reviewer_base_url: str = Field(
+        default="http://127.0.0.1:8288/v1",
+        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_BASE_URL",
+    )
+    world_v2_contextual_failsafe_reviewer_model: str = Field(
+        default="mlx-community/Qwen3-1.7B-Instruct-4bit",
+        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_MODEL",
+    )
+    world_v2_contextual_failsafe_reviewer_api_key: str = Field(
+        default="local",
+        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_API_KEY",
+    )
     world_v2_expression_episode_mode: Literal["off", "shadow", "on"] = Field(
         default="shadow", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
     )

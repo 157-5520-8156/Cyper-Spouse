@@ -50,12 +50,15 @@ from .model_facing_context import compact_chat_model_facing_context
 from .production_reliability_metrics import (
     record_backup_recovery,
     record_claim_repair,
+    record_failsafe,
     record_shape_repair,
 )
 
 
 _MAX_PENDING_DRAFTS = 64
 _RECOVERY_MODEL_TIMEOUT_SECONDS = 2.5
+_CONTEXTUAL_FAILSAFE_TIMEOUT_SECONDS = 3.0
+_CONTEXTUAL_FAILSAFE_VERSION = "contextual-failure-recovery.1"
 # One corrective completion for a claim-bookkeeping near-miss.  A repaired
 # genuine reply a few seconds late reads far more human than an instant
 # canned acknowledgement, but the wait stays bounded.
@@ -567,7 +570,13 @@ class SingleCallExpressionAdapter:
         ):
             self._owner._recovery_attempted.add(key)
             try:
-                output = await recovery.recover(request, failure_code)
+                recovery_timeout = fit_secondary_call_timeout(
+                    _RECOVERY_MODEL_TIMEOUT_SECONDS
+                )
+                if recovery_timeout is None:
+                    raise TimeoutError("ordinary recovery budget exhausted")
+                async with asyncio.timeout(recovery_timeout):
+                    output = await recovery.recover(request, failure_code)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -579,6 +588,27 @@ class SingleCallExpressionAdapter:
             else:
                 record_backup_recovery()
                 return output
+        contextual = self._owner._contextual_failsafe_expression
+        if contextual is not None:
+            try:
+                async with asyncio.timeout(_CONTEXTUAL_FAILSAFE_TIMEOUT_SECONDS):
+                    output = await contextual.recover(
+                        request,
+                        f"ordinary_routes_exhausted:{failure_code}"[:64],
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "contextual failure recovery failed: %s: %s",
+                    type(exc).__name__,
+                    str(exc)[:240],
+                )
+            else:
+                record_failsafe()
+                return output.model_copy(
+                    update={"model_version": _CONTEXTUAL_FAILSAFE_VERSION}
+                )
         raise RuntimeError(
             "model-owned expression unavailable after configured recovery "
             f"({failure_code[:64]})"
@@ -607,6 +637,9 @@ class SingleCallInboundCognition:
         thinking_model: ChatCompletionModel | None = None,
         appraisal_model: ChatCompletionModel | None = None,
         recovery_model: ChatCompletionModel | None = None,
+        contextual_failsafe_model: ChatCompletionModel | None = None,
+        contextual_failsafe_reviewer_model: ChatCompletionModel | None = None,
+        contextual_failsafe_enabled: bool = False,
         flash_model_id: str | None = None,
         thinking_model_id: str | None = None,
         temperature: float = 0.7,
@@ -673,6 +706,54 @@ class SingleCallInboundCognition:
                 semantic_boundary_reviewer=None,
             )
             if self._recovery_model is not None
+            else None
+        )
+        if contextual_failsafe_enabled and (
+            contextual_failsafe_model is None
+            or contextual_failsafe_reviewer_model is None
+        ):
+            raise ValueError(
+                "contextual failsafe requires separate generation and reviewer models"
+            )
+        if (
+            contextual_failsafe_enabled
+            and contextual_failsafe_model is contextual_failsafe_reviewer_model
+        ):
+            raise ValueError(
+                "contextual failsafe generation and reviewer must be independent"
+            )
+        if contextual_failsafe_enabled:
+            generator_identity = str(
+                getattr(contextual_failsafe_model, "model", "")
+            ).strip()
+            reviewer_identity = str(
+                getattr(contextual_failsafe_reviewer_model, "model", "")
+            ).strip()
+            if generator_identity and generator_identity == reviewer_identity:
+                raise ValueError(
+                    "contextual failsafe reviewer must use a distinct model identity"
+                )
+        self._contextual_failsafe_expression = (
+            ChatModelDeliberationAdapter(
+                model=contextual_failsafe_model,
+                model_id=(
+                    "contextual-failure-recovery:"
+                    + str(
+                        getattr(
+                            contextual_failsafe_model,
+                            "model",
+                            type(contextual_failsafe_model).__name__,
+                        )
+                    )
+                )[:256],
+                temperature=temperature,
+                expression_capabilities=expression_capabilities,
+                identity_frame=identity_frame,
+                semantic_boundary_reviewer=None,
+                recovery_prompt_mode="contextual_failure",
+                contextual_grounding_reviewer=contextual_failsafe_reviewer_model,
+            )
+            if contextual_failsafe_enabled
             else None
         )
         self._fallback_appraisal = AppraisalDraftDeliberationAdapter(model=flash_model)

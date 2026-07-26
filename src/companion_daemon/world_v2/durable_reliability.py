@@ -47,6 +47,8 @@ def _is_failsafe_audit(audit: dict[str, Any]) -> bool:
     return (
         "local-expression-failsafe" in model_id
         or "local-expression-failsafe" in model_version
+        or "contextual-failure-recovery" in model_id
+        or "contextual-failure-recovery" in model_version
     )
 
 

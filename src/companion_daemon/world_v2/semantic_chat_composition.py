@@ -66,6 +66,8 @@ def build_semantic_chat_composition(
     flash_model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
+    contextual_failsafe_model: ChatCompletionModel | None = None,
+    contextual_failsafe_reviewer_model: ChatCompletionModel | None = None,
     model_id_prefix: str,
     expression_capabilities: ExpressionDraftCapabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES,
 ) -> SemanticChatComposition:
@@ -160,6 +162,35 @@ def build_semantic_chat_composition(
         )
         owned.append(local_advisory_model)
 
+    if (
+        settings.world_v2_contextual_failsafe_enabled
+        and contextual_failsafe_model is None
+    ):
+        # This is an explicitly dormant-by-default third provider, not a
+        # local template.  A separately configured role checkpoint keeps its
+        # expression capability distinct from the appraisal extractor; its
+        # output still passes the ordinary ExpressionDraft source-closure gate.
+        contextual_failsafe_model = OpenAICompatibleChatModel(
+            api_key=settings.world_v2_contextual_failsafe_api_key,
+            base_url=settings.world_v2_contextual_failsafe_base_url,
+            model=settings.world_v2_contextual_failsafe_model,
+            reasoning_effort="none",
+            max_completion_tokens=384,
+        )
+        owned.append(contextual_failsafe_model)
+    if (
+        settings.world_v2_contextual_failsafe_enabled
+        and contextual_failsafe_reviewer_model is None
+    ):
+        contextual_failsafe_reviewer_model = OpenAICompatibleChatModel(
+            api_key=settings.world_v2_contextual_failsafe_reviewer_api_key,
+            base_url=settings.world_v2_contextual_failsafe_reviewer_base_url,
+            model=settings.world_v2_contextual_failsafe_reviewer_model,
+            reasoning_effort="none",
+            max_completion_tokens=256,
+        )
+        owned.append(contextual_failsafe_reviewer_model)
+
     catalog = default_matrix_catalog()
     character = load_character(str(settings.character_path))
     aliases_raw = character.identity.get("nicknames", ())
@@ -194,6 +225,9 @@ def build_semantic_chat_composition(
         flash_model=flash_model,
         thinking_model=thinking_model,
         appraisal_model=local_appraisal_model,
+        contextual_failsafe_model=contextual_failsafe_model,
+        contextual_failsafe_reviewer_model=contextual_failsafe_reviewer_model,
+        contextual_failsafe_enabled=settings.world_v2_contextual_failsafe_enabled,
         flash_model_id=str(getattr(flash_model, "model", f"{model_id_prefix}-flash")),
         thinking_model_id=(
             str(getattr(thinking_model, "model", f"{model_id_prefix}-thinking"))
