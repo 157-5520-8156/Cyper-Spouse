@@ -149,7 +149,14 @@ def _proactive_draft(text: str, *, claims: list[dict[str, object]] | None = None
 @pytest.mark.asyncio
 async def test_proactive_history_claim_is_corrected_once_against_pinned_sources() -> None:
     model = _ProactiveReplySequence([
-        _proactive_draft("你之前说去成都看熊猫，后来怎么样？"),
+        _proactive_draft(
+            "你之前说去成都看熊猫，后来怎么样？",
+            claims=[{
+                "claim_text": "你之前说去成都看熊猫",
+                "scope": "counterpart_history",
+                "source_refs": ["event:user:chengdu:not-in-context"],
+            }],
+        ),
         _proactive_draft(
             "你之前说深圳不太好玩，后来回想起来还是这个感觉吗？",
             claims=[{
@@ -177,8 +184,22 @@ async def test_proactive_history_claim_is_corrected_once_against_pinned_sources(
 @pytest.mark.asyncio
 async def test_proactive_history_claim_is_rejected_after_one_bad_correction() -> None:
     model = _ProactiveReplySequence([
-        _proactive_draft("你之前说去成都看熊猫，后来怎么样？"),
-        _proactive_draft("你之前说成都熊猫很好玩，对吧？"),
+        _proactive_draft(
+            "你之前说去成都看熊猫，后来怎么样？",
+            claims=[{
+                "claim_text": "你之前说去成都看熊猫",
+                "scope": "counterpart_history",
+                "source_refs": ["event:user:chengdu:not-in-context"],
+            }],
+        ),
+        _proactive_draft(
+            "你之前说成都熊猫很好玩，对吧？",
+            claims=[{
+                "claim_text": "你之前说成都熊猫很好玩",
+                "scope": "counterpart_history",
+                "source_refs": ["event:user:chengdu:not-in-context"],
+            }],
+        ),
     ])
 
     output = await ProactiveDraftAdapter(
@@ -212,7 +233,14 @@ async def test_companion_old_reply_cannot_prove_a_counterpart_experience() -> No
         update={"model_content_json": json.dumps(context, ensure_ascii=False)}
     )
     model = _ProactiveReplySequence([
-        _proactive_draft("你之前说去成都看熊猫，后来怎么样？"),
+        _proactive_draft(
+            "你之前说去成都看熊猫，后来怎么样？",
+            claims=[{
+                "claim_text": "你之前说去成都看熊猫",
+                "scope": "counterpart_history",
+                "source_refs": ["event:companion:chengdu"],
+            }],
+        ),
         _proactive_draft(
             "你之前说去成都看熊猫，后来怎么样？",
             claims=[{
@@ -272,7 +300,14 @@ async def test_valid_grounded_proactive_claim_does_not_add_a_review_call() -> No
 @pytest.mark.asyncio
 async def test_malformed_grounding_correction_remains_a_technical_failure() -> None:
     model = _ProactiveReplySequence([
-        _proactive_draft("你之前说去成都看熊猫，后来怎么样？"),
+        _proactive_draft(
+            "你之前说去成都看熊猫，后来怎么样？",
+            claims=[{
+                "claim_text": "你之前说去成都看熊猫",
+                "scope": "counterpart_history",
+                "source_refs": ["event:user:chengdu:not-in-context"],
+            }],
+        ),
         "{not-json",
     ])
 

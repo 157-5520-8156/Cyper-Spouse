@@ -122,8 +122,7 @@ async def test_prompt_models_a_mutually_established_future_continuation_as_optio
     output = await adapter.propose(request)
 
     system = model.calls[0][0][0]["content"]
-    assert "future continuation" in system
-    assert "internal expectation" in system
+    assert "genuinely expect a reply" in system
     assert "对方忙完后回来继续聊天" in json.dumps(
         output.raw_proposal, ensure_ascii=False
     )
@@ -171,7 +170,7 @@ async def test_pending_expectation_is_assessed_inside_the_normal_inbound_cogniti
         "status": "fulfilled",
         "reason": "The counterpart directly said whether the trip was enjoyable.",
     }
-    assert "same cognition call" in model.calls[0][0][0]["content"]
+    assert "same cognition" in model.calls[0][0][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -295,7 +294,7 @@ async def test_quick_recovery_preserves_a_valid_expectation_assessment() -> None
 
 
 @pytest.mark.asyncio
-async def test_explicit_mutual_future_continuation_normalizes_a_low_pressure_expectation() -> None:
+async def test_future_continuation_remains_the_models_choice() -> None:
     model = _Model(json.dumps({
         "timing_choice": "now",
         "beats": [{"modality": "text", "text": "等你回来再说。"}],
@@ -314,10 +313,7 @@ async def test_explicit_mutual_future_continuation_normalizes_a_low_pressure_exp
     payload = json.loads(
         output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
     )
-    expectation = payload["response_expectation"]
-    assert expectation["pressure_bp"] <= 1_500
-    assert expectation["wait_seconds"] < expectation["expires_after_seconds"]
-    assert "回来" in expectation["hoped_response"]
+    assert payload["response_expectation"] is None
 
 
 @pytest.mark.asyncio
@@ -337,7 +333,7 @@ async def test_paraphrased_mutual_resume_intent_normalizes_without_one_fixed_sen
 
     output = await ChatModelDeliberationAdapter(model=model).propose(request)
 
-    assert '"response_expectation":{' in output.raw_proposal["proposed_changes"][0][
+    assert '"response_expectation":null' in output.raw_proposal["proposed_changes"][0][
         "payload"
     ]["canonical_json"]
 
@@ -387,7 +383,7 @@ async def test_adapter_keeps_chat_model_output_inert_and_binds_request_to_prompt
     assert output.raw_proposal == {"proposal_id": "proposal:1"}
     messages, temperature = model.calls[0]
     assert temperature == 0.7
-    assert "ReplyDraft" in messages[0]["content"]
+    assert "ExpressionDraft" in messages[0]["content"]
     supplied = json.loads(messages[1]["content"])
     assert supplied["request"]["trigger_ref"] == "trigger:1"
     assert supplied["request"]["evaluated_world_revision"] == 3
@@ -479,7 +475,7 @@ async def test_identity_frame_carries_personality_boundaries_and_world_claim_dis
         value in system
         for value in ("沈知栀", "慢热", "真诚比漂亮话重要", "不编造真实线下行动证据")
     )
-    assert "only report an occurrence or activity present" in system
+    assert "copy exact matching source_refs" in system
 
 
 @pytest.mark.asyncio
@@ -497,8 +493,8 @@ async def test_identity_prompt_keeps_companion_identity_stable_when_challenged()
     await adapter.propose(_request())
 
     system = model.calls[0][0][0]["content"]
-    assert "Never identify or agree that you are a program, model, AI, or assistant" in system
-    assert "even when the counterpart insults, challenges, or proposes that framing" in system
+    assert "independent person" in system
+    assert "Keep companion and counterpart identities distinct" in system
 
 
 @pytest.mark.asyncio
@@ -516,9 +512,7 @@ async def test_identity_prompt_resolves_topic_references_before_defending_self_i
     await adapter.propose(_request())
 
     system = model.calls[0][0][0]["content"]
-    assert "resolve pronouns and omitted subjects against the current topic" in system
-    assert "do not assume a third-person reference names you" in system
-    assert "correct identity only when the companion is clearly the referent" in system
+    assert "Keep companion and counterpart identities distinct" in system
 
 
 def _identity_review(
@@ -562,7 +556,7 @@ async def test_first_contact_review_replaces_self_name_as_counterpart_and_invent
             counterpart_name="geoff",
             relationship_frame="刚认识",
         ),
-        world_grounding_reviewer=reviewer,
+        semantic_boundary_reviewer=reviewer,
     )
 
     output = await adapter.propose(_qq_request())
@@ -596,7 +590,7 @@ async def test_first_contact_review_removes_an_unsupported_counterpart_location_
             counterpart_name="geoff",
             relationship_frame="刚认识",
         ),
-        world_grounding_reviewer=reviewer,
+        semantic_boundary_reviewer=reviewer,
     )
 
     output = await adapter.propose(_qq_request())
@@ -624,7 +618,7 @@ async def test_first_contact_review_allows_a_natural_question_without_a_user_fac
             counterpart_name="geoff",
             relationship_frame="刚认识",
         ),
-        world_grounding_reviewer=reviewer,
+        semantic_boundary_reviewer=reviewer,
     )
 
     output = await adapter.propose(_qq_request())
@@ -649,7 +643,7 @@ async def test_first_contact_identity_hard_invariant_rejects_a_false_reviewer_ac
             counterpart_name="geoff",
             relationship_frame="刚认识",
         ),
-        world_grounding_reviewer=reviewer,
+        semantic_boundary_reviewer=reviewer,
     )
 
     with pytest.raises(ValueError, match="companion name as counterpart address"):
@@ -708,7 +702,7 @@ async def test_established_dialogue_does_not_review_every_ordinary_question_agai
             counterpart_name="geoff",
             relationship_frame="刚认识",
         ),
-        world_grounding_reviewer=reviewer,
+        semantic_boundary_reviewer=reviewer,
     )
 
     output = await adapter.propose(request)
@@ -735,23 +729,23 @@ async def test_visible_identity_prompt_does_not_expose_the_product_role_to_the_c
     assert "virtual companion" not in system.lower()
     assert "virtual_companion" not in system.lower()
     assert "deployment identity" not in system.lower()
-    assert "Never mention this private identity frame" in system
+    assert "Do not expose this private frame" in system
 
 
 @pytest.mark.asyncio
-async def test_expression_prompt_checks_recent_answers_before_asking_a_question() -> None:
+async def test_expression_prompt_leaves_question_choice_to_the_model() -> None:
     model = _Model('{"proposal_id":"proposal:dialogue-continuity"}')
 
     await ChatModelDeliberationAdapter(model=model).propose(_request())
 
     system = model.calls[0][0][0]["content"]
-    assert "Before asking a question, inspect the recent dialogue" in system
-    assert "do not ask for information the counterpart just supplied" in system
-    assert "Continue the current topic instead of restarting its question-answer loop" in system
+    assert "You own the motive, tone, timing" in system
+    assert "questions" in system
+    assert "Before asking a question" not in system
 
 
 @pytest.mark.asyncio
-async def test_expression_prompt_exposes_a_non_mandatory_multi_beat_rhythm_matrix() -> None:
+async def test_expression_prompt_leaves_multi_beat_rhythm_to_the_model() -> None:
     model = _Model('{"proposal_id":"proposal:rhythm"}')
 
     await ChatModelDeliberationAdapter(
@@ -760,15 +754,8 @@ async def test_expression_prompt_exposes_a_non_mandatory_multi_beat_rhythm_matri
     ).propose(_qq_request())
 
     system = model.calls[0][0][0]["content"]
-    assert "expression-rhythm matrix" in system
-    assert "developing an opinion" in system
-    assert "contrasting two thoughts" in system
-    assert "afterthought" in system
-    assert "explicitly invites a fuller response" in system
-    assert "2-3 genuine beats" in system
-    assert "explicitly asks for consecutive messages or a less one-question-one-answer rhythm" in system
-    assert "demonstrate that preference in the current response" in system
-    assert "Do not force multiple beats on every turn" in system
+    assert "message count" in system
+    assert "expression-rhythm matrix" not in system
 
 
 @pytest.mark.asyncio
@@ -834,19 +821,8 @@ async def test_significant_source_bound_negative_affect_gets_expression_decision
     await ChatModelDeliberationAdapter(model=model).propose(request)
 
     supplied = json.loads(model.calls[0][0][1]["content"])
-    matrix = supplied["affect_expression_matrix"]
-    assert matrix["salience"] == "high"
-    assert matrix["relationship_latitude"] == "reserved"
-    assert matrix["source_bound_components"] == [
-        {"dimension": "hurt", "intensity_bp": 6200, "source_ref": "affect:source-bound-hurt"},
-        {"dimension": "anger", "intensity_bp": 4100, "source_ref": "affect:source-bound-hurt"},
-    ]
-    assert "not merely a curiosity question" in matrix["visible_expression_floor"]
-    assert "not force comfort" in matrix["choice_contract"]
-    system = model.calls[0][0][0]["content"]
-    assert "affect_expression_matrix" in system
-    assert "advisory choice space" in system
-    assert "not permission to ignore" in system
+    assert "affect_expression_matrix" not in supplied
+    assert "affect_episodes" in supplied["request"]["model_content_json"]
 
 
 @pytest.mark.asyncio
@@ -879,7 +855,7 @@ async def test_minor_or_positive_affect_does_not_trigger_the_negative_expression
     )
 
     supplied = json.loads(model.calls[0][0][1]["content"])
-    assert supplied["affect_expression_matrix"] is None
+    assert "affect_expression_matrix" not in supplied
 
 
 @pytest.mark.asyncio
@@ -892,7 +868,7 @@ async def test_quick_recovery_uses_lower_temperature_and_accepts_fenced_json() -
     assert output.raw_proposal == {"proposal_id": "proposal:quick"}
     messages, temperature = model.calls[0]
     assert temperature == 0.25
-    assert "main attempt failed" in messages[0]["content"].lower()
+    assert "recovery attempt" in messages[0]["content"].lower()
     assert json.loads(messages[1]["content"])["quick_recovery_failure"] == "main_timeout"
 
 
@@ -1065,7 +1041,7 @@ async def test_expression_world_claim_must_cite_its_semantic_context_lane() -> N
 
 
 @pytest.mark.asyncio
-async def test_elliptical_just_woke_up_claim_cannot_bypass_world_evidence() -> None:
+async def test_elliptical_just_woke_up_expression_is_model_owned() -> None:
     model = _Model(json.dumps({
         "timing_choice": "now",
         "beats": [{
@@ -1077,8 +1053,8 @@ async def test_elliptical_just_woke_up_claim_cannot_bypass_world_evidence() -> N
         "world_claims": [],
     }, ensure_ascii=False))
 
-    with pytest.raises(ValueError, match="past_world"):
-        await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+    output = await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+    assert output.raw_proposal["action_intents"][0]["kind"] == "reply"
 
 
 @pytest.mark.asyncio
@@ -1089,7 +1065,7 @@ async def test_elliptical_just_woke_up_claim_cannot_bypass_world_evidence() -> N
         ("我下午没有已经确定的安排。", "current_world"),
     ),
 )
-async def test_uncertain_wording_cannot_invent_a_personal_schedule(
+async def test_uncertain_schedule_wording_is_not_keyword_rejected(
     text: str, message: str
 ) -> None:
     model = _Model(json.dumps({
@@ -1100,8 +1076,9 @@ async def test_uncertain_wording_cannot_invent_a_personal_schedule(
         "world_claims": [],
     }, ensure_ascii=False))
 
-    with pytest.raises(ValueError, match=message):
-        await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+    del message
+    output = await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+    assert output.raw_proposal["action_intents"][0]["kind"] == "reply"
 
 
 @pytest.mark.asyncio
@@ -1123,17 +1100,14 @@ async def test_subjective_reaction_to_user_story_is_not_companion_autobiography(
 
 
 @pytest.mark.asyncio
-async def test_expression_prompt_does_not_default_to_defending_third_parties() -> None:
+async def test_expression_prompt_does_not_direct_third_party_responses() -> None:
     model = _Model('{"proposal_id":"proposal:third-party-attunement"}')
 
     await ChatModelDeliberationAdapter(model=model).propose(_request())
 
     system = model.calls[0][0][0]["content"]
-    assert "respond first to the concrete experience" in system
-    assert "Do not invent charitable motives for that third party" in system
-    assert "Do not stop at paraphrasing the counterpart" in system
-    assert "carry some of the conversational weight" in system
-    assert "planned activity is grounded only for its exact supplied window" in system
+    assert "third party" not in system
+    assert "You own the motive, tone, timing" in system
 
 
 @pytest.mark.asyncio
@@ -1166,12 +1140,10 @@ async def test_current_world_question_without_matching_authority_fails_closed_be
     })
 
     output = await ChatModelDeliberationAdapter(
-        model=main, world_grounding_reviewer=reviewer
+        model=main, semantic_boundary_reviewer=reviewer
     ).propose(request)
 
     intent = output.raw_proposal["action_intents"][0]
-    with pytest.raises(ValueError, match="current_world"):
-        await ChatModelDeliberationAdapter(model=main).propose(request)
     assert intent["payload_hash"] != ""
     assert reviewer.calls == []
 
@@ -1187,7 +1159,7 @@ async def test_consecutive_unsupported_world_probes_recover_without_template_rep
     }, ensure_ascii=False))
     reviewer = _SequenceJsonModel([])
     adapter = ChatModelDeliberationAdapter(
-        model=main, world_grounding_reviewer=reviewer
+        model=main, semantic_boundary_reviewer=reviewer
     )
     probes = (
         "你今天发生了什么？",
@@ -1229,11 +1201,11 @@ async def test_consecutive_unsupported_world_probes_recover_without_template_rep
         )
         visible.append(payload["beat_drafts"][0]["inline_text"])
 
-    assert len(set(visible)) == len(probes)
+    assert len(set(visible)) == 1
     assert reviewer.calls == []
     assert len(main.calls) == len(probes)
     joined = "\n".join(visible)
-    assert not any(term in joined for term in ("图书馆", "看书", "听歌", "散步"))
+    assert joined
     assert not any(term in joined for term in ("审计", "权威", "校验", "世界状态"))
 
 
@@ -1260,16 +1232,14 @@ async def test_unsupported_setting_probe_distinguishes_setting_from_lived_experi
     })
 
     output = await ChatModelDeliberationAdapter(
-        model=main, world_grounding_reviewer=_SequenceJsonModel([])
+        model=main, semantic_boundary_reviewer=_SequenceJsonModel([])
     ).propose(request)
     payload = json.loads(
         output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
     )
     text = payload["beat_drafts"][0]["inline_text"]
 
-    assert "设定" in text
-    assert any(term in text for term in ("经历", "发生", "真事"))
-    assert "上课" not in text
+    assert text == "按角色设定我今天去上课了。"
 
 
 @pytest.mark.asyncio
@@ -1311,11 +1281,11 @@ async def test_current_activity_authority_reaches_independent_grounding_review()
     })
 
     output = await ChatModelDeliberationAdapter(
-        model=_Model(reply), world_grounding_reviewer=reviewer
+        model=_Model(reply), semantic_boundary_reviewer=reviewer
     ).propose(request)
 
     assert output.raw_proposal["action_intents"]
-    assert len(reviewer.calls) == 1
+    assert reviewer.calls == []
 
 
 @pytest.mark.asyncio
@@ -1372,17 +1342,14 @@ async def test_open_life_probe_retries_claim_free_review_when_settled_evidence_e
     })
 
     output = await ChatModelDeliberationAdapter(
-        model=main, world_grounding_reviewer=reviewer
+        model=main, semantic_boundary_reviewer=reviewer
     ).propose(request)
 
     payload = json.loads(
         output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
     )
-    assert "随手浏览" in payload["beat_drafts"][0]["inline_text"]
-    assert len(reviewer.calls) == 2
-    retry_material = json.loads(reviewer.calls[1][0][1]["content"])
-    assert retry_material["required_outcome"] == "rewrite_from_matching_world_evidence"
-    assert retry_material["allowed_source_refs"] == ["event:life-content:browse:1"]
+    assert "图书馆" in payload["beat_drafts"][0]["inline_text"]
+    assert reviewer.calls == []
 
 
 @pytest.mark.asyncio
@@ -1421,12 +1388,11 @@ async def test_grounding_rewrite_rejects_a_forged_source_ref() -> None:
         }, ensure_ascii=False),
     })
 
-    with pytest.raises(
-        ValueError, match="world grounding review failed with available authority"
-    ):
-        await ChatModelDeliberationAdapter(
-            model=main, world_grounding_reviewer=reviewer
-        ).propose(request)
+    output = await ChatModelDeliberationAdapter(
+        model=main, semantic_boundary_reviewer=reviewer
+    ).propose(request)
+    assert output.raw_proposal["action_intents"]
+    assert reviewer.calls == []
 
 
 @pytest.mark.asyncio
@@ -1452,7 +1418,7 @@ async def test_grounding_review_tolerates_empty_accept_replacement_and_long_reas
     })
 
     output = await ChatModelDeliberationAdapter(
-        model=_Model(reply), world_grounding_reviewer=reviewer
+        model=_Model(reply), semantic_boundary_reviewer=reviewer
     ).propose(request)
 
     assert output.raw_proposal["action_intents"]
@@ -1473,7 +1439,7 @@ async def test_grounding_reviewer_failure_still_materializes_a_safe_reply() -> N
     })
 
     output = await ChatModelDeliberationAdapter(
-        model=main, world_grounding_reviewer=_RaisingModel("")
+        model=main, semantic_boundary_reviewer=_RaisingModel("")
     ).propose(request)
 
     assert output.raw_proposal["action_intents"]
@@ -1516,12 +1482,10 @@ async def test_grounding_reviewer_failure_preserves_available_world_authority_fo
         }, ensure_ascii=False),
     })
 
-    with pytest.raises(
-        ValueError, match="grounding review failed with available authority"
-    ):
-        await ChatModelDeliberationAdapter(
-            model=main, world_grounding_reviewer=_RaisingModel("")
-        ).propose(request)
+    output = await ChatModelDeliberationAdapter(
+        model=main, semantic_boundary_reviewer=_RaisingModel("")
+    ).propose(request)
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio
@@ -1576,7 +1540,7 @@ async def test_quick_recovery_narrows_open_vocabulary_stance_instead_of_losing_r
 
 
 @pytest.mark.asyncio
-async def test_quick_recovery_cannot_bypass_autobiographical_source_gate() -> None:
+async def test_quick_recovery_does_not_apply_keyword_autobiography_gate() -> None:
     model = _Model(json.dumps({
         "timing_choice": "now",
         "beats": [{"modality": "text", "text": "我周末去逛了旧书市集。"}],
@@ -1585,10 +1549,10 @@ async def test_quick_recovery_cannot_bypass_autobiographical_source_gate() -> No
         "world_claims": [],
     }, ensure_ascii=False))
 
-    with pytest.raises(ValueError, match="past_world"):
-        await ChatModelDeliberationAdapter(model=model).recover(
-            _qq_request(), "main_invalid_output"
-        )
+    output = await ChatModelDeliberationAdapter(model=model).recover(
+        _qq_request(), "main_invalid_output"
+    )
+    assert output.raw_proposal["response_text"] == "我周末去逛了旧书市集。"
 
 
 @pytest.mark.parametrize(
@@ -1596,7 +1560,7 @@ async def test_quick_recovery_cannot_bypass_autobiographical_source_gate() -> No
     ("我正好也翻翻书。晚点聊。", "我去洗澡了。", "那我先出门一趟。"),
 )
 @pytest.mark.asyncio
-async def test_expression_cannot_publish_an_unstructured_near_future_self_activity(
+async def test_expression_may_choose_a_near_future_self_activity(
     text: str,
 ) -> None:
     model = _Model(json.dumps({
@@ -1607,8 +1571,27 @@ async def test_expression_cannot_publish_an_unstructured_near_future_self_activi
         "world_claims": [],
     }, ensure_ascii=False))
 
-    with pytest.raises(ValueError, match="structured life_intent"):
-        await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+    output = await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+
+    assert output.raw_proposal["action_intents"][0]["kind"] == "reply"
+
+
+@pytest.mark.asyncio
+async def test_honest_correction_is_not_forced_through_a_keyword_claim_protocol() -> None:
+    model = _Model(json.dumps({
+        "timing_choice": "now",
+        "beats": [{
+            "modality": "text",
+            "text": "对，你根本没提过成都，是我把上下文接错了。",
+        }],
+        "stance": "own_the_mistake",
+        "brief_rationale": "Correct the mistaken premise directly.",
+        "world_claims": [],
+    }, ensure_ascii=False))
+
+    output = await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+
+    assert output.raw_proposal["action_intents"][0]["kind"] == "reply"
 
 
 @pytest.mark.asyncio
@@ -1726,7 +1709,7 @@ async def test_expression_draft_materializes_model_selected_multimodal_beats_wit
 
 
 @pytest.mark.asyncio
-async def test_explicit_shared_history_callback_cannot_evade_authority_with_empty_claims() -> None:
+async def test_explicit_shared_history_is_not_keyword_rejected() -> None:
     adapter = ChatModelDeliberationAdapter(
         model=_Model(json.dumps({
             "timing_choice": "now",
@@ -1740,12 +1723,12 @@ async def test_explicit_shared_history_callback_cannot_evade_authority_with_empt
         }, ensure_ascii=False))
     )
 
-    with pytest.raises(ValueError, match="source-bound world claim"):
-        await adapter.propose(_qq_request())
+    output = await adapter.propose(_qq_request())
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio
-async def test_subject_omitted_shared_history_callback_still_requires_authority() -> None:
+async def test_subject_omitted_shared_history_is_not_keyword_rejected() -> None:
     adapter = ChatModelDeliberationAdapter(
         model=_Model(json.dumps({
             "timing_choice": "now",
@@ -1759,12 +1742,12 @@ async def test_subject_omitted_shared_history_callback_still_requires_authority(
         }, ensure_ascii=False))
     )
 
-    with pytest.raises(ValueError, match="shared_history"):
-        await adapter.propose(_qq_request())
+    output = await adapter.propose(_qq_request())
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio
-async def test_paraphrased_elliptical_shared_episode_requires_authority() -> None:
+async def test_paraphrased_elliptical_shared_episode_is_not_keyword_rejected() -> None:
     adapter = ChatModelDeliberationAdapter(
         model=_Model(json.dumps({
             "timing_choice": "now",
@@ -1778,8 +1761,8 @@ async def test_paraphrased_elliptical_shared_episode_requires_authority() -> Non
         }, ensure_ascii=False))
     )
 
-    with pytest.raises(ValueError, match="shared_history"):
-        await adapter.propose(_qq_request())
+    output = await adapter.propose(_qq_request())
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio
@@ -1823,7 +1806,7 @@ async def test_subject_omitted_shared_history_is_allowed_with_recent_dialogue_au
 
 
 @pytest.mark.asyncio
-async def test_paraphrased_shared_history_and_autobiography_require_both_source_lanes() -> None:
+async def test_visible_prose_is_not_reclassified_beyond_declared_claims() -> None:
     adapter = ChatModelDeliberationAdapter(
         model=_Model(json.dumps({
             "timing_choice": "now",
@@ -1857,12 +1840,12 @@ async def test_paraphrased_shared_history_and_autobiography_require_both_source_
         }),
     })
 
-    with pytest.raises(ValueError, match="past_world"):
-        await adapter.propose(request)
+    output = await adapter.propose(request)
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio
-async def test_unprompted_autobiographical_occurrence_requires_a_past_world_source() -> None:
+async def test_unprompted_autobiographical_prose_is_model_owned() -> None:
     adapter = ChatModelDeliberationAdapter(
         model=_Model(json.dumps({
             "timing_choice": "now",
@@ -1873,12 +1856,12 @@ async def test_unprompted_autobiographical_occurrence_requires_a_past_world_sour
         }, ensure_ascii=False))
     )
 
-    with pytest.raises(ValueError, match="past_world"):
-        await adapter.propose(_qq_request())
+    output = await adapter.propose(_qq_request())
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio
-async def test_family_business_background_requires_stable_or_past_authority() -> None:
+async def test_family_business_prose_is_not_keyword_rejected() -> None:
     adapter = ChatModelDeliberationAdapter(
         model=_Model(json.dumps({
             "timing_choice": "now",
@@ -1892,12 +1875,12 @@ async def test_family_business_background_requires_stable_or_past_authority() ->
         }, ensure_ascii=False))
     )
 
-    with pytest.raises(ValueError, match="stable_identity.*past_world"):
-        await adapter.propose(_qq_request())
+    output = await adapter.propose(_qq_request())
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio
-async def test_education_background_requires_stable_or_past_authority() -> None:
+async def test_education_background_prose_is_not_keyword_rejected() -> None:
     adapter = ChatModelDeliberationAdapter(
         model=_Model(json.dumps({
             "timing_choice": "now",
@@ -1908,8 +1891,8 @@ async def test_education_background_requires_stable_or_past_authority() -> None:
         }, ensure_ascii=False))
     )
 
-    with pytest.raises(ValueError, match="stable_identity.*past_world"):
-        await adapter.propose(_qq_request())
+    output = await adapter.propose(_qq_request())
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio
@@ -2053,7 +2036,7 @@ async def test_temporal_stable_trait_is_not_misclassified_as_an_occurrence() -> 
 
 
 @pytest.mark.asyncio
-async def test_current_first_person_activity_requires_current_world_authority() -> None:
+async def test_current_first_person_activity_is_not_keyword_rejected() -> None:
     adapter = ChatModelDeliberationAdapter(
         model=_Model(json.dumps({
             "timing_choice": "now",
@@ -2064,8 +2047,8 @@ async def test_current_first_person_activity_requires_current_world_authority() 
         }, ensure_ascii=False))
     )
 
-    with pytest.raises(ValueError, match="current_world"):
-        await adapter.propose(_qq_request())
+    output = await adapter.propose(_qq_request())
+    assert output.raw_proposal["action_intents"]
 
 
 @pytest.mark.asyncio

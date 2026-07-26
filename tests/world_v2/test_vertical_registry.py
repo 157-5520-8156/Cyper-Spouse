@@ -119,7 +119,7 @@ def test_hand_rolled_wells_never_import_the_framework() -> None:
             violations.append(f"{row.module}: imports {sorted(forbidden)}")
     # The frozen pilot twins are hand-written implementations that no longer
     # own a registry row of their own; guard them explicitly.
-    for frozen_twin in ("quick_reaction.py", "afterthought_author.py"):
+    for frozen_twin in ("quick_reaction.py",):
         forbidden = _imported_modules(WORLD_V2 / frozen_twin) & FRAMEWORK_MODULES
         if forbidden:
             violations.append(f"{frozen_twin}: imports {sorted(forbidden)}")
@@ -132,7 +132,6 @@ def test_framework_editions_do_not_import_the_frozen_twins() -> None:
 
     frozen = {
         "companion_daemon.world_v2.quick_reaction",
-        "companion_daemon.world_v2.afterthought_author",
     }
     for module in ("quick_reaction_vertical.py", "afterthought_author_vertical.py"):
         overlap = _imported_modules(WORLD_V2 / module) & frozen
@@ -156,12 +155,6 @@ def test_frozen_twin_identity_constants_stay_equal() -> None:
     """Both editions must keep byte-identical proposal namespaces while the
     rollback window is open."""
 
-    from companion_daemon.world_v2.afterthought_author import (
-        AFTERTHOUGHT_PROPOSAL_PREFIX as hand_afterthought,
-    )
-    from companion_daemon.world_v2.afterthought_author_vertical import (
-        AFTERTHOUGHT_PROPOSAL_PREFIX as framework_afterthought,
-    )
     from companion_daemon.world_v2.quick_reaction import (
         QUICK_REACTION_PROPOSAL_PREFIX as hand_quick,
     )
@@ -170,4 +163,3 @@ def test_frozen_twin_identity_constants_stay_equal() -> None:
     )
 
     assert hand_quick == framework_quick
-    assert hand_afterthought == framework_afterthought

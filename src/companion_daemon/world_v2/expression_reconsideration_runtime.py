@@ -13,6 +13,7 @@ import asyncio
 from datetime import timedelta
 import hashlib
 import json
+import logging
 from typing import Literal, Protocol
 
 from .event_identity import domain_idempotency_key
@@ -23,6 +24,7 @@ from .minimal_reply_events import (
 from .schema_core import FrozenModel
 from .schemas import ClaimLease, ProjectionCursor, TriggerProcess, WorldEvent
 
+_LOG = logging.getLogger(__name__)
 
 def _digest(value: object) -> str:
     return hashlib.sha256(
@@ -146,13 +148,23 @@ class ExpressionReconsiderationRuntime:
             return ExpressionReconsiderationRunResult(
                 trigger_id=active.trigger_id, status="moot", disposition="continue"
             )
+        current = await self._project()
         if self._reviewer is None:
             return ExpressionReconsiderationRunResult(
                 trigger_id=active.trigger_id, status="awaiting_review"
             )
-        reviewed = await self._reviewer.review(
-            process=active, observation_event=source[0], cursor=self._cursor(await self._project())
-        )
+        try:
+            reviewed = await self._reviewer.review(
+                process=active, observation_event=source[0], cursor=self._cursor(current)
+            )
+        except Exception:  # noqa: BLE001 - provider/contract failures remain retryable
+            _LOG.warning(
+                "expression reconsideration role decision failed; keeping gate durable",
+                exc_info=True,
+            )
+            return ExpressionReconsiderationRunResult(
+                trigger_id=active.trigger_id, status="awaiting_review"
+            )
         decision = self._normalize_decision(reviewed)
         if decision is None:
             return ExpressionReconsiderationRunResult(
@@ -603,6 +615,12 @@ class ExpressionReconsiderationRuntime:
             ),
             cursor=self._cursor(projection),
             commit_id="commit:expression-reconsideration:replace:" + _digest([process.trigger_id, process.claim_lease.attempt_id, decision_hash]),
+        )
+        _LOG.info(
+            "expression plan pending beats cancelled plan_id=%s cancelled_pending_count=%d disposition=%s",
+            plan.plan_id,
+            1 + len(sibling_terminal_events) // 3,
+            decision.disposition,
         )
         await self._release_interrupted_commitment(
             action_id=action.action_id,

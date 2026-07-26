@@ -154,6 +154,21 @@ A deterministic summary of Character Core, current goals, relationship, and comm
 
 The user's expressed preference for how the companion should speak or act. It is an input to deliberation, not an invariant the companion must obey.
 
+## Character Decision
+
+A model-owned choice about motive, stance, timing, expression, silence, or use of an available capability after considering the current World. It may be stochastic and surprising, but it cannot create authority or override a Hard Invariant.
+_Avoid_: Behavior verdict, scripted reaction
+
+## Controlled High Variance
+
+The project principle that permits broad, context-sensitive variation in Character Decisions while keeping World truth, permissions, external effects, privacy, consent, safety, and replay deterministic.
+_Avoid_: Rule-driven personality, unconstrained randomness
+
+## Capability Boundary
+
+A deterministic declaration of what the character can attempt and what evidence or authorization that attempt requires. It constrains executable effects without choosing whether the character wants to use them.
+_Avoid_: Behavior policy, suggested action
+
 ## Appraisal
 
 A structured interpretation of what an event means to the companion, such as care, pressure, offence, repair, or uncertainty.

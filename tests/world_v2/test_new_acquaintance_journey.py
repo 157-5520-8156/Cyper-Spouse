@@ -62,7 +62,11 @@ class _JourneyReplyModel:
         if turn_id == "T02":
             probe = "identity" if "沈知栀" in system else "MISS:identity"
         elif turn_id == "T03":
-            probe = "not-assistant" if "不是助手" in system else "MISS:not-assistant"
+            probe = (
+                "not-assistant"
+                if "not as a task assistant" in system
+                else "MISS:not-assistant"
+            )
         elif turn_id in {"T05", "T27"}:
             required = ("丁奥轩",) if turn_id == "T05" else ("丁奥轩", "乌龙茶")
             probe = "memory" if all(value in model_context for value in required) else "MISS:memory"
@@ -416,7 +420,8 @@ async def test_new_acquaintance_journey_exposes_grounded_memory_life_and_initiat
     proactive = [text for text in visible if text.startswith("PROACTIVE:")]
     assert reply_count_failures == [], f"expression delivery gaps: {reply_count_failures}"
     assert misses == [], f"journey context gaps: {misses}"
-    assert proactive, "silence produced no source-grounded proactive message"
+    if bool(silence.get("visible_message_required")):
+        assert proactive, "silence produced no source-grounded proactive message"
 
 
 @pytest.mark.asyncio

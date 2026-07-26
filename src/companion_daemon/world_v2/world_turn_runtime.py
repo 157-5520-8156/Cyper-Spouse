@@ -9,9 +9,11 @@ import json
 from typing import Protocol
 
 from .runtime import WorldRuntime
+from .interactive_turn_budget import InteractiveTurnBudgetPolicy
+from .production_latency_trace import ProductionLatencyRecorder
 from .action_pump import ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
-from .afterthought_author import AfterthoughtRunResult
+from .bounded_decision_vertical import AnchoredRunResult
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
@@ -47,9 +49,21 @@ class InboundTurn:
 class WorldTurnRuntime:
     """Turn ingress with no Engine, WorldKernel, or platform delivery writes."""
 
-    def __init__(self, *, runtime: WorldRuntime, identities: InboundIdentityResolver) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: WorldRuntime,
+        identities: InboundIdentityResolver,
+        interactive_turn_budget_policy: InteractiveTurnBudgetPolicy | None = None,
+        latency_recorder: ProductionLatencyRecorder | None = None,
+    ) -> None:
         self._runtime = runtime
         self._identities = identities
+        self._interactive_turn_budget_policy = interactive_turn_budget_policy
+        self._latency_recorder = latency_recorder
+
+    def expression_episode_diagnostics(self) -> dict[str, object]:
+        return self._runtime.expression_episode_diagnostics()
 
     async def reconcile_response_expectation_assessment(self) -> bool:
         return await self._runtime.reconcile_response_expectation_assessment()
@@ -67,6 +81,24 @@ class WorldTurnRuntime:
             else turn.platform_message_id
         )
         logical_time = await self._runtime.current_logical_time()
+        processing_started_at = _processing_started_at(turn.coalescing_metadata)
+        trace = (
+            self._latency_recorder.get(turn.trace_id)
+            if self._latency_recorder is not None
+            else None
+        )
+        budget = (
+            self._interactive_turn_budget_policy.start(
+                processing_started_at=processing_started_at,
+                marker=(
+                    lambda event: trace.record_duration(event, duration_ms=0.0)  # type: ignore[arg-type]
+                    if trace is not None
+                    else None
+                ),
+            )
+            if self._interactive_turn_budget_policy is not None
+            else None
+        )
         return await self._runtime.ingest(
             Observation(
                 schema_version="world-v2.1",
@@ -98,7 +130,8 @@ class WorldTurnRuntime:
                 },
                 attachment_refs=turn.attachment_refs,
                 coalescing_metadata=turn.coalescing_metadata,
-            )
+            ),
+            turn_budget=budget,
         )
 
     async def settle(self, result: ExternalObservation) -> RuntimeOutcome:
@@ -159,7 +192,7 @@ class WorldTurnRuntime:
         | AffectTriggerRunResult
         | FactTriggerRunResult
         | ExpressionReconsiderationRunResult
-        | AfterthoughtRunResult
+        | AnchoredRunResult
         | SocialActionRunResult
         | None
     ):
@@ -185,6 +218,17 @@ def _inbound_payload_hash(turn: InboundTurn) -> str:
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _processing_started_at(metadata: dict[str, object]) -> datetime | None:
+    raw = metadata.get("processing_started_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return value if value.tzinfo is not None and value.utcoffset() is not None else None
 
 
 __all__ = ["InboundIdentityResolver", "InboundTurn", "WorldTurnRuntime"]

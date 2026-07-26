@@ -136,7 +136,7 @@ def _empty_ledger(kind=WorldLedger.in_memory, *, world_id="world:context-empty")
     return ledger
 
 
-def test_context_reactivates_related_dialogue_outside_the_recency_tail() -> None:
+def test_context_does_not_use_lexical_overlap_to_reactivate_old_dialogue() -> None:
     world_id = "world:context-topic-reactivation"
     ledger = WorldLedger.in_memory(world_id=world_id)
     morning = NOW.replace(hour=8)
@@ -184,7 +184,7 @@ def test_context_reactivates_related_dialogue_outside_the_recency_tail() -> None
         json.loads(item.payload_json)["text"] for item in capsule.recent_dialogue.items
     }
     assert "深圳这件事下午有新进展。" in retained_texts
-    assert "我今天从深圳回来，晚点再和你说旅行的事。" in retained_texts
+    assert "我今天从深圳回来，晚点再和你说旅行的事。" not in retained_texts
 
 
 class CountingLedger:
@@ -309,6 +309,54 @@ def test_real_ledger_resolves_situation_core_and_authoritative_empty_domains(
     assert all(len(batch) <= 1 for batch in counted.resolved_batches)
     assert set(counted.lookups) == {core.origin.accepted_event_ref}
     assert counted.commit_calls == 0
+
+
+def test_resolver_reuses_exact_cursor_and_invalidates_on_revision_change() -> None:
+    ledger = _empty_ledger(world_id="world:context-cursor-cache")
+    counted = CountingLedger(ledger)
+    resolver = LedgerProjectionContextResolver(
+        ledger=counted, situation_compiler=SituationCompiler()
+    )
+    first_projection = ledger.project()
+    first_query = query_from_projection(
+        first_projection,
+        actor_ref="actor:companion",
+        trigger_ref="event:start",
+    )
+
+    first = resolver.resolve(first_query)
+    second = resolver.resolve(first_query)
+
+    assert second == first
+    assert counted.project_at_calls == 1
+    assert resolver.performance_counters().cache_hits == 1
+    assert resolver.performance_counters().cache_misses == 1
+    compiler = ContextCapsuleCompiler(resolver=resolver)
+    first_capsule = compiler.compile(first_query)
+    second_capsule = compiler.compile(first_query)
+    assert second_capsule is first_capsule
+    assert compiler.performance_counters().cache_hits == 1
+    assert compiler.performance_counters().cache_misses == 1
+
+    next_event = _observation(ledger.world_id, 2)
+    ledger.commit(
+        [next_event],
+        expected_world_revision=first_projection.world_revision,
+        expected_deliberation_revision=first_projection.deliberation_revision,
+    )
+    next_query = query_from_projection(
+        ledger.project(),
+        actor_ref="actor:companion",
+        trigger_ref=next_event.event_id,
+    )
+    third = resolver.resolve(next_query)
+    third_capsule = compiler.compile(next_query)
+
+    assert third.query_hash != first.query_hash
+    assert third_capsule.capsule_id != first_capsule.capsule_id
+    assert counted.project_at_calls == 2
+    assert resolver.performance_counters().cache_misses == 2
+    assert compiler.performance_counters().cache_misses == 2
 
 
 def test_context_resolution_has_no_ledger_write_side_effect(
@@ -906,4 +954,66 @@ def test_explicit_actor_relevance_scope_is_bound_into_every_proof() -> None:
     with pytest.raises(ValueError, match="another actor"):
         context_capsule_compiler_from_ledger(ledger=ledger, relevance_scope=wrong_actor).compile(
             query
+        )
+
+
+def test_withhold_composite_situation_metadata_satisfies_the_compiler_privacy_floor() -> None:
+    """Production regression (2026-07-21): a current_situation whose child slice
+    carries ``withhold`` must be stamped at least ``withhold`` by the resolver,
+    or ``_compile_slice`` rejects the capsule as a typed-authority downgrade."""
+
+    from test_situation_compiler_v16 import _goal as situation_goal
+    from test_situation_compiler_v16 import _request as situation_request
+
+    import companion_daemon.world_v2.context_capsule as capsule_module
+
+    situation = SituationCompiler().compile(
+        situation_request(goals=(situation_goal("goal:diary-honest", 9000, privacy="withhold"),))
+    ).internal
+    assert situation is not None
+    assert capsule_module.derived_privacy_floor("current_situation", situation) == "withhold"
+
+    world_id = "world:context-withhold-situation"
+    ledger = WorldLedger.in_memory(world_id=world_id)
+    ledger.commit(
+        [_event(world_id), *(_observation(world_id, index) for index in range(1, 9))],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    projection = ledger.project()
+    assert projection.world_revision >= situation.compiled_at_world_revision
+    query = query_from_projection(
+        projection, actor_ref=situation.actor_ref, trigger_ref="event:observation:1"
+    )
+    resolver = LedgerProjectionContextResolver(
+        ledger=ledger, situation_compiler=SituationCompiler()
+    )
+    scope = ContextRelevanceScope(actor_ref=situation.actor_ref)
+
+    bound = resolver._situation_slice(query, situation, scope)
+
+    assert bound.item_metadata[0].privacy_class == "withhold"
+    compiled, entries = capsule_module._compile_slice(
+        slice_name="current_situation",
+        bound=bound,
+        limit=capsule_module.ContextCapsuleBudgetPolicy().current_situation,
+    )
+    assert compiled.availability == "available"
+    assert compiled.items[0].privacy_class == "withhold"
+    assert entries == ()
+
+    # The safety check itself must stay intact: metadata classified below the
+    # typed value's own floor is still rejected as a downgrade.
+    downgraded = bound.model_copy(
+        update={
+            "item_metadata": (
+                bound.item_metadata[0].model_copy(update={"privacy_class": "private"}),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="downgrades typed authority"):
+        capsule_module._compile_slice(
+            slice_name="current_situation",
+            bound=downgraded,
+            limit=capsule_module.ContextCapsuleBudgetPolicy().current_situation,
         )

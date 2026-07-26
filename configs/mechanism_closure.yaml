@@ -192,7 +192,7 @@ mechanisms:
       - tests/world_v2/test_attention_view.py::test_sleep_plan_reads_as_away_and_cites_the_plan_authority
       - tests/world_v2/test_attention_view.py::test_advisory_is_source_bound_bounded_and_labelled
       - tests/world_v2/test_attention_view.py::test_advisory_without_any_committed_source_is_dropped
-      - tests/world_v2/test_attention_view.py::test_expression_prompt_teaches_the_later_mechanics_and_restraint
+      - tests/world_v2/test_attention_view.py::test_expression_prompt_exposes_attention_without_prescribing_timing
 
   - id: appraisal-affect-relationship-impression
     phase: 3
@@ -314,19 +314,19 @@ mechanisms:
     phase: 5
     status: closed
     runtime_activation: default
-    limitations: [requires-an-injected-background-model, single-restrained-text-followup-only-most-replies-should-decline, user-answer-inside-the-window-voids-the-opportunity]
-    sources: [reply-execution-receipt, recorded-act-hold-draw, bounded-background-model]
+    limitations: [requires-an-injected-background-model, user-answer-rebinds-the-opportunity-to-the-new-turn]
+    sources: [reply-execution-receipt, recorded-consideration-time, bounded-role-model]
     events: [ExecutionReceiptRecorded, RandomDrawRecorded, ProposalRecorded, ExpressionPlanAccepted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [expression-plans, actions]
-    decision_consumers: [AfterthoughtAuthorRuntime, ActionPump, ExpressionReconsiderationRuntime]
+    decision_consumers: [AfterthoughtVerticalRuntime, ActionPump, ExpressionReconsiderationRuntime]
     actions: [followup]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
     adapters: [http-v2, qq-c2c-v2]
     tests:
-      - tests/world_v2/test_afterthought_author.py::test_act_draw_authorizes_one_followup_with_recorded_mode_and_window
-      - tests/world_v2/test_afterthought_author.py::test_hold_draw_is_terminal_and_never_consults_the_model
-      - tests/world_v2/test_afterthought_author.py::test_user_answering_inside_the_window_voids_the_opportunity
+      - tests/world_v2/test_afterthought_author_vertical.py::test_random_authority_selects_only_consideration_time
+      - tests/world_v2/test_afterthought_author_vertical.py::test_role_model_owns_impulse_and_text
+      - tests/world_v2/test_afterthought_author_vertical.py::test_role_model_may_decline_without_local_hold
 
   - id: action-budget-receipt-recovery
     phase: 5

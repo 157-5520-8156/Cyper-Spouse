@@ -23,6 +23,10 @@ from companion_daemon.world_v2.deliberation import (
     ModelRoute,
     RouteRequest,
     TriggerMessage,
+    claim_secondary_provider_slot,
+)
+from companion_daemon.world_v2.interactive_turn_budget import (
+    InteractiveTurnBudgetPolicy,
 )
 from companion_daemon.world_v2.proposal_envelope import MinimalProposal, ProposalEvidenceRef
 from test_context_capsule import HASH_B, NOW, _bound, _request
@@ -176,6 +180,444 @@ class _Quick:
             model_version="v1",
             raw_proposal=self.raw,  # type: ignore[arg-type]
         )
+
+
+class _EpisodeMain(_Main):
+    def __init__(self, *, full_delay: float = 0, provisional_delay: float = 0) -> None:
+        super().__init__(delay=full_delay)
+        self.provisional_delay = provisional_delay
+        self.provisional_requests: list[ModelInput] = []
+
+    async def propose_provisional(self, request: ModelInput) -> ModelOutput:
+        self.provisional_requests.append(request)
+        if self.provisional_delay:
+            await asyncio.sleep(self.provisional_delay)
+        raw = _decision_raw()
+        raw["proposal_id"] = "proposal:episode:provisional"
+        return ModelOutput(
+            model_id="provisional",
+            model_version="v1",
+            raw_proposal=raw,
+        )
+
+
+class _ManualClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self._waiters: list[tuple[float, asyncio.Future[None]]] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        target = self.now + seconds
+        if target <= self.now:
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        self._waiters.append((target, waiter))
+        await waiter
+
+    async def advance(self, seconds: float) -> None:
+        self.now += seconds
+        for target, waiter in tuple(self._waiters):
+            if target <= self.now and not waiter.done():
+                waiter.set_result(None)
+        self._waiters = [
+            (target, waiter) for target, waiter in self._waiters if not waiter.done()
+        ]
+        await asyncio.sleep(0)
+
+
+class _ControlledMain(_Main):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.result: asyncio.Future[ModelOutput] | None = None
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        self.requests.append(request)
+        self.result = asyncio.get_running_loop().create_future()
+        self.started.set()
+        try:
+            return await self.result
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+class _ControlledQuick(_Quick):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.result: asyncio.Future[ModelOutput] | None = None
+
+    async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+        self.requests.append(request)
+        self.failure_codes.append(failure_code)
+        self.result = asyncio.get_running_loop().create_future()
+        self.started.set()
+        return await self.result
+
+
+class _HedgeThenLocalQuick(_Quick):
+    """Models production: remote hedge hangs, local reserve failsafe is sync."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.result: asyncio.Future[ModelOutput] | None = None
+
+    async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+        self.requests.append(request)
+        self.failure_codes.append(failure_code)
+        if len(self.requests) == 1:
+            self.result = asyncio.get_running_loop().create_future()
+            self.started.set()
+            return await self.result
+        return ModelOutput(
+            model_id="local-expression-failsafe",
+            model_version="local-expression-failsafe.1",
+            raw_proposal=_minimal_raw(text="刚才我没接好，先回你一声。"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_first_valid_hedge_waits_for_validation_and_cancels_slow_primary() -> None:
+    clock = _ManualClock()
+    budget = InteractiveTurnBudgetPolicy(
+        total_seconds=5.5,
+        hedge_after_seconds=1.5,
+        acceptance_dispatch_reserve_seconds=1.2,
+        clock=clock,
+        sleep=clock.sleep,
+    ).start()
+    primary = _ControlledMain()
+    backup = _ControlledQuick()
+    unit = Deliberation(router=_Router(), main_model=primary, quick_recovery=backup)
+
+    running = asyncio.create_task(
+        unit.deliberate(_capsule(), attempt_id="attempt:first-valid", budget=budget)
+    )
+    await primary.started.wait()
+    await clock.advance(1.49)
+    assert not backup.started.is_set()
+    await clock.advance(0.01)
+    await backup.started.wait()
+    assert backup.result is not None
+    backup.result.set_result(
+        ModelOutput(model_id="backup", model_version="v1", raw_proposal=_minimal_raw())
+    )
+
+    result = await running
+
+    assert result.proposal is not None
+    assert result.audit.model_id == "backup"
+    assert primary.cancelled.is_set()
+    assert len(primary.requests) == len(backup.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_first_completed_invalid_does_not_beat_later_valid_candidate() -> None:
+    clock = _ManualClock()
+    budget = InteractiveTurnBudgetPolicy(
+        total_seconds=5.5,
+        hedge_after_seconds=1.5,
+        acceptance_dispatch_reserve_seconds=1.2,
+        clock=clock,
+        sleep=clock.sleep,
+    ).start()
+    primary = _ControlledMain()
+    backup = _ControlledQuick()
+    running = asyncio.create_task(
+        Deliberation(router=_Router(), main_model=primary, quick_recovery=backup).deliberate(
+            _capsule(), attempt_id="attempt:invalid-first", budget=budget
+        )
+    )
+    await primary.started.wait()
+    assert primary.result is not None
+    primary.result.set_result(
+        ModelOutput(model_id="invalid", model_version="v1", raw_proposal={"bad": True})
+    )
+    await backup.started.wait()
+    assert backup.result is not None
+    backup.result.set_result(
+        ModelOutput(model_id="backup", model_version="v1", raw_proposal=_minimal_raw())
+    )
+
+    result = await running
+
+    assert result.proposal is not None
+    assert result.audit.model_id == "backup"
+    assert len(result.attempt_audits) == 2
+
+
+@pytest.mark.asyncio
+async def test_primary_valid_before_hedge_never_calls_backup() -> None:
+    clock = _ManualClock()
+    budget = InteractiveTurnBudgetPolicy(
+        total_seconds=5.5,
+        hedge_after_seconds=1.5,
+        acceptance_dispatch_reserve_seconds=1.2,
+        clock=clock,
+        sleep=clock.sleep,
+    ).start()
+    primary = _ControlledMain()
+    backup = _ControlledQuick()
+    running = asyncio.create_task(
+        Deliberation(router=_Router(), main_model=primary, quick_recovery=backup).deliberate(
+            _capsule(), attempt_id="attempt:primary-fast", budget=budget
+        )
+    )
+    await primary.started.wait()
+    assert primary.result is not None
+    primary.result.set_result(
+        ModelOutput(model_id="primary", model_version="v1", raw_proposal=_decision_raw())
+    )
+
+    result = await running
+
+    assert result.audit.model_id == "primary"
+    assert result.audit.slot == "primary"
+    assert result.audit.outcome == "winner"
+    assert backup.requests == []
+
+
+@pytest.mark.asyncio
+async def test_corrective_claims_second_slot_and_prevents_hedge_or_third_call() -> None:
+    class CorrectingMain(_Main):
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            assert claim_secondary_provider_slot("corrective")
+            assert not claim_secondary_provider_slot("backup")
+            return ModelOutput(
+                model_id="corrected",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    clock = _ManualClock()
+    backup = _ControlledQuick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=CorrectingMain(),
+        quick_recovery=backup,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:corrective-second-slot",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=5.5,
+            hedge_after_seconds=1.5,
+            acceptance_dispatch_reserve_seconds=1.2,
+            clock=clock,
+            sleep=clock.sleep,
+        ).start(),
+    )
+
+    assert result.audit.model_id == "corrected"
+    assert result.audit.slot == "corrective"
+    assert result.audit.outcome == "winner"
+    assert backup.requests == []
+
+
+@pytest.mark.asyncio
+async def test_two_slow_slots_record_technical_failure_without_a_third_role_call() -> None:
+    """Primary plus one recovery exhaust the bounded role-call allowance."""
+
+    clock = _ManualClock()
+    primary = _ControlledMain()
+    backup = _HedgeThenLocalQuick()
+    running = asyncio.create_task(
+        Deliberation(router=_Router(), main_model=primary, quick_recovery=backup).deliberate(
+            _capsule(),
+            attempt_id="attempt:budget-exhausted-failsafe",
+            budget=InteractiveTurnBudgetPolicy(
+                total_seconds=5.5,
+                hedge_after_seconds=1.5,
+                acceptance_dispatch_reserve_seconds=1.2,
+                clock=clock,
+                sleep=clock.sleep,
+            ).start(),
+        )
+    )
+    await primary.started.wait()
+    await clock.advance(1.5)
+    await backup.started.wait()
+    await clock.advance(2.8)
+
+    result = await running
+
+    assert clock.now == pytest.approx(4.3)
+    assert result.proposal is None
+    assert result.audit.status == "recovery_failed"
+    assert result.audit.failure_code == "backup_timeout"
+    assert result.audit.outcome == "budget_exhausted"
+    assert result.attempt_audits[0].outcome == "budget_exhausted"
+    assert result.attempt_audits[0].failure_code == "primary_timeout"
+    assert len(primary.requests) == 1
+    assert len(backup.requests) == 1
+    assert backup.failure_codes == ["main_timeout"]
+
+
+@pytest.mark.asyncio
+async def test_dual_invalid_after_full_budget_stops_after_one_corrective_call() -> None:
+    """A failed bounded correction becomes technical failure, never local prose."""
+
+    clock = _ManualClock()
+
+    class _InvalidThenExhaustLocal(_Quick):
+        async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+            self.requests.append(request)
+            self.failure_codes.append(failure_code)
+            if len(self.requests) == 1:
+                # Remote hedge spent the whole absolute budget before returning
+                # an unusable draft — the production race that skipped failsafe.
+                clock.now = 5.5
+                return ModelOutput(
+                    model_id="invalid-backup",
+                    model_version="v1",
+                    raw_proposal={"bad": True},
+                )
+            return ModelOutput(
+                model_id="local-expression-failsafe",
+                model_version="local-expression-failsafe.1",
+                raw_proposal=_minimal_raw(text="刚才我没接好，先回你一声。"),
+            )
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_Main({"bad": True}),
+        quick_recovery=_InvalidThenExhaustLocal(),
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:dual-invalid-past-deadline",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=5.5,
+            hedge_after_seconds=1.5,
+            acceptance_dispatch_reserve_seconds=1.2,
+            clock=clock,
+            sleep=clock.sleep,
+        ).start(),
+    )
+
+    assert result.proposal is None
+    assert result.audit.status == "recovery_failed"
+    assert result.audit.failure_code == "backup_invalid"
+    assert result.attempt_audits[0].failure_code == "primary_invalid"
+    assert result.attempt_audits[0].outcome == "budget_exhausted"
+    assert result.attempt_audits[1].outcome == "budget_exhausted"
+    assert len(result.attempt_audits) == 2
+
+
+@pytest.mark.asyncio
+async def test_backup_timeout_is_durable_when_local_failsafe_also_fails() -> None:
+    clock = _ManualClock()
+    primary = _ControlledMain()
+
+    class _HangThenFailQuick(_Quick):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.result: asyncio.Future[ModelOutput] | None = None
+
+        async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+            self.requests.append(request)
+            self.failure_codes.append(failure_code)
+            if len(self.requests) == 1:
+                self.result = asyncio.get_running_loop().create_future()
+                self.started.set()
+                return await self.result
+            raise RuntimeError("local failsafe unavailable")
+
+    backup = _HangThenFailQuick()
+    running = asyncio.create_task(
+        Deliberation(router=_Router(), main_model=primary, quick_recovery=backup).deliberate(
+            _capsule(),
+            attempt_id="attempt:backup-timeout-code",
+            budget=InteractiveTurnBudgetPolicy(
+                total_seconds=5.5,
+                hedge_after_seconds=1.5,
+                acceptance_dispatch_reserve_seconds=1.2,
+                clock=clock,
+                sleep=clock.sleep,
+            ).start(),
+        )
+    )
+    await primary.started.wait()
+    await clock.advance(1.5)
+    await backup.started.wait()
+    await clock.advance(4.0)
+    result = await running
+    assert result.proposal is None
+    assert result.audit.failure_code == "backup_timeout"
+    assert result.audit.outcome == "budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_first_valid_race_records_latency_markers() -> None:
+    clock = _ManualClock()
+    marks: list[str] = []
+    budget = InteractiveTurnBudgetPolicy(
+        total_seconds=5.5,
+        hedge_after_seconds=1.5,
+        acceptance_dispatch_reserve_seconds=1.2,
+        clock=clock,
+        sleep=clock.sleep,
+    ).start(marker=marks.append)
+    primary = _ControlledMain()
+    backup = _ControlledQuick()
+    running = asyncio.create_task(
+        Deliberation(router=_Router(), main_model=primary, quick_recovery=backup).deliberate(
+            _capsule(), attempt_id="attempt:latency-markers", budget=budget
+        )
+    )
+    await primary.started.wait()
+    await clock.advance(1.5)
+    await backup.started.wait()
+    assert backup.result is not None
+    backup.result.set_result(
+        ModelOutput(model_id="backup", model_version="v1", raw_proposal=_minimal_raw())
+    )
+    result = await running
+    assert result.proposal is not None
+    assert "primary" in marks
+    assert "hedge_started" in marks
+    assert "candidate_validated" in marks
+    assert "winner" in marks
+
+
+@pytest.mark.asyncio
+async def test_primary_can_win_after_hedge_starts_and_loser_is_audited() -> None:
+    clock = _ManualClock()
+    primary = _ControlledMain()
+    backup = _ControlledQuick()
+    running = asyncio.create_task(
+        Deliberation(router=_Router(), main_model=primary, quick_recovery=backup).deliberate(
+            _capsule(),
+            attempt_id="attempt:primary-after-hedge",
+            budget=InteractiveTurnBudgetPolicy(
+                total_seconds=5.5,
+                hedge_after_seconds=1.5,
+                acceptance_dispatch_reserve_seconds=1.2,
+                clock=clock,
+                sleep=clock.sleep,
+            ).start(),
+        )
+    )
+    await primary.started.wait()
+    await clock.advance(1.5)
+    await backup.started.wait()
+    assert primary.result is not None
+    primary.result.set_result(
+        ModelOutput(model_id="primary", model_version="v1", raw_proposal=_decision_raw())
+    )
+
+    result = await running
+
+    assert result.audit.model_id == "primary"
+    assert len(result.attempt_audits) == 2
+    assert result.attempt_audits[0].failure_code == "backup_cancelled"
+    assert result.attempt_audits[0].outcome == "hedge_cancelled"
 
 
 @pytest.mark.asyncio
@@ -528,3 +970,131 @@ async def test_provider_suppressing_cancellation_cannot_extend_caller_deadline()
     assert unit.provider_health.quick_circuit_open is False
     await asyncio.sleep(0.06)
     assert unit.provider_health.main_inflight == 0
+
+
+@pytest.mark.asyncio
+async def test_expression_episode_off_is_original_single_provider_path() -> None:
+    main = _EpisodeMain()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+        expression_episode_mode="off",
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:episode-off",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+
+    assert result.proposal is not None
+    assert main.provisional_requests == []
+    assert len(result.attempt_audits) == 1
+
+
+@pytest.mark.asyncio
+async def test_expression_episode_shadow_runs_candidate_without_changing_full_result() -> None:
+    main = _EpisodeMain(full_delay=0.02)
+    unit = Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+        expression_episode_mode="shadow",
+    )
+    result = await unit.deliberate(
+        _capsule(),
+        attempt_id="attempt:episode-shadow",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+
+    assert result.proposal is not None
+    assert result.proposal.proposal_id == "proposal:decision:1"
+    assert len(main.requests) == 1
+    assert len(main.provisional_requests) == 1
+    assert len(result.attempt_audits) == 1
+    diagnostics = unit.expression_episode_diagnostics()
+    assert diagnostics["mode"] == "shadow"
+    assert diagnostics["turns"] == 1
+    assert diagnostics["provisional_first"] == 1
+    assert diagnostics["slot_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_expression_episode_on_authorizes_first_valid_provisional_only() -> None:
+    main = _EpisodeMain(full_delay=0.1)
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+        expression_episode_mode="on",
+    )
+    result = await deliberation.deliberate(
+        _capsule(),
+        attempt_id="attempt:episode-on",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+
+    assert result.proposal is not None
+    assert result.proposal.proposal_id == "proposal:episode:provisional"
+    assert len(main.requests) == 1
+    assert len(main.provisional_requests) == 1
+    assert len(result.attempt_audits) == 1
+    tail = await deliberation.await_expression_episode_tail(
+        result.proposal.trigger_ref
+    )
+    assert tail is not None
+    assert tail.disposition == "complete_without_more"
+
+
+@pytest.mark.asyncio
+async def test_expression_episode_on_retains_auditable_full_append_tail() -> None:
+    class AppendMain(_EpisodeMain):
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            output = await super().propose(request)
+            return output.model_copy(
+                update={
+                    "episode_disposition": "append",
+                    "raw_proposal": {
+                        **output.raw_proposal,
+                        "episode_disposition": "append",
+                    },
+                }
+            )
+
+    main = AppendMain(full_delay=0.05)
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+        expression_episode_mode="on",
+    )
+    result = await deliberation.deliberate(
+        _capsule(),
+        attempt_id="attempt:episode-on-append",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+
+    assert result.proposal is not None
+    tail = await deliberation.await_expression_episode_tail(
+        result.proposal.trigger_ref
+    )
+    assert tail is not None
+    assert tail.disposition == "append"
+    assert tail.deliberation is not None
+    assert tail.deliberation.proposal is not None
+    assert tail.deliberation.audit.status == "proposal_validated"

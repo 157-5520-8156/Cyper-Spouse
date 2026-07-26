@@ -16,6 +16,15 @@ from .goal_expiry_runtime import build_due_goal_expiry_events
 from .occurrence_clock_continuation import build_occurrence_clock_events
 from .outcome_observation_runtime import build_outcome_observation_event
 from .pinned_turn import PinnedTurnCompiler
+from .expression_episode_lifecycle import (
+    expression_episode_claim_event,
+    expression_episode_cancel_events,
+    expression_episode_complete_event,
+    expression_episode_open_event,
+    expression_episode_trigger_id,
+)
+from .expression_cadence import record_cadence_draws
+from .interactive_turn_budget import InteractiveTurnBudget
 from .production_latency_trace import ProductionLatencyRecorder
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
@@ -90,7 +99,6 @@ from .interaction_bid_trigger_runtime import (
 )
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
-from .afterthought_author import AfterthoughtAuthorRuntime, AfterthoughtRunResult
 from .afterthought_author_vertical import AfterthoughtVerticalRuntime
 from .bounded_decision_vertical import AnchoredRunResult, InlineOnceRunResult
 from .expression_reconsideration import expression_reconsideration_events_for_observation
@@ -99,6 +107,7 @@ from .expression_reconsideration_runtime import (
     ExpressionReconsiderationRunResult,
     ExpressionReconsiderationRuntime,
 )
+from .random_authority import RandomAuthority
 from .external_result_trigger_runtime import (
     ExternalResultTriggerRunResult,
     ExternalResultTriggerRuntime,
@@ -140,6 +149,7 @@ from .schemas import (
     ProjectionRequest,
     ResponseExpectationAssessedPayload,
     RuntimeOutcome,
+    TriggerProcess,
     WorldEvent,
     WorldProjection,
 )
@@ -316,7 +326,7 @@ class WorldRuntime:
         social_action_worker: SocialActionWorker | None = None,
         quick_reaction_worker: QuickReactionWorker | QuickReactionVerticalWorker | None = None,
         proactive_action_runtime: ProactiveActionRuntime | None = None,
-        afterthought_author: AfterthoughtAuthorRuntime | AfterthoughtVerticalRuntime | None = None,
+        afterthought_author: AfterthoughtVerticalRuntime | None = None,
         memory_withdrawal_review: MemoryWithdrawalReviewRuntime | None = None,
         external_result_owner: str | None = None,
         external_result_deliberator: ToolResultDeliberator | None = None,
@@ -592,7 +602,6 @@ class WorldRuntime:
         | SocialActionRunResult
         | MemoryWithdrawalReviewRunResult
         | ProactiveActionRunResult
-        | AfterthoughtRunResult
         | AnchoredRunResult
         | None
     ):
@@ -1127,6 +1136,284 @@ class WorldRuntime:
             projection, replay = self._ledger.project(), rebuild()
         return (evaluator or ReplayEvaluator()).evaluate(projection=projection, replay=replay)
 
+    def expression_episode_diagnostics(self) -> dict[str, object]:
+        """Return text-free process aggregates for health endpoints."""
+
+        if self._pinned_turn is None:
+            return {"mode": "off"}
+        return self._pinned_turn.expression_episode_diagnostics()
+
+    async def _claim_expression_episode(
+        self, observation: Observation
+    ) -> tuple[TriggerProcess | None, ProjectionCursor | None]:
+        if (
+            self._pinned_turn is None
+            or self._pinned_turn.expression_episode_mode == "off"
+        ):
+            return None, None
+        projection = await self._project_for_write()
+        trigger_id = expression_episode_trigger_id(
+            self._world_id, observation.observation_id
+        )
+        process = next(
+            (item for item in projection.trigger_processes if item.trigger_id == trigger_id),
+            None,
+        )
+        if process is None or process.state == "terminal":
+            return process, None
+        if process.state == "claimed":
+            return process, ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            )
+        event, claimed = expression_episode_claim_event(
+            world_id=self._world_id,
+            process=process,
+            owner_id="worker:world-v2:expression-episode",
+            at=projection.logical_time or observation.logical_time,
+            trace_id=observation.trace_id,
+            correlation_id=observation.correlation_id,
+        )
+        committed = await self._commit(
+            [event],
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            commit_id=f"commit:{trigger_id}:claim",
+        )
+        return claimed, ProjectionCursor(
+            world_revision=committed.world_revision,
+            deliberation_revision=committed.deliberation_revision,
+            ledger_sequence=committed.ledger_sequence,
+        )
+
+    async def _complete_expression_episode(
+        self,
+        *,
+        observation: Observation,
+        process: TriggerProcess | None,
+        outcome_ref: str,
+    ) -> None:
+        if process is None or process.state != "claimed":
+            return
+        projection = await self._project_for_write()
+        current = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id == process.trigger_id
+            ),
+            None,
+        )
+        if current is None or current.state == "terminal":
+            return
+        event = expression_episode_complete_event(
+            world_id=self._world_id,
+            process=current,
+            at=projection.logical_time or observation.logical_time,
+            trace_id=observation.trace_id,
+            correlation_id=observation.correlation_id,
+            outcome_ref=outcome_ref,
+        )
+        await self._commit(
+            [event],
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            commit_id=f"commit:{process.trigger_id}:complete",
+        )
+
+    async def _settle_expression_episode_for_action(
+        self, result: ExternalObservation
+    ) -> None:
+        if result.status not in {"provider_accepted", "delivered", "failed", "unknown"}:
+            return
+        projection = await self._project_for_write()
+        action = next(
+            (item for item in projection.actions if item.action_id == result.action_id),
+            None,
+        )
+        if action is None or action.expression_plan_id is None:
+            return
+        manifest = next(
+            (
+                item
+                for item in projection.expression_plan_manifests
+                if item.plan_id == action.expression_plan_id
+            ),
+            None,
+        )
+        if manifest is None:
+            return
+        audit = next(
+            (
+                item
+                for item in projection.proposal_audits
+                if item.proposal_id == manifest.proposal_id
+            ),
+            None,
+        )
+        if audit is None:
+            return
+        located = await self._lookup_event_commit(audit.trigger_ref)
+        if located is None or located[0].event_type != "ObservationRecorded":
+            return
+        try:
+            observation = Observation.model_validate_json(located[0].payload_json)
+        except ValueError:
+            return
+        process = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id
+                == expression_episode_trigger_id(
+                    self._world_id, observation.observation_id
+                )
+                and item.state != "terminal"
+            ),
+            None,
+        )
+        disposition = "complete_without_more"
+        tail_audit = next(
+            (
+                item
+                for item in projection.proposal_audits
+                if item.trigger_ref == located[0].event_id
+                and ":episode-append:" in item.proposal_id
+            ),
+            None,
+        )
+        if tail_audit is not None:
+            try:
+                tail_proposal = validate_proposal_envelope(
+                    json.loads(tail_audit.proposal_json)
+                )
+            except (TypeError, ValueError):
+                tail_audit = None
+            else:
+                if isinstance(tail_proposal, DecisionProposal):
+                    disposition = (
+                        tail_proposal.episode_disposition
+                        or "complete_without_more"
+                    )
+        if self._pinned_turn is not None and process is not None:
+            if tail_audit is None:
+                tail_commit, disposition = (
+                    await self._pinned_turn.audit_expression_episode_tail(
+                        observation=observation,
+                        observation_event=located[0],
+                    )
+                )
+                if tail_commit is not None and tail_commit.proposal_id is not None:
+                    refreshed = await self._project_for_write()
+                    tail_audit = next(
+                        (
+                            item
+                            for item in refreshed.proposal_audits
+                            if item.proposal_id == tail_commit.proposal_id
+                        ),
+                        None,
+                    )
+            if (
+                disposition == "append"
+                and tail_audit is not None
+                and self._expression_policy is not None
+                and self._expression_recorder is not None
+            ):
+                tail_projection = await self._project_for_write()
+                account = next(
+                    (
+                        item
+                        for item in tail_projection.budget_accounts
+                        if item.account_id == self._expression_policy.account_id
+                    ),
+                    None,
+                )
+                if tail_audit is not None and account is not None:
+                    try:
+                        material = derive_expression_plan_material(
+                            audit=tail_audit,
+                            cursor=ProjectionCursor(
+                                world_revision=tail_projection.world_revision,
+                                deliberation_revision=tail_projection.deliberation_revision,
+                                ledger_sequence=tail_projection.ledger_sequence,
+                            ),
+                            world_id=self._world_id,
+                            policy=self._expression_policy,
+                            account=account,
+                            logical_time=tail_projection.logical_time
+                            or observation.logical_time,
+                            created_at=observation.created_at,
+                            trace_id=observation.trace_id,
+                            correlation_id=observation.correlation_id,
+                            payload_store=self._expression_payload_store,
+                            source_observation=observation,
+                        )
+                    except ExpressionPlanAcceptanceError:
+                        disposition = "complete_without_more"
+                    else:
+                        await self._commit_visible_acceptance(
+                            recorder=self._expression_recorder,
+                            acceptance_id=(
+                                "acceptance:expression-plan:"
+                                + tail_audit.proposal_id
+                            ),
+                            material=material,
+                            actor=self._expression_policy.actor,
+                            source="world-runtime:expression-episode-append",
+                            trace_id=observation.trace_id,
+                        )
+        await self._complete_expression_episode(
+            observation=observation,
+            process=process,
+            outcome_ref=f"expression-episode:{disposition}:{result.status}",
+        )
+
+    async def _resolve_expression_episode_before_dispatch(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        process: TriggerProcess | None,
+    ) -> str | None:
+        if (
+            process is None
+            or self._pinned_turn is None
+            or self._pinned_turn.expression_episode_mode != "on"
+        ):
+            return None
+        tail = await self._pinned_turn.await_expression_episode_tail(
+            observation_event.event_id
+        )
+        if tail is None:
+            return None
+        disposition = tail.disposition
+        if disposition == "append":
+            return disposition
+        if disposition in {"cancel_pending", "supersede_pending"}:
+            projection = await self._project_for_write()
+            events = expression_episode_cancel_events(
+                world_id=self._world_id,
+                projection=projection,
+                process=process,
+                observation=observation,
+                observation_event_ref=observation_event.event_id,
+                superseded=disposition == "supersede_pending",
+            )
+            if events:
+                await self._commit(
+                    list(events),
+                    world_revision=projection.world_revision,
+                    deliberation_revision=projection.deliberation_revision,
+                    commit_id=f"commit:{process.trigger_id}:{disposition}",
+                )
+        await self._complete_expression_episode(
+            observation=observation,
+            process=process,
+            outcome_ref=f"expression-episode:{disposition}",
+        )
+        return disposition
+
     async def accept_appraisal_proposal(self, proposal_id: str) -> RuntimeOutcome:
         """Atomically consume one already-persisted appraisal proposal.
 
@@ -1483,7 +1770,12 @@ class WorldRuntime:
             projection_hint=f"world-revision:{committed.world_revision}",
         )
 
-    async def ingest(self, observation: Observation) -> RuntimeOutcome:
+    async def ingest(
+        self,
+        observation: Observation,
+        *,
+        turn_budget: InteractiveTurnBudget | None = None,
+    ) -> RuntimeOutcome:
         started = time.perf_counter()
         if observation.world_id != self._world_id:
             raise ValueError(
@@ -1516,7 +1808,8 @@ class WorldRuntime:
         reply_deferred_refs: tuple[str, ...] = ()
         reply_terminal_errors: tuple[str, ...] = ()
         audited = None
-        assessment_proposal: DecisionProposal | None = None
+        assessment_proposal: DecisionProposal | MinimalProposal | None = None
+        episode_process: TriggerProcess | None = None
         async with self._lock:
             existing = await self._lookup_event_commit(event.event_id)
             if existing is not None:
@@ -1592,6 +1885,15 @@ class WorldRuntime:
                     source_event=event,
                 ),
             ]
+            if (
+                self._pinned_turn is not None
+                and self._pinned_turn.expression_episode_mode != "off"
+            ):
+                ingress_events.append(
+                    expression_episode_open_event(
+                        observation=observation, observation_event=event
+                    )
+                )
             if self._interaction_appraisal_owner is not None:
                 trigger_events = interaction_appraisal_trigger_events(
                     observation=observation,
@@ -1700,7 +2002,10 @@ class WorldRuntime:
                     affect_owner_id=self._affect_deliberation_owner,
                     relationship_owner_id=self._relationship_deliberation_owner,
                     immediate_emotion_worker=self._immediate_emotion_worker,
-                ).run_observation(observation.observation_id)
+                ).run_observation(
+                    observation.observation_id,
+                    turn_budget=turn_budget,
+                )
                 emotion_ready = immediate_result.status in {"processed", "completed_existing"}
                 if not emotion_ready:
                     reply_deferred_refs = (
@@ -1749,6 +2054,34 @@ class WorldRuntime:
                         ledger_sequence=committed.ledger_sequence,
                     )
             if self._pinned_turn is not None and emotion_ready:
+                episode_process, episode_cursor = await self._claim_expression_episode(
+                    observation
+                )
+                if episode_cursor is not None:
+                    reply_cursor = episode_cursor
+                cadence_draws = ()
+                if self._pinned_turn.recorded_cadence_mode != "off":
+                    draw_head = await self._project_for_write()
+                    draw_kwargs = dict(
+                        authority=RandomAuthority(ledger=self._ledger),
+                        attempt_id=f"attempt:expression-cadence:{event.event_id}",
+                        beat_count=8,
+                        logical_time=draw_head.logical_time or observation.logical_time,
+                        actor="system:expression-cadence",
+                        trace_id=observation.trace_id,
+                        correlation_id=observation.correlation_id,
+                    )
+                    cadence_draws = (
+                        await asyncio.to_thread(record_cadence_draws, **draw_kwargs)
+                        if self._ledger.blocks_event_loop
+                        else record_cadence_draws(**draw_kwargs)
+                    )
+                    draw_head = await self._project_for_write()
+                    reply_cursor = ProjectionCursor(
+                        world_revision=draw_head.world_revision,
+                        deliberation_revision=draw_head.deliberation_revision,
+                        ledger_sequence=draw_head.ledger_sequence,
+                    )
                 audited = await self._pinned_turn.audit_observation(
                     observation=observation,
                     observation_event=event,
@@ -1757,6 +2090,8 @@ class WorldRuntime:
                         self._immediate_emotion_worker is not None
                         and not immediate_emotion_selected
                     ),
+                    turn_budget=turn_budget,
+                    recorded_cadence_draws=cadence_draws,
                 )
                 _LOG.warning(
                     "world v2 ingest phase trace=%s phase=reply_audit_ms value=%.1f",
@@ -2030,6 +2365,21 @@ class WorldRuntime:
                                     authorized_action_ids = tuple(
                                         item.action.action_id for item in material.beats
                                     )
+        pre_dispatch_disposition = None
+        if reply_authorized:
+            pre_dispatch_disposition = (
+                await self._resolve_expression_episode_before_dispatch(
+                    observation=observation,
+                    observation_event=event,
+                    process=episode_process,
+                )
+            )
+            if pre_dispatch_disposition in {
+                "cancel_pending",
+                "supersede_pending",
+            }:
+                reply_authorized = False
+                authorized_action_ids = ()
         if reply_authorized:
             status = "action_authorized"
         elif reply_terminal_errors:
@@ -2047,6 +2397,17 @@ class WorldRuntime:
                 proposal=assessment_proposal,
                 observation=observation,
                 observation_event=event,
+            )
+        episode_tail_pending = (
+            self._pinned_turn is not None
+            and self._pinned_turn.expression_episode_mode == "on"
+            and reply_authorized
+        )
+        if not episode_tail_pending:
+            await self._complete_expression_episode(
+                observation=observation,
+                process=episode_process,
+                outcome_ref=f"expression-episode:{status}",
             )
         final_projection = await self._project_for_write()
         _LOG.warning(
@@ -2085,6 +2446,63 @@ class WorldRuntime:
         """
 
         projection = await self._project_for_write()
+
+        def reply_audit_from(current_projection):
+            for candidate in reversed(current_projection.proposal_audits):
+                if (
+                    candidate.trigger_ref != observation_event.event_id
+                    or candidate.proposal_id.startswith(QUICK_REACTION_PROPOSAL_PREFIX)
+                    or candidate.proposal_kind != "decision"
+                ):
+                    continue
+                try:
+                    proposal = validate_proposal_envelope(
+                        json.loads(candidate.proposal_json)
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(proposal, DecisionProposal) and any(
+                    change.kind == "expression_plan_transition"
+                    for change in proposal.proposed_changes
+                ):
+                    return candidate, proposal
+            return None
+
+        reply_audit = reply_audit_from(projection)
+        episode = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id
+                == expression_episode_trigger_id(
+                    self._world_id, observation.observation_id
+                )
+            ),
+            None,
+        )
+        if (
+            reply_audit is None
+            and episode is not None
+            and episode.state != "terminal"
+            and self._pinned_turn is not None
+        ):
+            claimed, cursor = await self._claim_expression_episode(observation)
+            if cursor is None:
+                current = await self._project_for_write()
+                cursor = ProjectionCursor(
+                    world_revision=current.world_revision,
+                    deliberation_revision=current.deliberation_revision,
+                    ledger_sequence=current.ledger_sequence,
+                )
+            await self._pinned_turn.audit_observation(
+                observation=observation,
+                observation_event=observation_event,
+                cursor=cursor,
+                turn_budget=None,
+            )
+            projection = await self._project_for_write()
+            reply_audit = reply_audit_from(projection)
+            episode = claimed
         # A quick-reaction manifest shares the observation trigger but is not
         # the visible answer; retry joining must resolve the reply lane only.
         manifest = next(
@@ -2169,6 +2587,82 @@ class WorldRuntime:
                 ),
                 projection_hint=f"world-revision:{committed.world_revision}",
             )
+        if (
+            manifest is None
+            and reply_audit is not None
+            and self._expression_policy is not None
+            and self._expression_recorder is not None
+        ):
+            audit, proposal = reply_audit
+            if proposal.timing_choice == "silent":
+                await self._complete_expression_episode(
+                    observation=observation,
+                    process=episode,
+                    outcome_ref="expression-episode:observed_only",
+                )
+                projection = await self._project_for_write()
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:{trigger_id}",
+                    trigger_id=trigger_id,
+                    observation_ref=observation.observation_id,
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="observed_only",
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+            if proposal.timing_choice == "now":
+                account = next(
+                    (
+                        item
+                        for item in projection.budget_accounts
+                        if item.account_id == self._expression_policy.account_id
+                    ),
+                    None,
+                )
+                if account is not None:
+                    material = derive_expression_plan_material(
+                        audit=audit,
+                        cursor=ProjectionCursor(
+                            world_revision=projection.world_revision,
+                            deliberation_revision=projection.deliberation_revision,
+                            ledger_sequence=projection.ledger_sequence,
+                        ),
+                        world_id=self._world_id,
+                        policy=self._expression_policy,
+                        account=account,
+                        logical_time=projection.logical_time or observation.logical_time,
+                        created_at=observation.created_at,
+                        trace_id=observation.trace_id,
+                        correlation_id=observation.correlation_id,
+                        payload_store=self._expression_payload_store,
+                        source_observation=observation,
+                    )
+                    committed = await self._commit_visible_acceptance(
+                        recorder=self._expression_recorder,
+                        acceptance_id=f"acceptance:expression-plan:{audit.proposal_id}",
+                        material=material,
+                        actor=self._expression_policy.actor,
+                        source="world-runtime:expression-recovery",
+                        trace_id=observation.trace_id,
+                    )
+                    await self._complete_expression_episode(
+                        observation=observation,
+                        process=episode,
+                        outcome_ref="expression-episode:action_authorized",
+                    )
+                    projection = await self._project_for_write()
+                    return RuntimeOutcome(
+                        outcome_id=f"outcome:{trigger_id}",
+                        trigger_id=trigger_id,
+                        observation_ref=observation.observation_id,
+                        committed_world_revision=projection.world_revision,
+                        ledger_sequence=projection.ledger_sequence,
+                        status="action_authorized",
+                        authorized_action_ids=tuple(
+                            item.action.action_id for item in material.beats
+                        ),
+                        projection_hint=f"world-revision:{committed.world_revision}",
+                    )
         if manifest is None:
             # A reply lane may terminate with only durable deliberation audit
             # evidence (for example, main and quick-recovery both fail
@@ -2191,6 +2685,12 @@ class WorldRuntime:
                 for item in projection.trigger_processes
             )
             if has_bound_deliberation or has_appraisal_trigger:
+                await self._complete_expression_episode(
+                    observation=observation,
+                    process=episode,
+                    outcome_ref="expression-episode:observed_only",
+                )
+                projection = await self._project_for_write()
                 return RuntimeOutcome(
                     outcome_id=f"outcome:{trigger_id}",
                     trigger_id=trigger_id,
@@ -2661,18 +3161,20 @@ class WorldRuntime:
                 trigger_id=trigger_id,
                 projection=after_inbox,
             )
-            committed = await self._commit(
+            await self._commit(
                 list(plan.events),
                 world_revision=after_inbox.world_revision,
                 deliberation_revision=after_inbox.deliberation_revision,
                 commit_id=f"commit:{trigger_id}:settlement",
             )
+            await self._settle_expression_episode_for_action(result)
+            committed_projection = await self._project_for_write()
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
             trigger_id=trigger_id,
             observation_ref=result.result_id,
-            committed_world_revision=committed.world_revision,
-            ledger_sequence=committed.ledger_sequence,
+            committed_world_revision=committed_projection.world_revision,
+            ledger_sequence=committed_projection.ledger_sequence,
             status=plan.runtime_status,
             deferred_refs=(plan.deferred_ref,) if plan.deferred_ref else (),
             projection_hint=plan.projection_hint,

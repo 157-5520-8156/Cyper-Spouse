@@ -218,6 +218,7 @@ async def test_three_day_affect_decay_and_relationship_memory_change_the_next_tu
         )
         assert len(reply.responses) >= 2
         assert reply.responses[-1][1] == "acknowledge_briefly"
-        assert reply.responses[-1][0] != reply.responses[0][0]
+        # The model receives the changed state; local code no longer rewrites
+        # its visible response to force a variation.
     finally:
         app.close()

@@ -518,10 +518,26 @@ class WorldV2PlatformHost:
                 action_units_used += 1
                 background_statuses.append("media-delivery:" + auto_delivery.status)
 
-        while background_units_used < max_background_units and not preempted():
+        # The application returns ``None`` both for a genuinely empty queue and
+        # when a visible ingress wins a CAS race. One empty read therefore
+        # cannot safely terminate the pass: retry once, while keeping a small
+        # absolute read cap so an idle scheduler remains cheap.
+        empty_background_reads = 0
+        background_reads = 0
+        max_background_reads = max_background_units + 2
+        while (
+            background_units_used < max_background_units
+            and background_reads < max_background_reads
+            and not preempted()
+        ):
+            background_reads += 1
             result = await self.drain_background_once()
             if result is None:
-                break
+                empty_background_reads += 1
+                if empty_background_reads >= 2:
+                    break
+                continue
+            empty_background_reads = 0
             background_units_used += 1
             background_statuses.append(str(getattr(result, "work_status", "processed")))
 

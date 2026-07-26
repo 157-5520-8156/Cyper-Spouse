@@ -1,17 +1,9 @@
-"""Afterthought vertical, framework edition (BoundedDecisionVertical pilot).
+"""Model-owned afterthought decisions on the shared bounded vertical.
 
-Semantics are preserved byte-for-byte from ``afterthought_author.py`` (the
-frozen hand-written implementation, kept in tree for hot rollback): the
-restraint policy, mood/reply/daypart weight compiler, joint mode×delay grid,
-gate prompt, strict verdict parser with the v1 overlap guard, the opportunity
-predicate and the proposal materialization below are verbatim copies.  All
-lifecycle ceremony — open/claim/lease/complete, recorded draws, the bounded
-gate call, audit wrapping and ExpressionPlan acceptance — lives in
-:mod:`bounded_decision_vertical`.
-
-The shadow-replay suite drives this edition and the hand-written one on the
-same input stream and holds every commit to zero byte difference; the
-composition root switches between them via ``WORLD_V2_BDV_PILOT_DISABLED``.
+The system records a replayable time at which the character may reconsider
+the conversation.  It supplies current context and effect capabilities, while
+the role model owns whether there is an impulse and what it says.  Lifecycle,
+CAS, audit, budget, and Action authorization remain hard system boundaries.
 """
 
 from __future__ import annotations
@@ -21,8 +13,6 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Literal
-
 from pydantic import Field, model_validator
 
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
@@ -64,8 +54,6 @@ _LOG = logging.getLogger(__name__)
 
 AFTERTHOUGHT_PROPOSAL_PREFIX = "proposal:afterthought:"
 
-AfterthoughtMode = Literal["quick_continue", "topic_drift"]
-
 _REPLY_ACTION_KINDS = frozenset({"reply"})
 _REPLY_SETTLED_STATES = frozenset({"provider_accepted", "delivered"})
 # A pending outbound initiative means she already owes the channel something;
@@ -87,13 +75,6 @@ def _digest(value: object) -> str:
 class AfterthoughtPolicy(FrozenModel):
     """Installed restraint constants; none of them author a single word."""
 
-    # Most replies must not grow a tail.  Pre-context act mass out of 10_000.
-    base_act_bp: int = Field(default=2_000, ge=100, le=9_000)
-    act_floor_bp: int = Field(default=50, ge=1, le=9_000)
-    act_ceiling_bp: int = Field(default=4_500, ge=100, le=9_990)
-    # Mode preference mass, ported from v1's 0.26 / 0.14 pulse split.
-    quick_continue_weight_bp: int = Field(default=6_500, ge=1, le=10_000)
-    topic_drift_weight_bp: int = Field(default=3_500, ge=1, le=10_000)
     # Window grids: the drawn delay is one recorded candidate inside the
     # mode's v1 interval, so replay reproduces the exact seconds.
     quick_continue_min_seconds: int = Field(default=12, ge=1, le=600)
@@ -107,12 +88,9 @@ class AfterthoughtPolicy(FrozenModel):
     # A receipt older than this no longer produces an impulse at all: the
     # conversational moment has passed (and a deploy never resurrects one).
     opportunity_horizon_seconds: int = Field(default=240, ge=30, le=3_600)
-    # v1: "A normal short turn has already received its answer."  A reply
-    # shorter than this never grows a tail; it was already complete.
-    min_reply_chars: int = Field(default=10, ge=1, le=200)
     max_text_chars: int = Field(default=120, ge=20, le=1_000)
     gate_timeout_seconds: float = Field(default=8.0, gt=0.0, le=30.0)
-    # Local quiet hours [start, end): the act mass is halved, not zeroed.
+    # Local time is context for the model, never a local act/hold verdict.
     night_start_hour: int = Field(default=1, ge=0, le=23)
     night_end_hour: int = Field(default=7, ge=0, le=24)
 
@@ -122,38 +100,39 @@ class AfterthoughtPolicy(FrozenModel):
             raise ValueError("quick_continue window must move forward")
         if self.topic_drift_max_seconds <= self.topic_drift_min_seconds:
             raise ValueError("topic_drift window must move forward")
-        if self.act_ceiling_bp < self.act_floor_bp:
-            raise ValueError("act ceiling must not undercut the floor")
         return self
 
-    def delay_candidates(self, mode: AfterthoughtMode) -> tuple[int, ...]:
-        if mode == "quick_continue":
-            lo, hi, step = (
+    def delay_candidates(self) -> tuple[int, ...]:
+        """All replayable timing opportunities, without a behavior category."""
+
+        candidates: set[int] = set()
+        for lo, hi, step in (
+            (
                 self.quick_continue_min_seconds,
                 self.quick_continue_max_seconds,
                 self.quick_continue_step_seconds,
-            )
-        else:
-            lo, hi, step = (
+            ),
+            (
                 self.topic_drift_min_seconds,
                 self.topic_drift_max_seconds,
                 self.topic_drift_step_seconds,
-            )
-        grid = list(range(lo, hi + 1, step))
-        if grid[-1] != hi:
-            grid.append(hi)
-        return tuple(grid)
+            ),
+        ):
+            grid = list(range(lo, hi + 1, step))
+            if grid[-1] != hi:
+                grid.append(hi)
+            candidates.update(grid)
+        return tuple(sorted(candidates))
 
 
 class AfterthoughtDecisionProfile(FrozenModel):
-    """Explainable act/hold mass compiled from accepted mood, reply, daypart."""
+    """Replay identity inputs exposed to the role model as context."""
 
-    candidate_weights: dict[Literal["act", "hold"], int]
     reason_codes: tuple[str, ...]
 
 
 class AfterthoughtContextPolicy:
-    """Translate mood, the reply's own texture, and local daypart into mass."""
+    """Describe mood, reply texture, and local daypart without choosing behavior."""
 
     version = "afterthought-context.1"
 
@@ -164,7 +143,6 @@ class AfterthoughtContextPolicy:
     def compile(
         self, *, projection, logical_time: datetime, reply_text: str | None
     ) -> AfterthoughtDecisionProfile:
-        act = self._policy.base_act_bp
         reasons: list[str] = []
 
         mood = active_mood_intensities(projection.affect_episodes)
@@ -174,16 +152,12 @@ class AfterthoughtContextPolicy:
             default=0,
         )
         if guarded >= 5_000:
-            act = act * 2 // 5
             reasons.append("mood:guarded")
         elif guarded >= 3_000:
-            act = act * 7 // 10
             reasons.append("mood:reserved")
         elif approach >= 5_000:
-            act += 700
             reasons.append("mood:approach")
         elif approach >= 3_000:
-            act += 350
             reasons.append("mood:warm")
         else:
             reasons.append("mood:neutral")
@@ -192,10 +166,8 @@ class AfterthoughtContextPolicy:
         # plausibly leaves a loose thread; a terse one was already complete.
         length = len(reply_text.strip()) if reply_text else 0
         if length >= 30:
-            act += 500
             reasons.append("reply:substantial")
         elif 0 < length < 10:
-            act -= 600
             reasons.append("reply:terse")
         else:
             reasons.append("reply:moderate")
@@ -203,14 +175,11 @@ class AfterthoughtContextPolicy:
         local = self._chronology.localize(logical_time)
         assert local is not None
         if self._policy.night_start_hour <= local.hour < self._policy.night_end_hour:
-            act //= 2
             reasons.append("daypart:late_night")
         else:
             reasons.append("daypart:normal")
 
-        act = min(max(act, self._policy.act_floor_bp), self._policy.act_ceiling_bp)
         return AfterthoughtDecisionProfile(
-            candidate_weights={"act": act, "hold": 10_000 - act},
             reason_codes=tuple(reasons),
         )
 
@@ -227,25 +196,24 @@ def afterthought_attempt_id(
         {
             "receipt_event_ref": receipt_event_ref,
             "policy_version": policy_version,
-            "candidate_weights": profile.candidate_weights,
             "reason_codes": profile.reason_codes,
         }
     )
 
 
 class AfterthoughtVerdict(FrozenModel):
-    mode: AfterthoughtMode
+    impulse_summary: str = Field(min_length=1, max_length=240)
     text: str = Field(min_length=1)
 
 
 def parse_afterthought_verdict(
-    raw: object, *, drawn_mode: AfterthoughtMode, max_chars: int
+    raw: object, *, max_chars: int
 ) -> AfterthoughtVerdict | None:
-    """Strictly extract one confirmation; anything else means no afterthought.
+    """Extract one model-owned continuation choice.
 
-    The mode was already drawn by recorded random authority; the model only
-    confirms it and authors the line.  A mismatched echo, oversized text, a
-    multi-line answer, or any structural surprise declines quietly.
+    Random authority decides only when this opportunity is considered.  The
+    model owns whether there is an afterthought, why it arose, and how it
+    relates to the conversation.
     """
 
     if not isinstance(raw, str) or not raw.strip():
@@ -261,7 +229,8 @@ def parse_afterthought_verdict(
         return None
     if flagged is not True:
         return None
-    if value.get("mode") != drawn_mode:
+    impulse_summary = value.get("impulse_summary")
+    if not isinstance(impulse_summary, str) or not impulse_summary.strip():
         return None
     text = value.get("text")
     if not isinstance(text, str):
@@ -269,24 +238,9 @@ def parse_afterthought_verdict(
     text = text.strip()
     if not text or len(text) > max_chars or "\n" in text or "\r" in text:
         return None
-    return AfterthoughtVerdict(mode=drawn_mode, text=text)
-
-
-def _texts_overlap(candidate: str, earlier: str) -> bool:
-    """Ported from v1: keep one continuation from paraphrasing its own reply."""
-
-    def normalize(text: str) -> str:
-        return "".join(
-            char for char in text.lower() if char not in " \t，。！？!?、~～\u3000"
-        )
-
-    left, right = normalize(candidate), normalize(earlier)
-    if not left or not right:
-        return False
-    return (
-        left in right
-        or right in left
-        or len(set(left) & set(right)) / max(len(set(left)), 1) >= 0.82
+    return AfterthoughtVerdict(
+        impulse_summary=impulse_summary.strip(),
+        text=text,
     )
 
 
@@ -313,7 +267,7 @@ def materialize_afterthought_proposal(
     opportunity: AfterthoughtOpportunity,
     evaluated_world_revision: int,
     target: str,
-    mode: AfterthoughtMode,
+    impulse_summary: str,
     delay_seconds: int,
     dispatch_slack_seconds: int,
     text: str,
@@ -332,7 +286,7 @@ def materialize_afterthought_proposal(
             "trigger_ref": opportunity.receipt_event_ref,
             "world_revision": evaluated_world_revision,
             "target": target,
-            "mode": mode,
+            "impulse_summary": impulse_summary,
             "delay_seconds": delay_seconds,
             "recorded_draw_refs": recorded_draw_refs,
         }
@@ -354,7 +308,7 @@ def materialize_afterthought_proposal(
             payload_schema="expression_plan_transition.v1",
             value={
                 "plan_id": plan_id,
-                "overall_intent": f"expression:afterthought:{mode}",
+                "overall_intent": "expression:model_owned_afterthought",
                 "ordering_policy": "dependencies",
                 "terminal_policy": "settle",
                 "beat_drafts": [
@@ -408,10 +362,10 @@ def materialize_afterthought_proposal(
             ),
         ),
         confidence=5_500,
-        brief_rationale=f"Recorded {mode} afterthought impulse after her settled reply.",
-        behavior_tendency="continue_thought",
-        stance="spontaneous_addition",
-        display_strategy=mode,
+        brief_rationale=impulse_summary[:240],
+        behavior_tendency="model_owned_impulse",
+        stance="model_owned",
+        display_strategy="model_owned_afterthought",
         timing_choice="later",
     )
 
@@ -429,6 +383,23 @@ def next_afterthought_opportunity(
     """The eligibility predicate, verbatim from the hand-written pilot."""
 
     logical_time = projection.logical_time
+    if any(
+        item.process_kind == "expression_episode" and item.state != "terminal"
+        for item in projection.trigger_processes
+    ):
+        return None
+    pending_expression_plans = {
+        action.expression_plan_id
+        for action in projection.actions
+        if action.expression_plan_id is not None
+        and action.state in _PENDING_ACTION_STATES
+    }
+    expression_beats = tuple(getattr(projection, "expression_beats", ()))
+    if any(
+        sum(beat.plan_id == plan_id for beat in expression_beats) > 1
+        for plan_id in pending_expression_plans
+    ):
+        return None
     # Restraint: while any authored initiative is still pending toward the
     # channel, a fresh tail must not stack on top of it.
     for action in projection.actions:
@@ -513,10 +484,6 @@ def next_afterthought_opportunity(
         ),
         None,
     )
-    # v1's short-turn rule: a brief acknowledgement was already complete;
-    # scheduling a tail makes it too easy for her to answer herself.
-    if reply_text is not None and len(reply_text.strip()) < policy.min_reply_chars:
-        return None
     return AfterthoughtOpportunity(
         action_id=action.action_id,
         plan_id=action.expression_plan_id,
@@ -531,56 +498,41 @@ def next_afterthought_opportunity(
 
 
 def timing_candidates(policy: AfterthoughtPolicy) -> tuple[tuple[str, ...], dict[str, int]]:
-    """One recorded draw jointly selects mode and its in-window seconds."""
+    """Return replayable consideration times without choosing behavior."""
 
-    weights: dict[str, int] = {}
-    refs: list[str] = []
-    for mode, mass in (
-        ("quick_continue", policy.quick_continue_weight_bp),
-        ("topic_drift", policy.topic_drift_weight_bp),
-    ):
-        grid = policy.delay_candidates(mode)  # type: ignore[arg-type]
-        per_candidate = max(1, mass // len(grid))
-        for seconds in grid:
-            ref = f"{mode}:{seconds}"
-            refs.append(ref)
-            weights[ref] = per_candidate
+    seconds_grid = sorted(
+        policy.delay_candidates()
+    )
+    refs = [f"delay:{seconds}" for seconds in seconds_grid]
+    weights = {ref: 1 for ref in refs}
     return tuple(refs), weights
 
 
-def parse_timing(ref: str) -> tuple[AfterthoughtMode, int]:
-    mode, _, seconds = ref.rpartition(":")
-    if mode not in {"quick_continue", "topic_drift"}:
-        raise ValueError("afterthought timing draw returned an unknown mode")
-    return mode, int(seconds)  # type: ignore[return-value]
+def parse_timing(ref: str) -> int:
+    prefix, _, seconds = ref.rpartition(":")
+    if prefix != "delay":
+        raise ValueError("afterthought timing draw returned an unknown delay")
+    return int(seconds)
 
 
 def afterthought_gate_messages(
     *,
     policy: AfterthoughtPolicy,
     identity_frame: CompanionIdentityFrame | None,
-    mode: AfterthoughtMode,
     reply_text: str,
     dialogue: tuple[dict[str, str], ...],
     local_time_label: str,
+    situation: dict[str, object] | None = None,
 ) -> list[dict[str, str]]:
-    """The gate prompt, verbatim from the hand-written pilot."""
+    """Give the model an opportunity; do not decide its impulse in advance."""
 
-    mode_hint = (
-        "紧接着她刚发出的那句话补一个小尾巴：想起漏说的半句、补一个细节、轻轻收个尾。"
-        if mode == "quick_continue"
-        else "由刚才说的内容自然联想到的另一件小事：一次轻轻的跳跃，不是开新话题轰炸。"
-    )
     system = (
         "她刚刚在私聊里发出了一条回复。过一小会儿，人有时会自然地又想起什么，补一句。"
-        "你判断此刻是否真的有那么一句值得补，值得时替她写出来。"
-        f"本次给定的模式是 {mode}：{mode_hint}模式已定，不可更换。"
-        "要求：像她本人的口吻，口语、一句话、不换行，"
-        f"不超过{policy.max_text_chars}个字符；不得重复或改写她已经说过的内容；"
-        "不问候、不客套、不总结、不解释自己为什么补充。"
-        "多数时候其实没有值得补的话——拿不准就不补，宁缺毋滥。"
+        "请根据她的身份、当下状态和真实对话，自行判断有没有想补的话，以及它是顺着刚才"
+        "继续还是自然想到另一件事。不要为了完成任务而补，也不要套用固定社交模式。"
+        f"如果要说，保持一条自然消息且不超过{policy.max_text_chars}个字符。"
         '只输出一个 JSON 对象：{"afterthought":false} 或 '
-        '{"afterthought":true,"mode":"' + mode + '","text":"..."}。'
+        '{"afterthought":true,"impulse_summary":"她此刻为什么想补这一句","text":"..."}。'
         "禁止 Markdown、注释和任何其他字段。"
     )
     if identity_frame is not None:
@@ -593,7 +545,7 @@ def afterthought_gate_messages(
             "recent_dialogue": list(dialogue),
             "her_reply_just_sent": reply_text,
             "local_time": local_time_label,
-            "mode": mode,
+            "current_situation": situation or {},
         }
     )
     return [
@@ -603,11 +555,7 @@ def afterthought_gate_messages(
 
 
 class AfterthoughtVerticalRuntime:
-    """Framework-edition afterthought runtime (drop-in for the pilot class).
-
-    Constructor signature matches ``AfterthoughtAuthorRuntime`` exactly so
-    the composition root switch is a one-symbol change.
-    """
+    """Durable model-owned afterthought runtime."""
 
     PROCESS_KIND = PROCESS_KIND
 
@@ -684,8 +632,8 @@ class AfterthoughtVerticalRuntime:
                 attempt_id=afterthought_attempt_id(
                     receipt_event_ref=opp.receipt_event_ref, profile=profile
                 ),
-                candidate_refs=("act", "hold"),
-                candidate_weights=profile.candidate_weights,
+                candidate_refs=("consider",),
+                candidate_weights={"consider": 1},
             )
 
         def plan_timing_draw(context_inputs: DrawContext) -> DrawPlan:
@@ -701,7 +649,6 @@ class AfterthoughtVerticalRuntime:
         ) -> list[dict[str, str]]:
             opp = context_inputs.opportunity
             assert isinstance(opp, AfterthoughtOpportunity)
-            mode, _delay = context_inputs.interpretations["timing"]
             dialogue = await self._dialogue_frame(projection=context_inputs.projection)
             local = self._chronology.localize(
                 context_inputs.projection.logical_time or opp.anchored_at
@@ -710,23 +657,21 @@ class AfterthoughtVerticalRuntime:
             return afterthought_gate_messages(
                 policy=policy,
                 identity_frame=self._identity_frame,
-                mode=mode,
                 reply_text=opp.reply_text or "",
                 dialogue=dialogue,
                 local_time_label=local.strftime("%H:%M"),
+                situation=self._situation_frame(
+                    projection=context_inputs.projection,
+                    reply_text=opp.reply_text,
+                ),
             )
 
         def parse(raw: object, context_inputs: ModelStepContext) -> AfterthoughtVerdict | None:
             opp = context_inputs.opportunity
             assert isinstance(opp, AfterthoughtOpportunity)
-            mode, _delay = context_inputs.interpretations["timing"]
             verdict = parse_afterthought_verdict(
-                raw, drawn_mode=mode, max_chars=policy.max_text_chars
+                raw, max_chars=policy.max_text_chars
             )
-            if verdict is not None and _texts_overlap(verdict.text, opp.reply_text or ""):
-                # v1's episode overlap guard: a tail that paraphrases the
-                # reply it follows is noise, not an afterthought.
-                return None
             return verdict
 
         def compile_proposal(
@@ -737,12 +682,12 @@ class AfterthoughtVerticalRuntime:
             draws,
             interpretations,
         ) -> DecisionProposal:
-            mode, delay_seconds = interpretations["timing"]
+            delay_seconds = interpretations["timing"]
             return materialize_afterthought_proposal(
                 opportunity=opportunity,
                 evaluated_world_revision=evaluated_world_revision,
                 target=self._target,
-                mode=mode,
+                impulse_summary=verdict.impulse_summary,
                 delay_seconds=delay_seconds,
                 dispatch_slack_seconds=policy.dispatch_slack_seconds,
                 text=verdict.text,
@@ -752,11 +697,10 @@ class AfterthoughtVerticalRuntime:
         def prompt_material(
             context_inputs: ModelStepContext, proposal: DecisionProposal
         ) -> dict[str, object]:
-            mode, _delay = context_inputs.interpretations["timing"]
             return {
                 "contract": "afterthought-gate.1",
                 "trigger_ref": proposal.trigger_ref,
-                "mode": mode,
+                "impulse_summary": proposal.brief_rationale,
             }
 
         def audit_times(opportunity, head) -> AuditContextTimes:
@@ -779,16 +723,13 @@ class AfterthoughtVerticalRuntime:
                 DrawStep(
                     step_id="gate",
                     plan=plan_gate_draw,
-                    catalog_version="afterthought-act-hold.1",
+                    catalog_version="afterthought-consider.2",
                     weight_policy_version=AfterthoughtContextPolicy.version,
-                    halt_unless="act",
-                    halt_outcome="held",
-                    halt_reason="afterthought.draw_hold",
                 ),
                 DrawStep(
                     step_id="timing",
                     plan=plan_timing_draw,
-                    catalog_version="afterthought-mode-delay.1",
+                    catalog_version="afterthought-delay.2",
                     weight_policy_version=AfterthoughtContextPolicy.version,
                     interpret=parse_timing,
                 ),
@@ -798,7 +739,7 @@ class AfterthoughtVerticalRuntime:
                 parse=parse,
                 timeout_seconds=policy.gate_timeout_seconds,
                 temperature=0.7,
-                failure_policy="decline_quietly",
+                failure_policy="correction_retry_once",
                 audit=SingleCallAuditTemplate(
                     call_namespace="afterthought",
                     route=ModelRoute(
@@ -852,12 +793,67 @@ class AfterthoughtVerticalRuntime:
             for item in ordered
         )
 
+    def _situation_frame(
+        self, *, projection, reply_text: str | None
+    ) -> dict[str, object]:
+        """Expose bounded current state as advisory context, never a verdict."""
+
+        logical_time = projection.logical_time
+        if logical_time is None:
+            return {}
+        profile = AfterthoughtContextPolicy(
+            policy=self._policy,
+            chronology=self._chronology,
+        ).compile(
+            projection=projection,
+            logical_time=logical_time,
+            reply_text=reply_text,
+        )
+
+        def dumped(items, *, limit: int) -> list[dict[str, object]]:
+            return [
+                item.model_dump(mode="json")
+                for item in tuple(items)[-limit:]
+                if hasattr(item, "model_dump")
+            ]
+
+        return {
+            "advisory_reason_codes": list(profile.reason_codes),
+            "relationship": dumped(
+                getattr(projection, "relationship_states", ()),
+                limit=2,
+            ),
+            "affect": dumped(
+                getattr(projection, "affect_episodes", ()),
+                limit=4,
+            ),
+            "activities": dumped(
+                getattr(projection, "world_occurrences", ()),
+                limit=4,
+            ),
+            "open_threads": dumped(
+                [
+                    item
+                    for item in getattr(projection, "threads", ())
+                    if item.values.status == "open"
+                ],
+                limit=4,
+            ),
+            "commitments": dumped(
+                [
+                    item
+                    for item in getattr(projection, "commitments", ())
+                    if item.values.status == "open"
+                ],
+                limit=4,
+            ),
+        }
+
 
 __all__ = [
     "AFTERTHOUGHT_PROPOSAL_PREFIX",
     "AfterthoughtContextPolicy",
     "AfterthoughtDecisionProfile",
-    "AfterthoughtMode",
     "AfterthoughtOpportunity",
     "AfterthoughtPolicy",
     "AfterthoughtVerdict",

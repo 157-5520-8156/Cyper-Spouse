@@ -9,47 +9,9 @@ whose language is reactivated by the current message.
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
-import math
-import re
 
 from .recent_dialogue import RecentDialogueItem
-
-
-_ASCII_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]+")
-_CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
-_LOW_INFORMATION_CJK_UNITS = frozenset(
-    {
-        "今天",
-        "现在",
-        "事情",
-        "这个",
-        "那个",
-        "后来",
-        "还是",
-        "可以",
-        "觉得",
-        "有点",
-    }
-)
-
-
-def _semantic_units(text: str) -> frozenset[str]:
-    """Return replay-stable lexical units without language-specific topics."""
-
-    normalized = text.casefold()
-    units = set(_ASCII_TOKEN.findall(normalized))
-    for run in _CJK_RUN.findall(normalized):
-        if len(run) == 1:
-            units.add(run)
-            continue
-        units.update(
-            unit
-            for index in range(len(run) - 1)
-            if (unit := run[index : index + 2]) not in _LOW_INFORMATION_CJK_UNITS
-        )
-    return frozenset(units)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,50 +131,25 @@ class ConversationContinuityCompiler:
         for offset, item in enumerate(reversed(pending)):
             retain(item, "pending_interaction", 9_850 - offset * 50)
 
-        counterpart = tuple(item for item in ordered if item.speaker == "counterpart")
-        units_by_id = {item.dialogue_id: _semantic_units(item.text) for item in counterpart}
-        document_frequency = Counter(
-            unit for units in units_by_id.values() for unit in units
-        )
-        current_units = units_by_id.get(current.dialogue_id, frozenset())
-        candidates: list[tuple[float, RecentDialogueItem]] = []
-        if current_units:
-            document_count = max(1, len(counterpart))
-            current_weight = sum(
-                1.0 + math.log((document_count + 1) / (document_frequency[unit] + 1))
-                for unit in current_units
-            )
-            for item in counterpart:
-                if item.dialogue_id == current.dialogue_id:
-                    continue
-                shared = current_units & units_by_id[item.dialogue_id]
-                if not shared:
-                    continue
-                shared_weight = sum(
-                    1.0
-                    + math.log((document_count + 1) / (document_frequency[unit] + 1))
-                    for unit in shared
-                )
-                relatedness = shared_weight / max(1.0, current_weight)
-                if relatedness >= 0.08:
-                    candidates.append((relatedness, item))
-        candidates.sort(
-            key=lambda pair: (
-                -pair[0],
-                -pair[1].occurred_at.timestamp(),
-                -pair[1].sequence,
-                pair[1].dialogue_id,
-            )
-        )
-        for relatedness, item in candidates[: self._max_reactivated]:
-            retain(
-                item,
-                "topic_reactivation",
-                min(9_700, 9_000 + int(relatedness * 700)),
-            )
-
         for offset, item in enumerate(reversed(companions_before[-self._max_companion :])):
             retain(item, "recent_companion", 9_400 - offset * 50)
+
+        counterpart_by_source_ref = {
+            claim.authority_event_ref: item
+            for item in ordered
+            if item.speaker == "counterpart"
+            for claim in item.source_claims
+        }
+        recent_companions = companions_before[-self._max_companion :]
+        for offset, companion in enumerate(reversed(recent_companions[-2:])):
+            for acknowledged_ref in companion.acknowledges_observation_event_refs:
+                acknowledged = counterpart_by_source_ref.get(acknowledged_ref)
+                if acknowledged is not None:
+                    retain(
+                        acknowledged,
+                        "acknowledged_context",
+                        9_750 - offset * 50,
+                    )
 
         for offset, item in enumerate(reversed(ordered)):
             if len(selected) >= self._max_items:
@@ -234,40 +171,14 @@ class ConversationContinuityCompiler:
             )
             for item, reasons, _ in ranked
         )
-        cue_units = set(current_units)
-        for item in selected_dialogue:
-            if "pending_interaction" in item.continuity_reasons:
-                cue_units.update(_semantic_units(item.text))
-        rank_overrides: set[tuple[str, str]] = set()
-        if cue_units and retrieval_candidates:
-            candidate_units = {
-                (candidate.slice_name, candidate.item_ref): frozenset(
-                    unit
-                    for text in candidate.texts
-                    for unit in _semantic_units(text)
-                )
-                for candidate in retrieval_candidates
-            }
-            document_frequency = Counter(
-                unit for units in candidate_units.values() for unit in units
-            )
-            document_count = max(1, len(candidate_units))
-            cue_weight = sum(
-                1.0 + math.log((document_count + 1) / (document_frequency[unit] + 1))
-                for unit in cue_units
-            )
-            for identity, units in candidate_units.items():
-                shared = cue_units & units
-                shared_weight = sum(
-                    1.0
-                    + math.log((document_count + 1) / (document_frequency[unit] + 1))
-                    for unit in shared
-                )
-                if shared_weight / max(1.0, cue_weight) >= 0.06:
-                    rank_overrides.add(identity)
+        # Context facts, memories and threads already carry their own bounded
+        # source authority.  The expression model receives those candidates
+        # as advisory material and decides what is relevant; this compiler
+        # must not promote them by matching surface words.
+        del retrieval_candidates
         return ConversationContinuitySelection(
             dialogue=selected_dialogue,
-            rank_overrides=frozenset(rank_overrides),
+            rank_overrides=frozenset(),
         )
 
 

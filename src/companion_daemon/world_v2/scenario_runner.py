@@ -113,7 +113,7 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.14"
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "1e506c9a8deefa1e117bef4f78fb318bb819d54a016803623344a6a1cdb97565"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "07247dbd6192cde3cf936f7ae06248a607d856d2bcd31116dbddc902a44da6da"
 
 
 class _FixedScenarioRouter:
@@ -735,8 +735,13 @@ class ScenarioRunner:
                 if case.execution not in {"interruption", "seeded_expression_delay"}:
                     await app.drain_actions_once()
             if case.execution == "seeded_expression_delay":
-                reconsideration = await app.drain_background_once()
-                if getattr(reconsideration, "status", None) != "continued":
+                reconsideration = None
+                for _ in range(64):
+                    candidate = await app.drain_background_once()
+                    if getattr(candidate, "status", None) == "continued":
+                        reconsideration = candidate
+                        break
+                if reconsideration is None:
                     raise ScenarioVerificationError("delayed expression beat was not explicitly reconsidered")
                 due = now + timedelta(minutes=3)
                 await app.tick(

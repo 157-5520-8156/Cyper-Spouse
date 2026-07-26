@@ -543,9 +543,16 @@ class FailoverChatModel:
 
     provider = "deepseek+openai"
 
-    def __init__(self, *, primary: ChatModel, fallback: ChatModel) -> None:
+    def __init__(
+        self,
+        *,
+        primary: ChatModel,
+        fallback: ChatModel,
+        implicit_failover: bool = True,
+    ) -> None:
         self.primary = primary
         self.fallback = fallback
+        self.implicit_failover = implicit_failover
         self.model = f"{getattr(primary, 'model', type(primary).__name__)}->{getattr(fallback, 'model', type(fallback).__name__)}"
         self.last_provider = str(getattr(primary, "provider", "primary"))
         self.last_model = str(getattr(primary, "model", type(primary).__name__))
@@ -586,7 +593,10 @@ class FailoverChatModel:
                 json_object=json_object,
             )
         except Exception as exc:
-            if not _is_failover_eligible_provider_failure(exc):
+            if (
+                not self.implicit_failover
+                or not _is_failover_eligible_provider_failure(exc)
+            ):
                 raise
             self.last_attempt_used_fallback = True
             self.last_fallback_used_at = monotonic()
@@ -675,13 +685,41 @@ class FakeCompanionModel:
             return json.dumps(
                 {"decision": "select", "opening_token": opening_token}, ensure_ascii=False
             )
-        if "Return a ReplyDraft" in joined or "Return an ExpressionDraft" in joined:
+        if "exactly two keys: appraisal_draft and expression_draft" in joined:
             return json.dumps(
                 {
-                    "response_text": "我在，刚刚这句我有接到。",
-                    "stance": "acknowledge_briefly",
+                    "appraisal_draft": {
+                        "appraise": False,
+                        "brief_rationale": "Fake simulator leaves this as an ordinary interaction.",
+                        "behavior_tendency": "observe",
+                        "stance": "open",
+                        "display_strategy": "natural",
+                        "confidence": 3000,
+                    },
+                    "expression_draft": {
+                        "timing_choice": "now",
+                        "beats": [{"modality": "text", "text": "我在，刚刚这句我有接到。"}],
+                        "stance": "open",
+                        "brief_rationale": "Fake World v2 expression for an end-to-end turn.",
+                        "confidence": 6000,
+                        "world_claims": [],
+                    },
+                },
+                ensure_ascii=False,
+            )
+        if (
+            "Return a ReplyDraft" in joined
+            or "Return an ExpressionDraft" in joined
+            or "raw JSON ExpressionDraft" in joined
+        ):
+            return json.dumps(
+                {
+                    "timing_choice": "now",
+                    "beats": [{"modality": "text", "text": "我在，刚刚这句我有接到。"}],
+                    "stance": "open",
                     "brief_rationale": "Fake World v2 draft for an end-to-end simulator turn.",
                     "confidence": 6000,
+                    "world_claims": [],
                 },
                 ensure_ascii=False,
             )

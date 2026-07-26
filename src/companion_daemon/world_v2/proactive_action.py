@@ -31,7 +31,6 @@ from .expression_plan_acceptance import (
 )
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
 from .expression_draft import WorldClaimDraft, world_claim_source_tokens
-from .epistemic_claim_gate import require_grounded_claim_declarations
 from .ledger import LedgerPort
 from .proposal_audit import ProposalAuditCommit, ProposalAuditContext, ProposalAuditRecorder
 from .proposal_envelope import (
@@ -105,11 +104,6 @@ class ProactiveDraft(FrozenModel):
 def _validate_proactive_grounding(*, draft: ProactiveDraft, request: ModelInput) -> None:
     if draft.response_text is None:
         return
-    claims_json = [item.model_dump(mode="json") for item in draft.world_claims]
-    require_grounded_claim_declarations(
-        texts=(draft.response_text,),
-        claims=claims_json,
-    )
     try:
         context = json.loads(request.model_content_json)
     except (TypeError, json.JSONDecodeError) as exc:

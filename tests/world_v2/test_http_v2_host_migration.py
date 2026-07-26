@@ -780,7 +780,7 @@ def test_http_messages_route_uses_the_injected_v2_capture_host_only(
         asyncio.run(host.aclose())
 
     assert response.status_code == 200
-    assert response.json()["world_action_id"].startswith("action:minimal-reply:")
+    assert response.json()["world_action_id"].startswith("action:expression-plan:")
     assert response.json()["text"]
     assert tick.json() == {"status": "observed_only", "tick_id": "tick:http-v2:route"}
     assert drain.status_code == 200

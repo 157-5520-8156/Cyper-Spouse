@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import hashlib
 import json
+import logging
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -34,6 +35,7 @@ from .schemas import (
 
 
 EXPRESSION_PLAN_ACCEPTANCE_POLICY_VERSION = "expression-plan-acceptance.1"
+_LOG = logging.getLogger(__name__)
 
 
 class ExpressionPlanAcceptanceError(ValueError):
@@ -97,6 +99,12 @@ class ExpressionPlanAcceptanceMaterial(FrozenModel):
     ordering_policy: str = Field(min_length=1)
     terminal_policy: str = Field(min_length=1)
     beats: tuple[ExpressionPlanBeatMaterialized, ...] = Field(min_length=1, max_length=32)
+    cadence_profile: Literal[
+        "rapid", "conversational", "hesitant", "escalating"
+    ] | None = None
+    cadence_policy_version: str | None = None
+    recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
+    recorded_draw_refs: tuple[str, ...] = ()
     response_expectation: ResponseExpectationAuthority | None = None
 
     @model_validator(mode="after")
@@ -192,6 +200,24 @@ def derive_expression_plan_material(
         drafts
     ):
         raise ExpressionPlanAcceptanceError("budget_unavailable")
+    cadence_profile = payload.get("cadence_profile")
+    cadence_policy_version = payload.get("cadence_policy_version")
+    cadence_mode = payload.get("recorded_cadence_mode", "off")
+    draw_refs = tuple(payload.get("recorded_draw_refs", ()))
+    if cadence_mode not in {"off", "shadow", "on"}:
+        raise ExpressionPlanAcceptanceError("cadence_invalid")
+    if cadence_profile is not None and cadence_profile not in {
+        "rapid", "conversational", "hesitant", "escalating"
+    }:
+        raise ExpressionPlanAcceptanceError("cadence_invalid")
+    if cadence_policy_version not in {None, "expression-cadence.1"}:
+        raise ExpressionPlanAcceptanceError("cadence_invalid")
+    if (
+        not all(isinstance(item, str) and item for item in draw_refs)
+        or len(draw_refs) != len(set(draw_refs))
+        or len(draw_refs) > 7
+    ):
+        raise ExpressionPlanAcceptanceError("cadence_invalid")
 
     identity_root = {
         "contract": "expression-plan-acceptance.1",
@@ -374,7 +400,16 @@ def derive_expression_plan_material(
             not_before=logical_time + timedelta(seconds=expectation.wait_seconds),
             expires_at=logical_time + timedelta(seconds=expectation.expires_after_seconds),
         )
-    return ExpressionPlanAcceptanceMaterial(
+    if cadence_mode == "on" and len(materialized) > 1:
+        due = tuple(item.action.not_before for item in materialized)
+        if due[0] is not None or any(item is None for item in due[1:]) or any(
+            due[index] <= due[index - 1]  # type: ignore[operator]
+            for index in range(2, len(due))
+        ):
+            raise ExpressionPlanAcceptanceError("cadence_due_invalid")
+        if not draw_refs:
+            raise ExpressionPlanAcceptanceError("cadence_draws_invalid")
+    material = ExpressionPlanAcceptanceMaterial(
         proposal_id=proposal.proposal_id,
         proposal_event_ref=audit.event_ref,
         proposal_event_payload_hash=audit.event_payload_hash,
@@ -387,8 +422,20 @@ def derive_expression_plan_material(
         ordering_policy=str(payload.get("ordering_policy")),
         terminal_policy=str(payload.get("terminal_policy")),
         beats=tuple(materialized),
+        cadence_profile=cadence_profile,
+        cadence_policy_version=cadence_policy_version,
+        recorded_cadence_mode=cadence_mode,
+        recorded_draw_refs=draw_refs,
         response_expectation=response_expectation,
     )
+    _LOG.info(
+        "expression plan materialized plan_id=%s beat_count=%d cadence=%s mode=%s",
+        plan_id,
+        len(materialized),
+        cadence_profile or "legacy",
+        cadence_mode,
+    )
+    return material
 
 
 def _resolve_sidecar_payload(

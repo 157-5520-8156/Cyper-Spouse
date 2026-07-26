@@ -35,7 +35,9 @@ def test_dashboard_html_embeds_pixel_home_instead_of_static_render() -> None:
     assert 'href="/pixel-home/index.html?edit=1"' in DASHBOARD_HTML
     assert 'aria-label="在独立页面编辑小屋"' in DASHBOARD_HTML
     assert 'title="知栀的小屋日常画面"' in DASHBOARD_HTML
-    assert 'aspect-ratio:7/4' in DASHBOARD_HTML
+    assert "align-items:start" in DASHBOARD_HTML
+    assert ".room{position:relative;overflow:hidden;aspect-ratio:3/2}" in DASHBOARD_HTML
+    assert ".room iframe{position:absolute;top:0;left:0;width:1120px;height:640px" in DASHBOARD_HTML
     assert 'aspect-ratio:4/3' not in DASHBOARD_HTML
     assert "pointer-events:none" in DASHBOARD_HTML
     assert 'id="roomRoute"' not in DASHBOARD_HTML
@@ -45,6 +47,10 @@ def test_dashboard_script_posts_versioned_scene_state_to_the_iframe() -> None:
     assert "postMessage" in DASHBOARD_APP_JS
     assert "window.location.origin" in DASHBOARD_APP_JS
     assert "at_home:" in DASHBOARD_APP_JS
+    assert "ROOM_FRAME_WIDTH=1120" in DASHBOARD_APP_JS
+    assert "ROOM_FRAME_HEIGHT=640" in DASHBOARD_APP_JS
+    assert "ROOM_FRAME_INSET=8" in DASHBOARD_APP_JS
+    assert "new ResizeObserver(fitRoomFrame)" in DASHBOARD_APP_JS
     # Home is her dorm room; anything else means she is out.
     assert "'location:ecnu-dorm-room'" in DASHBOARD_APP_JS
     assert "'/pixel-home/index.html?embed=1&hour='" in DASHBOARD_APP_JS

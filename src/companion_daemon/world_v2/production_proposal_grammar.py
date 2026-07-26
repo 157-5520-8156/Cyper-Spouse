@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable, Literal, Mapping
 
+from .expression_episode import ExpressionEpisodeDiagnostics
+
 from .affect_acceptance_manifest import AffectAcceptanceManifest
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
 from .affect_proposal_compiler import AffectProposalCompiler
@@ -515,6 +517,8 @@ def compose_production_deliberation(
     expression_action_kinds: frozenset[str] | None = None,
     main_timeout_seconds: float = 6.0,
     quick_timeout_seconds: float = 2.5,
+    expression_episode_mode: Literal["off", "shadow", "on"] = "off",
+    expression_episode_diagnostics: ExpressionEpisodeDiagnostics | None = None,
 ):
     """Create the only Deliberation shape permitted by production composition.
 
@@ -531,6 +535,15 @@ def compose_production_deliberation(
         quick_recovery=quick_recovery,  # type: ignore[arg-type]
         main_timeout_seconds=main_timeout_seconds,
         quick_timeout_seconds=quick_timeout_seconds,
+        expression_episode_mode=expression_episode_mode,
+        expression_episode_diagnostics=expression_episode_diagnostics,
+        expression_episode_grammar=(
+            production_proposal_grammar(
+                "chat_reply", expression_action_kinds=expression_action_kinds
+            )
+            if expression_episode_mode != "off"
+            else None
+        ),
         proposal_grammar=production_proposal_grammar(
             lane_id, expression_action_kinds=expression_action_kinds
         ),

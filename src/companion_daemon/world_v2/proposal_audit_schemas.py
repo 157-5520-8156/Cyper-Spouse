@@ -79,6 +79,18 @@ class RecordedModelResultAudit(FrozenModel):
         "recovery_failed",
     ]
     failure_code: str | None = Field(default=None, max_length=64)
+    slot: Literal["primary", "backup", "corrective"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    outcome: Literal[
+        "winner",
+        "invalid",
+        "timeout",
+        "exception",
+        "hedge_cancelled",
+        "hedge_lost",
+        "budget_exhausted",
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
     input_tokens: int | None = Field(default=None, ge=0, le=10_000_000)
     output_tokens: int | None = Field(default=None, ge=0, le=10_000_000)
     usage: RecordedModelUsage | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -108,27 +120,45 @@ class RecordedModelResultAudit(FrozenModel):
             if self.route.tier == "flash" and self.usage.thinking_tokens:
                 raise ValueError("flash audit cannot report thinking tokens")
         required = {
-            "main_timeout": "main_timeout",
-            "main_invalid": "main_invalid_output",
-            "main_exception": "main_exception",
-            "main_timeout_recovered": "main_timeout",
-            "main_invalid_recovered": "main_invalid_output",
-            "main_exception_recovered": "main_exception",
+            "main_timeout": {"main_timeout", "primary_timeout", "corrective_timeout"},
+            "main_invalid": {
+                "main_invalid_output",
+                "primary_invalid",
+                "corrective_invalid",
+            },
+            "main_exception": {"main_exception", "primary_exception"},
+            "main_timeout_recovered": {
+                "main_timeout",
+                "primary_timeout",
+                "corrective_timeout",
+            },
+            "main_invalid_recovered": {
+                "main_invalid_output",
+                "primary_invalid",
+                "corrective_invalid",
+            },
+            "main_exception_recovered": {"main_exception", "primary_exception"},
         }.get(self.status)
         if self.status == "proposal_validated":
             if not has_output or self.failure_code is not None:
                 raise ValueError("validated audit requires output and no failure")
         elif self.status in {"main_timeout", "main_exception"}:
-            if has_output or self.failure_code != required:
+            if has_output or self.failure_code not in (required or set()):
                 raise ValueError("terminal main audit has invalid lineage")
         elif self.status == "main_invalid":
-            if self.failure_code != required:
+            if self.failure_code not in (required or set()):
                 raise ValueError("invalid main audit has invalid lineage")
         elif self.status == "recovery_failed":
-            if not (self.failure_code or "").startswith("quick_"):
+            if not (
+                (self.failure_code or "").startswith("quick_")
+                or (self.failure_code or "").startswith("backup_")
+                or (self.failure_code or "").startswith("corrective_")
+            ):
                 raise ValueError("failed recovery audit has invalid lineage")
-        elif not has_output or self.failure_code != required:
+        elif not has_output or self.failure_code not in (required or set()):
             raise ValueError("recovered audit has invalid lineage")
+        if (self.slot is None) != (self.outcome is None):
+            raise ValueError("slot and outcome audit metadata must appear together")
         return self
 
 
@@ -157,11 +187,18 @@ def model_audit_json(audit: RecordedModelResultAudit) -> str:
     payload = audit.model_dump(mode="json")
     if audit.usage is None:
         payload.pop("usage", None)
+    if audit.slot is None:
+        payload.pop("slot", None)
+        payload.pop("outcome", None)
     return canonical_json(payload)
 
 
 class ModelResultRecordedPayload(FrozenModel):
-    audit_contract: Literal["model-result-audit.1", "model-result-audit.2"] = "model-result-audit.1"
+    audit_contract: Literal[
+        "model-result-audit.1",
+        "model-result-audit.2",
+        "model-result-audit.3",
+    ] = "model-result-audit.1"
     model_result_ref: str = Field(min_length=1, max_length=256)
     deliberation_result_id: str = Field(min_length=1, max_length=256)
     proposal_hash: str | None = Field(default=None, pattern=_PROPOSAL_HASH)
@@ -195,6 +232,10 @@ class ModelResultRecordedPayload(FrozenModel):
             raise ValueError("metered model result requires usage provenance")
         if self.audit_contract == "model-result-audit.1" and audit.usage is not None:
             raise ValueError("usage provenance requires model-result-audit.2")
+        if self.audit_contract == "model-result-audit.3" and audit.slot is None:
+            raise ValueError("hedged model result requires slot outcome metadata")
+        if self.audit_contract != "model-result-audit.3" and audit.slot is not None:
+            raise ValueError("slot outcome metadata requires model-result-audit.3")
         return self
 
 
@@ -210,23 +251,49 @@ def validate_recorded_attempt_lineage(
     if len({audit.model_call_id for audit in audits}) != len(audits):
         raise ValueError("model attempts require distinct call identities")
     if len(audits) == 1:
-        if audits[0].status != "proposal_validated" or proposal_hash is None:
-            raise ValueError("single attempt must produce a validated proposal")
+        if proposal_hash is None:
+            if audits[0].outcome != "budget_exhausted":
+                raise ValueError("single failed attempt must exhaust the shared budget")
+        elif audits[0].status != "proposal_validated":
+            raise ValueError("single successful attempt must validate a proposal")
     else:
         main, quick = audits
-        expected = {
-            "main_timeout": ("main_timeout", "main_timeout_recovered"),
-            "main_invalid": ("main_invalid_output", "main_invalid_recovered"),
-            "main_exception": ("main_exception", "main_exception_recovered"),
-        }.get(main.status)
-        if expected is None or main.failure_code != expected[0]:
+        primary_won_race = (
+            proposal_hash is not None
+            and quick.status == "proposal_validated"
+            and main.status == "recovery_failed"
+            and main.failure_code in {"backup_cancelled", "backup_lost"}
+        )
+        if primary_won_race:
+            expected = None
+        else:
+            expected = {
+                "main_timeout": (
+                    {"main_timeout", "primary_timeout", "corrective_timeout"},
+                    "main_timeout_recovered",
+                ),
+                "main_invalid": (
+                    {"main_invalid_output", "primary_invalid", "corrective_invalid"},
+                    "main_invalid_recovered",
+                ),
+                "main_exception": ({"main_exception", "primary_exception"}, "main_exception_recovered"),
+            }.get(main.status)
+        if not primary_won_race and (
+            expected is None or main.failure_code not in expected[0]
+        ):
             raise ValueError("recovery lineage has an invalid main audit")
-        if quick.status == "recovery_failed":
+        if primary_won_race:
+            pass
+        elif quick.status == "recovery_failed":
             if proposal_hash is not None or not (quick.failure_code or "").startswith("quick_"):
-                raise ValueError("failed recovery cannot claim a proposal")
+                if not (
+                    (quick.failure_code or "").startswith("backup_")
+                    or (quick.failure_code or "").startswith("corrective_")
+                ):
+                    raise ValueError("failed recovery cannot claim a proposal")
         elif (
             quick.status != expected[1]
-            or quick.failure_code != expected[0]
+            or quick.failure_code != main.failure_code
             or proposal_hash is None
         ):
             raise ValueError("successful recovery lineage is invalid")

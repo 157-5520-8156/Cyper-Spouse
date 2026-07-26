@@ -17,6 +17,13 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from .deliberation import ModelInput
+from .expression_cadence import (
+    CADENCE_POLICY_VERSION,
+    CadenceDraw,
+    CadenceProfile,
+    ExpressionBeatRole,
+    cadence_windows,
+)
 from .expression_payload_contract import QQ_REACTION_OPTIONS, QQ_STICKER_OPTIONS
 from .proposal_envelope import (
     CanonicalTypedPayload,
@@ -62,6 +69,8 @@ class ExpressionDraftCapabilities(FrozenModel):
     # Deferred commitment settlement currently owns one future effect.  This
     # is an installed execution limit, not a judgement about when to defer.
     max_later_beats: int = Field(default=1, ge=1, le=16)
+    recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
+    cadence_policy_version: Literal["expression-cadence.1"] = CADENCE_POLICY_VERSION
 
     @model_validator(mode="after")
     def option_sets_match_modalities(self) -> "ExpressionDraftCapabilities":
@@ -86,7 +95,7 @@ class ExpressionDraftCapabilities(FrozenModel):
         return frozenset(kinds)
 
     def prompt_value(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "profile_id": self.profile_id,
             "modalities": self.modalities,
             "reaction_options": tuple(item.model_dump(mode="json") for item in self.reaction_options),
@@ -94,6 +103,20 @@ class ExpressionDraftCapabilities(FrozenModel):
             "max_beats": self.max_beats,
             "max_later_beats": self.max_later_beats,
         }
+        if self.recorded_cadence_mode != "off":
+            value.update(
+                {
+                    "recorded_cadence_mode": self.recorded_cadence_mode,
+                    "cadence_profiles": (
+                        "rapid",
+                        "conversational",
+                        "hesitant",
+                        "escalating",
+                    ),
+                    "cadence_policy_version": self.cadence_policy_version,
+                }
+            )
+        return value
 
 
 TEXT_ONLY_EXPRESSION_CAPABILITIES = ExpressionDraftCapabilities(
@@ -117,18 +140,22 @@ QQ_NAPCAT_EXPRESSION_CAPABILITIES = ExpressionDraftCapabilities(
 )
 
 
-def qq_expression_capabilities(adapter: str) -> ExpressionDraftCapabilities:
+def qq_expression_capabilities(
+    adapter: str, *, recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
+) -> ExpressionDraftCapabilities:
     """Return only modalities proven by the configured QQ transport dialect."""
 
-    return (
+    base = (
         QQ_NAPCAT_EXPRESSION_CAPABILITIES
         if adapter.strip().lower() == "napcat"
         else TEXT_ONLY_EXPRESSION_CAPABILITIES
     )
+    return base.model_copy(update={"recorded_cadence_mode": recorded_cadence_mode})
 
 
 class ExpressionBeatDraftChoice(FrozenModel):
     modality: ExpressionModality
+    role: ExpressionBeatRole = "substantive"
     text: str | None = Field(default=None, min_length=1, max_length=4_096)
     reaction_id: str | None = Field(default=None, min_length=1, max_length=128)
     sticker_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -196,6 +223,7 @@ class ExpressionDraft(FrozenModel):
     """Small model draft; no IDs, targets, provider parameters or budgets."""
 
     timing_choice: TimingChoice = "now"
+    cadence: CadenceProfile = "conversational"
     beats: tuple[ExpressionBeatDraftChoice, ...] = Field(default=(), max_length=16)
     delay_seconds: int | None = Field(default=None, ge=1, le=86_400)
     expires_after_seconds: int | None = Field(default=None, ge=2, le=172_800)
@@ -383,8 +411,29 @@ def _normalize_world_claim_aliases(value: dict[str, object]) -> dict[str, object
     return {**value, "world_claims": repaired}
 
 
+def _normalize_cadence_alias(value: dict[str, object]) -> dict[str, object]:
+    """Repair one unambiguous field-name echo without loosening validation.
+
+    The prompt asks the model to "choose one bounded cadence intent", and
+    models regularly echo that phrase as a literal ``cadence_intent`` key.
+    The meaning is identical to the schema's ``cadence`` field, so only this
+    exact alias is renamed — any other extra key still fails closed.
+    """
+
+    if "cadence_intent" in value and "cadence" not in value:
+        return {
+            ("cadence" if key == "cadence_intent" else key): item
+            for key, item in value.items()
+        }
+    return value
+
+
 def materialize_expression_draft(
-    *, value: dict[str, object], request: ModelInput, capabilities: ExpressionDraftCapabilities
+    *,
+    value: dict[str, object],
+    request: ModelInput,
+    capabilities: ExpressionDraftCapabilities,
+    cadence_draws: tuple[CadenceDraw, ...] | None = None,
 ) -> DecisionProposal:
     """Bind one model choice to the verified trigger and immutable effects."""
 
@@ -392,6 +441,7 @@ def materialize_expression_draft(
     if trigger is None:
         raise ValueError("ExpressionDraft requires a verified current message")
     value = _normalize_world_claim_aliases(value)
+    value = _normalize_cadence_alias(value)
     # JSON arrays are the natural wire representation of immutable tuples.
     # Field validators remain strict about every scalar and cross-field rule.
     draft = ExpressionDraft.model_validate_json(_canonical_json(value), strict=True)
@@ -419,19 +469,54 @@ def materialize_expression_draft(
         raise ValueError("sticker option is not available in this deployment")
     if any(item.modality == "reaction" for item in draft.beats) and not trigger.platform_message_id:
         raise ValueError("reaction requires a provider message binding")
+    cadence_draws = (
+        request.recorded_cadence_draws if cadence_draws is None else cadence_draws
+    )
+    cadence_draws = tuple(
+        item for item in cadence_draws if item.beat_position <= len(draft.beats)
+    )
+    cadence_draw_refs = tuple(dict.fromkeys(item.draw_ref for item in cadence_draws))
+    if cadence_draw_refs and not set(cadence_draw_refs).issubset(request.recorded_draw_refs):
+        raise ValueError("cadence draws are not bound to the model request")
+    if (
+        capabilities.recorded_cadence_mode == "on"
+        and draft.timing_choice == "now"
+        and len(draft.beats) > 1
+        and len(cadence_draws) != len(draft.beats) - 1
+    ):
+        raise ValueError("on cadence requires one recorded draw per subsequent beat")
 
+    identity_draft = draft.model_dump(mode="json")
+    if capabilities.recorded_cadence_mode == "off":
+        identity_draft.pop("cadence", None)
+        for beat in identity_draft.get("beats", ()):
+            if isinstance(beat, dict):
+                beat.pop("role", None)
     identity = _digest(
         {
-            "contract": "expression-draft-materialization.1",
+            "contract": (
+                "expression-draft-materialization.1"
+                if capabilities.recorded_cadence_mode == "off"
+                else "expression-draft-materialization.2"
+            ),
             "capability_profile": capabilities.profile_id,
             "call_id": request.call_id,
             "trigger_ref": request.trigger_ref,
             "world_revision": request.evaluated_world_revision,
             "reply_target": trigger.reply_target,
-            "draft": draft.model_dump(mode="json"),
+            "draft": identity_draft,
             # When upstream RandomAuthority supplies a draw, its immutable ref
             # participates in proposal identity and remains in ModelInput audit.
             "recorded_draw_refs": request.recorded_draw_refs,
+            **(
+                {
+                    "cadence_draw_refs": cadence_draw_refs,
+                    "cadence_policy_version": capabilities.cadence_policy_version,
+                    "recorded_cadence_mode": capabilities.recorded_cadence_mode,
+                }
+                if capabilities.recorded_cadence_mode != "off"
+                else {}
+            ),
         }
     )
     proposal_id = f"proposal:expression:{identity}"
@@ -473,6 +558,29 @@ def materialize_expression_draft(
             origin + timedelta(seconds=draft.delay_seconds),
             origin + timedelta(seconds=draft.expires_after_seconds),
         )
+    elif len(draft.beats) > 1 and capabilities.recorded_cadence_mode != "off":
+        try:
+            origin = datetime.fromisoformat(
+                str(json.loads(request.model_content_json)["logical_time"])
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("recorded cadence requires pinned logical_time") from exc
+        if origin.tzinfo is None or origin.utcoffset() is None:
+            raise ValueError("recorded cadence requires timezone-aware pinned logical_time")
+
+    expanded_cadence = (
+        cadence_windows(
+            origin=origin,
+            profile=draft.cadence,
+            beat_count=len(draft.beats),
+            draws=cadence_draws,
+        )
+        if origin is not None
+        and draft.timing_choice == "now"
+        and len(draft.beats) > 1
+        and cadence_draws
+        else tuple(None for _ in draft.beats)
+    )
 
     change_id = f"change:expression:{identity}"
     plan_id = f"plan:expression:{identity}"
@@ -490,16 +598,28 @@ def materialize_expression_draft(
         intent_id = f"intent:expression:{identity}:{position}"
         payload_ref = f"payload:expression:{identity}:{position}"
         payload_hash = "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
-        delay_value = (
-            {
-                "not_before": due_window[0].isoformat(),
-                "expires_at": due_window[1].isoformat(),
-            }
-            if due_window is not None
+        effective_window = (
+            expanded_cadence[position - 1]
+            if (
+                draft.timing_choice == "now"
+                and capabilities.recorded_cadence_mode == "on"
+            )
+            else due_window
+        )
+        suggested_window = (
+            expanded_cadence[position - 1]
+            if capabilities.recorded_cadence_mode == "shadow"
             else None
         )
-        beat_values.append(
+        delay_value = (
             {
+                "not_before": effective_window[0].isoformat(),
+                "expires_at": effective_window[1].isoformat(),
+            }
+            if effective_window is not None
+            else None
+        )
+        beat_value = {
                 "beat_id": beat_id,
                 "inline_text": body,
                 "materialized_payload_ref": payload_ref,
@@ -510,8 +630,22 @@ def materialize_expression_draft(
                 "cancel_policy": "cancel-before-dispatch",
                 "reconsider_policy": "reconsider-on-new-observation",
                 "merge_policy": "model-reconsider",
-            }
-        )
+        }
+        if capabilities.recorded_cadence_mode != "off":
+            beat_value.update(
+                {
+                    "semantic_role": choice.role,
+                    "shadow_delay_window": (
+                        {
+                            "not_before": suggested_window[0].isoformat(),
+                            "expires_at": suggested_window[1].isoformat(),
+                        }
+                        if suggested_window is not None
+                        else None
+                    ),
+                }
+            )
+        beat_values.append(beat_value)
         intents.append(
             ProposalActionIntent(
                 intent_id=intent_id,
@@ -523,7 +657,7 @@ def materialize_expression_draft(
                 causal_change_id=change_id,
                 beat_ref=beat_id,
                 dependencies=(previous_intent_id,) if previous_intent_id else (),
-                due_window=due_window,
+                due_window=effective_window,
             )
         )
         previous_beat_id, previous_intent_id = beat_id, intent_id
@@ -539,6 +673,16 @@ def materialize_expression_draft(
                 "overall_intent": f"expression:{draft.timing_choice}",
                 "ordering_policy": "dependencies",
                 "terminal_policy": "settle",
+                **(
+                    {
+                        "cadence_profile": draft.cadence,
+                        "cadence_policy_version": capabilities.cadence_policy_version,
+                        "recorded_cadence_mode": capabilities.recorded_cadence_mode,
+                        "recorded_draw_refs": cadence_draw_refs,
+                    }
+                    if capabilities.recorded_cadence_mode != "off"
+                    else {}
+                ),
                 "beat_drafts": beat_values,
                 "response_expectation": (
                     draft.response_expectation.model_dump(mode="json")

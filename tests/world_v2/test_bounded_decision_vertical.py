@@ -5,9 +5,9 @@ interruption injected at every commit boundary (pre- and post-write), the
 bounded model step's three installed failure policies, and the daily-check
 primitives (wake exactness, check identity, recorded decision recovery).
 
-The two migrated engines (anchored, inline-once) are additionally held to
-byte equality against the frozen hand-written pilots by the shadow-replay
-suite; here they must converge against their own no-crash baselines.
+Historical pilot byte-equality is deliberately excluded: the production
+afterthought semantics are now model-owned and are not required to reproduce
+the removed act/hold pilot.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from companion_daemon.world_v2.bounded_decision_vertical import (
     run_bounded_model_step,
 )
 from companion_daemon.world_v2.deliberation import ModelRoute
-from companion_daemon.world_v2.ledger import WorldLedger, canonical_event_json
+from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.random_authority import RandomAuthority
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import ClockObservation, WorldEvent
@@ -37,17 +37,8 @@ from companion_daemon.world_v2.schemas import ClockObservation, WorldEvent
 from bdv_shadow_support import (
     CrashInjected,
     CrashingLedger,
-    advance_clock,
     assert_identical_tails,
-    build_side,
     ledger_tail,
-    observation_for,
-)
-from test_bdv_shadow_replay import (
-    _afterthought_crash_run,
-    _find_afterthought_authorizing_base,
-    _find_quick_reacting_base,
-    _quick_crash_run,
 )
 
 
@@ -151,13 +142,13 @@ async def test_correction_retry_once_reasks_exactly_once() -> None:
     assert "合同" in model.calls[1][-1]["content"]
 
     stubborn = _StubModel(["坏", "还是坏"])
-    verdict, raw = await run_bounded_model_step(
-        step=_step(failure_policy="correction_retry_once"),
-        model=stubborn,
-        context=_context(),
-        log_label="synthetic",
-    )
-    assert verdict is None and raw == "还是坏"
+    with pytest.raises(BoundedModelUnavailable):
+        await run_bounded_model_step(
+            step=_step(failure_policy="correction_retry_once"),
+            model=stubborn,
+            context=_context(),
+            log_label="synthetic",
+        )
     assert len(stubborn.calls) == 2
 
 
@@ -418,134 +409,3 @@ async def test_daily_check_crash_matrix_converges_to_baseline_bytes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Anchored + inline engines: framework-only crash convergence (P0)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_anchored_engine_crash_matrix_converges_to_its_baseline() -> None:
-    """Every interruption converges: byte-identically to the baseline while
-    the lane still owns its moment, and to the durable recoverable prefix
-    once the authorized tail action legitimately owns the floor.
-
-    Interruptions up to and including the acceptance CAS replay to the exact
-    baseline bytes (the logical clock is frozen, all identities re-derive).
-    After the acceptance landed, the pending authorized followup suppresses
-    the opportunity by design (a fresh tail must not stack on a pending
-    initiative), so completion waits for the action's own settlement; the
-    ledger must then be the exact baseline prefix with the claim lease still
-    owned — a recoverable, replay-valid state, never a fork.
-    """
-
-    base = await _find_afterthought_authorizing_base()
-    baseline_ledger, total_boundaries, baseline_statuses = await _afterthought_crash_run(
-        edition="framework", crash_at=None, mode="pre", base_act_bp=base
-    )
-    assert "authorized" in baseline_statuses
-    baseline = ledger_tail(baseline_ledger)
-    assert total_boundaries >= 6
-
-    for boundary in range(1, total_boundaries + 1):
-        for mode in ("pre", "post"):
-            ledger, _count, statuses = await _afterthought_crash_run(
-                edition="framework", crash_at=boundary, mode=mode, base_act_bp=base
-            )
-            assert "crash" in statuses, f"boundary {boundary}/{mode} never crashed"
-            label = f"anchored crash boundary {boundary} ({mode})"
-            tail = ledger_tail(ledger)
-            evidence = ledger.export_replay_evidence()
-            assert evidence.projection.semantic_hash == evidence.replay.semantic_hash
-            if tail.ledger_sequence == baseline.ledger_sequence:
-                assert_identical_tails(baseline, tail, label=label)
-                continue
-            # The interruption landed after acceptance: completion is owned by
-            # the followup's later settlement.  The ledger must be the exact
-            # baseline prefix (missing only the final completion commit) with
-            # the durable claim still held.
-            missing = baseline.ledger_sequence - tail.ledger_sequence
-            assert missing == 1, f"{label}: unexpected divergence ({missing} events)"
-            assert tail.events == baseline.events[: len(tail.events)], (
-                f"{label}: recovered prefix diverged from the baseline"
-            )
-            completed = baseline.events[-1]
-            assert "TriggerProcessCompleted" in completed[4], (
-                f"{label}: the only deferrable commit is the completion"
-            )
-            process = next(
-                item
-                for item in evidence.projection.trigger_processes
-                if item.process_kind == "afterthought_author"
-            )
-            assert process.state == "claimed"
-            assert process.claim_lease is not None
-            assert process.claim_lease.owner_id == "worker:shadow:afterthought"
-
-
-@pytest.mark.asyncio
-async def test_inline_engine_crash_matrix_reaches_a_stable_fixpoint() -> None:
-    """The inline contract is give-up-silently: a crash may legitimately leave
-    the lane short of the baseline (an opportunity is never a debt), but the
-    recovery re-run must reach a terminal fixpoint with no duplicate effects
-    and a replay-valid ledger."""
-
-    base = await _find_quick_reacting_base()
-    for boundary in range(1, 6):
-        for mode in ("pre", "post"):
-            ledger, _commits, statuses = await _quick_crash_run(
-                edition="framework", crash_at=boundary, mode=mode, base_act_bp=base
-            )
-            # The first pass swallowed the interruption silently, either as a
-            # lane failure or as an incomplete dispatch.
-            assert statuses[0] in {"failed", "dispatch_incomplete"}, statuses
-            # Fixpoint: the last recovery pass ended terminal.
-            assert statuses[-1] in {"duplicate", "held", "declined", "reacted"}
-            evidence = ledger.export_replay_evidence()
-            assert evidence.projection.semantic_hash == evidence.replay.semantic_hash
-            draws = [
-                item.event
-                for item in evidence.events
-                if item.event.event_type == "RandomDrawRecorded"
-            ]
-            assert len(draws) <= 1, "the recorded draw must replay, not re-roll"
-            audits = [
-                item.event
-                for item in evidence.events
-                if item.event.event_type == "ProposalRecorded"
-                and "quick-reaction" in item.event.event_id
-            ]
-            assert len(audits) <= 1, "the audit must never duplicate"
-            reactions = [
-                item.event
-                for item in evidence.events
-                if item.event.event_type == "ActionAuthorized"
-                and "quick-reaction" in canonical_event_json(item.event)
-            ]
-            assert len(reactions) <= 1, "the authorized reaction must never duplicate"
-
-
-@pytest.mark.asyncio
-async def test_engines_share_one_ledger_reality_with_the_runtime() -> None:
-    """Smoke: a framework side wired into WorldRuntime drives end to end."""
-
-    side = build_side(
-        edition="framework",
-        world_id="world:synthetic:smoke",
-        quick_base_act_bp=8_000,
-        afterthought_base_act_bp=4_400,
-        quick_gate_behaviour="always_react",
-        afterthought_gate_behaviour="author",
-    )
-    outcome = await side.runtime.ingest(
-        observation_for(side, suffix="smoke.1", text="给你看一眼我今天的收获！")
-    )
-    assert outcome.status == "action_authorized"
-    pumped = await side.runtime.drain_actions_once()
-    assert pumped is not None and pumped.status == "settled"
-    await advance_clock(side, seconds=20)
-    seen = []
-    for _ in range(3):
-        result = await side.runtime.drain_background_once()
-        seen.append(None if result is None else result.status)
-    assert "opened" in seen
-    evidence = side.ledger.export_replay_evidence()
-    assert evidence.projection.semantic_hash == evidence.replay.semantic_hash

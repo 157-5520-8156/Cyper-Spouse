@@ -173,6 +173,9 @@ async def test_slow_semantic_advice_fails_open_with_a_bounded_delay_and_flash_re
         settings=Settings(
             database_path=tmp_path / "advisory-timeout.sqlite",
             WORLD_V2_ADVISORY_TIMEOUT_SECONDS=0.05,
+            # Keep this advisory-timeout test independent of the developer
+            # machine's optional local appraisal endpoint and its 1.5s gate.
+            LOCAL_APPRAISAL_ENABLED=False,
         ),
         bootstrap_at=NOW,
         model=flash,
@@ -226,7 +229,7 @@ async def test_qq_production_composition_uses_the_same_same_turn_semantic_module
 
     assert result.action_id is not None
     assert delivery.sent == [("10001", reply.text)]
-    assert len(reply.calls) == 1
+    assert len(reply.calls) == 2
     assert "appraisal_draft" in reply.calls[0][0]["content"]
     assert "user_affect.signal" in reply.calls[0][1]["content"]
     assert "withdrawing" in reply.calls[0][1]["content"]

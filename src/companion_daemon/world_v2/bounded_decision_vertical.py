@@ -26,7 +26,7 @@ Three lifecycle engines cover the shapes catalogued in
 
 Replay-compatibility contract: the engines are byte-compatible with the
 hand-written pilots they absorb (``quick_reaction.py``,
-``afterthought_author.py``).  Every identity string, projection re-read and
+the afterthought vertical).  Every identity string, projection re-read and
 commit boundary is preserved exactly; the shadow-replay suite holds both
 implementations to zero byte difference.  The framework version is therefore
 deliberately *not* part of any event identity material (owner decision 3,
@@ -413,6 +413,10 @@ async def run_bounded_model_step(
                     ),
                 },
             ]
+    if step.failure_policy == "correction_retry_once":
+        raise BoundedModelUnavailable(
+            f"{log_label} model returned invalid output after correction"
+        )
     return None, raw
 
 
@@ -427,7 +431,7 @@ def single_call_deliberation_result(
     """Wrap one bounded gate call as an auditable single-attempt result.
 
     Byte-identical to the ``_deliberation_result`` helpers previously copied
-    into ``quick_reaction.py:848`` and ``afterthought_author.py:1096``.
+    into the quick-reaction and afterthought verticals.
     """
 
     call_id = f"model-call:{template.call_namespace}:{_deliberation_digest(prompt_material)}"
@@ -597,6 +601,7 @@ class AnchoredRunResult(FrozenModel):
         "idle",
         "opened",
         "owned_elsewhere",
+        "retry_wait",
         "held",
         "declined",
         "authorized",
@@ -765,12 +770,25 @@ class AnchoredVerticalRuntime:
             interpretations=dict(interpretations),
         )
         interpretation_label = self._interpretation_label(interpretations)
-        verdict, raw_response = await run_bounded_model_step(
-            step=self._spec.model,
-            model=self._model,
-            context=model_context,
-            log_label=self._spec.lane_id,
-        )
+        try:
+            verdict, raw_response = await run_bounded_model_step(
+                step=self._spec.model,
+                model=self._model,
+                context=model_context,
+                log_label=self._spec.lane_id,
+            )
+        except BoundedModelUnavailable:
+            _LOG.warning(
+                "%s model decision failed; keeping durable claim retryable",
+                self._spec.lane_id,
+                exc_info=True,
+            )
+            return AnchoredRunResult(
+                status="retry_wait",
+                trigger_id=trigger_id,
+                interpretation=interpretation_label,
+                reason_code=f"{self._spec.lane_id}.model_retryable",
+            )
         if verdict is None:
             await self._complete(
                 process=active, opportunity=opportunity, outcome="declined"

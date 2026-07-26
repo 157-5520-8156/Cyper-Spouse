@@ -271,7 +271,7 @@ async def test_deadline_deferred_repair_is_spent_before_the_failsafe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spent_corrective_is_not_repeated_before_the_failsafe() -> None:
+async def test_spent_corrective_is_not_repeated_or_replaced_with_local_prose() -> None:
     # The in-attempt corrective already ran once and failed; the expression
     # pass must not repeat the identical repair before its bounded failsafe.
     provider = _ShapeRepairedCombinedProvider(corrected_on_call=99)
@@ -281,13 +281,13 @@ async def test_spent_corrective_is_not_repeated_before_the_failsafe() -> None:
     await cognition.appraisal.propose(request)
     assert len(provider.calls) == 2  # paired pass plus one failed corrective
 
-    expression = await cognition.expression.propose(
-        request.model_copy(update={"call_id": "call:pre-failsafe-exhausted-expression"})
-    )
+    with pytest.raises(ValueError, match="requires_model_recovery"):
+        await cognition.expression.propose(
+            request.model_copy(update={"call_id": "call:pre-failsafe-exhausted-expression"})
+        )
 
     assert len(provider.calls) == 2  # no third identical repair
-    assert expression.model_id == "local-expression-failsafe"
-    assert metrics.reliability_snapshot()["failsafe_24h"] == 1
+    assert metrics.reliability_snapshot()["failsafe_24h"] == 0
 
 
 @pytest.mark.asyncio

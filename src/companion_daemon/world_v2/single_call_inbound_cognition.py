@@ -35,7 +35,10 @@ from .deliberation import (
     ModelInput,
     ModelOutput,
     ModelUsageProvenance,
+    claim_secondary_provider_slot,
+    expression_episode_provider_slots_active,
     fit_secondary_call_timeout,
+    has_provider_slot_coordinator,
 )
 from .expression_draft import (
     ExpressionDraftCapabilities,
@@ -44,16 +47,9 @@ from .expression_draft import (
 )
 from .immediate_emotion_gate import SemanticImmediateEmotionGate
 from .model_facing_context import compact_chat_model_facing_context
-from .no_world_evidence_recovery import (
-    claim_free_reply_already_given,
-    is_companion_world_evidence_probe,
-    recent_companion_texts,
-    recover_without_world_evidence,
-)
 from .production_reliability_metrics import (
     record_backup_recovery,
     record_claim_repair,
-    record_failsafe,
     record_shape_repair,
 )
 
@@ -112,6 +108,107 @@ _UNSAFE_VISIBLE_KEYS = ("role", "tool", "tool_calls", "function_call", "argument
 
 
 logger = logging.getLogger(__name__)
+
+
+def _salvage_expression_without_invalid_world_claims(
+    *,
+    value: dict[str, object],
+    violation: str,
+    request: ModelInput,
+    capabilities: ExpressionDraftCapabilities,
+) -> str | None:
+    """Drop exact unsupported claim clauses while preserving the honest reply.
+
+    The claim validator has already rejected the draft at this point.  When
+    every declared world claim appears verbatim in visible text, removing
+    those exact clauses is narrower and safer than discarding unrelated
+    greeting/reaction text or asking a second model to rewrite the whole turn.
+    The ordinary materializer runs again afterwards, so undeclared residual
+    autobiography and malformed shapes still fail closed.
+    """
+
+    if not (
+        violation.startswith(
+            "world claim cites authority outside its semantic source lane:"
+        )
+        or violation.startswith(
+            "source-bound world claim declaration missing required scope(s):"
+        )
+    ):
+        return None
+    claims = value.get("world_claims")
+    if not isinstance(claims, list) or not claims:
+        return None
+    claim_texts: list[str] = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            return None
+        scope = claim.get("scope")
+        claim_text = claim.get("claim_text")
+        if (
+            scope == "subjective_or_hypothetical"
+            or not isinstance(claim_text, str)
+            or not claim_text.strip()
+        ):
+            continue
+        claim_texts.append(claim_text.strip())
+    if not claim_texts:
+        return None
+
+    salvaged = dict(value)
+    found = {claim_text: False for claim_text in claim_texts}
+
+    def strip_claims(text: str) -> str:
+        repaired = text
+        for claim_text in claim_texts:
+            if claim_text in repaired:
+                found[claim_text] = True
+                repaired = repaired.replace(claim_text, "")
+        return repaired.strip().lstrip("，,。.!！?？；;：:、").lstrip()
+
+    response_text = salvaged.get("response_text")
+    if isinstance(response_text, str):
+        repaired_response = strip_claims(response_text)
+        if not repaired_response:
+            return None
+        salvaged["response_text"] = repaired_response
+    else:
+        beats = salvaged.get("beats")
+        if not isinstance(beats, list):
+            return None
+        repaired_beats: list[object] = []
+        for beat in beats:
+            if not isinstance(beat, dict):
+                repaired_beats.append(beat)
+                continue
+            text = beat.get("text")
+            if not isinstance(text, str):
+                repaired_beats.append(beat)
+                continue
+            repaired_text = strip_claims(text)
+            if repaired_text:
+                repaired_beats.append({**beat, "text": repaired_text})
+        if not repaired_beats:
+            return None
+        salvaged["beats"] = repaired_beats
+    if not all(found.values()):
+        return None
+
+    # Remove every factual declaration, not just the invalid ref.  Any
+    # remaining factual assertion must independently survive the standard
+    # undeclared-claim gate below.
+    salvaged["world_claims"] = []
+    raw = json.dumps(salvaged, ensure_ascii=False, separators=(",", ":"))
+    try:
+        materialize_expression_draft(
+            raw=raw,
+            request=request,
+            capabilities=capabilities,
+            quick_recovery=False,
+        )
+    except (TypeError, ValueError):
+        return None
+    return raw
 
 
 def _cache_key(request: ModelInput) -> tuple[str, str, str]:
@@ -185,7 +282,7 @@ def _requires_remote_appraisal(text: str | None) -> bool:
 
 
 class _PendingExpression:
-    __slots__ = ("raw", "model_id", "route_tier", "usage")
+    __slots__ = ("raw", "model_id", "route_tier", "usage", "episode_disposition")
 
     def __init__(
         self,
@@ -194,11 +291,13 @@ class _PendingExpression:
         model_id: str,
         route_tier: str,
         usage: ModelUsageProvenance | None,
+        episode_disposition: str | None = None,
     ) -> None:
         self.raw = raw
         self.model_id = model_id
         self.route_tier = route_tier
         self.usage = usage
+        self.episode_disposition = episode_disposition
 
 
 class _FailedExpressionDetail:
@@ -246,6 +345,18 @@ class SingleCallAppraisalAdapter:
 
     def __init__(self, owner: "SingleCallInboundCognition") -> None:
         self._owner = owner
+
+    def has_hedge_provider(self, _request: ModelInput) -> bool:
+        return self._owner._recovery_model is not None
+
+    async def propose_provisional(self, request: ModelInput) -> ModelOutput:
+        return await self._owner._propose_episode_candidate(request)
+
+    def accept_candidate(self, request: ModelInput) -> None:
+        self._owner._accept_candidate_pending(request)
+
+    def discard_candidate(self, request: ModelInput) -> None:
+        self._owner._discard_candidate_pending(request)
 
     @property
     def immediate_emotion_gate(self) -> SemanticImmediateEmotionGate | None:
@@ -301,6 +412,25 @@ class SingleCallExpressionAdapter:
     def __init__(self, owner: "SingleCallInboundCognition") -> None:
         self._owner = owner
 
+    def has_hedge_provider(self, _request: ModelInput) -> bool:
+        return self._owner._recovery_expression is not None
+
+    async def propose_provisional(self, request: ModelInput) -> ModelOutput:
+        """Use the selected real provider for one strict provisional beat."""
+
+        return await self._owner._selected_expression(request).propose_provisional(
+            request
+        )
+
+    def episode_provisional_already_evaluated(self, request: ModelInput) -> bool:
+        return _cache_key(request) in self._owner._episode_provisional_started
+
+    def accept_candidate(self, _request: ModelInput) -> None:
+        return
+
+    def discard_candidate(self, _request: ModelInput) -> None:
+        return
+
     def has_precomputed_advisory(
         self,
         *,
@@ -344,19 +474,12 @@ class SingleCallExpressionAdapter:
         if pending is None:
             if key in self._owner._failed_combined:
                 self._owner._failed_combined.discard(key)
-                if self._owner._should_use_grounded_provider_recovery(request):
-                    # A verified memory question already exhausted the paired
-                    # pass and its one backup attempt.  Force the normal
-                    # Deliberation recovery audit before the local, claim-free
-                    # boundary response rather than silently treating it as a
-                    # successful visible expression.
-                    raise ValueError("paired_expression_requires_grounded_recovery")
                 repaired = await self._owner._retry_failed_expression_before_failsafe(
                     request, key
                 )
                 if repaired is not None:
                     return repaired
-                return self._owner._local_expression_failsafe(request, "combined_cognition_failed")
+                raise ValueError("paired_expression_requires_model_recovery")
             try:
                 return await self._owner._fallback_expression.propose(request)
             except asyncio.CancelledError:
@@ -365,27 +488,26 @@ class SingleCallExpressionAdapter:
                 recovery = self._owner._recovery_expression
                 if recovery is None or _provider_already_used_fallback(
                     self._owner._selected_provider(request)
-                ):
+                ) or has_provider_slot_coordinator():
                     raise
                 self._owner._recovery_attempted.add(key)
-                async with asyncio.timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS):
+                recovery_timeout = fit_secondary_call_timeout(
+                    _RECOVERY_MODEL_TIMEOUT_SECONDS
+                )
+                if recovery_timeout is None:
+                    raise
+                async with asyncio.timeout(recovery_timeout):
                     output = await recovery.propose(request)
                 record_backup_recovery()
                 return output
         if pending.route_tier != request.route.tier:
             # The post-acceptance capsule may legitimately route differently.
-            # Never attribute bytes produced by one tier to another tier's
-            # independent proposal audit merely to preserve the one-call fast
-            # path.
-            return self._owner._local_expression_failsafe(request, "combined_route_changed")
+            # Ask the newly selected role model to decide again from that
+            # capsule; local code must not invent a substitute expression.
+            return await self._owner._selected_expression(request).propose(request)
         try:
-            selected = self._owner._selected_expression(request)
-            reviewed_raw = await selected._review_world_grounding_if_needed(  # noqa: SLF001
-                request=request,
-                raw=pending.raw,
-            )
             proposal = materialize_expression_draft(
-                raw=reviewed_raw,
+                raw=pending.raw,
                 request=request,
                 capabilities=self._owner._capabilities,
                 quick_recovery=False,
@@ -396,16 +518,26 @@ class SingleCallExpressionAdapter:
             # configured backup model one fresh, source-bound expression pass
             # before Deliberation invokes its local recovery lane.
             fallback = self._owner._recovery_expression
-            if fallback is None:
+            if fallback is None or has_provider_slot_coordinator():
                 raise
             self._owner._recovery_attempted.add(_cache_key(request))
             try:
-                async with asyncio.timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS):
+                recovery_timeout = fit_secondary_call_timeout(
+                    _RECOVERY_MODEL_TIMEOUT_SECONDS
+                )
+                if recovery_timeout is None:
+                    raise TimeoutError("recovery budget exhausted")
+                async with asyncio.timeout(recovery_timeout):
                     output = await fallback.propose(request)
             except (TimeoutError, TypeError, ValueError):
                 raise
             record_backup_recovery()
             return output
+        if pending.episode_disposition is not None:
+            proposal = {
+                **proposal,
+                "episode_disposition": pending.episode_disposition,
+            }
         return ModelOutput(
             model_id=pending.model_id,
             model_version=self._owner.VERSION,
@@ -413,6 +545,7 @@ class SingleCallExpressionAdapter:
             input_tokens=pending.usage.input_tokens if pending.usage is not None else None,
             output_tokens=pending.usage.output_tokens if pending.usage is not None else None,
             usage=pending.usage,
+            episode_disposition=pending.episode_disposition,
         )
 
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
@@ -424,10 +557,12 @@ class SingleCallExpressionAdapter:
         # adapter's quick-recovery prompt, so the backup receives the same
         # bounded world/emotion/relationship context without adding a second
         # provider lane.
-        recovery = self._owner._recovery_expression
+        recovery = (
+            self._owner._recovery_expression
+            or self._owner._selected_expression(request)
+        )
         if (
-            recovery is not None
-            and key not in self._owner._recovery_attempted
+            key not in self._owner._recovery_attempted
             and not _provider_already_used_fallback(self._owner._selected_provider(request))
         ):
             self._owner._recovery_attempted.add(key)
@@ -444,11 +579,10 @@ class SingleCallExpressionAdapter:
             else:
                 record_backup_recovery()
                 return output
-        # The paired pass and the one configured backup model have now spent
-        # their provider attempts. Local recovery is deliberately claim-free
-        # and only handles identity, evidence, modality, and other safety
-        # boundaries.
-        return self._owner._local_expression_failsafe(request, failure_code)
+        raise RuntimeError(
+            "model-owned expression unavailable after configured recovery "
+            f"({failure_code[:64]})"
+        )
 
 
 class SingleCallInboundCognition:
@@ -503,7 +637,7 @@ class SingleCallInboundCognition:
             temperature=temperature,
             expression_capabilities=expression_capabilities,
             identity_frame=identity_frame,
-            world_grounding_reviewer=flash_model,
+            semantic_boundary_reviewer=flash_model,
         )
         self._thinking_expression = (
             ChatModelDeliberationAdapter(
@@ -512,7 +646,7 @@ class SingleCallInboundCognition:
                 temperature=temperature,
                 expression_capabilities=expression_capabilities,
                 identity_frame=identity_frame,
-                world_grounding_reviewer=flash_model,
+                semantic_boundary_reviewer=flash_model,
             )
             if thinking_model is not None
             else None
@@ -536,7 +670,7 @@ class SingleCallInboundCognition:
                 # One backup completion is the recovery budget.  The normal
                 # materializer still enforces source-bound claims, so a
                 # second semantic reviewer is unnecessary here.
-                world_grounding_reviewer=None,
+                semantic_boundary_reviewer=None,
             )
             if self._recovery_model is not None
             else None
@@ -562,14 +696,43 @@ class SingleCallInboundCognition:
             else None
         )
         self._pending: OrderedDict[tuple[str, str, str], _PendingExpression] = OrderedDict()
+        self._candidate_pending: OrderedDict[
+            tuple[tuple[str, str, str], str], _PendingExpression
+        ] = OrderedDict()
         self._failed_combined = _BoundedKeySet(_MAX_PENDING_DRAFTS)
         self._failed_details: OrderedDict[
             tuple[str, str, str], _FailedExpressionDetail
         ] = OrderedDict()
         self._recovery_attempted = _BoundedKeySet(_MAX_PENDING_DRAFTS)
         self._precomputed_advisory: set[tuple[str, str, str]] = set()
+        self._episode_provisional_started = _BoundedKeySet(_MAX_PENDING_DRAFTS)
         self.appraisal = SingleCallAppraisalAdapter(self)
         self.expression = SingleCallExpressionAdapter(self)
+
+    async def _propose_episode_candidate(self, request: ModelInput) -> ModelOutput:
+        key = _cache_key(request)
+        self._episode_provisional_started.add(key)
+        return await self._selected_expression(request).propose_provisional(request)
+
+    def _accept_candidate_pending(self, request: ModelInput) -> None:
+        key = _cache_key(request)
+        pending = self._candidate_pending.pop((key, request.call_id), None)
+        if pending is None:
+            return
+        self._pending[key] = pending
+        self._pending.move_to_end(key)
+        while len(self._pending) > _MAX_PENDING_DRAFTS:
+            self._pending.popitem(last=False)
+        self._discard_other_candidate_pending(key)
+
+    def _discard_candidate_pending(self, request: ModelInput) -> None:
+        key = _cache_key(request)
+        self._candidate_pending.pop((key, request.call_id), None)
+
+    def _discard_other_candidate_pending(self, key: tuple[str, str, str]) -> None:
+        for candidate_key in tuple(self._candidate_pending):
+            if candidate_key[0] == key:
+                self._candidate_pending.pop(candidate_key, None)
 
     def _selected_expression(self, request: ModelInput) -> ChatModelDeliberationAdapter:
         if request.route.tier == "thinking":
@@ -598,16 +761,6 @@ class SingleCallInboundCognition:
         return _no_change_proposal(
             request=request,
             rationale=f"Provider recovery exhausted; appraisal withheld ({failure_code[:96]}).",
-        )
-
-    @staticmethod
-    def _should_use_grounded_provider_recovery(request: ModelInput) -> bool:
-        trigger = request.trigger_message
-        if trigger is None or not _has_grounded_recovery_material(request.model_content_json):
-            return False
-        normalized = "".join(trigger.text.lower().split())
-        return any(
-            marker in normalized for marker in ("记得", "还记得", "喜欢什么", "之前说", "说过什么")
         )
 
     def _model_id_for(self, request: ModelInput) -> str:
@@ -659,6 +812,9 @@ class SingleCallInboundCognition:
             {"role": "assistant", "content": raw},
             {"role": "user", "content": instruction},
         ]
+        if not claim_secondary_provider_slot("corrective"):
+            logger.warning("corrective retry skipped: secondary provider slot already started")
+            return None
         try:
             async with asyncio.timeout(timeout_seconds):
                 complete_json = getattr(provider, "complete_json", None)
@@ -759,7 +915,12 @@ class SingleCallInboundCognition:
         self._failed_details.pop(key, None)
         self._recovery_attempted.add(key)
         try:
-            async with asyncio.timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS):
+            recovery_timeout = fit_secondary_call_timeout(
+                _RECOVERY_MODEL_TIMEOUT_SECONDS
+            )
+            if recovery_timeout is None:
+                raise TimeoutError("paired cognition backup budget exhausted")
+            async with asyncio.timeout(recovery_timeout):
                 return await self._propose_appraisal(
                     request,
                     provider_override=self._recovery_model,
@@ -813,7 +974,10 @@ class SingleCallInboundCognition:
         )
         appraisal_messages = AppraisalDraftDeliberationAdapter._messages(provider_request)
         expression_messages = expression_adapter._messages(  # noqa: SLF001 - paired internal seam
-            request=provider_request, quick_recovery=False, failure_code=None
+            request=provider_request,
+            quick_recovery=False,
+            provisional=False,
+            failure_code=None,
         )
         messages = [
             {
@@ -821,16 +985,10 @@ class SingleCallInboundCognition:
                 "content": (
                     "Return exactly one JSON object with exactly two keys: appraisal_draft and "
                     "expression_draft. Both values must be JSON objects. This is one simultaneous "
-                    "inner cognition pass: the expression may be shaped by the appraisal and optional "
-                    "affect it returns, but neither draft is accepted authority yet. The application "
-                    "will independently validate and accept Appraisal/Affect before it can authorize "
-                    "the Expression. Do not weaken, erase, or prematurely repair a material feeling "
-                    "merely to sound agreeable. The expression_draft's timing_choice (now/later/"
-                    "silent) is part of this same inner pass: read any phone_attention advisory "
-                    "(【手机注意力：…】) and the appraisal you just made before deciding whether she "
-                    "answers now, defers with later (the host delivers the deferred text after "
-                    "delay_seconds and keeps it as her private commitment), or stays silent; "
-                    "appraising a message honestly does not oblige an instant visible reply."
+                    "cognition pass. Treat appraisal, affect, attention, relationship, memory and "
+                    "World context as evidence and advisory material, not behavior instructions. "
+                    "The role model owns timing, motive, stance, expression and silence; neither "
+                    "draft is accepted authority until the application validates its hard boundaries."
                     "\n\nAPPRAISAL DRAFT CONTRACT:\n"
                     + appraisal_messages[0]["content"]
                     + "\n\nEXPRESSION DRAFT CONTRACT:\n"
@@ -872,6 +1030,7 @@ class SingleCallInboundCognition:
                 allow_recovery
                 and self._recovery_model is not None
                 and not _provider_already_used_fallback(provider)
+                and not has_provider_slot_coordinator()
             ):
                 return await self._retry_with_recovery_provider(request)
             self._failed_combined.add(_cache_key(request))
@@ -883,6 +1042,7 @@ class SingleCallInboundCognition:
                 allow_recovery
                 and self._recovery_model is not None
                 and not _provider_already_used_fallback(provider)
+                and not has_provider_slot_coordinator()
             ):
                 return await self._retry_with_recovery_provider(request)
             self._failed_combined.add(_cache_key(request))
@@ -902,7 +1062,16 @@ class SingleCallInboundCognition:
         appraisal_raw = json.dumps(
             value["appraisal_draft"], ensure_ascii=False, separators=(",", ":")
         )
-        expression_value = value["expression_draft"]
+        expression_value = dict(value["expression_draft"])
+        episode_disposition = expression_value.pop("episode_disposition", None)
+        if episode_disposition not in {
+            None,
+            "complete_without_more",
+            "append",
+            "cancel_pending",
+            "supersede_pending",
+        }:
+            raise ValueError("combined expression has invalid episode disposition")
         expression_raw = json.dumps(expression_value, ensure_ascii=False, separators=(",", ":"))
         # The provider creates two fallible drafts in one transport response,
         # but they remain independent proposal candidates.  A malformed inner
@@ -945,8 +1114,26 @@ class SingleCallInboundCognition:
                     expression_valid = True
         else:
             expression_valid = True
-        corrective_spent = False
         if not expression_valid and violation is not None:
+            salvaged = _salvage_expression_without_invalid_world_claims(
+                value=expression_value,
+                violation=violation,
+                request=request,
+                capabilities=self._capabilities,
+            )
+            if salvaged is not None:
+                expression_raw = salvaged
+                expression_valid = True
+                logger.warning(
+                    "unsupported world-claim clause removed without losing the reply"
+                )
+                record_claim_repair()
+        corrective_spent = False
+        if (
+            not expression_valid
+            and violation is not None
+            and not expression_episode_provider_slots_active()
+        ):
             # A structural near-miss (claim bookkeeping, beat shape, later
             # contract) regularly arrives attached to a perfectly good visible
             # reply.  Rerunning the identical contract on the backup provider
@@ -988,28 +1175,37 @@ class SingleCallInboundCognition:
             and allow_recovery
             and self._recovery_model is not None
             and not _provider_already_used_fallback(provider)
+            and not has_provider_slot_coordinator()
         ):
             return await self._retry_with_recovery_provider(request)
         if expression_valid:
-            self._pending[key] = _PendingExpression(
+            pending_expression = _PendingExpression(
                 raw=expression_raw,
                 model_id=model_id,
                 route_tier=request.route.tier,
                 usage=usage,
+                episode_disposition=episode_disposition,
             )
-            self._pending.move_to_end(key)
-            while len(self._pending) > _MAX_PENDING_DRAFTS:
-                self._pending.popitem(last=False)
+            if has_provider_slot_coordinator():
+                self._candidate_pending[(key, request.call_id)] = pending_expression
+                self._candidate_pending.move_to_end((key, request.call_id))
+                while len(self._candidate_pending) > _MAX_PENDING_DRAFTS * 2:
+                    self._candidate_pending.popitem(last=False)
+            else:
+                self._pending[key] = pending_expression
+                self._pending.move_to_end(key)
+                while len(self._pending) > _MAX_PENDING_DRAFTS:
+                    self._pending.popitem(last=False)
         else:
             self._pending.pop(key, None)
             # The appraisal bytes may still be valid even when the paired
             # expression draft is not.  Preserve a same-trigger marker plus
             # the exact violation so the post-acceptance expression lane can
             # spend one corrective retry that names the concrete problem
-            # before it falls back to a local canned line.  When the
+            # before it falls back to the bounded role-model recovery. When the
             # in-attempt corrective was already spent (and failed once), do
             # not queue the same correction again: repeating an identical
-            # failed repair only delays the bounded local recovery.
+            # failed repair only delays the bounded model recovery.
             self._failed_combined.add(key)
             if violation is not None and not corrective_spent:
                 self._remember_failed_expression(
@@ -1035,152 +1231,6 @@ class SingleCallInboundCognition:
         )
         while len(self._failed_details) > _MAX_PENDING_DRAFTS:
             self._failed_details.popitem(last=False)
-
-    def _local_expression_failsafe(self, request: ModelInput, failure_code: str) -> ModelOutput:
-        trigger = request.trigger_message
-        if trigger is None:
-            raise ValueError("local expression failsafe requires a verified message")
-        trigger_text = trigger.text or ""
-        intent = _classify_local_failsafe_intent(trigger_text)
-        logger.warning(
-            "local expression failsafe engaged trigger=%s failure=%s intent=%s",
-            trigger.observation_ref,
-            failure_code[:120],
-            intent,
-        )
-        record_failsafe()
-        name = self._identity_frame.companion_name if self._identity_frame is not None else None
-        if intent == "world_evidence":
-            try:
-                context: object = json.loads(request.model_content_json)
-            except (TypeError, json.JSONDecodeError):
-                context = {}
-            recent_texts = recent_companion_texts(context)
-            if claim_free_reply_already_given(
-                trigger_text=trigger_text, recent_visible_texts=recent_texts
-            ):
-                # Every claim-free variant for this probe was already said;
-                # parroting one verbatim reads as a script.  Fall to the
-                # bounded acknowledgement that names the hand-off instead.
-                return self._local_expression_recovery_ack(
-                    request=request,
-                    failure_code=failure_code,
-                    intent=intent,
-                )
-            text = recover_without_world_evidence(
-                trigger_text=trigger_text,
-                source_ref=trigger.observation_ref,
-                recent_visible_texts=recent_texts,
-            )
-        elif intent == "identity":
-            text = f"我是{name}。" if name else "我在。"
-        elif intent == "role_boundary":
-            subject = f"我是{name}，是" if name else "我是"
-            if self._identity_frame is None or self._identity_frame.not_an_assistant:
-                text = f"不是。{subject}和你聊天、相处的人，不是你的助手或工具。"
-            else:
-                text = f"{subject}和你聊天、相处的人。"
-        elif intent == "emotion":
-            # Preserve the relational meaning of a hurt/repair bid even when
-            # both model attempts are unavailable.  This owns only the
-            # runtime's failed hand-off; it does not infer why the counterpart
-            # feels that way or claim a new world event.
-            text = "我听到了你的情绪。刚才那句我确实没接好，先不装作没事。"
-        elif intent == "user_fact":
-            # The disclosure itself is part of the immutable trigger, but the
-            # durable Fact/Memory workers may still be pending.  Acknowledge
-            # hearing it without falsely promising that persistence already
-            # succeeded.
-            text = "我看到你是在告诉我一件关于自己的事。刚才没接好，不想装作没听见。"
-        elif intent == "unavailable_action":
-            # Never authorize a text substitute for an unavailable modality.
-            raise ValueError("local failsafe cannot replace an unavailable action modality")
-        elif intent == "greeting":
-            # A provider outage must not turn a first hello into an unexplained
-            # disappearance.  This is deliberately a tiny, claim-free social
-            # acknowledgement: it does not invent a current activity or a
-            # feeling, but keeps the live conversation continuous until the
-            # normal model lane is available again.
-            text = (
-                f"你好，第一次见。我是{name}。"
-                if name
-                else "你好，第一次见。先认识一下，我在。"
-            )
-        else:
-            # Ordinary conversation, emotion, relationship, memory, and
-            # attachment content remain model-owned.  Local recovery cannot
-            # invent a reply for them after both provider attempts fail; a
-            # bounded acknowledgement is still preferable to silently losing
-            # an otherwise normal live message, so keep that policy in the
-            # typed fallback below rather than pretending to answer its topic.
-            return self._local_expression_recovery_ack(
-                request=request,
-                failure_code=failure_code,
-                intent=intent,
-            )
-        raw = json.dumps(
-            {
-                "response_text": text,
-                "stance": "answer_without_world_claims",
-                "brief_rationale": (f"local_structural_failsafe:{intent}:{failure_code[:64]}"),
-                "confidence": 0,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return ModelOutput(
-            model_id="local-expression-failsafe",
-            model_version="local-expression-failsafe.1",
-            raw_proposal=materialize_expression_draft(
-                raw=raw,
-                request=request,
-                capabilities=self._capabilities,
-                quick_recovery=True,
-            ),
-        )
-
-    def _local_expression_recovery_ack(
-        self, *, request: ModelInput, failure_code: str, intent: str
-    ) -> ModelOutput:
-        """Keep a provider failure visible without inventing topic content.
-
-        Deliberate silence remains model-owned (a valid ``timing_choice`` in a
-        normal proposal).  This path is only entered after the provider and
-        its bounded recovery both failed, so silently settling a live inbound
-        as ``observed_only`` would make the companion look as if it vanished.
-        The acknowledgement names the failure, makes no world claim, and
-        leaves the original topic for a later model-owned answer.
-        """
-
-        text = (
-            "我刚才没接好这句，不想装作已经回答了；但我看到你说了什么。"
-            if intent in {"acknowledgement", "relationship"}
-            else "我刚才没接好这句，不想敷衍你；这句话我先收到了。"
-        )
-        raw = json.dumps(
-            {
-                "response_text": text,
-                "stance": "acknowledge_briefly",
-                "brief_rationale": (
-                    f"local_expression_recovery_ack:{intent}:{failure_code[:64]}"
-                ),
-                "confidence": 0,
-                "world_claims": [],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return ModelOutput(
-            model_id="local-expression-failsafe",
-            model_version="local-expression-failsafe.1",
-            raw_proposal=materialize_expression_draft(
-                raw=raw,
-                request=request,
-                capabilities=self._capabilities,
-                quick_recovery=False,
-            ),
-        )
-
 
 def _normalize_visible_expression(
     value: dict[str, Any],
@@ -1287,159 +1337,6 @@ def _visible_expression_shape(value: dict[str, Any]) -> str:
     if len(value) > 16:
         parts.append(f"+{len(value) - 16}-keys")
     return ";".join(parts)
-
-
-def _has_grounded_recovery_material(raw_context: str) -> bool:
-    try:
-        context = json.loads(raw_context)
-    except (TypeError, json.JSONDecodeError):
-        return False
-    slices = context.get("slices") if isinstance(context, dict) else None
-    if not isinstance(slices, dict):
-        return False
-    for name in (
-        "relevant_facts",
-        "active_memory_candidates",
-        "recent_experiences",
-        "current_situation",
-        "world_life",
-    ):
-        lane = slices.get(name)
-        if (
-            isinstance(lane, dict)
-            and lane.get("availability") == "available"
-            and isinstance(lane.get("items"), list)
-            and bool(lane["items"])
-        ):
-            return True
-    return False
-
-
-def _classify_local_failsafe_intent(text: str) -> str:
-    normalized = "".join(text.lower().split())
-    if any(marker in normalized for marker in ("表情", "贴纸", "reaction", "sticker")):
-        return "unavailable_action"
-    identity_markers = ("你是谁", "你叫什么", "你的名字", "whoareyou", "yourname")
-    role_boundary_markers = (
-        "助手",
-        "助理",
-        "秘书",
-        "工具",
-        "机器人",
-        "人工智能",
-        "ai",
-        "程序",
-        "模型",
-        "assistant",
-        "robot",
-        "bot",
-        "program",
-    )
-    relationship_markers = (
-        "什么关系",
-        "你是我的什么",
-        "我们算什么",
-        "是什么关系",
-        "ourrelationship",
-        "whatamitoyou",
-        "whatrelationship",
-    )
-    # A direct self-disclosure is already observable in the trigger.  Keep a
-    # provider outage from asking the person to repeat a name or preference;
-    # the recovery may acknowledge the disclosure without claiming that the
-    # asynchronous fact/memory workers have already persisted it.
-    user_fact_markers = (
-        "我叫",
-        "我的名字",
-        "英文名",
-        "我喜欢",
-        "我最喜欢",
-        "我平时最喜欢",
-        "我不喜欢",
-        "我平时喝",
-        "我平时喜欢",
-    )
-    greeting_markers = ("你好", "嗨", "哈喽", "初次见", "第一次见", "hello", "hey")
-    # Relational/emotional probes must win over the broader "recent world
-    # evidence" detector (e.g. "刚才你真的不高兴吗？").  Do not treat a
-    # third-person topic as a bid for repair, though: "电影里的人生气了"
-    # should not receive "刚才我没接好".  The local lane is only a failsafe,
-    # so its emotion detector intentionally accepts a small set of explicit
-    # first/second-person constructions instead of every emotion keyword.
-    emotional_markers = (
-        "失望",
-        "敷衍",
-        "冒犯",
-        "怪话",
-        "攻击",
-        "生气",
-        "不高兴",
-        "不爽",
-        "讨厌",
-        "没在听",
-        "走流程",
-        "不满意",
-        "没用",
-        "废物",
-        "垃圾",
-        "语气有点冲",
-        "道歉",
-        "抱歉",
-        "对不起",
-    )
-    direct_emotion_phrases = (
-        "我失望",
-        "我很失望",
-        "我有点失望",
-        "我生气",
-        "我很生气",
-        "我有点生气",
-        "我不高兴",
-        "我不爽",
-        "我讨厌你",
-        "你失望",
-        "你生气",
-        "你真的生气",
-        "你不高兴",
-        "你不爽",
-        "你是不是在敷衍",
-        "你在敷衍",
-        "你回得",
-        "你没在听",
-        "你让我失望",
-        "你让我生气",
-        "你就是个没用",
-        "你就是个垃圾",
-    )
-    is_direct_apology = any(
-        marker in normalized for marker in ("道歉", "抱歉", "对不起")
-    )
-    is_explicit_relational_emotion = any(
-        phrase in normalized for phrase in direct_emotion_phrases
-    )
-    is_contextual_relational_emotion = any(
-        prefix in normalized and any(marker in normalized for marker in emotional_markers)
-        for prefix in ("你刚才", "你这")
-    )
-    if (
-        is_direct_apology
-        or is_explicit_relational_emotion
-        or is_contextual_relational_emotion
-    ):
-        return "emotion"
-    if any(marker in normalized for marker in user_fact_markers):
-        return "user_fact"
-    if is_companion_world_evidence_probe(text):
-        return "world_evidence"
-    if any(marker in normalized for marker in role_boundary_markers):
-        return "role_boundary"
-    if any(marker in normalized for marker in relationship_markers):
-        return "relationship"
-    if any(marker in normalized for marker in identity_markers):
-        return "identity"
-    if normalized == "hi" or any(marker in normalized for marker in greeting_markers):
-        return "greeting"
-    return "acknowledgement"
 
 
 def _parse_combined(raw: str) -> dict[str, dict[str, Any]]:

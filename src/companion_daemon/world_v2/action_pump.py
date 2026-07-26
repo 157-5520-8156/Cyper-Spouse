@@ -12,6 +12,7 @@ from datetime import timedelta
 import hashlib
 import inspect
 import json
+import logging
 from typing import Literal, Protocol
 
 from .errors import ConcurrencyConflict, IdempotencyConflict
@@ -28,6 +29,7 @@ from .schemas import (
     WorldEvent,
 )
 
+_LOG = logging.getLogger(__name__)
 
 def _digest(value: object) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -54,6 +56,12 @@ class ActionPumpResult(FrozenModel):
         "marked_unknown",
         "expired",
     ]
+    # The pump status describes workflow progress; this separately carries
+    # the provider observation that was durably settled during this call.
+    # Callers must not guess provider visibility from workflow labels.
+    provider_status: Literal[
+        "provider_accepted", "delivered", "failed", "unknown"
+    ] | None = None
 
 
 class ActionPump:
@@ -310,6 +318,14 @@ class ActionPump:
             or current.claim_lease.attempt_id != attempt_id
         ):
             return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
+        if current.not_before is not None:
+            observed_at = latest.logical_time or current.logical_time
+            _LOG.info(
+                "action due dispatch action_id=%s plan_id=%s due_drift_ms=%.1f",
+                current.action_id,
+                current.expression_plan_id or "none",
+                max(0.0, (observed_at - current.not_before).total_seconds() * 1_000),
+            )
         await self._enforce_executor_authority(action=current, projection=latest)
         result = await self._executor.dispatch(current)
         return await self._settle_or_pending(action=current, result=result, dispatched=True)
@@ -372,6 +388,13 @@ class ActionPump:
         await self._enforce_executor_authority(action=current, projection=projection)
         action = current
         at = projection.logical_time or action.logical_time
+        if action.not_before is not None:
+            _LOG.info(
+                "action due dispatch action_id=%s plan_id=%s due_drift_ms=%.1f",
+                action.action_id,
+                action.expression_plan_id or "none",
+                max(0.0, (at - action.not_before).total_seconds() * 1_000),
+            )
         if at >= action.claim_lease.expires_at:
             return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
         await self._commit_event(
@@ -505,7 +528,11 @@ class ActionPump:
                         action=action,
                         result=self._external_observation(action=action, receipt=verified),
                     )
-                    return ActionPumpResult(action_id=action.action_id, status="settled")
+                    return ActionPumpResult(
+                        action_id=action.action_id,
+                        status="settled",
+                        provider_status=verified.status,
+                    )
         # Once the recovery lease has elapsed without terminal evidence,
         # preserve that fact but terminate the original Action as unknown;
         # any later provider result goes through reconciliation.
@@ -531,7 +558,11 @@ class ActionPump:
         await self._settle_checked(
             action=action, result=self._external_observation(action=action, receipt=result)
         )
-        return ActionPumpResult(action_id=action.action_id, status="settled")
+        return ActionPumpResult(
+            action_id=action.action_id,
+            status="settled",
+            provider_status=result.status,
+        )
 
     async def _settle_checked(self, *, action: Action, result: ExternalObservation) -> None:
         if (

@@ -109,17 +109,30 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         may_carry_source_evidence=("afterthought_author",),
         runtime_drain_markers=("self._afterthought_author.drain_one",),
         composition_markers=(
-            "AfterthoughtAuthorRuntime",
             "AfterthoughtVerticalRuntime",
-            "afterthought_runtime = afterthought_class(",
+            "afterthought_runtime = AfterthoughtVerticalRuntime(",
         ),
         drain_site="WorldRuntime.drain_background_once (early, short horizon)",
         spec_module="companion_daemon.world_v2.afterthought_author_vertical",
         spec_builder="AfterthoughtVerticalRuntime",
-        notes=(
-            "Hand-written twin afterthought_author.py stays frozen in tree for"
-            " the WORLD_V2_BDV_PILOT_DISABLED hot rollback window.",
-        ),
+        notes=("Model-led afterthought consideration with replayable timing only.",),
+    ),
+    VerticalRegistration(
+        lane_id="expression_episode",
+        summary="Durable provisional/full visible expression lifecycle",
+        shape="anchored_trigger",
+        hand_rolled=True,
+        module="expression_episode_lifecycle.py",
+        process_kinds=("expression_episode",),
+        grammar_lanes=("chat_reply",),
+        lease_starts_at_logical_time=("expression_episode",),
+        open_before_claim_enforced=("expression_episode",),
+        opened_identity_reducer_validated=("expression_episode",),
+        claim_identity_from_domain_key=("expression_episode",),
+        may_carry_source_evidence=("expression_episode",),
+        runtime_drain_markers=("self._claim_expression_episode",),
+        composition_markers=("expression_episode_mode=config.expression_episode_mode",),
+        drain_site="WorldRuntime.ingest (inline, around visible reply)",
     ),
     # ------------------------------------------------------------------
     # Hand-rolled A-shape wells (event-anchored durable triggers)

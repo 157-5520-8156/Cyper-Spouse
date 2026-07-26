@@ -33,12 +33,14 @@ from .context_capsule import (
     InnerAdvisoryProjection,
 )
 from .context_resolver import query_from_projection
-from .deliberation import Deliberation, TriggerMessage
+from .deliberation import Deliberation, DeliberationResult, TriggerMessage, _digest
+from .expression_cadence import CadenceDraw
+from .interactive_turn_budget import InteractiveTurnBudget
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .ledger import LedgerPort
 from .model_facing_context import mechanism_consumption_summary
 from .proposal_audit import ProposalAuditCommit, ProposalAuditContext, ProposalAuditRecorder
-from .proposal_envelope import ProposalEvidenceRef
+from .proposal_envelope import DecisionProposal, ProposalEvidenceRef
 from .production_latency_trace import ProductionLatencyRecorder, TurnLatencyTrace
 from .aspiration_view import active_aspiration_advisories
 from .attention_view import phone_attention_advisories
@@ -97,6 +99,7 @@ class PinnedTurnCompiler:
         shared_private_invitation_advisory: bool = False,
         attention_advisory: bool = False,
         attention_chronology: LocalChronology | None = None,
+        recorded_cadence_mode: str = "off",
     ) -> None:
         if not companion_actor_ref:
             raise ValueError("Pinned turn companion actor is required")
@@ -130,6 +133,84 @@ class PinnedTurnCompiler:
         # it never schedules, delays, or vetoes anything by itself.
         self._attention_advisory = attention_advisory
         self._attention_chronology = attention_chronology or LocalChronology()
+        if recorded_cadence_mode not in {"off", "shadow", "on"}:
+            raise ValueError("recorded cadence mode must be off, shadow, or on")
+        self._recorded_cadence_mode = recorded_cadence_mode
+
+    def expression_episode_diagnostics(self) -> dict[str, object]:
+        """Expose aggregate process-local episode evidence without text."""
+
+        return self._deliberation.expression_episode_diagnostics()
+
+    @property
+    def expression_episode_mode(self) -> str:
+        return self._deliberation.expression_episode_mode
+
+    @property
+    def recorded_cadence_mode(self) -> str:
+        return self._recorded_cadence_mode
+
+    async def await_expression_episode_tail(self, trigger_ref: str):
+        return await self._deliberation.await_expression_episode_tail(trigger_ref)
+
+    async def audit_expression_episode_tail(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+    ) -> tuple[ProposalAuditCommit | None, str]:
+        """Persist a completed full tail without another provider call."""
+
+        tail = await self._deliberation.await_expression_episode_tail(
+            observation_event.event_id
+        )
+        if tail is None:
+            return None, "complete_without_more"
+        if tail.disposition != "append" or tail.deliberation is None:
+            return None, tail.disposition
+        projection = await self._project()
+        proposal = tail.deliberation.proposal
+        if not isinstance(proposal, DecisionProposal):
+            return None, "complete_without_more"
+        rebound = proposal.model_copy(
+            update={
+                "proposal_id": (
+                    proposal.proposal_id
+                    + f":episode-append:{projection.world_revision}"
+                ),
+                "evaluated_world_revision": projection.world_revision,
+            }
+        )
+        identity = {
+            "capsule_id": tail.deliberation.capsule_id,
+            "proposal_hash": rebound.proposal_hash,
+            "attempt_audits": tuple(
+                value.model_dump(mode="json")
+                for value in tail.deliberation.attempt_audits
+            ),
+        }
+        rebound_result = DeliberationResult(
+            result_id=f"deliberation:{_digest(identity)}",
+            capsule_id=tail.deliberation.capsule_id,
+            proposal=rebound,
+            audit=tail.deliberation.audit,
+            attempt_audits=tail.deliberation.attempt_audits,
+        )
+        context = ProposalAuditContext(
+            world_id=observation.world_id,
+            trigger_ref=observation_event.event_id,
+            logical_time=projection.logical_time or observation.logical_time,
+            created_at=observation.created_at,
+            actor=self._companion_actor_ref,
+            source="world-runtime:expression-episode-tail",
+            trace_id=observation.trace_id,
+            causation_id=observation_event.event_id,
+            correlation_id=observation.correlation_id,
+            evaluated_world_revision=projection.world_revision,
+            expected_commit_world_revision=projection.world_revision,
+            expected_deliberation_revision=projection.deliberation_revision,
+        )
+        return await self._record(rebound_result, context), "append"
 
     async def audit_observation(
         self,
@@ -138,6 +219,8 @@ class PinnedTurnCompiler:
         observation_event: WorldEvent,
         cursor: ProjectionCursor,
         skip_advisories: bool = False,
+        turn_budget: InteractiveTurnBudget | None = None,
+        recorded_cadence_draws: tuple[CadenceDraw, ...] = (),
     ) -> ProposalAuditCommit:
         """Compile an audit at a cursor that includes the committed Observation.
 
@@ -249,6 +332,11 @@ class PinnedTurnCompiler:
                 ),
             ),
             trigger_message=trigger_message,
+            budget=turn_budget,
+            recorded_draw_refs=tuple(
+                dict.fromkeys(item.draw_ref for item in recorded_cadence_draws)
+            ),
+            recorded_cadence_draws=recorded_cadence_draws,
         )
         if latency_trace is None:
             result = await self._deliberation.deliberate(capsule, **deliberate_kwargs)

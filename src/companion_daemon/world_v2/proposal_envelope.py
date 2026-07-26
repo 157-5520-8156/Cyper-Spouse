@@ -807,8 +807,12 @@ class ExpressionBeatDraft(FrozenModel):
     materialized_payload_ref: BoundedRef | None = None
     payload_hash: str = Field(pattern=_HASH_PATTERN)
     content_type: BoundedLabel
+    semantic_role: Literal[
+        "opening", "substantive", "challenge", "self_correction", "afterthought"
+    ] | None = None
     dependency_beat_ids: list[BoundedRef] = Field(max_length=32)
     delay_window: DueWindow | None
+    shadow_delay_window: DueWindow | None = None
     cancel_policy: BoundedLabel
     reconsider_policy: BoundedLabel
     merge_policy: BoundedLabel
@@ -896,6 +900,12 @@ class ExpressionPlanPayload(FrozenModel):
     beat_drafts: list[ExpressionBeatDraft] = Field(min_length=1, max_length=32)
     ordering_policy: BoundedLabel
     terminal_policy: BoundedLabel
+    cadence_profile: Literal[
+        "rapid", "conversational", "hesitant", "escalating"
+    ] | None = None
+    cadence_policy_version: Literal["expression-cadence.1"] | None = None
+    recorded_cadence_mode: Literal["off", "shadow", "on"] | None = None
+    recorded_draw_refs: list[BoundedRef] = Field(default_factory=list, max_length=7)
     response_expectation: ResponseExpectationDraftPayload | None = None
     event_share_claim: EventShareClaimBinding | None = None
     proactive_source_binding: ProactiveExpressionSourceBinding | None = None
@@ -1344,6 +1354,12 @@ class DecisionProposal(ProposalEnvelope):
     # Acceptance consumes ``now``; deferred social Acceptance consumes
     # ``later``; ``silent`` has no visible effect to authorize.
     timing_choice: Literal["now", "later", "silent"] = "now"
+    episode_disposition: Literal[
+        "complete_without_more",
+        "append",
+        "cancel_pending",
+        "supersede_pending",
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
     conversation_thread_changes: tuple[ReferencedSummary, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")

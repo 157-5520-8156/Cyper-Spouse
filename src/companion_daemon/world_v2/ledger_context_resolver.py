@@ -8,6 +8,7 @@ an inferred reference or hash.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
@@ -40,6 +41,7 @@ from .context_capsule import (
     SliceName,
     authority_refs_digest,
     canonical_value_hash,
+    derived_privacy_floor,
     resolved_result_set_hash,
     source_bindings_hash,
 )
@@ -100,6 +102,16 @@ _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
 
 _LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ContextResolverPerformanceCounters:
+    """Non-authoritative evidence for cursor-pinned resolver reuse."""
+
+    resolve_calls: int
+    cache_hits: int
+    cache_misses: int
+
 
 _ITEM_ID: dict[SliceName, str] = {
     "character_core": "core_id",
@@ -384,6 +396,14 @@ def _typed_authority_claims(
 def _privacy(slice_name: SliceName, item: BaseModel) -> PrivacyClass:
     values = getattr(item, "values", None)
     candidates: list[PrivacyClass] = [_PRIVACY_FLOOR[slice_name]]
+    # The capsule compiler independently re-derives the typed value's privacy
+    # floor and rejects any metadata classified below it (typed authority must
+    # never be downgraded).  Stamp with the exact same derivation so composite
+    # values -- e.g. a current_situation whose activity or social-environment
+    # children carry ``withhold`` -- classify at least as strict as that floor.
+    derived = derived_privacy_floor(slice_name, item)
+    if derived is not None:
+        candidates.append(derived)
     for value in (
         getattr(item, "privacy_class", None),
         getattr(values, "privacy_class", None),
@@ -421,6 +441,8 @@ def _signal_bp(slice_name: SliceName, item: BaseModel) -> int:
             return 10_000
         if "pending_interaction" in reasons:
             return 10_000
+        if "acknowledged_context" in reasons:
+            return 9_850
         if "topic_reactivation" in reasons:
             return 9_900
         if "recent_companion" in reasons:
@@ -640,6 +662,21 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             if perception_result_reader is not None
             else None
         )
+        # Cache the complete resolver product at the module boundary instead
+        # of teaching every slice caller about dependencies. The exact query
+        # hash covers cursor, snapshot, actor, trigger, consumer profile and
+        # logical time; fixed resolver collaborators are instance-scoped.
+        self._resolved_context_cache: dict[str, ResolvedContextResult] = {}
+        self._resolve_calls = 0
+        self._resolve_cache_hits = 0
+        self._resolve_cache_misses = 0
+
+    def performance_counters(self) -> ContextResolverPerformanceCounters:
+        return ContextResolverPerformanceCounters(
+            resolve_calls=self._resolve_calls,
+            cache_hits=self._resolve_cache_hits,
+            cache_misses=self._resolve_cache_misses,
+        )
 
     def _scope_for_query(
         self, query: ContextCompileQuery, projection: LedgerProjection
@@ -789,6 +826,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
 
     def resolve(self, query: ContextCompileQuery) -> ResolvedContextResult:
         started = time.perf_counter()
+        self._resolve_calls += 1
         head = self._ledger.project()
         if (
             head.world_revision != query.world_revision
@@ -796,6 +834,14 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             or head.ledger_sequence != query.ledger_sequence
         ):
             raise ValueError("historical Context resolution requires an indexed projection reader")
+        query_hash = context_query_hash(query)
+        cached = self._resolved_context_cache.get(query_hash)
+        if cached is not None:
+            self._resolve_cache_hits += 1
+            self._resolved_context_cache.pop(query_hash)
+            self._resolved_context_cache[query_hash] = cached
+            return cached
+        self._resolve_cache_misses += 1
         projection = self._ledger.project_at(query.cursor)
         self._validate_projection(query, projection)
         scope = self._scope_for_query(query, projection)
@@ -1144,11 +1190,15 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             memory_ms,
             budget_ms,
         )
-        return ResolvedContextResult(
-            query_hash=context_query_hash(query),
+        result = ResolvedContextResult(
+            query_hash=query_hash,
             capability=self.capability,
             resolved_context=request,
         )
+        self._resolved_context_cache[query_hash] = result
+        while len(self._resolved_context_cache) > 16:
+            self._resolved_context_cache.pop(next(iter(self._resolved_context_cache)))
+        return result
 
     def resolve_advisory_slice(
         self,

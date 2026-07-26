@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from companion_daemon.world_v2.expression_reconsideration_runtime import (
     ExpressionReconsiderationRuntime,
 )
 from companion_daemon.world_v2.expression_reconsideration_model_adapter import (
+    AuditedReplacementReconsiderationReviewer,
     ExpressionReconsiderationChatModelAdapter,
 )
 from companion_daemon.world_v2.reducers import ReducerState, make_projection, reduce_event
@@ -377,6 +379,35 @@ class _ContinueReviewer:
         return "continue"
 
 
+class _BrokenReviewer:
+    async def review(self, **_kwargs):
+        raise ValueError("invalid model JSON")
+
+
+@pytest.mark.asyncio
+async def test_invalid_role_decision_remains_retryable_without_crashing_the_scheduler() -> None:
+    observation, source_event = _observation()
+    trigger_event = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    ledger = _TriggerLedger(_state())
+    ledger.commit((source_event, trigger_event))
+
+    result = await ExpressionReconsiderationRuntime(
+        ledger=ledger,
+        owner_id="worker:reconsideration",
+        reviewer=_BrokenReviewer(),
+    ).drain_one()
+
+    assert result.status == "awaiting_review"
+    assert ledger.project().trigger_processes[0].state == "claimed"
+    assert ledger.project().actions[0].state == "authorized"
+
+
 @pytest.mark.asyncio
 async def test_only_explicit_reviewer_continuation_releases_expression_gate() -> None:
     observation, source_event = _observation()
@@ -398,6 +429,80 @@ async def test_only_explicit_reviewer_continuation_releases_expression_gate() ->
 
     assert result.status == "continued"
     assert ledger.project().trigger_processes[0].state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_role_may_continue_unsent_tail_after_first_beat_reached_provider() -> None:
+    """A delivered sibling is context, not a local-policy veto of the role."""
+
+    observation, source_event = _observation()
+    trigger_event = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    pending = _action()
+    sent = pending.model_copy(
+        update={
+            "action_id": "action:expression:one",
+            "expression_beat_id": "beat:expression:1",
+            "intent_ref": "proposal:1:intent:one",
+            "payload_ref": "payload:expression:one",
+            "payload_hash": "sha256:" + "1" * 64,
+            "idempotency_key": "action:expression:one",
+            "budget_reservation_id": "reservation:expression:one",
+            "state": "provider_accepted",
+            "claim_lease": ClaimLease(
+                owner_id="pump:test",
+                attempt_id="attempt:expression:one",
+                acquired_at=NOW,
+                expires_at=NOW + timedelta(minutes=2),
+            ),
+        }
+    )
+    state = _state().model_copy(
+        update={
+            "actions": (sent, pending),
+            "pending_actions": (sent, pending),
+            "budget_accounts": (
+                BudgetAccount(
+                    account_id="account:chat:1",
+                    category="chat",
+                    window_id="window:1",
+                    limit=100,
+                    reserved=10,
+                ),
+            ),
+            "budget_reservations": (
+                BudgetReservation(
+                    reservation_id=pending.budget_reservation_id,
+                    account_id="account:chat:1",
+                    action_id=pending.action_id,
+                    category="chat",
+                    amount_limit=10,
+                ),
+            ),
+        }
+    )
+    ledger = _TriggerLedger(state)
+    ledger.commit((source_event, trigger_event))
+
+    result = await ExpressionReconsiderationRuntime(
+        ledger=ledger,
+        owner_id="worker:reconsideration",
+        reviewer=_ContinueReviewer(),
+    ).drain_one()
+
+    projection = ledger.project()
+    assert result.status == "continued"
+    assert next(item for item in projection.actions if item.action_id == pending.action_id).state == (
+        "authorized"
+    )
+    assert sent.action_id not in {
+        item.action_id for item in projection.actions if item.state == "cancelled"
+    }
 
 
 class _CancelReviewer:
@@ -456,6 +561,73 @@ async def test_replacement_decision_atomically_cancels_undispatched_action_and_r
     assert projection.expression_beats[0].state == "terminated"
     assert projection.trigger_processes[0].state == "terminal"
     assert "replacement:1" in (projection.trigger_processes[0].runtime_outcome_ref or "")
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_duplicate_cancel_after_terminal_reconsideration() -> None:
+    """Crash/restart after a cancel must not re-emit ActionCancelled.
+
+    Plan §5: beat 1 delivered / undispatched cancelled once; restart replay
+    recovers commitments without duplicating the cancellation.
+    """
+
+    observation, source_event = _observation()
+    trigger_event = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    action = _action()
+    state = _state().model_copy(
+        update={
+            "budget_accounts": (
+                BudgetAccount(
+                    account_id="account:chat:1",
+                    category="chat",
+                    window_id="window:1",
+                    limit=100,
+                    reserved=10,
+                ),
+            ),
+            "budget_reservations": (
+                BudgetReservation(
+                    reservation_id=action.budget_reservation_id,
+                    account_id="account:chat:1",
+                    action_id=action.action_id,
+                    category="chat",
+                    amount_limit=10,
+                ),
+            ),
+        }
+    )
+    ledger = _TriggerLedger(state)
+    ledger.commit((source_event, trigger_event))
+
+    first = await ExpressionReconsiderationRuntime(
+        ledger=ledger, owner_id="worker:reconsideration", reviewer=_CancelReviewer()
+    ).drain_one()
+    cancel_ids = {
+        event_id
+        for event_id, event in ledger._events.items()
+        if event.event_type == "ActionCancelled"
+    }
+    assert first.status == "replacement_required"
+    assert len(cancel_ids) == 1
+
+    # Simulate process restart: fresh runtime, same durable ledger head.
+    second = await ExpressionReconsiderationRuntime(
+        ledger=ledger, owner_id="worker:reconsideration", reviewer=_CancelReviewer()
+    ).drain_one()
+    cancel_ids_after = {
+        event_id
+        for event_id, event in ledger._events.items()
+        if event.event_type == "ActionCancelled"
+    }
+    assert second.status == "idle"
+    assert cancel_ids_after == cancel_ids
+    assert ledger.project().actions[0].state == "cancelled"
 
 
 class _DeferReviewer:
@@ -654,9 +826,11 @@ class _DecisionModel:
 
     def __init__(self, raw: str) -> None:
         self.raw = raw
+        self.calls: list[list[dict[str, str]]] = []
 
-    async def complete(self, _messages, *, temperature: float):
+    async def complete(self, messages, *, temperature: float):
         assert temperature == 0.25
+        self.calls.append(messages)
         return self.raw
 
 
@@ -678,6 +852,72 @@ async def test_chat_model_adapter_cannot_inject_new_payload_or_unbound_replaceme
 
     assert accepted.disposition == "cancel"
     assert accepted.rationale_ref and accepted.rationale_ref.startswith("model-decision:")
+
+
+@pytest.mark.asyncio
+async def test_replacement_lookup_uses_the_same_pinned_cursor_as_the_role_decision() -> None:
+    observation, source_event = _observation()
+    trigger = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    ).payload()["process"]
+    process = TriggerProcess.model_validate_json(json.dumps(trigger))
+    cursor = ProjectionCursor(world_revision=1, deliberation_revision=1, ledger_sequence=2)
+    projected_at: list[ProjectionCursor] = []
+
+    def project_at(requested: ProjectionCursor):
+        projected_at.append(requested)
+        return SimpleNamespace(
+            proposal_audits=(
+                SimpleNamespace(
+                    event_ref="event:proposal:new-observation",
+                    trigger_ref=source_event.event_id,
+                    proposal_id="proposal:new-observation",
+                ),
+            ),
+            expression_plan_manifests=(
+                SimpleNamespace(proposal_id="proposal:new-observation"),
+            ),
+            expression_beats=(
+                SimpleNamespace(
+                    beat_id="beat:expression:2",
+                    payload_ref="payload:expression:pending",
+                ),
+            ),
+            stored_message_payloads=(
+                SimpleNamespace(
+                    payload_ref="payload:expression:previous",
+                    text="上一条已经发出的消息。",
+                ),
+                SimpleNamespace(
+                    payload_ref="payload:expression:pending",
+                    text="这条是尚未发出的旧表达。",
+                ),
+            ),
+        )
+
+    model = _DecisionModel('{"disposition":"merge"}')
+    decision = await AuditedReplacementReconsiderationReviewer(
+        reviewer=ExpressionReconsiderationChatModelAdapter(
+            model=model
+        ),
+        project_at=project_at,
+    ).review(process=process, observation_event=source_event, cursor=cursor)
+
+    assert projected_at == [cursor]
+    assert decision.replacement_plan_ref == "event:proposal:new-observation"
+    supplied = json.loads(model.calls[0][1]["content"])
+    assert (
+        supplied["conversation_context"]["old_pending_expression"]
+        == "这条是尚未发出的旧表达。"
+    )
+    assert supplied["conversation_context"]["recent_message_payloads"] == [
+        "上一条已经发出的消息。",
+        "这条是尚未发出的旧表达。",
+    ]
     with pytest.raises(ValueError, match="unsupported"):
         ExpressionReconsiderationChatModelAdapter._decision(
             '{"disposition":"new_beat","inline_text":"you should not see this"}'

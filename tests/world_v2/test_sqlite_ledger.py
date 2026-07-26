@@ -222,6 +222,54 @@ def test_sqlite_migrates_verified_v35_head_without_rewriting_events(tmp_path) ->
         ).fetchone()[0] == event_count
 
 
+def test_historical_projection_replay_reuses_verified_ascending_prefixes(tmp_path) -> None:
+    path = tmp_path / "historical-prefix.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    cursors: list[ProjectionCursor] = []
+    world_revision = 0
+    for index in range(1, 26):
+        committed = ledger.commit(
+            [event(f"event-prefix-{index}", f"obs-prefix-{index}")],
+            commit_id=f"commit-prefix-{index}",
+            expected_world_revision=world_revision,
+            expected_deliberation_revision=0,
+        )
+        world_revision = committed.world_revision
+        cursors.append(
+            ProjectionCursor(
+                world_revision=committed.world_revision,
+                deliberation_revision=committed.deliberation_revision,
+                ledger_sequence=committed.ledger_sequence,
+            )
+        )
+    expected = ledger.project()
+    ledger.close()
+
+    replay = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    baseline = replay.performance_counters()
+    projections = tuple(replay.project_at(cursor) for cursor in cursors[:-1])
+    after_first_pass = replay.performance_counters()
+
+    assert projections[-1].observation_refs == expected.observation_refs[:-1]
+    assert after_first_pass.historical_replay_calls == baseline.historical_replay_calls + 24
+    assert after_first_pass.historical_prefix_hits == baseline.historical_prefix_hits + 23
+    assert after_first_pass.replayed_events == baseline.replayed_events + 24
+
+    # The projection cache is deliberately large enough for one 20+ cursor
+    # production-turn sample. Re-reading it must not enter either replay path.
+    assert tuple(replay.project_at(cursor) for cursor in cursors[:-1]) == projections
+    after_hot_pass = replay.performance_counters()
+    assert after_hot_pass.historical_replay_calls == after_first_pass.historical_replay_calls
+    assert after_hot_pass.replayed_events == after_first_pass.replayed_events
+    replay.close()
+
+    # A separately reopened adapter still derives identical state/hash bytes
+    # without trusting process-local prefixes from the previous instance.
+    independent = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert independent.project_at(cursors[-2]) == projections[-1]
+    independent.close()
+
+
 def test_commit_seeded_head_cache_invalidates_on_external_append(tmp_path) -> None:
     path = tmp_path / "commit-seeded-head-external-append.sqlite3"
     left = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")

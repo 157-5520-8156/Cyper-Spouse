@@ -7,6 +7,7 @@ source-binds those inputs for deliberation; it does not infer behaviour or prose
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
@@ -845,7 +846,14 @@ def _strictest_privacy(values: tuple[PrivacyClass, ...]) -> PrivacyClass | None:
     return max(values, key=_PRIVACY_RANK.__getitem__) if values else None
 
 
-def _derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyClass | None:
+def derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyClass | None:
+    """Strictest privacy the typed value itself proves for one slice item.
+
+    This is the exact floor ``_compile_slice`` enforces against the resolver's
+    ``ResolvedItemMetadata.privacy_class``; the resolver must therefore stamp
+    metadata with at least this class (see ``ledger_context_resolver._privacy``).
+    """
+
     conservative: dict[SliceName, PrivacyClass] = {
         "character_core": "withhold",
         "current_situation": "private",
@@ -1240,7 +1248,7 @@ def _compile_slice(
             for binding in metadata.source_bindings
         ):
             raise ValueError(f"{slice_name} source binding is newer than the pinned snapshot")
-        derived_floor = _derived_privacy_floor(slice_name, item)
+        derived_floor = derived_privacy_floor(slice_name, item)
         proof_floor = bound.resolver_proof.privacy_floor
         if derived_floor is None and proof_floor is None:
             raise ValueError(f"{slice_name} requires a resolver-proven privacy floor")
@@ -1905,7 +1913,7 @@ def _compile_resolved_context(
         item.item_ref
         for item in slices["recent_dialogue"].items
         if set(json.loads(item.payload_json).get("continuity_reasons", ()))
-        & {"current_turn", "pending_interaction"}
+        & {"current_turn", "pending_interaction", "acknowledged_context"}
     }
     # Current attention and an unacknowledged counterpart message are not
     # interchangeable with ordinary recency.  They remain a tiny mandatory
@@ -2200,6 +2208,15 @@ class PreparedContextCapsuleHandle:
         raise TypeError("prepared Context Capsule handles cannot be serialized")
 
 
+@dataclass(frozen=True, slots=True)
+class ContextCompilerPerformanceCounters:
+    """Non-authoritative evidence for exact compiled-capsule reuse."""
+
+    compile_calls: int
+    cache_hits: int
+    cache_misses: int
+
+
 class ContextCapsuleCompiler:
     """Production seam: resolve internally, then compile the pinned trusted result."""
 
@@ -2218,6 +2235,17 @@ class ContextCapsuleCompiler:
         )
         self._resolver = resolver
         self._prepared_issuer = object()
+        self._compiled_context_cache: dict[str, ContextCapsule] = {}
+        self._compile_calls = 0
+        self._compile_cache_hits = 0
+        self._compile_cache_misses = 0
+
+    def performance_counters(self) -> ContextCompilerPerformanceCounters:
+        return ContextCompilerPerformanceCounters(
+            compile_calls=self._compile_calls,
+            cache_hits=self._compile_cache_hits,
+            cache_misses=self._compile_cache_misses,
+        )
 
     def _resolve(
         self, query: ContextCompileQuery
@@ -2254,10 +2282,36 @@ class ContextCapsuleCompiler:
         return pinned_query, resolved
 
     def compile(self, query: ContextCompileQuery) -> ContextCapsule:
+        self._compile_calls += 1
+        query_hash = context_query_hash(query)
+        cached = self._compiled_context_cache.get(query_hash)
+        if cached is not None:
+            # The resolver's exact-head check remains the invalidation gate for
+            # cross-connection writes. Avoid only the repeated deep Pydantic
+            # validation, hash/proof work and model-view serialization.
+            pinned_query = ContextCompileQuery.model_validate(
+                query.model_dump(mode="python", warnings="error")
+            )
+            result = self._resolver.resolve(pinned_query)
+            if not resolver_capability_is_valid(self._resolver, result.capability):
+                raise ValueError("resolved Context result has the wrong resolver capability")
+            if result.query_hash != query_hash:
+                raise ValueError("resolved Context result belongs to another query")
+            if not isinstance(result.resolved_context, ContextCapsuleRequest):
+                raise TypeError("trusted resolver returned an unsupported Context result")
+            self._compile_cache_hits += 1
+            self._compiled_context_cache.pop(query_hash)
+            self._compiled_context_cache[query_hash] = cached
+            return cached
+        self._compile_cache_misses += 1
         _, resolved = self._resolve(query)
-        return _compile_resolved_context(
+        compiled = _compile_resolved_context(
             resolved, policy=self._policy, _authority=_COMPILER_AUTHORITY
         )
+        self._compiled_context_cache[query_hash] = compiled
+        while len(self._compiled_context_cache) > 16:
+            self._compiled_context_cache.pop(next(iter(self._compiled_context_cache)))
+        return compiled
 
     def compile_for_deliberation(self, query: ContextCompileQuery) -> TrustedContextCapsuleHandle:
         return self.finalize_prepared(self.prepare_for_deliberation(query))

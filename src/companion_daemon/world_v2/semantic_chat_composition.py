@@ -92,7 +92,14 @@ def build_semantic_chat_composition(
             reasoning_effort="none",
             proxy_url=settings.openai_proxy_url,
         )
-        route = FailoverChatModel(primary=primary, fallback=fallback)
+        # Interactive Deliberation owns the shared absolute deadline and the
+        # two provider slots.  Keep this wrapper as an adapter bundle only;
+        # it must not add an invisible serial fallback behind either slot.
+        route = FailoverChatModel(
+            primary=primary,
+            fallback=fallback,
+            implicit_failover=False,
+        )
         owned.append(route)
         return route
 

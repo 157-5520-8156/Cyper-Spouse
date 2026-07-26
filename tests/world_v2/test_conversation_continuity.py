@@ -92,14 +92,9 @@ def test_compile_separates_pending_interaction_from_replied_history_and_memory()
     by_id = {item.dialogue_id: item for item in result.dialogue}
     assert "pending_interaction" in by_id[pending.dialogue_id].continuity_reasons
     assert "pending_interaction" not in by_id[first.dialogue_id].continuity_reasons
-    assert (
-        "active_memory_candidates",
-        "memory:shenzhen-trip",
-    ) in result.rank_overrides
-    assert (
-        "active_memory_candidates",
-        "memory:coffee",
-    ) not in result.rank_overrides
+    # Retrieval candidates are already source-bound Context.  Lexical overlap
+    # must not secretly promote one of them into the model's working set.
+    assert result.rank_overrides == frozenset()
 
 
 def test_delayed_reply_does_not_acknowledge_a_newer_stuck_message() -> None:
@@ -166,3 +161,54 @@ def test_common_time_word_alone_does_not_reactivate_an_unrelated_topic() -> None
 
     by_id = {item.dialogue_id: item for item in result.dialogue}
     assert "topic_reactivation" not in by_id[coffee.dialogue_id].continuity_reasons
+
+
+def test_clarification_keeps_user_context_behind_recent_companion_questions() -> None:
+    dashboard = _dialogue(
+        "dashboard",
+        "都是些工作上的事情，需要一些看板工具。",
+        speaker="counterpart",
+        at=NOW - timedelta(minutes=4),
+        sequence=1,
+    )
+    tool_question = _dialogue(
+        "tool-question",
+        "你平时用什么？Trello 还是 Notion 那种？",
+        speaker="companion",
+        at=NOW - timedelta(minutes=3),
+        sequence=2,
+        acknowledges=("event:dialogue:dashboard",),
+    )
+    assignment = _dialogue(
+        "assignment",
+        "然后就问我能不能做。",
+        speaker="counterpart",
+        at=NOW - timedelta(minutes=2),
+        sequence=3,
+    )
+    accept_question = _dialogue(
+        "accept-question",
+        "你妈又给你派活了？那你打算接吗？",
+        speaker="companion",
+        at=NOW - timedelta(minutes=1),
+        sequence=4,
+        acknowledges=("event:dialogue:assignment",),
+    )
+    current = _dialogue(
+        "current-tool",
+        "是飞书那种啦，用的 OpenClaw 接入的。",
+        speaker="counterpart",
+        at=NOW,
+        sequence=5,
+    )
+
+    result = ConversationContinuityCompiler(
+        max_items=4,
+        max_companion_items=2,
+    ).compile(
+        dialogue=(dashboard, tool_question, assignment, accept_question, current),
+        trigger_ref="event:dialogue:current-tool",
+    )
+
+    retained = {item.dialogue_id for item in result.dialogue}
+    assert dashboard.dialogue_id in retained

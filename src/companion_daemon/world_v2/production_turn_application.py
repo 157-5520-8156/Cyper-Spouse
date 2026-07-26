@@ -214,7 +214,7 @@ from .social_action_worker import SocialActionRunResult, SocialActionWorker
 from .quick_reaction import QuickReactionWorker
 from .quick_reaction_vertical import QuickReactionVerticalWorker
 from .chat_model_deliberation_adapter import ChatCompletionModel, CompanionIdentityFrame
-from .afterthought_author import AfterthoughtAuthorRuntime, AfterthoughtRunResult
+from .bounded_decision_vertical import AnchoredRunResult
 from .afterthought_author_vertical import AfterthoughtVerticalRuntime
 from .vertical_registry import assert_bounded_vertical_coverage
 from .proactive_action import (
@@ -1622,7 +1622,7 @@ class WorldV2TurnApplication:
         | FactTriggerRunResult
         | MemoryWithdrawalReviewRunResult
         | ExpressionReconsiderationRunResult
-        | AfterthoughtRunResult
+        | AnchoredRunResult
         | SocialActionRunResult
         | None
     ):
@@ -2884,11 +2884,11 @@ def build_sqlite_world_v2_turn_application(
         # that carries proactive/fact/memory cognition, unless the caller
         # injected an explicit reviewer (tests do).
         if expression_reconsideration_reviewer is None and proactive_model is not None:
-            async def reconsideration_projection():
+            async def reconsideration_projection(cursor):
                 return (
-                    await asyncio.to_thread(ledger.project)
+                    await asyncio.to_thread(ledger.project_at, cursor)
                     if ledger.blocks_event_loop
-                    else ledger.project()
+                    else ledger.project_at(cursor)
                 )
 
             expression_reconsideration_reviewer = (
@@ -2896,7 +2896,7 @@ def build_sqlite_world_v2_turn_application(
                     reviewer=ExpressionReconsiderationChatModelAdapter(
                         model=proactive_model,
                     ),
-                    project=reconsideration_projection,
+                    project_at=reconsideration_projection,
                 )
             )
         afterthought_runtime = None
@@ -2905,17 +2905,7 @@ def build_sqlite_world_v2_turn_application(
             # proactive budget/grammar: its one optional tail is a ``followup``
             # Action whose due window the generic pump owns.
             #
-            # BoundedDecisionVertical pilot switch: the framework edition is
-            # the default; WORLD_V2_BDV_PILOT_DISABLED=1 hot-rolls back to the
-            # frozen hand-written implementation (kept in tree one release
-            # cycle).  Both editions are proven byte-equivalent by the shadow
-            # replay suite before this default was flipped.
-            afterthought_class = (
-                AfterthoughtAuthorRuntime
-                if _bdv_pilot_disabled()
-                else AfterthoughtVerticalRuntime
-            )
-            afterthought_runtime = afterthought_class(
+            afterthought_runtime = AfterthoughtVerticalRuntime(
                 ledger=ledger,
                 model=proactive_model,
                 policy=ExpressionPlanBudgetPolicy(

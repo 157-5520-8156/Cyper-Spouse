@@ -335,11 +335,7 @@ def test_prose_carries_a_state_label_for_every_state() -> None:
     assert phone_attention_prose(view).startswith("【手机注意力：专注中】")
 
 
-def test_expression_prompt_teaches_the_later_mechanics_and_restraint() -> None:
-    """The timing calibration must reach the provider prompt verbatim enough
-    to matter: the phone_attention advisory hook, the later mechanics (host
-    delivers after delay_seconds, kept as her private commitment), the
-    one-beat deployment limit, and the do-not-perform-busyness restraint."""
+def test_expression_prompt_exposes_attention_without_prescribing_timing() -> None:
 
     from companion_daemon.world_v2.chat_model_deliberation_adapter import (
         ChatModelDeliberationAdapter,
@@ -354,24 +350,21 @@ def test_expression_prompt_teaches_the_later_mechanics_and_restraint() -> None:
         capsule_id="a" * 64,
         trigger_ref="trigger:prompt-probe",
         evaluated_world_revision=3,
-        model_content_json='{"capsule":"authoritative"}',
+        model_content_json='{"phone_attention":"focused"}',
     )
     messages = adapter._messages(  # noqa: SLF001 - prompt regression seam
         request=request, quick_recovery=False, failure_code=None
     )
     system = messages[0]["content"]
-    assert "phone_attention" in system
-    assert "【手机注意力：" in system
-    assert "later and silent are fully legitimate" in system
-    assert "delivers your beats only after delay_seconds" in system
-    assert "private commitment" in system
-    assert "exactly one text beat" in system
-    assert "never perform busyness" in system
-    # The recovery prompt stays narrow: no timing latitude in the failsafe.
+    assert "You own the motive, tone, timing" in system
+    assert "later and silent are fully legitimate" not in system
+    supplied = messages[1]["content"]
+    assert "phone_attention" in supplied
+    assert "focused" in supplied
     recovery = adapter._messages(  # noqa: SLF001
         request=request, quick_recovery=True, failure_code="timeout"
     )[0]["content"]
-    assert "later and silent are fully legitimate" not in recovery
+    assert "This is a recovery attempt" in recovery
 
 
 def test_overflowing_later_text_beats_merge_into_the_one_beat_contract() -> None:

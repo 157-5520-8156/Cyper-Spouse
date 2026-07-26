@@ -37,6 +37,7 @@ class RecentDialogueItem(FrozenModel):
         Literal[
             "current_turn",
             "pending_interaction",
+            "acknowledged_context",
             "topic_reactivation",
             "recent_companion",
             "recent",

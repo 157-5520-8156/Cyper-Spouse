@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 
 import pytest
@@ -18,7 +19,9 @@ from companion_daemon.world_v2.immediate_emotion_gate import (
 )
 from companion_daemon.world_v2.single_call_inbound_cognition import (
     SingleCallInboundCognition,
-    _classify_local_failsafe_intent,
+)
+from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+    ChatModelDeliberationAdapter,
 )
 from companion_daemon.world_v2.production_turn_application import (
     build_sqlite_world_v2_turn_application,
@@ -73,6 +76,71 @@ class _CombinedProvider:
                     "confidence": 8200,
                     "world_claims": [],
                 },
+            },
+            ensure_ascii=False,
+        )
+
+
+class _EpisodeCombinedProvider(_CombinedProvider):
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        if any(
+            "provisional first beat" in message["content"]
+            for message in messages
+        ):
+            del temperature
+            self.calls.append(messages)
+            return json.dumps(
+                {
+                    "timing_choice": "now",
+                    "beats": [{"modality": "text", "text": "这句话有点伤人。"}],
+                    "stance": "hurt_boundary",
+                    "brief_rationale": "A direct, self-contained first beat.",
+                    "world_claims": [],
+                },
+                ensure_ascii=False,
+            )
+        return await super().complete(messages, temperature=temperature)
+
+
+class _AppendEpisodeProvider:
+    model = "append-episode-fixture"
+
+    def __init__(self, disposition: str = "append") -> None:
+        self.calls: list[list[dict[str, str]]] = []
+        self.disposition = disposition
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        provisional = any(
+            "provisional first beat" in item["content"]
+            for item in messages
+        )
+        if not provisional:
+            await asyncio.sleep(0.05)
+        return json.dumps(
+            {
+                "timing_choice": "now",
+                "beats": [
+                    {
+                        "modality": "text",
+                        "text": "我先接住你这句话。"
+                        if provisional
+                        else "还有一点，我也想认真听你接着说。",
+                    }
+                ],
+                "stance": "attentive",
+                "brief_rationale": "Each beat has independent semantic value.",
+                "world_claims": [],
+                **(
+                    {"episode_disposition": self.disposition}
+                    if not provisional
+                    else {}
+                ),
             },
             ensure_ascii=False,
         )
@@ -274,6 +342,53 @@ class _TimeoutAfterCombinedProvider(_UnsupportedAutobiographyProvider):
         raise TimeoutError("provider main expression timed out")
 
 
+class _UnsupportedGreetingClaimProvider(_CombinedProvider):
+    """Reproduce the production greeting whose invented prefix poisoned the reply."""
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        if len(self.calls) > 1:
+            raise TimeoutError("claim correction timed out")
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "A casual greeting does not change affect.",
+                    "behavior_tendency": "engage",
+                    "stance": "warm",
+                    "display_strategy": "natural",
+                    "confidence": 6200,
+                },
+                "expression_draft": {
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "刚忙完社团的事，午安呀。你今天过得怎么样？",
+                        }
+                    ],
+                    "stance": "warm_greeting",
+                    "brief_rationale": "Return the greeting and keep the exchange open.",
+                    "confidence": 7600,
+                    "world_claims": [
+                        {
+                            "claim_text": "刚忙完社团的事",
+                            "scope": "current_world",
+                            "source_refs": [
+                                "current_situation activity_slices "
+                                "social.literature_club_meetup planned"
+                            ],
+                        }
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
 class _AlwaysFailProvider:
     model = "always-fails"
 
@@ -390,32 +505,6 @@ class _GroundedQuickRecoveryProvider(_CombinedProvider):
         )
 
 
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    (
-        ("你是机器人吗？", "role_boundary"),
-        ("你是 AI 还是程序？", "role_boundary"),
-        ("我们是什么关系？", "relationship"),
-        ("你是谁？", "identity"),
-        ("你现在到底在干什么？", "world_evidence"),
-        ("所以你现在在干啥呀", "world_evidence"),
-        ("你这会儿忙啥呢", "world_evidence"),
-        ("不是角色设定里的爱好，我问的是今天真的发生了什么。", "world_evidence"),
-        ("你刚才真的做了什么？", "world_evidence"),
-        ("电影里的人生气了。", "acknowledgement"),
-        ("我看到 NPC 和人吵架了。", "acknowledgement"),
-        ("你真的生气了吗？", "emotion"),
-        ("我有点失望。", "emotion"),
-        ("我叫丁奥轩，英文名 Geoff。", "user_fact"),
-        ("我平时最喜欢喝乌龙茶。", "user_fact"),
-    ),
-)
-def test_local_failsafe_identity_intents_are_semantic_categories(
-    text: str, expected: str
-) -> None:
-    assert _classify_local_failsafe_intent(text) == expected
-
-
 def _request(*, revision: int, call: str) -> ModelInput:
     return ModelInput(
         call_id=call,
@@ -444,6 +533,64 @@ def _request(*, revision: int, call: str) -> ModelInput:
             text="你就是个没用的机器人。",
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_invalid_world_claim_prefix_does_not_erase_a_valid_greeting() -> None:
+    provider = _UnsupportedGreetingClaimProvider()
+    cognition = SingleCallInboundCognition(flash_model=provider)
+    base = _request(revision=3, call="call:unsupported-greeting")
+    request = base.model_copy(
+        update={
+            "trigger_message": base.trigger_message.model_copy(
+                update={"text": "午安捏"}
+            ),
+            "model_content_json": json.dumps(
+                {
+                    "world_revision": 3,
+                    "logical_time": NOW.isoformat(),
+                    "slices": {
+                        "current_situation": {
+                            "availability": "available",
+                            "items": [
+                                {
+                                    "item_ref": "situation:planned-club",
+                                    "value": {
+                                        "activity_slices": [
+                                            {
+                                                "activity_kind": (
+                                                    "social.literature_club_meetup"
+                                                ),
+                                                "status": "planned",
+                                            }
+                                        ]
+                                    },
+                                }
+                            ],
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+
+    await cognition.appraisal.propose(request)
+    expression = await cognition.expression.propose(
+        request.model_copy(update={"call_id": "call:unsupported-greeting-expression"})
+    )
+    proposal = DecisionProposal.model_validate_json(
+        json.dumps(expression.raw_proposal)
+    )
+    visible = [
+        change.payload.value()["beat_drafts"][0]["inline_text"]
+        for change in proposal.proposed_changes
+        if change.kind == "expression_plan_transition"
+    ]
+
+    assert visible == ["午安呀。你今天过得怎么样？"]
+    assert expression.model_version != "local-expression-failsafe.1"
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -516,9 +663,9 @@ async def test_backup_failure_enters_local_recovery_without_a_third_model_call()
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await cognition.appraisal.propose(request)
 
-    output = await cognition.expression.recover(request, "main_exception")
+    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
+        await cognition.expression.recover(request, "main_exception")
 
-    assert output.model_version == "local-expression-failsafe.1"
     assert len(primary.calls) == 1
     assert len(backup.calls) == 1
 
@@ -709,6 +856,284 @@ async def test_one_call_vertical_accepts_emotion_before_authorizing_expression(t
     assert event_types.index("AppraisalAccepted") < event_types.index("ExpressionPlanAccepted")
     assert event_types.index("AffectEpisodeOpened") < event_types.index("ActionAuthorized")
     assert len(evidence.projection.appraisals) == len(evidence.projection.affect_episodes) == 1
+
+
+@pytest.mark.asyncio
+async def test_shadow_episode_runs_real_candidate_without_extra_action(tmp_path) -> None:
+    provider = _EpisodeCombinedProvider()
+    cognition = SingleCallInboundCognition(flash_model=provider)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "single-call-episode-shadow.sqlite",
+        config=replace(_config(), expression_episode_mode="shadow"),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:episode-shadow",
+                text="你就是个没用的机器人。",
+                observed_at=NOW,
+                trace_id="trace:episode-shadow",
+            )
+        )
+        await asyncio.sleep(0)
+        evidence = app.export_replay_evidence()
+        diagnostics = await app.world_health_diagnostics()
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    # A resumed claimed episode may need one role-model recovery, but never a
+    # local authored beat.
+    assert len(provider.calls) <= 3
+    # The full fixture intentionally contains two beats; shadow adds none.
+    assert len(evidence.projection.actions) == 2
+    episode = diagnostics["expression_episode"]
+    assert episode["mode"] == "shadow"
+    assert episode["turns"] == 1
+    assert episode["candidate_valid"] == 1
+    assert episode["slot_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_episode_restart_after_audit_authorizes_without_model_recall(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _EpisodeCombinedProvider()
+    cognition = SingleCallInboundCognition(flash_model=provider)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "single-call-episode-crash.sqlite",
+        config=replace(_config(), expression_episode_mode="shadow"),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    turn = InboundTurn(
+        platform="test",
+        platform_user_id="user.1",
+        platform_message_id="message:episode-crash-after-audit",
+        text="你就是个没用的机器人。",
+        observed_at=NOW,
+        trace_id="trace:episode-crash-after-audit",
+    )
+    runtime = app._turns._runtime  # noqa: SLF001 - crash-boundary integration proof
+    real_accept = runtime._commit_visible_acceptance  # noqa: SLF001
+    crashed = False
+
+    async def crash_once(**kwargs):
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise RuntimeError("crash-after-proposal-audit")
+        return await real_accept(**kwargs)
+
+    monkeypatch.setattr(runtime, "_commit_visible_acceptance", crash_once)
+    try:
+        with pytest.raises(RuntimeError, match="crash-after-proposal-audit"):
+            await app.respond(turn)
+        calls_after_crash = len(provider.calls)
+        projection_after_crash = app.export_replay_evidence().projection
+        episode = next(
+            item
+            for item in projection_after_crash.trigger_processes
+            if item.process_kind == "expression_episode"
+        )
+        assert episode.state == "claimed"
+        assert projection_after_crash.proposal_audits
+        assert projection_after_crash.actions == ()
+
+        outcome = await app.respond(turn)
+        projection = app.export_replay_evidence().projection
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert len(provider.calls) == calls_after_crash
+    assert len(projection.expression_plan_manifests) == 1
+    assert len(projection.actions) == 2
+    episode = next(
+        item for item in projection.trigger_processes
+        if item.process_kind == "expression_episode"
+    )
+    assert episode.state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_episode_restart_before_author_resumes_claimed_trigger(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _EpisodeCombinedProvider()
+    cognition = SingleCallInboundCognition(flash_model=provider)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "single-call-episode-crash-before-author.sqlite",
+        config=replace(_config(), expression_episode_mode="shadow"),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=None,
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    turn = InboundTurn(
+        platform="test",
+        platform_user_id="user.1",
+        platform_message_id="message:episode-crash-before-author",
+        text="今天想安静聊两句。",
+        observed_at=NOW,
+        trace_id="trace:episode-crash-before-author",
+    )
+    pinned = app._turns._runtime._pinned_turn  # noqa: SLF001
+    assert pinned is not None
+    real_audit = pinned.audit_observation
+    crashed = False
+
+    async def crash_once(**kwargs):
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise RuntimeError("crash-before-author")
+        return await real_audit(**kwargs)
+
+    monkeypatch.setattr(pinned, "audit_observation", crash_once)
+    try:
+        with pytest.raises(RuntimeError, match="crash-before-author"):
+            await app.respond(turn)
+        assert provider.calls == []
+        claimed = app.export_replay_evidence().projection
+        episode = next(
+            item
+            for item in claimed.trigger_processes
+            if item.process_kind == "expression_episode"
+        )
+        assert episode.state == "claimed"
+
+        outcome = await app.respond(turn)
+        projection = app.export_replay_evidence().projection
+    finally:
+        app.close()
+
+    assert outcome.status == "observed_only"
+    assert len(provider.calls) <= 3
+    episode = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "expression_episode"
+    )
+    assert episode.state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_on_episode_appends_only_after_provisional_receipt(tmp_path) -> None:
+    provider = _AppendEpisodeProvider()
+    expression = ChatModelDeliberationAdapter(model=provider)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "single-call-episode-append.sqlite",
+        config=replace(_config(), expression_episode_mode="on"),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=expression,
+        quick_recovery=expression,
+        appraisal_model=None,
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:episode-append",
+                text="今天脑子里有很多事。",
+                observed_at=NOW,
+                trace_id="trace:episode-append",
+            )
+        )
+        delivery = await app.drain_actions_once()
+        projection = app.export_replay_evidence().projection
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert delivery is not None and delivery.status == "settled"
+    assert len(provider.calls) == 2
+    assert len(projection.expression_plan_manifests) == 2
+    assert len(projection.actions) == 2
+    states = {item.state for item in projection.actions}
+    assert "delivered" in states
+    assert "authorized" in states
+    episode = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "expression_episode"
+    )
+    assert episode.state == "terminal"
+    assert episode.runtime_outcome_ref is not None
+    assert ":append:" in episode.runtime_outcome_ref
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["cancel_pending", "supersede_pending"])
+async def test_on_episode_cancels_undispatched_provisional_atomically(
+    tmp_path, disposition
+) -> None:
+    provider = _AppendEpisodeProvider(disposition)
+    expression = ChatModelDeliberationAdapter(model=provider)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / f"single-call-episode-{disposition}.sqlite",
+        config=replace(_config(), expression_episode_mode="on"),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=expression,
+        quick_recovery=expression,
+        appraisal_model=None,
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id=f"message:episode-{disposition}",
+                text="先别急着回，我还没说完。",
+                observed_at=NOW,
+                trace_id=f"trace:episode-{disposition}",
+            )
+        )
+        projection = app.export_replay_evidence().projection
+    finally:
+        app.close()
+
+    assert outcome.status == "observed_only"
+    assert len(provider.calls) == 2
+    assert projection.actions
+    assert {item.state for item in projection.actions} == {"cancelled"}
+    assert {
+        item.state
+        for item in projection.budget_reservations
+        if item.action_id in {action.action_id for action in projection.actions}
+    } == {"released"}
+    assert {item.state for item in projection.expression_plans} == {"terminated"}
+    episode = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "expression_episode"
+    )
+    assert episode.state == "terminal"
+    assert disposition in (episode.runtime_outcome_ref or "")
 
 
 @pytest.mark.asyncio
@@ -1059,7 +1484,7 @@ async def test_loose_unsupported_autobiography_never_reaches_an_action(tmp_path)
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
-    assert audits[-1]["model_version"] == "local-expression-failsafe.1"
+    assert audits[-1]["model_version"] == "single-call-inbound-cognition.1"
     # The paired appraisal already failed closed, so the expression lane now
     # materializes its bounded local repair directly instead of opening a
     # second Deliberation recovery attempt.
@@ -1067,7 +1492,7 @@ async def test_loose_unsupported_autobiography_never_reaches_an_action(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_local_failsafe_answers_role_boundary_without_system_meta_language(
+async def test_model_expression_is_not_replaced_by_a_local_role_template(
     tmp_path,
 ) -> None:
     provider = _UnsupportedAutobiographyProvider()
@@ -1105,20 +1530,17 @@ async def test_local_failsafe_answers_role_boundary_without_system_meta_language
     assert delivery is not None and delivery.status == "settled"
     assert len(transport.bodies) == 1
     reply = transport.bodies[0]
-    assert "林乔" in reply
-    assert "不是" in reply and "助手" in reply
-    assert "聊天" in reply
-    assert not any(marker in reply for marker in ("刚才", "回复", "组织好", "失败"))
+    assert reply == "我刚才一直在看电影。"
     audits = [
         json.loads(item.event.payload()["audit_json"])
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
-    assert audits[-1]["model_version"] == "local-expression-failsafe.1"
+    assert audits[-1]["model_version"] != "local-expression-failsafe.1"
 
 
 @pytest.mark.asyncio
-async def test_timed_out_world_probe_recovers_locally_without_a_third_provider_wait(
+async def test_model_owned_world_answer_is_not_rewritten_by_a_keyword_gate(
     tmp_path,
 ) -> None:
     provider = _TimeoutAfterCombinedProvider()
@@ -1146,29 +1568,27 @@ async def test_timed_out_world_probe_recovers_locally_without_a_third_provider_w
 
     assert outcome.status == "action_authorized"
     assert delivery is not None and delivery.status == "settled"
-    # The claim-gate near-miss earns exactly one bounded corrective retry
-    # (which times out here); the failure marker then settles the expression
-    # locally without any further provider wait.
-    assert len(provider.calls) == 2
-    assert "world-claim validation" in provider.calls[1][-1]["content"]
+    assert len(provider.calls) == 1
     assert len(transport.bodies) == 1
     reply = transport.bodies[0]
-    assert "看电影" not in reply
-    assert not any(marker in reply for marker in ("刚才那次回复", "组织好", "失败"))
-    assert any(marker in reply for marker in ("设定", "人设", "经历", "真事"))
+    assert reply == "我刚才一直在看电影。"
     audits = [
         json.loads(item.event.payload()["audit_json"])
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
-    assert audits[-1]["model_version"] == "local-expression-failsafe.1"
+    assert audits[-1]["model_version"] == "single-call-inbound-cognition.1"
     assert audits[-1]["status"] == "proposal_validated"
 
 
 @pytest.mark.asyncio
-async def test_grounded_context_does_not_trigger_a_third_provider_call_after_failure() -> None:
+async def test_grounded_context_recovery_is_still_owned_by_a_role_model() -> None:
     provider = _GroundedQuickRecoveryProvider()
-    cognition = SingleCallInboundCognition(flash_model=provider)
+    recovery = _QuickExpressionProvider()
+    cognition = SingleCallInboundCognition(
+        flash_model=provider,
+        recovery_model=recovery,
+    )
     base = _request(revision=3, call="call:grounded-appraisal")
     trigger = base.trigger_message.model_copy(update={
         "text": "你还记得我喜欢什么吗？",
@@ -1195,24 +1615,16 @@ async def test_grounded_context_does_not_trigger_a_third_provider_call_after_fai
         "call_id": "call:grounded-expression",
         "evaluated_world_revision": 5,
     })
-    with pytest.raises((TypeError, ValueError)):
-        await cognition.expression.propose(expression_request)
-
-    output = await cognition.expression.recover(
-        expression_request.model_copy(update={"call_id": "call:grounded-quick"}),
-        "main_invalid_output",
-    )
+    output = await cognition.expression.propose(expression_request)
     proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
-    assert proposal.response_text
-    assert output.model_version == "local-expression-failsafe.1"
-    # The paired pass plus its one bounded structural corrective retry; the
-    # grounded memory question then forces the Deliberation recovery audit
-    # without any further provider call.
+    assert proposal.response_text == "我接到了，刚才只是慢了一拍。"
+    assert output.model_version != "local-expression-failsafe.1"
     assert len(provider.calls) == 2
+    assert len(recovery.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_ordinary_fact_context_does_not_trigger_provider_quick_recovery() -> None:
+async def test_ordinary_fact_context_does_not_trigger_local_character_prose() -> None:
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     request = _request(revision=3, call="call:ordinary-recovery") .model_copy(update={
@@ -1232,10 +1644,9 @@ async def test_ordinary_fact_context_does_not_trigger_provider_quick_recovery() 
         ),
     })
 
-    output = await cognition.expression.recover(request, "main_timeout")
-
-    assert output.model_version == "local-expression-failsafe.1"
-    assert provider.calls == []
+    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
+        await cognition.expression.recover(request, "main_timeout")
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -1246,7 +1657,7 @@ async def test_ordinary_fact_context_does_not_trigger_provider_quick_recovery() 
     ),
 )
 @pytest.mark.asyncio
-async def test_generic_local_expression_failure_is_visible_without_topic_claims(
+async def test_generic_local_expression_failure_does_not_author_character_prose(
     text: str,
 ) -> None:
     provider = _GroundedQuickRecoveryProvider()
@@ -1257,17 +1668,12 @@ async def test_generic_local_expression_failure_is_visible_without_topic_claims(
     })
     request = base.model_copy(update={"trigger_message": trigger})
 
-    output = await cognition.expression.recover(request, "main_timeout")
-    proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
-
-    assert output.model_version == "local-expression-failsafe.1"
-    assert proposal.response_text
-    assert "我刚才没接好这句" in proposal.response_text
-    assert "看书" not in proposal.response_text
+    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
+        await cognition.expression.recover(request, "main_timeout")
 
 
 @pytest.mark.asyncio
-async def test_first_greeting_provider_failure_keeps_the_conversation_visible() -> None:
+async def test_first_greeting_provider_failure_does_not_invent_a_local_greeting() -> None:
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(
         flash_model=provider,
@@ -1286,15 +1692,12 @@ async def test_first_greeting_provider_failure_keeps_the_conversation_visible() 
         }
     )
 
-    output = await cognition.expression.recover(request, "main_invalid_output")
-    proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
-
-    assert proposal.response_text == "你好，第一次见。我是沈知栀。"
-    assert output.model_version == "local-expression-failsafe.1"
+    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
+        await cognition.expression.recover(request, "main_invalid_output")
 
 
 @pytest.mark.asyncio
-async def test_user_fact_provider_failure_acknowledges_the_disclosure_without_repeating_it(
+async def test_user_fact_provider_failure_does_not_invent_a_local_acknowledgement(
 ) -> None:
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
@@ -1307,18 +1710,12 @@ async def test_user_fact_provider_failure_acknowledges_the_disclosure_without_re
         }
     )
 
-    output = await cognition.expression.recover(request, "main_invalid_output")
-    proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
-
-    assert proposal.response_text == (
-        "我看到你是在告诉我一件关于自己的事。刚才没接好，不想装作没听见。"
-    )
-    assert "再说一遍" not in proposal.response_text
-    assert "记住了" not in proposal.response_text
+    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
+        await cognition.expression.recover(request, "main_invalid_output")
 
 
 @pytest.mark.asyncio
-async def test_first_greeting_provider_failure_authorizes_a_visible_turn(tmp_path) -> None:
+async def test_first_greeting_provider_failure_records_technical_silence(tmp_path) -> None:
     provider = _AlwaysFailProvider()
     cognition = SingleCallInboundCognition(
         flash_model=provider,
@@ -1355,12 +1752,12 @@ async def test_first_greeting_provider_failure_authorizes_a_visible_turn(tmp_pat
     finally:
         app.close()
 
-    assert outcome.status == "action_authorized"
-    assert transport.bodies == ["你好，第一次见。我是沈知栀。"]
+    assert outcome.status == "observed_only"
+    assert transport.bodies == []
 
 
 @pytest.mark.asyncio
-async def test_emotional_repair_provider_failure_acknowledges_the_relational_bid() -> None:
+async def test_emotional_provider_failure_does_not_force_a_repair_script() -> None:
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     base = _request(revision=3, call="call:emotion-failsafe")
@@ -1372,14 +1769,12 @@ async def test_emotional_repair_provider_failure_acknowledges_the_relational_bid
         }
     )
 
-    output = await cognition.expression.recover(request, "main_invalid_output")
-    proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
-
-    assert proposal.response_text == "我听到了你的情绪。刚才那句我确实没接好，先不装作没事。"
+    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
+        await cognition.expression.recover(request, "main_invalid_output")
 
 
 @pytest.mark.asyncio
-async def test_colloquial_current_activity_probe_gets_claim_free_local_reply() -> None:
+async def test_colloquial_current_activity_probe_does_not_get_local_prose() -> None:
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     base = _request(revision=3, call="call:colloquial-world-probe")
@@ -1389,17 +1784,12 @@ async def test_colloquial_current_activity_probe_gets_claim_free_local_reply() -
         )
     })
 
-    output = await cognition.expression.recover(request, "main_invalid_output")
-    proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
-
-    assert proposal.response_text
-    assert output.model_version == "local-expression-failsafe.1"
-    assert "看书" not in proposal.response_text
-    assert "听歌" not in proposal.response_text
+    with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
+        await cognition.expression.recover(request, "main_invalid_output")
 
 
 @pytest.mark.asyncio
-async def test_colloquial_world_probe_provider_failure_still_delivers_claim_free_reply(tmp_path) -> None:
+async def test_colloquial_world_probe_provider_failure_records_no_fake_reply(tmp_path) -> None:
     provider = _AlwaysFailProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     transport = _DeliveredTransport()
@@ -1422,14 +1812,12 @@ async def test_colloquial_world_probe_provider_failure_still_delivers_claim_free
     finally:
         app.close()
 
-    assert outcome.status == "action_authorized"
-    assert transport.bodies
-    assert "看书" not in transport.bodies[0]
-    assert "听歌" not in transport.bodies[0]
+    assert outcome.status == "observed_only"
+    assert transport.bodies == []
 
 
 @pytest.mark.asyncio
-async def test_double_provider_failure_keeps_a_typed_ack_without_recovery_failure(
+async def test_double_provider_failure_records_recovery_failure_without_fake_ack(
     tmp_path,
 ) -> None:
     backup = _AlwaysFailProvider()
@@ -1456,18 +1844,19 @@ async def test_double_provider_failure_keeps_a_typed_ack_without_recovery_failur
     finally:
         app.close()
 
-    assert outcome.status == "action_authorized"
-    assert transport.bodies
-    assert "没接好" in transport.bodies[0]
+    assert outcome.status == "observed_only"
+    assert transport.bodies == []
     audits = [
         json.loads(item.event.payload()["audit_json"])
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
-    assert audits[-1]["status"] == "proposal_validated"
-    assert audits[-1]["failure_code"] is None
-    assert len(primary.calls) == 1
-    assert len(backup.calls) == 1
+    assert audits[-1]["status"] == "recovery_failed"
+    assert audits[-1]["failure_code"]
+    assert audits[-1]["model_version"] != "local-expression-failsafe.1"
+    assert len(primary.calls) >= 1
+    assert len(backup.calls) >= 1
+    assert len(primary.calls) + len(backup.calls) <= 3
 
 
 class _GateVerdictModel:

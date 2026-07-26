@@ -659,7 +659,11 @@ class _IdentityAwareModel:
     async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
         del temperature
         system = messages[0]["content"]
-        grounded = "沈知栀" in system and "不是助手" in system and "geoff" in system.lower()
+        grounded = (
+            "沈知栀" in system
+            and "not as a task assistant" in system
+            and "geoff" in system.lower()
+        )
         text = "我是沈知栀，你是 Geoff。" if grounded else "我是你的 AI 助手小 Geoff。"
         return json.dumps({
             "timing_choice": "now",

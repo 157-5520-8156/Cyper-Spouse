@@ -208,6 +208,37 @@ async def test_platform_scheduler_zero_action_budget_allows_only_non_media_backg
 
 
 @pytest.mark.asyncio
+async def test_platform_scheduler_does_not_mistake_one_cursor_race_for_an_empty_queue() -> None:
+    class _RacingBackgroundApplication(_FakeApplication):
+        def __init__(self) -> None:
+            super().__init__()
+            self._results = [
+                None,
+                SimpleNamespace(work_status="accepted"),
+                None,
+                None,
+            ]
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("background", None))
+            return self._results.pop(0)
+
+    application = _RacingBackgroundApplication()
+    host = WorldV2PlatformHost(application=application)  # type: ignore[arg-type]
+
+    result = await host.drain_scheduled_work(
+        max_action_units=0,
+        max_background_units=4,
+        media_preview_trace_id="trace:background-race",
+        media_preview_correlation_id="correlation:background-race",
+    )
+
+    assert result.background_units_used == 1
+    assert result.background_statuses == ("accepted",)
+    assert application.calls == [("background", None)] * 4
+
+
+@pytest.mark.asyncio
 async def test_platform_scheduler_shares_each_budget_across_all_worker_classes() -> None:
     class _BudgetedApplication(_FakeApplication):
         def __init__(self) -> None:

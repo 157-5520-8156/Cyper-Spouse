@@ -23,6 +23,7 @@ from .immediate_emotion_proposal_worker import ImmediateEmotionProposalWorker
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort, ObservationEventLocator
 from .pinned_turn import PinnedTurnCompiler
+from .interactive_turn_budget import InteractiveTurnBudget
 from .schema_core import FrozenModel
 from .schemas import ClaimLease, Observation, ProjectionCursor, TriggerProcess, WorldEvent
 
@@ -86,7 +87,12 @@ class InteractionAppraisalTriggerRuntime:
     async def drain_one(self) -> AppraisalTriggerRunResult:
         return await self._run_one(observation_id=None)
 
-    async def run_observation(self, observation_id: str) -> AppraisalTriggerRunResult:
+    async def run_observation(
+        self,
+        observation_id: str,
+        *,
+        turn_budget: InteractiveTurnBudget | None = None,
+    ) -> AppraisalTriggerRunResult:
         """Process the exact new interaction before its visible reply is deliberated.
 
         The durable trigger remains the authority and recovery seam.  Selecting it by
@@ -96,9 +102,17 @@ class InteractionAppraisalTriggerRuntime:
 
         if not observation_id:
             raise ValueError("same-turn appraisal requires an observation id")
-        return await self._run_one(observation_id=observation_id)
+        return await self._run_one(
+            observation_id=observation_id,
+            turn_budget=turn_budget,
+        )
 
-    async def _run_one(self, *, observation_id: str | None) -> AppraisalTriggerRunResult:
+    async def _run_one(
+        self,
+        *,
+        observation_id: str | None,
+        turn_budget: InteractiveTurnBudget | None = None,
+    ) -> AppraisalTriggerRunResult:
         started = time.perf_counter()
         projection = await self._project()
         process = next(
@@ -127,6 +141,7 @@ class InteractionAppraisalTriggerRuntime:
                 observation=observation,
                 observation_event=source_event,
                 cursor=current_cursor,
+                turn_budget=turn_budget,
             )
             _LOG.warning(
                 "interaction appraisal phases trace=%s audit_ms=%.1f",

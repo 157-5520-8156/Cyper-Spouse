@@ -15,11 +15,17 @@ import json
 import logging
 import math
 import time
-from typing import Any, Awaitable, Literal, Protocol, TypeVar
+from typing import Any, Awaitable, Callable, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .context_capsule import ContextCapsule, TrustedContextCapsuleHandle
+from .interactive_turn_budget import InteractiveTurnBudget
+from .expression_episode import (
+    ExpressionEpisodeDiagnostics,
+    validate_provisional_proposal,
+)
+from .expression_cadence import CadenceDraw
 from .proposal_envelope import (
     MinimalProposal,
     ProposalEvidenceRef,
@@ -48,6 +54,48 @@ _LOG = logging.getLogger(__name__)
 _ATTEMPT_DEADLINE: ContextVar[float | None] = ContextVar(
     "world_v2_model_attempt_deadline", default=None
 )
+_PROVIDER_SLOT_COORDINATOR: ContextVar["_ProviderSlotCoordinator | None"] = ContextVar(
+    "world_v2_provider_slot_coordinator", default=None
+)
+
+
+class _ProviderSlotCoordinator:
+    """Process-local two-slot lease shared with nested cognition adapters."""
+
+    def __init__(self) -> None:
+        self.second_kind: Literal["backup", "corrective"] | None = None
+        self.episode_reserved = False
+
+    def claim_second(self, kind: Literal["backup", "corrective"]) -> bool:
+        if self.second_kind is not None:
+            return False
+        self.second_kind = kind
+        return True
+
+
+def claim_secondary_provider_slot(kind: Literal["backup", "corrective"]) -> bool:
+    """Claim the turn's only secondary provider call.
+
+    Direct adapter use has no coordinator and keeps its historical one-retry
+    behavior.  Interactive Deliberation installs the coordinator.
+    """
+
+    coordinator = _PROVIDER_SLOT_COORDINATOR.get()
+    return coordinator is None or coordinator.claim_second(kind)
+
+
+def secondary_provider_slot_kind() -> Literal["backup", "corrective"] | None:
+    coordinator = _PROVIDER_SLOT_COORDINATOR.get()
+    return coordinator.second_kind if coordinator is not None else None
+
+
+def has_provider_slot_coordinator() -> bool:
+    return _PROVIDER_SLOT_COORDINATOR.get() is not None
+
+
+def expression_episode_provider_slots_active() -> bool:
+    coordinator = _PROVIDER_SLOT_COORDINATOR.get()
+    return bool(coordinator is not None and coordinator.episode_reserved)
 
 
 def remaining_attempt_seconds() -> float | None:
@@ -169,6 +217,7 @@ def _checked_output(value: object) -> ModelOutput:
             "raw_proposal": raw,
             "input_tokens": getattr(value, "input_tokens", None),
             "output_tokens": getattr(value, "output_tokens", None),
+            "episode_disposition": getattr(value, "episode_disposition", None),
             # A validated provenance model is still untrusted adapter output at
             # this boundary.  Convert it to bounded primitives before the
             # hostile-shape walk; otherwise every metered production response
@@ -269,6 +318,9 @@ class ModelInput(_FrozenModel):
     trigger_message: TriggerMessage | None = None
     catalog_versions: tuple[str, ...] = ()
     recorded_draw_refs: tuple[str, ...] = ()
+    # Values are reconstructable from RandomDrawRecorded; refs remain in the
+    # hashed/audited request while this process-local convenience is excluded.
+    recorded_cadence_draws: tuple[CadenceDraw, ...] = Field(default=(), exclude=True)
 
 
 class ModelUsageProvenance(_FrozenModel):
@@ -302,6 +354,12 @@ class ModelOutput(_FrozenModel):
     input_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     output_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     usage: ModelUsageProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
+    episode_disposition: Literal[
+        "complete_without_more",
+        "append",
+        "cancel_pending",
+        "supersede_pending",
+    ] | None = None
 
     @model_validator(mode="after")
     def usage_matches_legacy_token_fields(self) -> "ModelOutput":
@@ -354,6 +412,18 @@ class ModelResultAudit(_FrozenModel):
     response_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     status: AuditStatus
     failure_code: str | None = Field(default=None, max_length=64)
+    slot: Literal["primary", "backup", "corrective"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    outcome: Literal[
+        "winner",
+        "invalid",
+        "timeout",
+        "exception",
+        "hedge_cancelled",
+        "hedge_lost",
+        "budget_exhausted",
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
     input_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     output_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     usage: ModelUsageProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -378,28 +448,46 @@ class ModelResultAudit(_FrozenModel):
                 raise ValueError("model usage tokens do not match audit tokens")
             if self.route.tier == "flash" and self.usage.thinking_tokens:
                 raise ValueError("flash audit cannot report thinking tokens")
-        required_failure = {
-            "main_timeout": "main_timeout",
-            "main_invalid": "main_invalid_output",
-            "main_exception": "main_exception",
-            "main_timeout_recovered": "main_timeout",
-            "main_invalid_recovered": "main_invalid_output",
-            "main_exception_recovered": "main_exception",
+        required_failures = {
+            "main_timeout": {"main_timeout", "primary_timeout", "corrective_timeout"},
+            "main_invalid": {
+                "main_invalid_output",
+                "primary_invalid",
+                "corrective_invalid",
+            },
+            "main_exception": {"main_exception", "primary_exception"},
+            "main_timeout_recovered": {
+                "main_timeout",
+                "primary_timeout",
+                "corrective_timeout",
+            },
+            "main_invalid_recovered": {
+                "main_invalid_output",
+                "primary_invalid",
+                "corrective_invalid",
+            },
+            "main_exception_recovered": {"main_exception", "primary_exception"},
         }.get(self.status)
         if self.status == "proposal_validated":
             if not has_output or self.failure_code is not None:
                 raise ValueError("validated proposal audit requires output and no failure")
         elif self.status in {"main_timeout", "main_exception"}:
-            if has_output or self.failure_code != required_failure:
+            if has_output or self.failure_code not in (required_failures or set()):
                 raise ValueError("terminal main audit has an invalid output or failure")
         elif self.status == "main_invalid":
-            if self.failure_code != required_failure:
+            if self.failure_code not in (required_failures or set()):
                 raise ValueError("invalid main audit has the wrong failure code")
         elif self.status == "recovery_failed":
-            if not (self.failure_code or "").startswith("quick_"):
+            if not (
+                (self.failure_code or "").startswith("quick_")
+                or (self.failure_code or "").startswith("backup_")
+                or (self.failure_code or "").startswith("corrective_")
+            ):
                 raise ValueError("failed recovery audit requires a quick failure code")
-        elif not has_output or self.failure_code != required_failure:
+        elif not has_output or self.failure_code not in (required_failures or set()):
             raise ValueError("recovered audit lacks output or matching main failure")
+        if (self.slot is None) != (self.outcome is None):
+            raise ValueError("slot and outcome audit metadata must appear together")
         return self
 
 
@@ -421,8 +509,8 @@ class DeliberationResult(_FrozenModel):
 
     @model_validator(mode="after")
     def failure_has_no_proposal(self) -> DeliberationResult:
-        if self.attempt_audits[-1] != self.audit:
-            raise ValueError("final audit must be the last model-attempt audit")
+        if self.audit not in self.attempt_audits:
+            raise ValueError("final audit must belong to the model-attempt audits")
         call_ids = tuple(value.model_call_id for value in self.attempt_audits)
         if len(call_ids) != len(set(call_ids)):
             raise ValueError("model attempts require distinct call identities")
@@ -432,29 +520,50 @@ class DeliberationResult(_FrozenModel):
         ):
             raise ValueError("minimal proposal is not bound to its final model audit")
         if len(self.attempt_audits) == 1:
-            if self.audit.status != "proposal_validated" or self.proposal is None:
-                raise ValueError("single-attempt deliberation must be a validated main proposal")
+            if self.proposal is None:
+                if self.audit.outcome != "budget_exhausted":
+                    raise ValueError("single failed attempt must exhaust the shared budget")
+            elif self.audit.status != "proposal_validated":
+                raise ValueError("single successful attempt must validate a proposal")
         else:
             main, quick = self.attempt_audits
-            expected = {
-                "main_timeout": ("main_timeout", "main_timeout_recovered"),
-                "main_invalid": ("main_invalid_output", "main_invalid_recovered"),
-                "main_exception": ("main_exception", "main_exception_recovered"),
-            }.get(main.status)
-            if expected is None or main.failure_code != expected[0]:
-                raise ValueError("recovery lineage has an invalid main terminal audit")
-            if quick.status == "recovery_failed":
-                if self.proposal is not None or not (quick.failure_code or "").startswith("quick_"):
-                    raise ValueError("failed recovery has invalid proposal or failure code")
-            elif quick.status != expected[1] or quick.failure_code != expected[0]:
-                raise ValueError("successful recovery does not match its main failure")
-            elif self.proposal is None:
-                raise ValueError("successful recovery requires a proposal")
-            elif (
-                isinstance(self.proposal, MinimalProposal)
-                and self.proposal.source_model_result != quick.model_result_ref
-            ):
-                raise ValueError("minimal proposal is not bound to its final model audit")
+            primary_won_race = (
+                self.proposal is not None
+                and self.audit == quick
+                and quick.status == "proposal_validated"
+                and main.status == "recovery_failed"
+                and main.failure_code in {"backup_cancelled", "backup_lost"}
+            )
+            if not primary_won_race:
+                expected = {
+                    "main_timeout": (
+                        {"main_timeout", "primary_timeout", "corrective_timeout"},
+                        "main_timeout_recovered",
+                    ),
+                    "main_invalid": (
+                        {"main_invalid_output", "primary_invalid", "corrective_invalid"},
+                        "main_invalid_recovered",
+                    ),
+                    "main_exception": ({"main_exception", "primary_exception"}, "main_exception_recovered"),
+                }.get(main.status)
+                if expected is None or main.failure_code not in expected[0]:
+                    raise ValueError("recovery lineage has an invalid main terminal audit")
+                if quick.status == "recovery_failed":
+                    if self.proposal is not None or not (
+                        (quick.failure_code or "").startswith("quick_")
+                        or (quick.failure_code or "").startswith("backup_")
+                        or (quick.failure_code or "").startswith("corrective_")
+                    ):
+                        raise ValueError("failed recovery has invalid proposal or failure code")
+                elif quick.status != expected[1] or quick.failure_code != main.failure_code:
+                    raise ValueError("successful recovery does not match its main failure")
+                elif self.proposal is None:
+                    raise ValueError("successful recovery requires a proposal")
+                elif (
+                    isinstance(self.proposal, MinimalProposal)
+                    and self.proposal.source_model_result != quick.model_result_ref
+                ):
+                    raise ValueError("minimal proposal is not bound to its final model audit")
             if main.attempt_id != quick.attempt_id or main.route != quick.route:
                 raise ValueError("model attempt lineage changed identity or route")
         identity = {
@@ -465,6 +574,17 @@ class DeliberationResult(_FrozenModel):
         if self.result_id != f"deliberation:{_digest(identity)}":
             raise ValueError("deliberation result identity is invalid")
         return self
+
+
+class EpisodeTailResult(_FrozenModel):
+    disposition: Literal[
+        "complete_without_more",
+        "append",
+        "cancel_pending",
+        "supersede_pending",
+    ]
+    deliberation: DeliberationResult | None = None
+    failure_code: str | None = None
 
 
 class Deliberation:
@@ -485,6 +605,9 @@ class Deliberation:
         quick_timeout_seconds: float = 2.5,
         proposal_grammar: ProposalGrammar | None = None,
         recovery_mode: Literal["minimal_only", "proposal_grammar"] = "minimal_only",
+        expression_episode_mode: Literal["off", "shadow", "on"] = "off",
+        expression_episode_diagnostics: ExpressionEpisodeDiagnostics | None = None,
+        expression_episode_grammar: ProposalGrammar | None = None,
     ) -> None:
         if not 0 < main_timeout_seconds <= 120:
             raise ValueError("main model timeout is out of bounds")
@@ -497,8 +620,35 @@ class Deliberation:
         self._quick_timeout = quick_timeout_seconds
         self._proposal_grammar = proposal_grammar
         self._recovery_mode = recovery_mode
+        self._expression_episode_mode = expression_episode_mode
+        self._episode_diagnostics = expression_episode_diagnostics or (
+            ExpressionEpisodeDiagnostics(mode=expression_episode_mode)
+            if expression_episode_mode != "off"
+            else None
+        )
+        self._expression_episode_grammar = expression_episode_grammar
         self._provider_tasks: set[asyncio.Task[object]] = set()
         self._quick_provider_tasks: set[asyncio.Task[object]] = set()
+        self._episode_tail_tasks: dict[
+            str, asyncio.Task[EpisodeTailResult | None]
+        ] = {}
+
+    def expression_episode_diagnostics(self) -> dict[str, object]:
+        if self._episode_diagnostics is None:
+            return ExpressionEpisodeDiagnostics(mode="off").snapshot()
+        return self._episode_diagnostics.snapshot()
+
+    async def await_expression_episode_tail(
+        self, trigger_ref: str
+    ) -> EpisodeTailResult | None:
+        task = self._episode_tail_tasks.get(trigger_ref)
+        if task is None:
+            return None
+        return await asyncio.shield(task)
+
+    @property
+    def expression_episode_mode(self) -> Literal["off", "shadow", "on"]:
+        return self._expression_episode_mode
 
     async def deliberate(
         self,
@@ -507,8 +657,10 @@ class Deliberation:
         attempt_id: str,
         catalog_versions: tuple[str, ...] = (),
         recorded_draw_refs: tuple[str, ...] = (),
+        recorded_cadence_draws: tuple[CadenceDraw, ...] = (),
         trigger_evidence: tuple[ProposalEvidenceRef, ...] = (),
         trigger_message: TriggerMessage | None = None,
+        budget: InteractiveTurnBudget | None = None,
     ) -> DeliberationResult:
         if not isinstance(capsule_handle, TrustedContextCapsuleHandle):
             raise TypeError("Deliberation requires a compiler-issued Capsule handle")
@@ -527,6 +679,12 @@ class Deliberation:
                 raise ValueError(f"{label} contain an invalid reference")
             if len(set(values)) != len(values):
                 raise ValueError(f"{label} must be unique")
+        cadence_refs = tuple(
+            dict.fromkeys(item.draw_ref for item in recorded_cadence_draws)
+        )
+        if cadence_refs != recorded_draw_refs:
+            if recorded_cadence_draws:
+                raise ValueError("recorded cadence draws must bind the exact draw refs")
         if (
             not isinstance(trigger_evidence, tuple)
             or len(trigger_evidence) > 8
@@ -574,8 +732,20 @@ class Deliberation:
             trigger_message=trigger_message,
             catalog_versions=catalog_versions,
             recorded_draw_refs=recorded_draw_refs,
+            recorded_cadence_draws=recorded_cadence_draws,
         )
         request_hash = _digest(model_input.model_dump(mode="json"))
+        if budget is not None:
+            return await self._deliberate_first_valid(
+                trusted=trusted,
+                model_input=model_input,
+                request_hash=request_hash,
+                call_identity=call_identity,
+                route=route,
+                attempt_id=attempt_id,
+                trigger_evidence=trigger_evidence,
+                budget=budget,
+            )
         failure_code: str | None = None
         recovered_status: AuditStatus | None = None
         output: ModelOutput | None = None
@@ -729,6 +899,579 @@ class Deliberation:
             attempt_audits=(final_audit,),
         )
 
+    async def _deliberate_first_valid(
+        self,
+        *,
+        trusted: ContextCapsule,
+        model_input: ModelInput,
+        request_hash: str,
+        call_identity: dict[str, object],
+        route: ModelRoute,
+        attempt_id: str,
+        trigger_evidence: tuple[ProposalEvidenceRef, ...],
+        budget: InteractiveTurnBudget,
+    ) -> DeliberationResult:
+        """Race at most two fully validated candidates under one absolute deadline."""
+
+        async def candidate(
+            operation: Callable[[], Awaitable[ModelOutput]],
+            *,
+            call_id: str,
+            minimal_only: bool,
+            lane: Literal["main", "quick"],
+            include_reserve: bool = False,
+            proposal_grammar_override: ProposalGrammar | None = None,
+        ) -> tuple[ProposalInput | None, ModelOutput | None, str | None]:
+            remaining = budget.remaining(include_reserve=include_reserve)
+            if remaining <= 0:
+                return None, None, "timeout"
+            output: ModelOutput | None = None
+            token = _ATTEMPT_DEADLINE.set(budget.candidate_deadline)
+            try:
+                output = _checked_output(
+                    await self._with_deadline(
+                        operation(),
+                        timeout=remaining,
+                        label=call_id,
+                        lane=lane,
+                    )
+                )
+                proposal = self._validated_proposal(
+                    output,
+                    trusted,
+                    minimal_only=minimal_only,
+                    trigger_evidence=trigger_evidence,
+                    proposal_grammar_override=proposal_grammar_override,
+                )
+                proposal = self._bind_minimal_model_result(proposal, call_id, output)
+                return proposal, output, None
+            except TimeoutError:
+                return None, output, "timeout"
+            except (TypeError, ValueError) as exc:
+                _LOG.warning(
+                    "deliberation candidate invalid call=%s trigger=%s error=%s: %s",
+                    call_id,
+                    trusted.trigger_ref,
+                    type(exc).__name__,
+                    str(exc)[:500],
+                )
+                return None, output, "invalid"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOG.warning(
+                    "deliberation candidate raised call=%s trigger=%s error=%s: %s",
+                    call_id,
+                    trusted.trigger_ref,
+                    type(exc).__name__,
+                    str(exc)[:500],
+                )
+                return None, output, "exception"
+            finally:
+                _ATTEMPT_DEADLINE.reset(token)
+
+        primary_call_id = model_input.call_id
+        slot_coordinator = _ProviderSlotCoordinator()
+        provisional_operation = getattr(self._main, "propose_provisional", None)
+        already_evaluated = getattr(
+            self._main, "episode_provisional_already_evaluated", None
+        )
+        episode_enabled = (
+            self._expression_episode_mode != "off"
+            and callable(provisional_operation)
+            and not (
+                callable(already_evaluated)
+                and already_evaluated(model_input)
+            )
+        )
+        episode_started_at = budget.clock()
+        episode_recorded = False
+
+        def record_episode(
+            result: tuple[ProposalInput | None, ModelOutput | None, str | None],
+            *,
+            winner: Literal["full", "provisional"],
+        ) -> None:
+            nonlocal episode_recorded
+            if episode_recorded or self._episode_diagnostics is None:
+                return
+            proposal, output, failure = result
+            valid = proposal is not None and failure is None
+            rejection_kind: Literal["grounding", "placeholder", "other"] | None = None
+            if not valid and output is not None:
+                try:
+                    validate_provisional_proposal(output.raw_proposal)
+                except (TypeError, ValueError) as exc:
+                    rejection_kind = (
+                        "placeholder"
+                        if "placeholder" in str(exc)
+                        else "other"
+                    )
+                else:
+                    rejection_kind = "grounding"
+            self._episode_diagnostics.record(
+                candidate_ms=max(0.0, (budget.clock() - episode_started_at) * 1_000),
+                valid=valid,
+                winner=winner,
+                would_send=valid,
+                would_append=bool(
+                    output is not None
+                    and output.episode_disposition == "append"
+                ),
+                slot_calls=2,
+                rejection_kind=rejection_kind,
+            )
+            episode_recorded = True
+
+        budget.mark("primary")
+        slot_token = _PROVIDER_SLOT_COORDINATOR.set(slot_coordinator)
+        try:
+            primary_task = asyncio.create_task(
+                candidate(
+                    lambda: self._main.propose(model_input),
+                    call_id=primary_call_id,
+                    minimal_only=False,
+                    lane="main",
+                )
+            )
+            hedge_timer = asyncio.create_task(budget.wait_for_hedge())
+            deadline_timer = asyncio.create_task(budget.sleep(budget.remaining()))
+        finally:
+            _PROVIDER_SLOT_COORDINATOR.reset(slot_token)
+        backup_task: asyncio.Task[
+            tuple[ProposalInput | None, ModelOutput | None, str | None]
+        ] | None = None
+        primary_result: tuple[ProposalInput | None, ModelOutput | None, str | None] | None = None
+        primary_timing_recorded = False
+        backup_result: tuple[ProposalInput | None, ModelOutput | None, str | None] | None = None
+        backup_call_id: str | None = None
+        backup_input: ModelInput | None = None
+        backup_request_hash: str | None = None
+        primary_failure_for_recovery = "main_timeout"
+
+        def start_backup(failure_code: str) -> None:
+            nonlocal backup_task, backup_call_id, backup_input, backup_request_hash
+            if backup_task is not None or budget.remaining() <= 0:
+                return
+            hedge_available = getattr(self._quick, "has_hedge_provider", None)
+            if (
+                failure_code == "main_timeout"
+                and callable(hedge_available)
+                and not hedge_available(model_input)
+            ):
+                return
+            if not slot_coordinator.claim_second("backup"):
+                return
+            budget.mark("hedge_started")
+            backup_call_id = f"model-call:{_digest({**call_identity, 'lane': 'hedge', 'main_failure': failure_code})}"
+            backup_input = model_input.model_copy(update={"call_id": backup_call_id})
+            backup_request_hash = _digest(backup_input.model_dump(mode="json"))
+            token = _PROVIDER_SLOT_COORDINATOR.set(slot_coordinator)
+            try:
+                backup_task = asyncio.create_task(
+                    candidate(
+                        lambda: self._quick.recover(backup_input, failure_code),
+                        call_id=backup_call_id,
+                        minimal_only=self._recovery_mode == "minimal_only",
+                        lane="quick",
+                    )
+                )
+            finally:
+                _PROVIDER_SLOT_COORDINATOR.reset(token)
+
+        if episode_enabled and slot_coordinator.claim_second("backup"):
+            slot_coordinator.episode_reserved = True
+            budget.mark("provisional")
+            backup_call_id = (
+                f"model-call:{_digest({**call_identity, 'lane': 'provisional'})}"
+            )
+            backup_input = model_input.model_copy(update={"call_id": backup_call_id})
+            backup_request_hash = _digest(backup_input.model_dump(mode="json"))
+            token = _PROVIDER_SLOT_COORDINATOR.set(slot_coordinator)
+            try:
+                backup_task = asyncio.create_task(
+                    candidate(
+                        lambda: provisional_operation(backup_input),
+                        call_id=backup_call_id,
+                        minimal_only=False,
+                        lane="quick",
+                        proposal_grammar_override=self._expression_episode_grammar,
+                    )
+                )
+            finally:
+                _PROVIDER_SLOT_COORDINATOR.reset(token)
+
+        try:
+            while True:
+                active: set[asyncio.Task[object]] = {
+                    task
+                    for task in (primary_task, hedge_timer, deadline_timer, backup_task)
+                    if task is not None and not task.done()
+                }
+                if not active:
+                    break
+                done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                if hedge_timer in done and primary_result is None:
+                    start_backup("main_timeout")
+                if primary_task in done and primary_result is None:
+                    primary_result = primary_task.result()
+                    if (
+                        not primary_timing_recorded
+                        and self._episode_diagnostics is not None
+                    ):
+                        self._episode_diagnostics.record_full(
+                            (budget.clock() - budget.started_at) * 1_000
+                        )
+                        primary_timing_recorded = True
+                    proposal, output, failure = primary_result
+                    if proposal is not None and failure is None:
+                        budget.mark("candidate_validated")
+                        accept_candidate = getattr(self._main, "accept_candidate", None)
+                        if callable(accept_candidate):
+                            accept_candidate(model_input)
+                        loser_audit: ModelResultAudit | None = None
+                        if (
+                            backup_task is not None
+                            and self._expression_episode_mode == "shadow"
+                        ):
+                            if backup_task.done():
+                                record_episode(
+                                    backup_task.result(), winner="provisional"
+                                )
+                            else:
+                                self._quick_provider_tasks.add(backup_task)
+
+                                def finish_shadow(
+                                    task: asyncio.Task[
+                                        tuple[
+                                            ProposalInput | None,
+                                            ModelOutput | None,
+                                            str | None,
+                                        ]
+                                    ],
+                                ) -> None:
+                                    self._quick_provider_tasks.discard(task)
+                                    if task.cancelled():
+                                        return
+                                    try:
+                                        value = task.result()
+                                    except Exception:
+                                        return
+                                    record_episode(value, winner="full")
+
+                                backup_task.add_done_callback(finish_shadow)
+                            backup_task = None
+                        elif backup_task is not None:
+                            if not backup_task.done():
+                                backup_task.cancel()
+                                await asyncio.gather(backup_task, return_exceptions=True)
+                            discard_candidate = getattr(
+                                self._quick, "discard_candidate", None
+                            )
+                            if callable(discard_candidate) and backup_input is not None:
+                                discard_candidate(backup_input)
+                            assert backup_call_id is not None and backup_request_hash is not None
+                            loser_audit = self._audit(
+                                model_call_id=backup_call_id,
+                                attempt_id=attempt_id,
+                                route=route,
+                                request_hash=backup_request_hash,
+                                output=None,
+                                status="recovery_failed",
+                                failure_code="backup_cancelled",
+                                slot="backup",
+                                outcome="hedge_cancelled",
+                            )
+                            budget.mark("hedge_cancelled")
+                        winner_slot = (
+                            "corrective"
+                            if slot_coordinator.second_kind == "corrective"
+                            else "primary"
+                        )
+                        final = self._audit(
+                            model_call_id=primary_call_id,
+                            attempt_id=attempt_id,
+                            route=route,
+                            request_hash=request_hash,
+                            output=output,
+                            status="proposal_validated",
+                            failure_code=None,
+                            slot=winner_slot,
+                            outcome="winner",
+                        )
+                        budget.mark("winner")
+                        return self._result(
+                            trusted,
+                            proposal=proposal,
+                            audit=final,
+                            attempt_audits=(
+                                (loser_audit, final)
+                                if loser_audit is not None
+                                else (final,)
+                            ),
+                        )
+                    primary_failure_for_recovery = {
+                        "invalid": "main_invalid_output",
+                        "exception": "main_exception",
+                        "timeout": "main_timeout",
+                    }.get(failure or "", "main_exception")
+                    discard_candidate = getattr(self._main, "discard_candidate", None)
+                    if callable(discard_candidate):
+                        discard_candidate(model_input)
+                    start_backup(primary_failure_for_recovery)
+                    if (
+                        self._expression_episode_mode == "shadow"
+                        and backup_result is not None
+                        and backup_result[0] is not None
+                        and backup_result[2] is None
+                    ):
+                        # In shadow the provisional slot replaces the old
+                        # hedge. If full fails, it may serve as that one normal
+                        # recovery response; it never creates an extra Action.
+                        backup_result = None
+                if backup_task is not None and backup_task in done and backup_result is None:
+                    backup_result = backup_task.result()
+                    proposal, output, failure = backup_result
+                    if self._expression_episode_mode == "shadow":
+                        record_episode(backup_result, winner="provisional")
+                        if primary_result is None:
+                            continue
+                    if proposal is not None and failure is None:
+                        budget.mark("candidate_validated")
+                        accept_candidate = getattr(self._quick, "accept_candidate", None)
+                        if callable(accept_candidate) and backup_input is not None:
+                            accept_candidate(backup_input)
+                        if (
+                            self._expression_episode_mode == "on"
+                            and primary_result is None
+                            and not primary_task.done()
+                        ):
+                            continuing_primary = primary_task
+
+                            async def finish_full_tail() -> EpisodeTailResult | None:
+                                full_proposal, full_output, full_failure = (
+                                    await continuing_primary
+                                )
+                                if self._episode_diagnostics is not None:
+                                    self._episode_diagnostics.record_full(
+                                        (budget.clock() - budget.started_at) * 1_000
+                                    )
+                                if full_failure is not None or full_output is None:
+                                    return EpisodeTailResult(
+                                        disposition="complete_without_more",
+                                        failure_code=full_failure or "missing_output",
+                                    )
+                                disposition = (
+                                    full_output.episode_disposition
+                                    or "complete_without_more"
+                                )
+                                if (
+                                    disposition != "append"
+                                    or full_proposal is None
+                                ):
+                                    return EpisodeTailResult(
+                                        disposition=disposition
+                                    )
+                                full_audit = self._audit(
+                                    model_call_id=primary_call_id,
+                                    attempt_id=attempt_id,
+                                    route=route,
+                                    request_hash=request_hash,
+                                    output=full_output,
+                                    status="proposal_validated",
+                                    failure_code=None,
+                                    slot="primary",
+                                    outcome="winner",
+                                )
+                                return EpisodeTailResult(
+                                    disposition="append",
+                                    deliberation=self._result(
+                                        trusted,
+                                        proposal=full_proposal,
+                                        audit=full_audit,
+                                        attempt_audits=(full_audit,),
+                                    ),
+                                )
+
+                            self._episode_tail_tasks[trusted.trigger_ref] = (
+                                asyncio.create_task(
+                                    finish_full_tail(),
+                                    name=f"expression-tail:{trusted.trigger_ref}",
+                                )
+                            )
+                            primary_task = None
+                            assert (
+                                backup_call_id is not None
+                                and backup_request_hash is not None
+                            )
+                            provisional_audit = self._audit(
+                                model_call_id=backup_call_id,
+                                attempt_id=attempt_id,
+                                route=route,
+                                request_hash=backup_request_hash,
+                                output=output,
+                                status="proposal_validated",
+                                failure_code=None,
+                                slot="backup",
+                                outcome="winner",
+                            )
+                            budget.mark("winner")
+                            return self._result(
+                                trusted,
+                                proposal=proposal,
+                                audit=provisional_audit,
+                                attempt_audits=(provisional_audit,),
+                            )
+                        discard_candidate = getattr(self._main, "discard_candidate", None)
+                        if callable(discard_candidate):
+                            discard_candidate(model_input)
+                        if not primary_task.done():
+                            primary_task.cancel()
+                            await asyncio.gather(primary_task, return_exceptions=True)
+                            await asyncio.sleep(0)
+                            budget.mark("hedge_lost")
+                        if primary_result is None:
+                            primary_result = (None, None, "timeout")
+                        main_output = primary_result[1]
+                        main_failure = primary_result[2]
+                        main_status: AuditStatus = {
+                            "invalid": "main_invalid",
+                            "exception": "main_exception",
+                            "timeout": "main_timeout",
+                        }.get(main_failure or "", "main_timeout")
+                        main_failure_code = {
+                            "invalid": "primary_invalid",
+                            "exception": "primary_exception",
+                            "timeout": "primary_timeout",
+                        }.get(main_failure or "", "primary_timeout")
+                        main_audit = self._audit(
+                            model_call_id=primary_call_id,
+                            attempt_id=attempt_id,
+                            route=route,
+                            request_hash=request_hash,
+                            output=main_output,
+                            status=main_status,
+                            failure_code=main_failure_code,
+                            slot="primary",
+                            outcome=(
+                                "hedge_cancelled"
+                                if main_failure == "timeout"
+                                else (main_failure or "exception")
+                            ),
+                        )
+                        recovered_status: AuditStatus = {
+                            "primary_invalid": "main_invalid_recovered",
+                            "primary_exception": "main_exception_recovered",
+                            "primary_timeout": "main_timeout_recovered",
+                        }[main_failure_code]
+                        assert backup_call_id is not None and backup_request_hash is not None
+                        final = self._audit(
+                            model_call_id=backup_call_id,
+                            attempt_id=attempt_id,
+                            route=route,
+                            request_hash=backup_request_hash,
+                            output=output,
+                            status=recovered_status,
+                            failure_code=main_failure_code,
+                            slot="backup",
+                            outcome="winner",
+                        )
+                        budget.mark("winner")
+                        return self._result(
+                            trusted,
+                            proposal=proposal,
+                            audit=final,
+                            attempt_audits=(main_audit, final),
+                        )
+                    if primary_result is not None:
+                        discard_candidate = getattr(self._quick, "discard_candidate", None)
+                        if callable(discard_candidate) and backup_input is not None:
+                            discard_candidate(backup_input)
+                        break
+                # A candidate and the deadline can become ready in the same
+                # scheduler turn.  Validation wins that tie: discarding an
+                # already-validated corrected draft is the production race
+                # that previously produced a canned failsafe after provider
+                # success.
+                if deadline_timer in done:
+                    break
+
+            if primary_result is None:
+                primary_result = (None, None, "timeout")
+            main_failure = primary_result[2]
+            main_status = {
+                "invalid": "main_invalid",
+                "exception": "main_exception",
+                "timeout": "main_timeout",
+            }.get(main_failure or "", "main_timeout")
+            main_failure_code = {
+                "invalid": (
+                    "corrective_invalid"
+                    if slot_coordinator.second_kind == "corrective"
+                    else "primary_invalid"
+                ),
+                "exception": "primary_exception",
+                "timeout": (
+                    "corrective_timeout"
+                    if slot_coordinator.second_kind == "corrective"
+                    else "primary_timeout"
+                ),
+            }.get(main_failure or "", "primary_timeout")
+            for task in (primary_task, hedge_timer, deadline_timer, backup_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            main_audit = self._audit(
+                model_call_id=primary_call_id,
+                attempt_id=attempt_id,
+                route=route,
+                request_hash=request_hash,
+                output=primary_result[1],
+                status=main_status,
+                failure_code=main_failure_code,
+                slot="primary",
+                outcome=(
+                    "budget_exhausted"
+                    if budget.remaining() <= 0
+                    else (main_failure or "exception")
+                ),
+            )
+            if budget.remaining() <= 0:
+                budget.mark("budget_exhausted")
+            if backup_call_id is None or backup_request_hash is None:
+                return self._result(
+                    trusted,
+                    proposal=None,
+                    audit=main_audit,
+                    attempt_audits=(main_audit,),
+                )
+            backup_failure = backup_result[2] if backup_result is not None else "timeout"
+            backup_kind = slot_coordinator.second_kind or "backup"
+            final = self._audit(
+                model_call_id=backup_call_id,
+                attempt_id=attempt_id,
+                route=route,
+                request_hash=backup_request_hash,
+                output=backup_result[1] if backup_result is not None else None,
+                status="recovery_failed",
+                failure_code=f"{backup_kind}_{backup_failure or 'exception'}",
+                slot=backup_kind,
+                outcome=(
+                    "budget_exhausted"
+                    if budget.remaining() <= 0
+                    else (backup_failure or "exception")
+                ),
+            )
+            return self._result(
+                trusted,
+                proposal=None,
+                audit=final,
+                attempt_audits=(main_audit, final),
+            )
+        finally:
+            for task in (primary_task, hedge_timer, deadline_timer, backup_task):
+                if task is not None and not task.done():
+                    task.cancel()
+
     def main_has_precomputed_advisory(
         self,
         *,
@@ -826,6 +1569,10 @@ class Deliberation:
             done, _ = await asyncio.wait((task,), timeout=timeout)
         except BaseException:
             task.cancel()
+            # Deliver cancellation to the provider before reporting the slot
+            # as lost.  This is one scheduler turn, not a grace-period wait;
+            # cancellation-suppressing transports remain detached below.
+            await asyncio.sleep(0)
             raise
         if task in done:
             return task.result()
@@ -853,6 +1600,7 @@ class Deliberation:
         *,
         minimal_only: bool = False,
         trigger_evidence: tuple[ProposalEvidenceRef, ...] = (),
+        proposal_grammar_override: ProposalGrammar | None = None,
     ) -> ProposalInput:
         checked = _checked_output(output)
         proposal = validate_proposal_envelope(checked.raw_proposal)
@@ -915,8 +1663,9 @@ class Deliberation:
             }
             if evidence.evidence_kind not in allowed_kinds:
                 raise ValueError("proposal evidence kind does not match Capsule source authority")
-        if self._proposal_grammar is not None:
-            self._proposal_grammar.validate(proposal)
+        grammar = proposal_grammar_override or self._proposal_grammar
+        if grammar is not None:
+            grammar.validate(proposal)
         return proposal
 
     @staticmethod
@@ -929,6 +1678,16 @@ class Deliberation:
         output: ModelOutput | None,
         status: AuditStatus,
         failure_code: str | None,
+        slot: Literal["primary", "backup", "corrective"] | None = None,
+        outcome: Literal[
+            "winner",
+            "invalid",
+            "timeout",
+            "exception",
+            "hedge_cancelled",
+            "hedge_lost",
+            "budget_exhausted",
+        ] | None = None,
     ) -> ModelResultAudit:
         response_hash = _digest(output.raw_proposal) if output is not None else None
         return ModelResultAudit(
@@ -942,6 +1701,8 @@ class Deliberation:
             response_hash=response_hash,
             status=status,
             failure_code=failure_code,
+            slot=slot,
+            outcome=outcome,
             input_tokens=output.input_tokens if output is not None else None,
             output_tokens=output.output_tokens if output is not None else None,
             usage=output.usage if output is not None else None,
@@ -984,5 +1745,8 @@ __all__ = [
     "QuickRecoveryAdapter",
     "RouteRequest",
     "fit_secondary_call_timeout",
+    "claim_secondary_provider_slot",
+    "has_provider_slot_coordinator",
     "remaining_attempt_seconds",
+    "secondary_provider_slot_kind",
 ]

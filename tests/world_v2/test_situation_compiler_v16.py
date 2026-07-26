@@ -515,6 +515,56 @@ def test_legacy_plans_fail_closed_until_owner_authority_is_installed() -> None:
         _request(plans=plans)
 
 
+def test_expired_planned_activity_is_not_current_expression_evidence() -> None:
+    expired = _plan("plan:expired", 7000, "npc:a")
+    expired_head = expired.head.model_copy(
+        update={
+            "status": "planned",
+            "scheduled_window": DueWindow(
+                opens_at=datetime(2026, 7, 12, 10, tzinfo=UTC),
+                closes_at=datetime(2026, 7, 12, 11, tzinfo=UTC),
+            ),
+        }
+    )
+    expired = expired.model_copy(update={"head": expired_head})
+    future = _plan("plan:future", 6000, "npc:b")
+    future_head = future.head.model_copy(
+        update={
+            "status": "planned",
+            "scheduled_window": DueWindow(
+                opens_at=datetime(2026, 7, 15, 10, tzinfo=UTC),
+                closes_at=datetime(2026, 7, 15, 11, tzinfo=UTC),
+            ),
+        }
+    )
+    future = future.model_copy(update={"head": future_head})
+    snapshot = SituationAuthoritySnapshot.model_construct(
+        world_id="world:1",
+        actor_ref="actor:1",
+        pinned_world_revision=9,
+        logical_time=NOW,
+        logical_time_source=None,
+        committed_events=(),
+        goals=(),
+        location=None,
+        resources=(),
+        attention=None,
+        attention_expiry_due=(),
+        commitments=(),
+        plans=(expired, future),
+    )
+    sources = []
+
+    activities, _social, relation = SituationCompiler()._activity_slices(
+        snapshot, sources
+    )
+
+    assert [item.plan_id for item in activities] == ["plan:future"]
+    assert activities[0].window_opens_at == datetime(2026, 7, 15, 10, tzinfo=UTC)
+    assert relation.relation == "planned_future"
+    assert [item.entity_ref for item in sources] == ["plan:future"]
+
+
 def test_tampered_cache_is_discarded_and_viewer_is_always_reprojected() -> None:
     cache = SituationCompileCache(signing_key=b"situation-test-cache-key-32-bytes!!")
     compiler = SituationCompiler(cache)

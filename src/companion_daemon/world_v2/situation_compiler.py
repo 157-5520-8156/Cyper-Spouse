@@ -776,6 +776,8 @@ class ActivitySlice(FrozenModel):
     importance_bp: int | None = Field(default=None, ge=0, le=10_000)
     participant_refs: tuple[str, ...] = ()
     location_ref: str | None = None
+    window_opens_at: datetime | None = None
+    window_closes_at: datetime | None = None
     privacy_class: PrivacyClass | None = None
 
 
@@ -1200,7 +1202,19 @@ class SituationCompiler:
         self, snapshot: SituationAuthoritySnapshot, sources: list[SourceRevision]
     ) -> tuple[tuple[ActivitySlice, ...], SocialEnvironmentSlice, PlanRelationSlice]:
         active = [
-            item for item in snapshot.plans if item.head.status in {"planned", "active", "paused"}
+            item
+            for item in snapshot.plans
+            if item.head.status in {"planned", "active", "paused"}
+            # An overdue planned item is lifecycle debt, not evidence of a
+            # current or future activity.  Keep it in the ledger/dashboard,
+            # but do not hand it to expression as something she can claim she
+            # is about to do.
+            and not (
+                item.head.status == "planned"
+                and item.head.scheduled_window is not None
+                and snapshot.logical_time is not None
+                and item.head.scheduled_window.closes_at < snapshot.logical_time
+            )
         ]
         active.sort(key=lambda item: (-item.head.importance_bp, item.head.plan_id))
         activities: list[ActivitySlice] = []
@@ -1217,6 +1231,16 @@ class SituationCompiler:
                     importance_bp=head.importance_bp,
                     participant_refs=canonical_participants,
                     location_ref=head.location_ref,
+                    window_opens_at=(
+                        head.scheduled_window.opens_at
+                        if head.scheduled_window is not None
+                        else None
+                    ),
+                    window_closes_at=(
+                        head.scheduled_window.closes_at
+                        if head.scheduled_window is not None
+                        else None
+                    ),
                     privacy_class=head.privacy_class,
                 )
             )
