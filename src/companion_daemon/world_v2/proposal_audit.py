@@ -130,7 +130,10 @@ class ProposalAuditRecorder:
             audit_json = model_audit_json(audit)  # type: ignore[arg-type]
             model_payload = ModelResultRecordedPayload(
                 audit_contract=(
-                    "model-result-audit.3"
+                    "model-result-audit.4"
+                    if audit.recall_trace is not None
+                    or audit.prefetch_trace is not None
+                    else "model-result-audit.3"
                     if audit.slot is not None
                     else "model-result-audit.2"
                     if audit.usage is not None
@@ -231,6 +234,8 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         input_tokens=value.input_tokens,
         output_tokens=value.output_tokens,
         usage=value.usage,
+        recall_trace=value.recall_trace,
+        prefetch_trace=value.prefetch_trace,
     )
 
 

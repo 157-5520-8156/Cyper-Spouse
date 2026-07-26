@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import UTC, datetime
 from hashlib import sha256
+import threading
 
 import pytest
 
@@ -19,6 +22,19 @@ from companion_daemon.world_v2.deliberation import (
     ModelRoute,
     ModelUsageProvenance,
     TriggerMessage,
+)
+from companion_daemon.world_v2.recall_index import (
+    FeatureHashRecallEmbedding,
+    InMemoryRecallIndex,
+    RecallCursor,
+    RecallDocument,
+    RecallSourceBinding,
+)
+from companion_daemon.world_v2.recall_audit import CharacterRecallRequest
+from companion_daemon.world_v2.recall_corpus import RecallCorpusSources
+from companion_daemon.world_v2.recall_runtime import (
+    RecallCoordinator,
+    verify_trusted_recall_trace,
 )
 
 
@@ -89,6 +105,333 @@ class _SequenceJsonModel(_Model):
     ) -> str:
         self.calls.append((messages, temperature))
         return self._replies.pop(0)
+
+
+class _BlockingPrefetchEmbedding:
+    version = "blocking-prefetch-fixture.1"
+    dimensions = FeatureHashRecallEmbedding.dimensions
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self._delegate = FeatureHashRecallEmbedding()
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        if texts == ("并行预取",):
+            self.started.set()
+            self.release.wait(timeout=2)
+        return self._delegate.embed(texts)
+
+
+@pytest.mark.asyncio
+async def test_character_may_pull_one_source_bound_recall_before_deciding() -> None:
+    model = _SequenceJsonModel(
+        [
+            json.dumps(
+                {
+                    "recall_request": {
+                        "query_text": "凤凰单丛",
+                        "memory_kinds": ["semantic"],
+                        "limit": 3,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "timing_choice": "now",
+                    "beats": [],
+                    "world_claims": [],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "你前两天提到凤凰单丛，后来泡得怎么样？",
+                        }
+                    ],
+                    "stance": "curious",
+                    "brief_rationale": "I chose to follow the recalled topic.",
+                    "world_claims": [
+                        {
+                            "claim_text": "对方前两天提到凤凰单丛",
+                            "scope": "counterpart_history",
+                            "source_refs": ["event:fact:tea"],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    cursor = RecallCursor(
+        world_revision=3,
+        deliberation_revision=2,
+        ledger_sequence=5,
+    )
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(
+        cursor=cursor,
+        documents=(
+            RecallDocument(
+                document_id="recall:fact:tea",
+                memory_kind="semantic",
+                source_item_ref="fact:tea",
+                source_slice="relevant_facts",
+                source_refs=("event:fact:tea",),
+                source_bindings=(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type="FactCommitted",
+                        ref="event:fact:tea",
+                        source_world_revision=2,
+                        immutable_hash="c" * 64,
+                    ),
+                ),
+                source_world_revision=2,
+                text="我最近开始用盖碗泡凤凰单丛。",
+                actor_ref="agent:companion",
+                subject_refs=("user:primary",),
+                occurred_from=datetime(2026, 7, 25, 12, tzinfo=UTC),
+                privacy_class="personal",
+            ),
+        ),
+    )
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+    )
+    request = _qq_request().model_copy(
+        update={
+            "evaluated_deliberation_revision": 2,
+            "evaluated_ledger_sequence": 5,
+            "model_content_json": json.dumps(
+                {
+                    "world_revision": 3,
+                    "deliberation_revision": 2,
+                    "ledger_sequence": 5,
+                    "logical_time": "2026-07-27T12:00:00+00:00",
+                    "slices": {},
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+    coordinator.schedule_prefetch(
+        query_text=request.trigger_message.text,
+        accessibility_seed="recall-prefetch:trigger:1:5",
+        trigger_ref=request.trigger_ref,
+    )
+
+    output = await ChatModelDeliberationAdapter(
+        model=model,
+        recall_coordinator=coordinator,
+    ).propose(request)
+
+    assert len(model.calls) == 3
+    assert output.recall_trace is not None
+    assert output.prefetch_trace is not None
+    trace = verify_trusted_recall_trace(output.recall_trace)
+    assert trace.request.query_text == "凤凰单丛"
+    assert trace.query.accessibility_seed.startswith("character-recall:")
+    assert trace.query.actor_ref == "agent:companion"
+    assert trace.query.subject_refs == ("agent:companion", "user:primary")
+    assert trace.hits[0].document.source_refs == ("event:fact:tea",)
+    assert trace.hits[0].dense_score_bp >= 0
+    assert "凤凰单丛" in model.calls[1][0][-1]["content"]
+    assert "parallel_attention_prefetch" in model.calls[1][0][-1]["content"]
+    assert any(
+        "parallel_attention_prefetch" in item["content"]
+        for item in model.calls[2][0]
+    )
+    assert output.raw_proposal["timing_choice"] == "now"
+    recalled_evidence = next(
+        item
+        for item in output.raw_proposal["evidence_refs"]
+        if item["ref_id"] == "event:fact:tea"
+    )
+    assert recalled_evidence["immutable_hash"] == "sha256:" + "c" * 64
+
+
+@pytest.mark.asyncio
+async def test_parallel_prefetch_cannot_delay_a_first_pass_final_answer() -> None:
+    embedding = _BlockingPrefetchEmbedding()
+    cursor = RecallCursor(
+        world_revision=3,
+        deliberation_revision=0,
+        ledger_sequence=0,
+    )
+    document = RecallDocument(
+        document_id="recall:parallel",
+        memory_kind="semantic",
+        source_item_ref="fact:parallel",
+        source_slice="relevant_facts",
+        source_refs=("event:parallel",),
+        source_bindings=(
+            RecallSourceBinding(
+                source_kind="committed_event",
+                authority_type="FactCommitted",
+                ref="event:parallel",
+                source_world_revision=2,
+                immutable_hash="d" * 64,
+            ),
+        ),
+        source_world_revision=2,
+        text="这是一条可丢弃的预取候选。",
+        actor_ref="agent:companion",
+        subject_refs=("user:primary",),
+        occurred_from=datetime(2026, 7, 25, 12, tzinfo=UTC),
+        privacy_class="personal",
+    )
+    index = InMemoryRecallIndex(embedding=embedding)
+    index.rebuild(cursor=cursor, documents=(document,))
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+        trigger_ref="trigger:1",
+    )
+    coordinator.schedule_prefetch(
+        query_text="并行预取",
+        accessibility_seed="draw:parallel-prefetch",
+        trigger_ref="trigger:1",
+    )
+    assert await asyncio.to_thread(embedding.started.wait, 0.5)
+    model = _Model(
+        json.dumps(
+            {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": "这句我直接回答。"}],
+                "world_claims": [],
+            },
+            ensure_ascii=False,
+        )
+    )
+    try:
+        output = await asyncio.wait_for(
+            ChatModelDeliberationAdapter(
+                model=model,
+                recall_coordinator=coordinator,
+            ).propose(_qq_request()),
+            timeout=0.5,
+        )
+    finally:
+        embedding.release.set()
+        coordinator.close()
+
+    assert len(model.calls) == 1
+    assert output.prefetch_trace is None
+    assert output.recall_trace is None
+
+
+@pytest.mark.asyncio
+async def test_blocked_prefetch_is_daemonized_and_close_remains_bounded() -> None:
+    embedding = _BlockingPrefetchEmbedding()
+    cursor = RecallCursor(
+        world_revision=3,
+        deliberation_revision=0,
+        ledger_sequence=0,
+    )
+    index = InMemoryRecallIndex(embedding=embedding)
+    index.rebuild(cursor=cursor, documents=())
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+        trigger_ref="trigger:blocked-close",
+    )
+    coordinator.schedule_prefetch(
+        query_text="并行预取",
+        accessibility_seed="draw:blocked-close",
+        trigger_ref="trigger:blocked-close",
+    )
+    assert await asyncio.to_thread(embedding.started.wait, 0.5)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        coordinator.close()
+        elapsed = loop.time() - started
+    finally:
+        embedding.release.set()
+
+    assert elapsed < 0.1
+
+
+def test_character_recall_uses_older_pinned_context_after_newer_refresh() -> None:
+    cursor = RecallCursor(
+        world_revision=3,
+        deliberation_revision=2,
+        ledger_sequence=5,
+    )
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(
+        cursor=cursor,
+        documents=(
+            RecallDocument(
+                document_id="recall:fact:tea",
+                memory_kind="semantic",
+                source_item_ref="fact:tea",
+                source_slice="relevant_facts",
+                source_refs=("event:fact:tea",),
+                source_bindings=(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type="FactCommitted",
+                        ref="event:fact:tea",
+                        source_world_revision=2,
+                        immutable_hash="c" * 64,
+                    ),
+                ),
+                source_world_revision=2,
+                text="我最近开始用盖碗泡凤凰单丛。",
+                actor_ref="agent:companion",
+                subject_refs=("user:primary",),
+                occurred_from=datetime(2026, 7, 25, 12, tzinfo=UTC),
+                privacy_class="personal",
+            ),
+        ),
+    )
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+    )
+    coordinator.refresh(
+        cursor=RecallCursor(
+            world_revision=4,
+            deliberation_revision=3,
+            ledger_sequence=6,
+        ),
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, 1, tzinfo=UTC),
+        sources=RecallCorpusSources(),
+    )
+
+    trace = verify_trusted_recall_trace(
+        coordinator.recall(
+            request=CharacterRecallRequest(query_text="凤凰单丛"),
+            accessibility_seed="draw:older-context",
+            expected_cursor=cursor,
+            trigger_ref="trigger:older-context",
+        )
+    )
+
+    assert trace.index_cursor == cursor
+    assert trace.hits[0].document.source_item_ref == "fact:tea"
 
 
 class _RaisingModel(_Model):

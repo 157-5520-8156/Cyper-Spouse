@@ -113,12 +113,19 @@ class ScenarioVerificationError(AssertionError):
 # already-authoritative Fact/Memory/Thread evidence receives the bounded
 # working-context floor; it does not change scenario predicates or grant new
 # fact/action authority.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.15"
+# ``.16`` records the completed character-owned recall contract.  Context now
+# prepares bounded local attention candidates in parallel, model-visible
+# prefetch/pull results carry exact query/source/cursor provenance under
+# ``model-result-audit.4``, and paired cognition uses a one-hop transition
+# proof.  This intentionally changes audit identities while every fixed
+# scenario predicate remains the executable gate; it is not evidence that
+# long-term conversational naturalness has already been established.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.16"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "97c02b97193fb5910c3b8ea95e5c809cc18571d1b7569d7931d72a84df42c968"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "d15d59259226563b313a77e735d8c29245aedbcfe0ca8a53137cb926c28b2b84"
 
 
 class _FixedScenarioRouter:

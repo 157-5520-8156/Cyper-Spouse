@@ -13,6 +13,7 @@ from typing import Literal, Self
 from pydantic import Field, TypeAdapter, model_validator
 
 from .proposal_envelope import ProposalInput
+from .recall_audit import RecallAuditTrace
 from .schema_core import FrozenModel
 
 
@@ -94,6 +95,12 @@ class RecordedModelResultAudit(FrozenModel):
     input_tokens: int | None = Field(default=None, ge=0, le=10_000_000)
     output_tokens: int | None = Field(default=None, ge=0, le=10_000_000)
     usage: RecordedModelUsage | None = Field(default=None, exclude_if=lambda value: value is None)
+    recall_trace: RecallAuditTrace | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    prefetch_trace: RecallAuditTrace | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def output_and_failure_are_consistent(self) -> Self:
@@ -109,6 +116,10 @@ class RecordedModelResultAudit(FrozenModel):
             raise ValueError("model output audit identity is partial")
         if not has_output and (self.input_tokens is not None or self.output_tokens is not None):
             raise ValueError("model token counts require an output identity")
+        if self.recall_trace is not None and not has_output:
+            raise ValueError("recall trace requires a model output identity")
+        if self.prefetch_trace is not None and not has_output:
+            raise ValueError("prefetch trace requires a model output identity")
         if self.usage is not None:
             if not has_output:
                 raise ValueError("model usage requires an output identity")
@@ -198,6 +209,7 @@ class ModelResultRecordedPayload(FrozenModel):
         "model-result-audit.1",
         "model-result-audit.2",
         "model-result-audit.3",
+        "model-result-audit.4",
     ] = "model-result-audit.1"
     model_result_ref: str = Field(min_length=1, max_length=256)
     deliberation_result_id: str = Field(min_length=1, max_length=256)
@@ -234,8 +246,18 @@ class ModelResultRecordedPayload(FrozenModel):
             raise ValueError("usage provenance requires model-result-audit.2")
         if self.audit_contract == "model-result-audit.3" and audit.slot is None:
             raise ValueError("hedged model result requires slot outcome metadata")
-        if self.audit_contract != "model-result-audit.3" and audit.slot is not None:
+        if self.audit_contract not in {
+            "model-result-audit.3",
+            "model-result-audit.4",
+        } and audit.slot is not None:
             raise ValueError("slot outcome metadata requires model-result-audit.3")
+        has_recall_audit = (
+            audit.recall_trace is not None or audit.prefetch_trace is not None
+        )
+        if self.audit_contract == "model-result-audit.4" and not has_recall_audit:
+            raise ValueError("recall model result requires a replay trace")
+        if self.audit_contract != "model-result-audit.4" and has_recall_audit:
+            raise ValueError("recall trace requires model-result-audit.4")
         return self
 
 

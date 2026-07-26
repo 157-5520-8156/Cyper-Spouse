@@ -57,6 +57,7 @@ from .production_turn_application import (
     build_sqlite_world_v2_turn_application,
 )
 from .schemas import ProjectionRequest
+from .recall_embedding import configured_recall_embedding
 from .semantic_chat_composition import (
     SemanticChatComposition,
     build_semantic_chat_composition,
@@ -638,6 +639,7 @@ def build_http_v2_capture_host(
         router=semantic_chat.router,
         main_model=semantic_chat.main_model,
         quick_recovery=semantic_chat.main_model,
+        semantic_recall_embedding=configured_recall_embedding(settings),
         transport=transport,
         media_transport=media_transport,
         media_planner=(media_preview.planner if media_preview is not None else None),

@@ -112,10 +112,45 @@ LongMemEval 正是把 extraction、cross-session reasoning、temporal reasoning�
 
 ### 当前试验状态（2026-07-27）
 
-当前代码只完成第一阶段中的窄探针：对已经通过 cursor、隐私、失效和来源校验并进入候选集的
-Fact、MemoryCandidate 与开放 Thread，依据当前用户文本做可重放的高精度 lexical
-prefetch。它没有建立持久 FTS/dense Recall Index，也没有增加 query-conditioned
-temporal/structured-link 检索、角色自主 `recall` 工具或 reflection。该探针用于先验证
-“少量自动联想是否改善真实对聊”，不能作为整套目标架构已经完成的声明。
+当前代码已经把目标架构接入 World V2 生产组合，而不再只是 lexical 探针：
+
+- `RecallCorpusCompiler` 从精确 cursor 的近期对话、Fact、Experience/Memory、World Life、
+  开放 Thread 和 PrivateImpression 编译 episodic / semantic / reflective 文档；每个文档
+  保留完整不可变 source binding。PrivateImpression 继续是可撤销的角色理解，不会因被检索
+  而成为事实 authority。
+- `SQLiteRecallIndex` 提供 lexical、temporal、现有 World link 及本地 feature-hash dense
+  混合排名。索引是可删除 sidecar，只为新增或变化的文档计算本地向量；同内容的新 cursor
+  只更新 head。`FeatureHashRecallEmbedding` 明确是零网络、非语义的可靠基线，不能冒充
+  语义模型。部署显式设置 `WORLD_V2_RECALL_EMBEDDING_MODEL` 后，OpenAI-compatible 语义
+  embedding 只在角色已经选择 `recall_request` 后、于事件循环外执行；自动预取和精确当前
+  Context 不等待远端 embedding。语义向量按 provider endpoint、模型版本、维度和文本哈希
+  写入最多 8192 条且序列化向量总量最多 32 MiB 的 SQLite 可重建缓存；同文档跨 pull、
+  跨重启复用，仅新增文本调用供应商。
+  供应商故障只降级 dense 通道，不阻断其余检索或聊天回复。
+- Context 本身同步携带精确当前的短工作记忆；最多四项的本地预取在线程中与第一轮模型
+  并行准备，不阻塞首轮。角色直接作答时丢弃这些未被模型看见的候选；只有角色选择一次
+  `recall_request` 时，已经完成的预取才与自主 query 的结果共同进入第二轮，候选仍只是
+  有来源的参考而非行为建议。系统不按话题或动机替她决定是否回忆。
+- appraisal + expression 配对认知与普通 expression 两条生产路径均支持同一次角色自主
+  recall。最多一个额外模型往返，并复用原 turn 的第二调用预算；没有第三次检索或隐藏重试。
+- 被第二轮模型实际看见的预取和每次角色 pull 都固定完整执行 query（actor、subject、时间、
+  隐私、过滤条件与可重放 seed）、各通道分数、随机 accessibility offset、结果、
+  embedding/index 版本、精确 cursor、文档和 source binding，并进入
+  `model-result-audit.4`；未被模型看见的并行预取不伪装成模型证据。冷重放读取已记录
+  proposal/result，不重新检索或调模型。
+- 进程内保留最多 16 个不可变 cursor 搜索快照，避免并发后台认知刷新最新 sidecar 时污染
+  已经 pinned 的前台回忆；SQLite 仍只保存一个最新可重建索引，不按 cursor 复制整套文档。
+  paired appraisal → expression 的跨提交复用使用显式 `paired_cognition_carry` 契约：
+  目标 Context 只接受全局紧邻的唯一直接前态（不能跳过其他 trigger 的中间 Context），
+  runtime 签发 source/target 完整游标的 transition hash，且 trace 只能携带一次；普通
+  recall 必须与 Capsule cursor 完全相等。同游标不同 trigger 的快照和预取身份也彼此隔离。
+- sidecar 损坏、锁冲突或 embedding 故障会把该 cursor 的 recall 标记为不可用并记录诊断，
+  Context 继续以空 recall 材料编译。单次结果、单条 trace 和总语料都有独立上限，防止审计
+  超过不可变 Model Result 的 32 KB 合同或让一次自主 recall 扫描无界语料。
+
+尚未被代码实现“证明”的部分是效果结论，而不是上述主链：真实语义 embedding 仍为显式
+部署选项，是否值得持续开启，以及 reflection 是否确实改善自然连续性而不造成机械提旧事，
+必须靠后续真实对聊和长期指标决定。微调和 latent/recurrent cache 仍按本文件的采用顺序留在
+实验阶段，不属于本次 Recall Index 的完成条件。
 
 最重要的验收不是“向量检索命中了几条”，而是：角色能否在恰当但不固定的时机自然想起；能否忽略无关记忆；面对更新能否使用新事实；没有证据时能否不编造；打断、重启和供应商切换后是否仍连续；同时保持 source closure、延迟目标和 effect-once。

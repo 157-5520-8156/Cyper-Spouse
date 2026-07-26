@@ -39,6 +39,18 @@ from .schema_core import FrozenModel
 
 ExpressionModality = Literal["text", "reaction", "sticker", "typing"]
 TimingChoice = Literal["now", "later", "silent"]
+_EVENT_EVIDENCE_KIND = {
+    "ObservationRecorded": "observed_message",
+    "FactCommitted": "committed_fact",
+    "FactCorrected": "committed_fact",
+    "FactWithdrawn": "committed_fact",
+    "ExperienceCommitted": "committed_experience",
+    "WorldOccurrenceSettled": "settled_world_event",
+    "ActivityPlanned": "active_plan",
+    "ActivityStarted": "active_plan",
+    "ActivityPaused": "active_plan",
+    "ActivityResumed": "active_plan",
+}
 
 
 def _canonical_json(value: object) -> str:
@@ -356,7 +368,7 @@ def _validate_world_claims(*, draft: ExpressionDraft, request: ModelInput) -> No
             context, "world_life", "recent_experiences"
         ),
         "counterpart_history": _slice_source_tokens(
-            context, "recent_dialogue", "user_facts"
+            context, "recent_dialogue", "relevant_facts"
         ),
         "shared_history": _slice_source_tokens(
             context, "recent_dialogue", "recent_experiences"
@@ -371,6 +383,89 @@ def _validate_world_claims(*, draft: ExpressionDraft, request: ModelInput) -> No
                 "world claim cites authority outside its semantic source lane: "
                 f"scope={claim.scope} refs={outside[:4]} claim={claim.claim_text[:80]!r}"
             )
+
+
+def _world_claim_evidence(
+    *,
+    draft: ExpressionDraft,
+    request: ModelInput,
+) -> tuple[ProposalEvidenceRef, ...]:
+    cited = {
+        ref
+        for claim in draft.world_claims
+        if claim.scope != "subjective_or_hypothetical"
+        for ref in claim.source_refs
+    }
+    if not cited:
+        return ()
+    context = json.loads(request.model_content_json)
+    slices = context.get("slices") if isinstance(context, dict) else None
+    if not isinstance(slices, dict):
+        raise ValueError("world claim evidence requires Context slices")
+    candidates: dict[str, set[tuple[str, str, int, str]]] = {}
+    for lane in slices.values():
+        if not isinstance(lane, dict):
+            continue
+        items = lane.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            bindings = item.get("source_bindings")
+            if not isinstance(bindings, list):
+                continue
+            for binding in bindings:
+                if not isinstance(binding, dict):
+                    continue
+                ref = binding.get("ref")
+                source_kind = binding.get("source_kind")
+                authority_type = binding.get("authority_type")
+                revision = binding.get("source_world_revision")
+                immutable_hash = binding.get("immutable_hash")
+                if (
+                    isinstance(ref, str)
+                    and ref in cited
+                    and isinstance(source_kind, str)
+                    and isinstance(authority_type, str)
+                    and isinstance(revision, int)
+                    and not isinstance(revision, bool)
+                    and isinstance(immutable_hash, str)
+                    and len(immutable_hash) == 64
+                ):
+                    candidates.setdefault(ref, set()).add(
+                        (source_kind, authority_type, revision, immutable_hash)
+                    )
+    evidence: list[ProposalEvidenceRef] = []
+    for ref in sorted(cited):
+        matches = candidates.get(ref, set())
+        if not matches:
+            # Older Context profiles expose a projection item_ref/value hash
+            # without its event binding. The existing semantic-lane check
+            # remains authoritative for those replay-compatible tokens. New
+            # recall documents always carry bindings and therefore enter the
+            # proposal evidence closure below.
+            continue
+        if len(matches) != 1:
+            raise ValueError("world claim source has ambiguous authority binding")
+        source_kind, authority_type, revision, immutable_hash = next(iter(matches))
+        if source_kind == "execution_receipt":
+            kind = "settled_external_result"
+        elif source_kind == "committed_event":
+            kind = _EVENT_EVIDENCE_KIND.get(
+                authority_type, "committed_world_event"
+            )
+        else:
+            raise ValueError("world claim source is not immutable event authority")
+        evidence.append(
+            ProposalEvidenceRef(
+                ref_id=ref,
+                evidence_kind=kind,
+                source_world_revision=revision,
+                immutable_hash="sha256:" + immutable_hash,
+            )
+        )
+    return tuple(evidence)
 
 
 def is_world_claim_violation(violation: str) -> bool:
@@ -527,6 +622,7 @@ def materialize_expression_draft(
             source_world_revision=trigger.source_world_revision,
             immutable_hash=trigger.event_payload_hash,
         ),
+        *_world_claim_evidence(draft=draft, request=request),
     )
     if draft.timing_choice == "silent":
         return DecisionProposal(

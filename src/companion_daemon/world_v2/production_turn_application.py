@@ -100,6 +100,13 @@ from .life_content_store import SQLiteImmutableLifeContentStore
 from .situation_compiler import SituationCompiler
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .media_v2 import MediaPlanner, SQLiteImmutableMediaPayloadStore
+from .recall_index import (
+    FeatureHashRecallEmbedding,
+    RecallEmbedding,
+    SQLiteRecallIndex,
+)
+from .recall_embedding import SQLiteCachedRecallEmbedding
+from .recall_runtime import RecallCoordinator
 from .event_media_planner_adapter import (
     EventMediaPlannerAdapter,
     EventMediaPlanningResultStore,
@@ -642,6 +649,8 @@ class WorldV2TurnApplication:
         latency_recorder: ProductionLatencyRecorder,
         trace_environment: TraceEnvironment,
         social_initiative_policy: SocialInitiativePolicy,
+        recall_index: SQLiteRecallIndex | None = None,
+        recall_coordinator: RecallCoordinator | None = None,
     ) -> None:
         self._turns = turns
         self._ledger = ledger
@@ -696,6 +705,8 @@ class WorldV2TurnApplication:
         self._latency = latency_recorder
         self._trace_environment = trace_environment
         self._social_initiative_policy = social_initiative_policy
+        self._recall_index = recall_index
+        self._recall_coordinator = recall_coordinator
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
         return await self._turns.respond(inbound)
@@ -2616,6 +2627,10 @@ class WorldV2TurnApplication:
         return self._ledger.export_replay_evidence()
 
     def close(self) -> None:
+        if self._recall_coordinator is not None:
+            self._recall_coordinator.close()
+        if self._recall_index is not None:
+            self._recall_index.close()
         self._life_content_store.close()
         self._expression_payload_store.close()
         self._media_payload_store.close()
@@ -2657,6 +2672,7 @@ def build_sqlite_world_v2_turn_application(
     proactive_identity_frame: CompanionIdentityFrame | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
     quick_reaction_model: ChatCompletionModel | None = None,
+    semantic_recall_embedding: RecallEmbedding | None = None,
     now: datetime,
     projection_authority: ProjectionAuthority | None = None,
     latency_recorder: ProductionLatencyRecorder | None = None,
@@ -2697,6 +2713,30 @@ def build_sqlite_world_v2_turn_application(
     life_content_store = SQLiteImmutableLifeContentStore(path=str(path), world_id=config.world_id)
     expression_payload_store = SQLiteImmutableExpressionPayloadStore(path=str(path), world_id=config.world_id)
     media_payload_store = SQLiteImmutableMediaPayloadStore(path=str(path), world_id=config.world_id)
+    recall_index = SQLiteRecallIndex(
+        path=path,
+        world_id=config.world_id,
+        embedding=FeatureHashRecallEmbedding(),
+    )
+    cached_semantic_embedding = (
+        SQLiteCachedRecallEmbedding(
+            path=path,
+            world_id=config.world_id,
+            delegate=semantic_recall_embedding,
+        )
+        if semantic_recall_embedding is not None
+        else None
+    )
+    recall_coordinator = RecallCoordinator(
+        index=recall_index,
+        semantic_embedding=cached_semantic_embedding,
+    )
+    installed_recall_targets: set[int] = set()
+    for adapter in (main_model, quick_recovery):
+        install_recall = getattr(adapter, "install_recall_coordinator", None)
+        if callable(install_recall) and id(adapter) not in installed_recall_targets:
+            install_recall(recall_coordinator)
+            installed_recall_targets.add(id(adapter))
     _LOG.warning(
         "world v2 application sidecars ready world=%s duration_ms=%.1f",
         config.world_id,
@@ -2764,6 +2804,12 @@ def build_sqlite_world_v2_turn_application(
             life_content_store=life_content_store,
             perception_result_reader=perception_transport,
             expression_payload_store=expression_payload_store,
+            # Immediate interaction appraisal may use the paired cognition
+            # adapter that also owns the eventual expression.  Its Context
+            # must therefore prepare the same cursor-pinned recall corpus as
+            # the reply lane; otherwise a character-chosen recall during the
+            # paired call has no index despite having a valid Capsule.
+            recall_coordinator=recall_coordinator,
         )
         chat_capsules = context_capsule_compiler_from_ledger(
             ledger=ledger,
@@ -2786,6 +2832,7 @@ def build_sqlite_world_v2_turn_application(
             life_content_store=life_content_store,
             perception_result_reader=perception_transport,
             expression_payload_store=expression_payload_store,
+            recall_coordinator=recall_coordinator,
         )
         expression_episode_diagnostics = ExpressionEpisodeDiagnostics(
             mode=config.expression_episode_mode
@@ -3817,8 +3864,12 @@ def build_sqlite_world_v2_turn_application(
             latency_recorder=latency,
             trace_environment=config.trace_environment,
             social_initiative_policy=config.social_initiative_policy,
+            recall_index=recall_index,
+            recall_coordinator=recall_coordinator,
         )
     except Exception:
+        recall_index.close()
+        recall_coordinator.close()
         life_content_store.close()
         expression_payload_store.close()
         media_payload_store.close()

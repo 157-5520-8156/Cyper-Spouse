@@ -68,8 +68,12 @@ from .perception_result_context import (
 )
 from .expression_payload_store import ImmutableExpressionPayloadStore
 from .recent_dialogue import RecentDialogueCompiler, RecentDialogueItem
+from .recall_corpus import RecallCorpusSources
+from .recall_index import RecallCursor, RecallSourceBinding
+from .recall_runtime import RecallCoordinator
 from .schema_core import PrivacyClass
 from .schemas import (
+    AppraisalProjection,
     BudgetAccount,
     CommittedWorldEventRef,
     FactProjection,
@@ -174,6 +178,7 @@ def context_capsule_compiler_from_ledger(
     life_content_store: ImmutableLifeContentStore | None = None,
     perception_result_reader: PerceptionResultReader | None = None,
     expression_payload_store: ImmutableExpressionPayloadStore | None = None,
+    recall_coordinator: RecallCoordinator | None = None,
 ) -> ContextCapsuleCompiler:
     """Composition-root factory for the production ledger-backed seam."""
 
@@ -185,6 +190,7 @@ def context_capsule_compiler_from_ledger(
             life_content_store=life_content_store,
             perception_result_reader=perception_result_reader,
             expression_payload_store=expression_payload_store,
+            recall_coordinator=recall_coordinator,
         ),
         policy=policy,
     )
@@ -641,6 +647,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         life_content_store: ImmutableLifeContentStore | None = None,
         perception_result_reader: PerceptionResultReader | None = None,
         expression_payload_store: ImmutableExpressionPayloadStore | None = None,
+        recall_coordinator: RecallCoordinator | None = None,
     ) -> None:
         super().__init__()
         self._ledger = ledger
@@ -662,6 +669,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             if perception_result_reader is not None
             else None
         )
+        self._recall = recall_coordinator
         # Cache the complete resolver product at the module boundary instead
         # of teaching every slice caller about dependencies. The exact query
         # hash covers cursor, snapshot, actor, trigger, consumer profile and
@@ -1048,6 +1056,86 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             for item in projection.appraisals
             if item.status == "active" and item.subject_ref in subject_refs
         )
+        if self._recall is not None:
+            recall_cursor = RecallCursor(
+                world_revision=query.world_revision,
+                deliberation_revision=query.deliberation_revision,
+                ledger_sequence=query.ledger_sequence,
+            )
+            try:
+                recall_authority = tuple(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type=item.event_type,
+                        ref=item.event_id,
+                        source_world_revision=item.world_revision,
+                        immutable_hash=item.payload_hash,
+                    )
+                    for item in projection.committed_world_event_refs
+                    if item.world_revision <= query.world_revision
+                )
+                self._recall.refresh(
+                    cursor=recall_cursor,
+                    actor_ref=query.actor_ref,
+                    subject_refs=tuple(sorted(scope.subject_refs)),
+                    logical_time=situation.logical_time,
+                    trigger_ref=query.trigger_ref,
+                    sources=RecallCorpusSources(
+                        recent_dialogue=dialogue_candidates,
+                        relevant_facts=recalled_facts,
+                        open_threads=open_threads_for_continuity,
+                        recent_experiences=tuple(
+                            item
+                            for item in scoped_experiences
+                            if hasattr(item, "origin")
+                        ),
+                        world_life=world_life,
+                        active_memory_candidates=memory_retrievals.items,
+                        appraisals=tuple(
+                            item
+                            for item in scoped_appraisals
+                            if isinstance(item, AppraisalProjection)
+                        ),
+                        private_impressions=tuple(
+                            item
+                            for item in projection.private_impressions
+                            if item.subject_ref in subject_refs and item.origin is not None
+                        ),
+                        authority_bindings=recall_authority,
+                    ),
+                )
+                trigger_dialogue = next(
+                    (
+                        item
+                        for item in dialogue_candidates
+                        if any(
+                            claim.authority_event_ref == query.trigger_ref
+                            for claim in item.source_claims
+                        )
+                    ),
+                    None,
+                )
+                if trigger_dialogue is not None:
+                    self._recall.schedule_prefetch(
+                        query_text=trigger_dialogue.text,
+                        accessibility_seed=(
+                            f"recall-prefetch:{query.trigger_ref}:{query.ledger_sequence}"
+                        ),
+                        trigger_ref=query.trigger_ref,
+                        limit=4,
+                    )
+            except Exception as exc:
+                self._recall.discard(
+                    recall_cursor,
+                    trigger_ref=query.trigger_ref,
+                )
+                _LOG.warning(
+                    "world v2 recall sidecar unavailable world=%s cursor=%s error=%s:%s",
+                    query.world_id,
+                    query.ledger_sequence,
+                    type(exc).__name__,
+                    exc,
+                )
         scoped_relationships = tuple(
             item
             for item in projection.relationship_states

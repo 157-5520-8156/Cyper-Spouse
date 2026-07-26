@@ -29,6 +29,17 @@ from companion_daemon.world_v2.interactive_turn_budget import (
     InteractiveTurnBudgetPolicy,
 )
 from companion_daemon.world_v2.proposal_envelope import MinimalProposal, ProposalEvidenceRef
+from companion_daemon.world_v2.recall_index import (
+    FeatureHashRecallEmbedding,
+    InMemoryRecallIndex,
+    RecallCursor,
+    RecallDocument,
+    RecallSourceBinding,
+)
+from companion_daemon.world_v2.recall_runtime import (
+    CharacterRecallRequest,
+    RecallCoordinator,
+)
 from test_context_capsule import HASH_B, NOW, _bound, _request
 from test_proposal_envelope import (
     _decision,
@@ -639,6 +650,149 @@ async def test_normal_flash_deliberation_returns_inert_validated_proposal_and_au
     assert router.requests[0].route_hints.source_capsule_id == result.capsule_id
     assert not hasattr(unit, "_ledger")
     assert not hasattr(unit, "_action_executor")
+
+
+@pytest.mark.asyncio
+async def test_trusted_recall_trace_extends_frozen_evidence_and_is_audited() -> None:
+    handle = _capsule()
+    capsule = handle.capsule
+    cursor = RecallCursor(
+        world_revision=capsule.world_revision,
+        deliberation_revision=capsule.deliberation_revision,
+        ledger_sequence=capsule.ledger_sequence,
+    )
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(
+        cursor=cursor,
+        documents=(
+            RecallDocument(
+                document_id="recall:fact:source",
+                memory_kind="semantic",
+                source_item_ref="fact:source",
+                source_slice="relevant_facts",
+                source_refs=("event:source:recall",),
+                source_bindings=(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type="FactCommitted",
+                        ref="event:source:recall",
+                        source_world_revision=7,
+                        immutable_hash=HASH_B,
+                    ),
+                ),
+                source_world_revision=7,
+                text="The counterpart previously described a tea preference.",
+                actor_ref="actor:companion",
+                subject_refs=("actor:companion",),
+                occurred_from=NOW,
+                privacy_class="personal",
+            ),
+        ),
+    )
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="actor:companion",
+        subject_refs=("actor:companion",),
+        logical_time=NOW,
+    )
+    trace = coordinator.recall(
+        request=CharacterRecallRequest(query_text="tea preference"),
+        accessibility_seed="draw:test:recall",
+        expected_cursor=cursor,
+        trigger_ref=capsule.trigger_ref,
+    )
+    raw = _decision_raw(evidence_ref="event:source:recall")
+    raw["evidence_refs"][0]["evidence_kind"] = "committed_fact"
+    main = _Main(
+        ModelOutput(
+            model_id="main",
+            model_version="v1",
+            raw_proposal=raw,
+            recall_trace=trace,
+        )
+    )
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+    ).deliberate(handle, attempt_id="attempt:recall")
+
+    assert result.proposal is not None
+    assert result.audit.recall_trace is not None
+    assert result.audit.recall_trace.result_hash == trace.audit.result_hash
+
+
+@pytest.mark.asyncio
+async def test_seen_prefetch_fact_extends_frozen_evidence_and_is_audited() -> None:
+    handle = _capsule()
+    capsule = handle.capsule
+    cursor = RecallCursor(
+        world_revision=capsule.world_revision,
+        deliberation_revision=capsule.deliberation_revision,
+        ledger_sequence=capsule.ledger_sequence,
+    )
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(
+        cursor=cursor,
+        documents=(
+            RecallDocument(
+                document_id="recall:prefetch:source",
+                memory_kind="semantic",
+                source_item_ref="fact:prefetch:source",
+                source_slice="relevant_facts",
+                source_refs=("event:source:prefetch",),
+                source_bindings=(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type="FactCommitted",
+                        ref="event:source:prefetch",
+                        source_world_revision=7,
+                        immutable_hash=HASH_B,
+                    ),
+                ),
+                source_world_revision=7,
+                text="The counterpart previously described a tea preference.",
+                actor_ref="actor:companion",
+                subject_refs=("actor:companion",),
+                occurred_from=NOW,
+                privacy_class="personal",
+            ),
+        ),
+    )
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="actor:companion",
+        subject_refs=("actor:companion",),
+        logical_time=NOW,
+    )
+    trace = coordinator.prefetch(
+        query_text="tea preference",
+        accessibility_seed="draw:test:prefetch",
+        trigger_ref=capsule.trigger_ref,
+    )
+    raw = _decision_raw(evidence_ref="event:source:prefetch")
+    raw["evidence_refs"][0]["evidence_kind"] = "committed_fact"
+    main = _Main(
+        ModelOutput(
+            model_id="main",
+            model_version="v1",
+            raw_proposal=raw,
+            prefetch_trace=trace,
+        )
+    )
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+    ).deliberate(handle, attempt_id="attempt:prefetch")
+
+    assert result.proposal is not None
+    assert result.audit.prefetch_trace is not None
+    assert result.audit.prefetch_trace.result_hash == trace.audit.result_hash
 
 
 @pytest.mark.asyncio

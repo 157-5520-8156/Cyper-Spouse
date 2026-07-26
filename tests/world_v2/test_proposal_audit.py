@@ -25,7 +25,18 @@ from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.errors import ConcurrencyConflict, LedgerIntegrityError
 from companion_daemon.world_v2.projection import InternalAuthorityReader
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
+from companion_daemon.world_v2.proposal_audit_schemas import RecordedModelResultAudit
 from companion_daemon.world_v2.proposal_envelope import DecisionProposal
+from companion_daemon.world_v2.recall_audit import (
+    CharacterRecallRequest,
+    RecallAuditTrace,
+)
+from companion_daemon.world_v2.recall_index import (
+    RecallCursor,
+    RecallQuery,
+    recall_query_hash,
+    recall_result_hash,
+)
 from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.schemas import WorldEvent
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
@@ -415,6 +426,75 @@ def test_metered_model_usage_is_bound_through_sqlite_replay_and_cost_gate(tmp_pa
     assert traces[0].thinking_tokens == 0
     assert CostProfileGate().evaluate(profile=TEST_ECONOMY_V1, traces=traces).passed
     assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
+
+
+def test_recall_query_and_results_are_pinned_through_cold_replay(tmp_path) -> None:
+    path = tmp_path / "audit-recall.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    base = _result()
+    cursor = RecallCursor(
+        world_revision=1,
+        deliberation_revision=0,
+        ledger_sequence=1,
+    )
+    request = CharacterRecallRequest(query_text="tea from last week")
+    query = RecallQuery(
+        query_text=request.query_text,
+        cursor=cursor,
+        actor_ref="actor:companion",
+        subject_refs=("actor:companion",),
+        viewer_privacy_ceiling="withhold",
+        at=NOW,
+        accessibility_seed="draw:audit:recall",
+    )
+    query_hash = recall_query_hash(
+        index_version="recall-index:test",
+        query=query,
+    )
+    trace = RecallAuditTrace(
+        trigger_ref="trigger:audit:1",
+        request=request,
+        query=query,
+        query_hash=query_hash,
+        result_hash=recall_result_hash(
+            query_hash=query_hash,
+            cursor=cursor,
+            hit_values=[],
+        ),
+        index_version="recall-index:test",
+        embedding_version="embedding:test",
+        index_cursor=cursor,
+        hits=(),
+    )
+    audit = base.audit.model_copy(update={"recall_trace": trace})
+    result_identity = {
+        "capsule_id": base.capsule_id,
+        "proposal_hash": base.proposal.proposal_hash,
+        "attempt_audits": (audit.model_dump(mode="json"),),
+    }
+    result = base.model_copy(
+        update={
+            "audit": audit,
+            "attempt_audits": (audit,),
+            "result_id": f"deliberation:{_digest(result_identity)}",
+        }
+    )
+    ProposalAuditRecorder(ledger=ledger).record(result, _context())
+
+    projection = ledger.project()
+    assert projection.model_result_audits[0].audit_contract == "model-result-audit.4"
+    assert '"query_text":"tea from last week"' in projection.model_result_audits[0].audit_json
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
+    replayed = reopened.project().model_result_audits[0]
+    assert replayed.audit_contract == "model-result-audit.4"
+    recorded = RecordedModelResultAudit.model_validate_json(replayed.audit_json)
+    assert recorded.recall_trace is not None
+    assert recorded.recall_trace.result_hash == trace.result_hash
+    assert recorded.recall_trace.query.accessibility_seed == "draw:audit:recall"
 
 
 def test_recovery_records_every_provider_call_then_final_proposal() -> None:

@@ -52,6 +52,7 @@ from .semantic_chat_composition import (
 )
 from .expression_draft import qq_expression_capabilities
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
+from .recall_embedding import configured_recall_embedding
 
 
 _LOG = logging.getLogger(__name__)
@@ -1074,6 +1075,7 @@ def build_qq_c2c_host(
         # local appraisal client through the adapter seam; tests inject a
         # fixture model here to exercise the lane against a fake NapCat.
         quick_reaction_model=quick_reaction_model,
+        semantic_recall_embedding=configured_recall_embedding(settings),
         now=bootstrap_at or datetime.now(UTC),
     )
     typing_signal = None

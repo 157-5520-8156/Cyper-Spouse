@@ -239,6 +239,37 @@ def _compiler(ledger: LedgerPort) -> ContextCapsuleCompiler:
     return context_capsule_compiler_from_ledger(ledger=ledger)
 
 
+def test_recall_sidecar_failure_does_not_abort_context_compilation() -> None:
+    class _FailingRecall:
+        def __init__(self) -> None:
+            self.discarded = []
+
+        def refresh(self, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            raise ValueError("broken disposable index")
+
+        def discard(self, cursor, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.discarded.append(cursor)
+
+    ledger = _empty_ledger(world_id="world:context-recall-degraded")
+    projection = ledger.project()
+    recall = _FailingRecall()
+    compiler = context_capsule_compiler_from_ledger(
+        ledger=ledger,
+        recall_coordinator=recall,  # type: ignore[arg-type]
+    )
+
+    capsule = compiler.compile(
+        query_from_projection(
+            projection,
+            actor_ref="actor:companion",
+            trigger_ref="event:start",
+        )
+    )
+
+    assert capsule.world_revision == projection.world_revision
+    assert recall.discarded
+
+
 def test_default_scope_includes_only_the_committed_incoming_actor() -> None:
     world_id = "world:context-interlocutor"
     ledger = WorldLedger.in_memory(world_id=world_id)

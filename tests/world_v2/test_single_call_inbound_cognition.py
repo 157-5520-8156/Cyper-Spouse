@@ -206,6 +206,51 @@ class _OrdinaryCombinedProvider(_CombinedProvider):
         )
 
 
+class _RecallThenCombinedProvider(_CombinedProvider):
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        if len(self.calls) == 1:
+            return json.dumps(
+                {
+                    "recall_request": {
+                        "query_text": "之前关于机器人的谈话",
+                        "memory_kinds": ["episodic", "semantic"],
+                        "limit": 4,
+                    }
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "No durable appraisal is needed.",
+                    "behavior_tendency": "observe",
+                    "stance": "self_possessed",
+                    "display_strategy": "natural",
+                    "confidence": 4000,
+                },
+                "expression_draft": {
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "这句话挺刺的。你具体是在不满我哪一点？",
+                        }
+                    ],
+                    "stance": "self_possessed",
+                    "brief_rationale": "I checked memory, then chose a direct question.",
+                    "confidence": 7600,
+                    "world_claims": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
 class _AdvancingClock:
     def __init__(self) -> None:
         self.value = 0
@@ -856,6 +901,52 @@ async def test_one_call_vertical_accepts_emotion_before_authorizing_expression(t
     assert event_types.index("AppraisalAccepted") < event_types.index("ExpressionPlanAccepted")
     assert event_types.index("AffectEpisodeOpened") < event_types.index("ActionAuthorized")
     assert len(evidence.projection.appraisals) == len(evidence.projection.affect_episodes) == 1
+
+
+@pytest.mark.asyncio
+async def test_paired_cognition_honors_character_recall_and_replays_trace(
+    tmp_path,
+) -> None:
+    provider = _RecallThenCombinedProvider()
+    cognition = SingleCallInboundCognition(flash_model=provider)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "single-call-recall.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:single-call-recall",
+                text="你就是个没用的机器人。",
+                observed_at=NOW,
+                trace_id="trace:single-call-recall",
+            )
+        )
+        evidence = app.export_replay_evidence()
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert len(provider.calls) == 2
+    assert "bounded read-only recall result" in provider.calls[1][-1]["content"]
+    recall_audits = tuple(
+        item
+        for item in evidence.projection.model_result_audits
+        if item.audit_contract == "model-result-audit.4"
+    )
+    assert recall_audits
+    assert all('"query_text":"之前关于机器人的谈话"' in item.audit_json for item in recall_audits)
+    assert all('"mode":"prefetch"' in item.audit_json for item in recall_audits)
+    assert all('"accessibility_seed":"recall-prefetch:' in item.audit_json for item in recall_audits)
 
 
 @pytest.mark.asyncio

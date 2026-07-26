@@ -32,6 +32,9 @@ from .proposal_envelope import (
     ProposalInput,
     validate_proposal_envelope,
 )
+from .recall_audit import RecallAuditTrace
+from .recall_index import RecallCursor
+from .recall_runtime import TrustedRecallTrace, verify_trusted_recall_trace
 from .route_hints import RouteHints, derive_route_hints
 
 
@@ -63,17 +66,19 @@ class _ProviderSlotCoordinator:
     """Process-local two-slot lease shared with nested cognition adapters."""
 
     def __init__(self) -> None:
-        self.second_kind: Literal["backup", "corrective"] | None = None
+        self.second_kind: Literal["backup", "corrective", "recall"] | None = None
         self.episode_reserved = False
 
-    def claim_second(self, kind: Literal["backup", "corrective"]) -> bool:
+    def claim_second(self, kind: Literal["backup", "corrective", "recall"]) -> bool:
         if self.second_kind is not None:
             return False
         self.second_kind = kind
         return True
 
 
-def claim_secondary_provider_slot(kind: Literal["backup", "corrective"]) -> bool:
+def claim_secondary_provider_slot(
+    kind: Literal["backup", "corrective", "recall"],
+) -> bool:
     """Claim the turn's only secondary provider call.
 
     Direct adapter use has no coordinator and keeps its historical one-retry
@@ -84,7 +89,7 @@ def claim_secondary_provider_slot(kind: Literal["backup", "corrective"]) -> bool
     return coordinator is None or coordinator.claim_second(kind)
 
 
-def secondary_provider_slot_kind() -> Literal["backup", "corrective"] | None:
+def secondary_provider_slot_kind() -> Literal["backup", "corrective", "recall"] | None:
     coordinator = _PROVIDER_SLOT_COORDINATOR.get()
     return coordinator.second_kind if coordinator is not None else None
 
@@ -175,6 +180,26 @@ def _model_result_ref(model_call_id: str, response_hash: str | None) -> str:
     )
 
 
+def _output_response_hash(output: ModelOutput) -> str:
+    if output.recall_trace is None and output.prefetch_trace is None:
+        return _digest(output.raw_proposal)
+    return _digest(
+        {
+            "raw_proposal": output.raw_proposal,
+            "recall_trace": (
+                verify_trusted_recall_trace(output.recall_trace).model_dump(mode="json")
+                if output.recall_trace is not None
+                else None
+            ),
+            "prefetch_trace": (
+                verify_trusted_recall_trace(output.prefetch_trace).model_dump(mode="json")
+                if output.prefetch_trace is not None
+                else None
+            ),
+        }
+    )
+
+
 def _bounded_raw(value: object, *, label: str) -> None:
     pending = [value]
     seen = 0
@@ -218,6 +243,22 @@ def _checked_output(value: object) -> ModelOutput:
             "input_tokens": getattr(value, "input_tokens", None),
             "output_tokens": getattr(value, "output_tokens", None),
             "episode_disposition": getattr(value, "episode_disposition", None),
+            "recall_trace": (
+                recall_trace.model_dump(mode="python")
+                if isinstance(
+                    (recall_trace := getattr(value, "recall_trace", None)),
+                    TrustedRecallTrace,
+                )
+                else recall_trace
+            ),
+            "prefetch_trace": (
+                prefetch_trace.model_dump(mode="python")
+                if isinstance(
+                    (prefetch_trace := getattr(value, "prefetch_trace", None)),
+                    TrustedRecallTrace,
+                )
+                else prefetch_trace
+            ),
             # A validated provenance model is still untrusted adapter output at
             # this boundary.  Convert it to bounded primitives before the
             # hostile-shape walk; otherwise every metered production response
@@ -313,6 +354,8 @@ class ModelInput(_FrozenModel):
     capsule_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     trigger_ref: str = Field(min_length=1, max_length=256)
     evaluated_world_revision: int = Field(ge=0)
+    evaluated_deliberation_revision: int = Field(default=0, ge=0)
+    evaluated_ledger_sequence: int = Field(default=0, ge=0)
     model_content_json: str = Field(min_length=2, max_length=512_000)
     trigger_evidence: tuple[ProposalEvidenceRef, ...] = Field(default=(), max_length=8)
     trigger_message: TriggerMessage | None = None
@@ -354,6 +397,12 @@ class ModelOutput(_FrozenModel):
     input_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     output_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     usage: ModelUsageProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
+    recall_trace: TrustedRecallTrace | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    prefetch_trace: TrustedRecallTrace | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     episode_disposition: Literal[
         "complete_without_more",
         "append",
@@ -427,6 +476,12 @@ class ModelResultAudit(_FrozenModel):
     input_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     output_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     usage: ModelUsageProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
+    recall_trace: RecallAuditTrace | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    prefetch_trace: RecallAuditTrace | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def result_ref_is_orchestrator_derived(self) -> ModelResultAudit:
@@ -438,6 +493,10 @@ class ModelResultAudit(_FrozenModel):
             raise ValueError("model output audit identity is partial")
         if not has_output and (self.input_tokens is not None or self.output_tokens is not None):
             raise ValueError("model token counts require an output identity")
+        if self.recall_trace is not None and not has_output:
+            raise ValueError("recall trace requires a model output identity")
+        if self.prefetch_trace is not None and not has_output:
+            raise ValueError("prefetch trace requires a model output identity")
         if self.usage is not None:
             if not has_output:
                 raise ValueError("model usage requires an output identity")
@@ -727,6 +786,8 @@ class Deliberation:
             capsule_id=trusted.capsule_id,
             trigger_ref=trusted.trigger_ref,
             evaluated_world_revision=trusted.world_revision,
+            evaluated_deliberation_revision=trusted.deliberation_revision,
+            evaluated_ledger_sequence=trusted.ledger_sequence,
             model_content_json=trusted.model_content_json,
             trigger_evidence=trigger_evidence,
             trigger_message=trigger_message,
@@ -1586,7 +1647,7 @@ class Deliberation:
     ) -> ProposalInput:
         if not isinstance(proposal, MinimalProposal):
             return proposal
-        response_hash = _digest(output.raw_proposal)
+        response_hash = _output_response_hash(output)
         return validate_proposal_envelope(
             proposal.model_copy(
                 update={"source_model_result": _model_result_ref(model_call_id, response_hash)}
@@ -1638,6 +1699,97 @@ class Deliberation:
                     binding.immutable_hash,
                 )
             )
+        if checked.prefetch_trace is not None:
+            prefetch = verify_trusted_recall_trace(checked.prefetch_trace)
+            current_cursor = RecallCursor(
+                world_revision=capsule.world_revision,
+                deliberation_revision=capsule.deliberation_revision,
+                ledger_sequence=capsule.ledger_sequence,
+            )
+            if (
+                prefetch.mode != "prefetch"
+                or prefetch.trigger_ref != capsule.trigger_ref
+                or (prefetch.evaluated_cursor or prefetch.index_cursor)
+                != current_cursor
+            ):
+                raise ValueError("prefetch trace does not match the exact Capsule")
+            if (
+                prefetch.reuse_contract == "same_context"
+                and prefetch.index_cursor != current_cursor
+            ):
+                raise ValueError("prefetch trace does not match the exact Capsule")
+            if prefetch.reuse_contract == "paired_cognition_carry" and any(
+                recalled > current
+                for recalled, current in zip(
+                    (
+                        prefetch.index_cursor.world_revision,
+                        prefetch.index_cursor.deliberation_revision,
+                        prefetch.index_cursor.ledger_sequence,
+                    ),
+                    (
+                        current_cursor.world_revision,
+                        current_cursor.deliberation_revision,
+                        current_cursor.ledger_sequence,
+                    ),
+                    strict=True,
+                )
+            ):
+                raise ValueError("paired prefetch carry contains future search material")
+            for hit in prefetch.hits:
+                if hit.document.authority != "world_fact":
+                    continue
+                for binding in hit.document.source_bindings:
+                    bindings_by_ref.setdefault(binding.ref, set()).add(
+                        (
+                            binding.source_kind,
+                            binding.authority_type,
+                            binding.source_world_revision,
+                            binding.immutable_hash,
+                        )
+                    )
+        if checked.recall_trace is not None:
+            recall = verify_trusted_recall_trace(checked.recall_trace)
+            if recall.mode != "character_pull":
+                raise ValueError("character recall trace has the wrong mode")
+            current_cursor = (
+                capsule.world_revision,
+                capsule.deliberation_revision,
+                capsule.ledger_sequence,
+            )
+            recall_cursor = (
+                recall.index_cursor.world_revision,
+                recall.index_cursor.deliberation_revision,
+                recall.index_cursor.ledger_sequence,
+            )
+            evaluated = recall.evaluated_cursor or recall.index_cursor
+            evaluated_cursor = (
+                evaluated.world_revision,
+                evaluated.deliberation_revision,
+                evaluated.ledger_sequence,
+            )
+            if recall.trigger_ref != capsule.trigger_ref:
+                raise ValueError("recall trace belongs to another trigger")
+            if evaluated_cursor != current_cursor:
+                raise ValueError("recall trace was not evaluated at the Capsule cursor")
+            if recall.reuse_contract == "paired_cognition_carry" and any(
+                recalled > current
+                for recalled, current in zip(
+                    recall_cursor, current_cursor, strict=True
+                )
+            ):
+                raise ValueError("paired recall carry contains future search material")
+            for hit in recall.hits:
+                if hit.document.authority != "world_fact":
+                    continue
+                for binding in hit.document.source_bindings:
+                    bindings_by_ref.setdefault(binding.ref, set()).add(
+                        (
+                            binding.source_kind,
+                            binding.authority_type,
+                            binding.source_world_revision,
+                            binding.immutable_hash,
+                        )
+                    )
         for evidence in proposal.evidence_refs:
             if evidence in trigger_evidence:
                 continue
@@ -1689,7 +1841,7 @@ class Deliberation:
             "budget_exhausted",
         ] | None = None,
     ) -> ModelResultAudit:
-        response_hash = _digest(output.raw_proposal) if output is not None else None
+        response_hash = _output_response_hash(output) if output is not None else None
         return ModelResultAudit(
             model_call_id=model_call_id,
             model_result_ref=_model_result_ref(model_call_id, response_hash),
@@ -1706,6 +1858,16 @@ class Deliberation:
             input_tokens=output.input_tokens if output is not None else None,
             output_tokens=output.output_tokens if output is not None else None,
             usage=output.usage if output is not None else None,
+            recall_trace=(
+                verify_trusted_recall_trace(output.recall_trace)
+                if output is not None and output.recall_trace is not None
+                else None
+            ),
+            prefetch_trace=(
+                verify_trusted_recall_trace(output.prefetch_trace)
+                if output is not None and output.prefetch_trace is not None
+                else None
+            ),
         )
 
     @staticmethod

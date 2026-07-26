@@ -179,6 +179,26 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_proxy_url: str | None = Field(default=None, alias="OPENAI_PROXY_URL")
+    # Optional semantic lane for the rebuildable World-v2 Recall Index.
+    # Keeping the model unset preserves the zero-network feature-hash default;
+    # enabling it reuses the OpenAI-compatible endpoint/key while retaining
+    # lexical/temporal/structured degradation on provider failure.
+    world_v2_recall_embedding_model: str | None = Field(
+        default=None,
+        alias="WORLD_V2_RECALL_EMBEDDING_MODEL",
+    )
+    world_v2_recall_embedding_dimensions: int = Field(
+        default=1536,
+        ge=1,
+        le=4096,
+        alias="WORLD_V2_RECALL_EMBEDDING_DIMENSIONS",
+    )
+    world_v2_recall_embedding_timeout_seconds: float = Field(
+        default=2.0,
+        ge=0.1,
+        le=10.0,
+        alias="WORLD_V2_RECALL_EMBEDDING_TIMEOUT_SECONDS",
+    )
     openrouter_api_key: str | None = Field(
         default_factory=lambda: _macos_launchctl_env("OPENROUTER_API_KEY"),
         alias="OPENROUTER_API_KEY",
