@@ -18,6 +18,7 @@ from companion_daemon.world_v2.deliberation import (
     RouteRequest,
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
+from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.ledger_context_resolver import (
@@ -29,6 +30,11 @@ from companion_daemon.world_v2.proactive_action import (
     ProactiveDeliberationTurn,
     ProactiveDraftAdapter,
     ProactiveOpportunity,
+)
+from companion_daemon.world_v2.proposal_envelope import (
+    DecisionProposal,
+    ProposalEvidenceRef,
+    validate_proposal_envelope,
 )
 from companion_daemon.world_v2.production_proposal_grammar import compose_production_deliberation
 from companion_daemon.world_v2.production_turn_application import (
@@ -60,6 +66,221 @@ from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 NOW = datetime(2026, 7, 16, 8, 0, tzinfo=UTC)
 WORLD = "world:proactive-production"
+
+
+def _proactive_model_request() -> ModelInput:
+    source_ref = "event:ambient:1"
+    return ModelInput(
+        call_id="call:proactive-grounding:1",
+        attempt_id="attempt:proactive-grounding:1",
+        route=ModelRoute(tier="flash", reason_code="test", router_version="test.1"),
+        capsule_id="a" * 64,
+        trigger_ref=source_ref,
+        evaluated_world_revision=9,
+        trigger_evidence=(
+            ProposalEvidenceRef(
+                ref_id=source_ref,
+                evidence_kind="settled_world_event",
+                source_world_revision=8,
+                immutable_hash="sha256:" + "b" * 64,
+            ),
+        ),
+        model_content_json=json.dumps(
+            {
+                "logical_time": NOW.isoformat(),
+                "slices": {
+                    "advisories": {
+                        "items": [{
+                            "value": {
+                                "kind": "proactive_opportunity",
+                                "candidate_refs": ["ambient_presence:epoch:1"],
+                                "source_refs": [source_ref],
+                                "candidates": [{"value": "ambient context"}],
+                            }
+                        }]
+                    },
+                    "recent_dialogue": {
+                        "availability": "available",
+                        "source_refs": ["event:user:shenzhen"],
+                        "items": [{
+                            "item_ref": "event:user:shenzhen",
+                            "value": {
+                                "speaker": "counterpart",
+                                "text": "深圳说实话不是很好玩哈哈哈哈",
+                            },
+                        }],
+                    },
+                    "user_facts": {"availability": "available", "items": []},
+                },
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+
+class _ProactiveReplySequence:
+    model = "test-proactive-grounding"
+
+    def __init__(self, replies: list[dict[str, object] | str]) -> None:
+        self.replies = list(replies)
+        self.calls = 0
+
+    async def complete(self, _messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        self.calls += 1
+        reply = self.replies.pop(0)
+        return reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False)
+
+
+def _proactive_draft(text: str, *, claims: list[dict[str, object]] | None = None):
+    return {
+        "timing_choice": "now",
+        "response_text": text,
+        "behavior_tendency": "reach_out",
+        "stance": "curious",
+        "display_strategy": "natural",
+        "brief_rationale": "The present context brought the counterpart to mind.",
+        "impulse_summary": "突然想到对方，想顺着这个念头问一句。",
+        "world_claims": claims or [],
+        "confidence": 7_000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_proactive_history_claim_is_corrected_once_against_pinned_sources() -> None:
+    model = _ProactiveReplySequence([
+        _proactive_draft("你之前说去成都看熊猫，后来怎么样？"),
+        _proactive_draft(
+            "你之前说深圳不太好玩，后来回想起来还是这个感觉吗？",
+            claims=[{
+                "claim_text": "你之前说深圳不太好玩",
+                "scope": "counterpart_history",
+                "source_refs": ["event:user:shenzhen"],
+            }],
+        ),
+    ])
+
+    output = await ProactiveDraftAdapter(
+        model=model, target="user:primary"
+    ).propose(_proactive_model_request())
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+
+    assert model.calls == 2
+    assert proposal.proactive_grounding_outcome == "corrected"
+    assert proposal.impulse_summary == "突然想到对方，想顺着这个念头问一句。"
+    assert "成都" not in proposal.proposed_changes[0].payload.value()["beat_drafts"][0][
+        "inline_text"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_proactive_history_claim_is_rejected_after_one_bad_correction() -> None:
+    model = _ProactiveReplySequence([
+        _proactive_draft("你之前说去成都看熊猫，后来怎么样？"),
+        _proactive_draft("你之前说成都熊猫很好玩，对吧？"),
+    ])
+
+    output = await ProactiveDraftAdapter(
+        model=model, target="user:primary"
+    ).propose(_proactive_model_request())
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+
+    assert model.calls == 2
+    assert proposal.proactive_grounding_outcome == "rejected"
+    assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
+    assert not proposal.action_intents
+
+
+@pytest.mark.asyncio
+async def test_companion_old_reply_cannot_prove_a_counterpart_experience() -> None:
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["recent_dialogue"] = {
+        "availability": "available",
+        "source_refs": ["event:companion:chengdu"],
+        "items": [{
+            "item_ref": "event:companion:chengdu",
+            "value": {
+                "speaker": "companion",
+                "text": "你之前说去成都看熊猫。",
+            },
+        }],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    model = _ProactiveReplySequence([
+        _proactive_draft("你之前说去成都看熊猫，后来怎么样？"),
+        _proactive_draft(
+            "你之前说去成都看熊猫，后来怎么样？",
+            claims=[{
+                "claim_text": "你之前说去成都看熊猫",
+                "scope": "counterpart_history",
+                "source_refs": ["event:companion:chengdu"],
+            }],
+        ),
+    ])
+
+    output = await ProactiveDraftAdapter(
+        model=model, target="user:primary"
+    ).propose(request)
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+    assert proposal.proactive_grounding_outcome == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_claim_free_proactive_question_does_not_add_a_review_call() -> None:
+    model = _ProactiveReplySequence([
+        _proactive_draft("突然有点好奇，你最近有没有遇到什么让你眼前一亮的东西？")
+    ])
+
+    output = await ProactiveDraftAdapter(
+        model=model, target="user:primary"
+    ).propose(_proactive_model_request())
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+
+    assert model.calls == 1
+    assert proposal.proactive_grounding_outcome == "not_required"
+
+
+@pytest.mark.asyncio
+async def test_valid_grounded_proactive_claim_does_not_add_a_review_call() -> None:
+    model = _ProactiveReplySequence([
+        _proactive_draft(
+            "你之前说深圳不太好玩。",
+            claims=[{
+                "claim_text": "你之前说深圳不太好玩",
+                "scope": "counterpart_history",
+                "source_refs": ["event:user:shenzhen"],
+            }],
+        )
+    ])
+
+    output = await ProactiveDraftAdapter(
+        model=model, target="user:primary"
+    ).propose(_proactive_model_request())
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+    assert model.calls == 1
+    assert proposal.proactive_grounding_outcome == "not_required"
+
+
+@pytest.mark.asyncio
+async def test_malformed_grounding_correction_remains_a_technical_failure() -> None:
+    model = _ProactiveReplySequence([
+        _proactive_draft("你之前说去成都看熊猫，后来怎么样？"),
+        "{not-json",
+    ])
+
+    with pytest.raises(ValueError):
+        await ProactiveDraftAdapter(
+            model=model, target="user:primary"
+        ).propose(_proactive_model_request())
+    assert model.calls == 2
 
 
 def _event(event_id: str, event_type: str, payload: dict[str, object], *, at: datetime = NOW) -> WorldEvent:
@@ -360,6 +581,112 @@ class _NoExpectationChat:
         )
 
 
+class _ExpectationAssessmentChat:
+    model = "test-expectation-assessment-chat"
+
+    def __init__(self) -> None:
+        self.replies = [
+            {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": "深圳怎么样，好玩吗？"}],
+                "stance": "curious",
+                "brief_rationale": "Ask about the trip.",
+                "world_claims": [],
+                "response_expectation": {
+                    "hoped_response": "对方说说深圳好不好玩",
+                    "pressure_bp": 1_000,
+                    "importance_bp": 4_000,
+                    "wait_seconds": 60,
+                    "expires_after_seconds": 3_600,
+                },
+            },
+            {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": "哈哈，听起来确实没戳中你。"}],
+                "stance": "receive_the_answer",
+                "brief_rationale": "The counterpart answered directly.",
+                "world_claims": [],
+                "response_expectation_assessment": {
+                    "status": "fulfilled",
+                    "reason": "The counterpart directly said Shenzhen was not enjoyable.",
+                },
+            },
+        ]
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        return json.dumps(self.replies.pop(0), ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_inbound_cognition_durably_fulfills_the_exact_prior_expectation(
+    tmp_path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    model = _ExpectationAssessmentChat()
+    chat = ChatModelDeliberationAdapter(model=model)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "expectation-assessment.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id="world:expectation-assessment",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=_DeliveredTransport(),
+        proactive_model=_DraftModel("silent"),
+        now=NOW,
+    )
+    try:
+        await app.inbound(
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:shenzhen:1",
+            text="从深圳回来啦",
+            observed_at=NOW,
+            trace_id="trace:shenzhen:1",
+        )
+        assert (await app.drain_actions_once()).status == "settled"
+        original_commit = WorldRuntime._commit  # noqa: SLF001
+        conflicts = 0
+
+        async def conflict_twice(runtime, events, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal conflicts
+            if (
+                events
+                and events[0].event_type == "ResponseExpectationAssessed"
+                and conflicts < 2
+            ):
+                conflicts += 1
+                raise ConcurrencyConflict("simulated assessment CAS race")
+            return await original_commit(runtime, events, **kwargs)
+
+        monkeypatch.setattr(WorldRuntime, "_commit", conflict_twice)
+        second = await app.inbound(
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:shenzhen:2",
+            text="深圳说实话不是很好玩哈哈哈哈",
+            observed_at=NOW + timedelta(minutes=1),
+            trace_id="trace:shenzhen:2",
+        )
+        assert second.status == "action_authorized"
+        assert not app._ledger.project().response_expectation_assessments  # noqa: SLF001
+        monkeypatch.setattr(WorldRuntime, "_commit", original_commit)
+        await app.drain_background_once()
+
+        assessments = app._ledger.project().response_expectation_assessments  # noqa: SLF001
+        assert len(assessments) == 1
+        assert assessments[0].status == "fulfilled"
+        assert assessments[0].inbound_observation_id.endswith("message:shenzhen:2")
+    finally:
+        app.close()
+
+
 class _DeliveredExecutor:
     def __init__(self) -> None:
         self.dispatch_calls = 0
@@ -491,7 +818,7 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
     system = model.messages[0][0]["content"]
     assert "semantic anchor" in system
     assert "light relationship-appropriate check-in" in system
-    assert "scripted greetings" in system
+    assert "Do not select from a motive menu" in system
     assert "choose silent" in system
     user = json.loads(model.messages[0][1]["content"])
     assert user["proactive_opportunity"]["source_kind"] == "thread"
@@ -1341,7 +1668,7 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
 
 
 @pytest.mark.asyncio
-async def test_production_application_uses_explicit_delivered_response_expectation_for_gap(
+async def test_delivered_response_expectation_does_not_open_a_proactive_lane(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     proactive = _LooseProactiveModel(
@@ -1390,33 +1717,15 @@ async def test_production_application_uses_explicit_delivered_response_expectati
             correlation_id="conversation:response-gap",
             reason="test_response_gap",
         )
-        assert (await app.drain_background_once()).status == "opened"
-        assert (await app.drain_background_once()).status == "authorized"
-        assert (await app.drain_actions_once()).status == "settled"
-        capsule = proactive.captured_capsule()
-        assert "对方忙完后回来继续聊天" in json.dumps(capsule, ensure_ascii=False)
-        assert "response_gap" in json.dumps(capsule, ensure_ascii=False)
-        model_input = json.loads(proactive.messages[0][1]["content"])
-        opportunity = model_input["proactive_opportunity"]
-        assert opportunity["source_kind"] == "response_gap"
-        assert "对方忙完后回来继续聊天" in opportunity["guidance"]
-        proactive_system = proactive.messages[0][0]["content"]
-        assert "non-null verified proof" in proactive_system
-        assert "rather than denying" in proactive_system
-        proposal = json.loads(
-            app._ledger.project().proposal_audits[-1].proposal_json  # noqa: SLF001
-        )
-        assert proposal["proactive_opportunity_decision"]["source_kind"] == "response_gap"
-        assert transport.bodies == [
-            "你忙完跟我说一声呀。",
-            "刚才说晚点聊，我还记着。",
-        ]
+        assert await app.drain_background_once() is None
+        assert proactive.calls == 0
+        assert transport.bodies == ["你忙完跟我说一声呀。"]
     finally:
         app.close()
 
 
 @pytest.mark.asyncio
-async def test_real_qq_provider_acceptance_can_open_a_truthful_response_gap(
+async def test_real_qq_provider_expectation_remains_advisory_only(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     proactive = _DraftModel("silent")
@@ -1455,7 +1764,7 @@ async def test_real_qq_provider_acceptance_can_open_a_truthful_response_gap(
             reason="test_qq_response_gap",
         )
         opened = await app.drain_background_once()
-        assert opened is not None and opened.status == "opened"
+        assert opened is None
         assert proactive.calls == 0
     finally:
         app.close()
@@ -1545,7 +1854,7 @@ async def test_unknown_qq_send_never_opens_a_response_gap(tmp_path) -> None:  # 
 
 
 @pytest.mark.asyncio
-async def test_persisted_qq_provider_acceptance_opens_response_gap_after_restart(
+async def test_persisted_qq_provider_expectation_does_not_reopen_after_restart(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     path = tmp_path / "response-gap-qq-restart.sqlite3"
@@ -1595,7 +1904,7 @@ async def test_persisted_qq_provider_acceptance_opens_response_gap_after_restart
             reason="test_qq_restart_gap",
         )
         opened = await restarted.drain_background_once()
-        assert opened is not None and opened.status == "opened"
+        assert opened is None
         assert restarted_proactive.calls == 0
     finally:
         restarted.close()

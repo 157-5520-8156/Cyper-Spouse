@@ -32,6 +32,7 @@ from .expression_draft import (
     TEXT_ONLY_EXPRESSION_CAPABILITIES,
     is_world_claim_violation,
     materialize_expression_draft,
+    request_requires_response_expectation_assessment,
 )
 from .epistemic_claim_gate import (
     require_grounded_claim_declarations,
@@ -277,6 +278,13 @@ class ChatModelDeliberationAdapter:
                 capabilities=self._expression_capabilities,
                 quick_recovery=quick_recovery,
             )
+            if (
+                request_requires_response_expectation_assessment(request)
+                and raw_proposal.get("response_expectation_assessment") is None
+            ):
+                raise ValueError(
+                    "pending response expectation requires a same-cognition assessment"
+                )
         except (TypeError, ValueError) as exc:
             violation = str(exc)
             if quick_recovery:
@@ -309,6 +317,13 @@ class ChatModelDeliberationAdapter:
                 capabilities=self._expression_capabilities,
                 quick_recovery=quick_recovery,
             )
+            if (
+                request_requires_response_expectation_assessment(request)
+                and raw_proposal.get("response_expectation_assessment") is None
+            ):
+                raise ValueError(
+                    "pending response expectation requires a same-cognition assessment"
+                )
         return ModelOutput(
             model_id=self._model_id,
             model_version=self.VERSION,
@@ -735,6 +750,14 @@ class ChatModelDeliberationAdapter:
                 "with hoped_response, pressure_bp, importance_bp, wait_seconds, and expires_after_seconds. "
                 "This records an internal expectation; it is not a promise to chase them. Omit it when no answer "
                 "is actually expected; never infer it mechanically from a question mark or from a generic farewell."
+                " If Context advisories contain kind=response_expectation, assess that exact prior expectation "
+                "against the current_trigger_message in this same cognition call. Return "
+                "response_expectation_assessment with status=fulfilled|superseded|still_pending|uncertain and a "
+                "short semantic reason. fulfilled means the current message answers what was hoped for; "
+                "superseded means the current message makes that wait no longer relevant; still_pending means it "
+                "does not answer and the original wait remains relevant; uncertain means the evidence does not "
+                "support a confident choice. Do not create or extend an expiry here. Omit this field when no such "
+                "advisory is supplied."
             )
         )
         system = (
@@ -1418,6 +1441,7 @@ def _proposal_from_model_text(
             "stance": "answer_without_world_claims",
             "brief_rationale": draft.brief_rationale,
             "confidence": draft.confidence,
+            "response_expectation_assessment": draft.response_expectation_assessment,
         }
     trigger = request.trigger_message
     if trigger is None:
@@ -1516,6 +1540,9 @@ def _proposal_from_model_text(
         source_model_result="model-result:adapter-placeholder",
         response_text=text,
         stance=stance,
+        response_expectation_assessment=value.get(
+            "response_expectation_assessment"
+        ),
     )
     return proposal.model_dump(mode="json")
 

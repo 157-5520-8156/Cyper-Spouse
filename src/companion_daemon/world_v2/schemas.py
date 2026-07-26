@@ -1128,6 +1128,24 @@ class ResponseExpectationAuthority(FrozenModel):
         return self
 
 
+class ResponseExpectationAssessedPayload(FrozenModel):
+    """One inbound cognition's source-bound interpretation of an open hope."""
+
+    assessment_id: str = Field(min_length=1)
+    source_plan_id: str = Field(min_length=1)
+    source_acceptance_event_ref: str = Field(min_length=1)
+    inbound_observation_id: str = Field(min_length=1)
+    inbound_observation_event_ref: str = Field(min_length=1)
+    status: Literal["fulfilled", "superseded", "still_pending", "uncertain"]
+    reason: str = Field(min_length=1, max_length=240)
+    assessed_at: datetime
+
+
+class ResponseExpectationAssessmentProjection(ResponseExpectationAssessedPayload):
+    event_ref: str = Field(min_length=1)
+    world_revision: int = Field(ge=1)
+
+
 class ExpressionPlanManifestRef(FrozenModel):
     """Durable authority for one generic accepted expression plan."""
 
@@ -4834,7 +4852,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.35"
+    reducer_bundle_version: str = "world-v2-reducers.36"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4959,6 +4977,9 @@ class LedgerProjection(FrozenModel):
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
     expression_plan_manifests: tuple[ExpressionPlanManifestRef, ...] = ()
+    response_expectation_assessments: tuple[
+        ResponseExpectationAssessmentProjection, ...
+    ] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
     expression_payload_descriptors: tuple[ExpressionPayloadDescriptorProjection, ...] = ()
     life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()

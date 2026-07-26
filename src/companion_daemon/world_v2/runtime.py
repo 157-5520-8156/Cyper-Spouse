@@ -129,6 +129,7 @@ from .memory_withdrawal_review import (
     MemoryWithdrawalReviewRuntime,
 )
 from .proposal_envelope import DecisionProposal, MinimalProposal, validate_proposal_envelope
+from .response_expectation_view import pending_response_expectation_manifest
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -137,6 +138,7 @@ from .schemas import (
     Observation,
     ProjectionCursor,
     ProjectionRequest,
+    ResponseExpectationAssessedPayload,
     RuntimeOutcome,
     WorldEvent,
     WorldProjection,
@@ -928,6 +930,144 @@ class WorldRuntime:
             return await asyncio.to_thread(self._ledger.lookup_event_commit, event_id)
         return self._ledger.lookup_event_commit(event_id)
 
+    async def _record_response_expectation_assessment(
+        self,
+        *,
+        proposal: DecisionProposal | MinimalProposal,
+        observation: Observation,
+        observation_event: WorldEvent,
+    ) -> bool:
+        assessment = proposal.response_expectation_assessment
+        if assessment is None:
+            return False
+        identity_material = {
+            "inbound_observation_id": observation.observation_id,
+            "observation_event_ref": observation_event.event_id,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                identity_material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        for retry_ordinal in range(2):
+            projection = await self._project_for_write()
+            if any(
+                item.inbound_observation_id == observation.observation_id
+                for item in projection.response_expectation_assessments
+            ):
+                return True
+            observation_ref = next(
+                (
+                    item
+                    for item in projection.committed_world_event_refs
+                    if item.event_id == observation_event.event_id
+                ),
+                None,
+            )
+            if observation_ref is None:
+                raise RuntimeError(
+                    "inbound observation is missing from the committed projection"
+                )
+            manifest = pending_response_expectation_manifest(
+                projection,
+                before_world_revision=observation_ref.world_revision,
+                at_logical_time=observation.logical_time,
+            )
+            # Reconstruct the exact historical advisory at this Observation:
+            # later deliveries cannot qualify by revision, and wall-clock
+            # expiry cannot erase the source during delayed reconciliation.
+            if manifest is None:
+                return False
+            payload = ResponseExpectationAssessedPayload(
+                assessment_id=f"assessment:response-expectation:{digest}",
+                source_plan_id=manifest.plan_id,
+                source_acceptance_event_ref=manifest.acceptance_event_ref,
+                inbound_observation_id=observation.observation_id,
+                inbound_observation_event_ref=observation_event.event_id,
+                status=assessment.status,
+                reason=assessment.reason,
+                assessed_at=observation.logical_time,
+            )
+            event = WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id=f"event:response-expectation-assessed:{digest}",
+                world_id=self._world_id,
+                event_type="ResponseExpectationAssessed",
+                logical_time=observation.logical_time,
+                created_at=observation.created_at,
+                actor="agent:companion",
+                source="world-runtime:inbound-cognition",
+                trace_id=observation.trace_id,
+                causation_id=observation_event.event_id,
+                correlation_id=observation.correlation_id,
+                idempotency_key=domain_idempotency_key(
+                    event_type="ResponseExpectationAssessed",
+                    world_id=self._world_id,
+                    payload=payload.model_dump(mode="json"),
+                )
+                or f"response-expectation-assessed:{digest}",
+                payload=payload.model_dump(mode="json"),
+            )
+            try:
+                await self._commit(
+                    [event],
+                    world_revision=projection.world_revision,
+                    deliberation_revision=projection.deliberation_revision,
+                    commit_id=(
+                        f"commit:response-expectation-assessed:{digest}:"
+                        f"{retry_ordinal}"
+                    ),
+                )
+            except ConcurrencyConflict:
+                continue
+            return True
+        _LOG.warning(
+            "response expectation assessment deferred after CAS conflict "
+            "observation=%s",
+            observation.observation_id,
+        )
+        return False
+
+    async def reconcile_response_expectation_assessment(self) -> bool:
+        """Retry one durable audited assessment that lost its post-reply CAS."""
+
+        projection = await self._project_for_write()
+        recorded_observations = {
+            item.inbound_observation_id
+            for item in projection.response_expectation_assessments
+        }
+        for audit in reversed(projection.proposal_audits):
+            if audit.proposal_kind not in {"decision", "minimal"}:
+                continue
+            try:
+                proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(proposal, (DecisionProposal, MinimalProposal))
+                or proposal.response_expectation_assessment is None
+            ):
+                continue
+            located = await self._lookup_event_commit(audit.trigger_ref)
+            if located is None or located[0].event_type != "ObservationRecorded":
+                continue
+            try:
+                observation = Observation.model_validate_json(located[0].payload_json)
+            except ValueError:
+                continue
+            if observation.observation_id in recorded_observations:
+                continue
+            if await self._record_response_expectation_assessment(
+                proposal=proposal,
+                observation=observation,
+                observation_event=located[0],
+            ):
+                return True
+        return False
+
     async def _commit_accepted(self, batch, *, cursor: ProjectionCursor):
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(
@@ -1376,6 +1516,7 @@ class WorldRuntime:
         reply_deferred_refs: tuple[str, ...] = ()
         reply_terminal_errors: tuple[str, ...] = ()
         audited = None
+        assessment_proposal: DecisionProposal | None = None
         async with self._lock:
             existing = await self._lookup_event_commit(event.event_id)
             if existing is not None:
@@ -1690,6 +1831,25 @@ class WorldRuntime:
                     except (AppraisalAcceptanceError, ConcurrencyConflict, ValueError) as exc:
                         code = getattr(exc, "code", "appraisal.worker_failed")
                         reply_deferred_refs = (*reply_deferred_refs, str(code))
+            if audited is not None and audited.proposal_id is not None:
+                assessment_head = await self._project_for_write()
+                assessment_audit = next(
+                    (
+                        item
+                        for item in assessment_head.proposal_audits
+                        if item.proposal_id == audited.proposal_id
+                        and item.proposal_kind in {"decision", "minimal"}
+                    ),
+                    None,
+                )
+                if assessment_audit is not None:
+                    assessment_proposal = validate_proposal_envelope(
+                        json.loads(assessment_audit.proposal_json)
+                    )
+                    if not isinstance(
+                        assessment_proposal, (DecisionProposal, MinimalProposal)
+                    ):
+                        assessment_proposal = None
             if self._pinned_turn is not None and audited is not None:
                 if self._reply_policy is not None and audited.proposal_id is not None:
                     after_audit = await self._project_for_write()
@@ -1878,6 +2038,16 @@ class WorldRuntime:
             status = "deferred"
         else:
             status = "observed_only"
+        # This advisory ledger record must never sit in front of visible reply
+        # authorization. Its helper is effect-once and absorbs a bounded CAS
+        # race, so background World progress cannot turn a valid reply into
+        # "typing, then silence".
+        if assessment_proposal is not None:
+            await self._record_response_expectation_assessment(
+                proposal=assessment_proposal,
+                observation=observation,
+                observation_event=event,
+            )
         final_projection = await self._project_for_write()
         _LOG.warning(
             "world v2 ingest phase trace=%s phase=complete_ms value=%.1f status=%s",

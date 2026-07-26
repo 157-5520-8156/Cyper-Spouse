@@ -2890,6 +2890,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.32",
                 "world-v2-reducers.33",
                 "world-v2-reducers.34",
+                "world-v2-reducers.35",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -3180,6 +3181,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.32",
                 "world-v2-reducers.33",
                 "world-v2-reducers.34",
+                "world-v2-reducers.35",
             }:
                 state = ReducerState.model_validate_json(
                     json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),

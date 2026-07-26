@@ -123,6 +123,7 @@ from .schemas import (
     ExecutionReceipt,
     ExternalObservation,
     Observation,
+    ResponseExpectationAssessedPayload,
     TriggerProcess,
 )
 
@@ -142,7 +143,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.35"
+    reducer_bundle: str = "world-v2-reducers.36"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -338,6 +339,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             Observation,
             required=frozenset({"observation_id"}),
         ),
+        "ResponseExpectationAssessed": ResponseExpectationAssessedPayload,
         "OperatorObservationRecorded": _payload_model(
             "OperatorObservationRecordedPayload",
             {"observation_id": _ID, "observation_hash": _ID},
@@ -500,6 +502,9 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
     {
         "WorldStarted": "world_id+seed_version",
         "ObservationRecorded": "source+source_event_id",
+        "ResponseExpectationAssessed": (
+            "world_id+source_plan_id+inbound_observation_id+assessment_id"
+        ),
         "OperatorObservationRecorded": "world_id+observation_id",
         "ClockAdvanced": "world_id+tick_id",
         "ExternalObservationRecorded": "source+source_event_id",
@@ -778,6 +783,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ObservationRecordedPayload",
                 evidence_types=("observed_message",),
                 successors=("TriggerProcessClaimed",),
+            ),
+            _contract(
+                "ResponseExpectationAssessed",
+                "world_runtime_inbound_cognition",
+                "world",
+                "ResponseExpectationAssessedPayload",
+                allowed_predecessors=("ObservationRecorded",),
+                evidence_types=("observed_message", "committed_world_event"),
             ),
             _contract(
                 "LegacyAcceptanceAuditRecorded",

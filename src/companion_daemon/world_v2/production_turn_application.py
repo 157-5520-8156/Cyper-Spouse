@@ -225,6 +225,7 @@ from .proactive_action import (
 from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .recent_dialogue import RecentDialogueCompiler
 from .social_initiative import (
+    SITUATION_STIMULUS_EVENT_TYPES,
     SocialInitiativeCompiler,
     SocialInitiativeContextPolicy,
     SocialInitiativePolicy,
@@ -1627,6 +1628,7 @@ class WorldV2TurnApplication:
     ):
         """Run one separately scheduled mental-state or memory work unit."""
 
+        await self._turns.reconcile_response_expectation_assessment()
         return await self._turns.drain_background_once()
 
     async def current_logical_time(self) -> datetime | None:
@@ -1725,66 +1727,11 @@ class WorldV2TurnApplication:
             contact_on_cooldown = recent_contact is not None and (
                 logical_time - recent_contact
             ).total_seconds() < policy.contact_cooldown_seconds
-            response_gaps: list[tuple[datetime, str]] = []
             if not contact_on_cooldown:
-                for manifest in projection.expression_plan_manifests:
-                    expectation = manifest.response_expectation
-                    if expectation is None or not (
-                        expectation.not_before <= logical_time < expectation.expires_at
-                    ):
-                        continue
-                    plan = next(
-                        (
-                            item
-                            for item in projection.expression_plans
-                            if item.plan_id == manifest.plan_id
-                        ),
-                        None,
-                    )
-                    beat = next(
-                        (
-                            item
-                            for item in manifest.beats
-                            if item.beat_id == expectation.source_beat_id
-                        ),
-                        None,
-                    )
-                    action = next(
-                        (
-                            item
-                            for item in projection.actions
-                            if beat is not None
-                            and item.action_id == beat.action.action_id
-                        ),
-                        None,
-                    )
-                    accepted = any(
-                        item.action_id == action.action_id
-                        and item.observed_state in {"provider_accepted", "delivered"}
-                        for item in projection.execution_receipts
-                    ) if action is not None else False
-                    delivery_ready = action is not None and accepted and (
-                        action.state == "delivered"
-                        if expectation.delivery_requirement == "confirmed_delivered"
-                        else action.state in {"provider_accepted", "delivered"}
-                    )
-                    answered = any(
-                        item.world_revision > manifest.recorded_at_world_revision
-                        for item in projection.message_observations
-                    )
-                    if (
-                        plan is not None
-                        and plan.state in {"authorized", "completed"}
-                        and beat is not None
-                        and delivery_ready
-                        and not answered
-                    ):
-                        response_gaps.append(
-                            (expectation.not_before, manifest.acceptance_event_ref)
-                        )
-                if response_gaps:
-                    opportunity_sources.add(min(response_gaps)[1])
-                elif projection.message_observations:
+                # Response expectations remain advisory model context. V3 only
+                # opens proactive consideration from real situation changes or
+                # the ambient cadence, never from an unanswered expression.
+                if projection.message_observations:
                     latest_message = projection.message_observations[-1]
                     source_ref = next(
                         (
@@ -1988,8 +1935,12 @@ class WorldV2TurnApplication:
             else None
         )
         last_model_decision = None
+        last_impulse_summary = None
+        last_grounding_outcome = None
         if latest is not None and latest.runtime_outcome_ref == "proactive:silent":
             last_model_decision = "silent"
+        elif latest is not None and latest.runtime_outcome_ref == "proactive:grounding-rejected":
+            last_model_decision = "grounding_rejected"
         elif latest is not None and str(latest.runtime_outcome_ref).startswith(
             "proactive:deliberation-failed:"
         ):
@@ -2011,7 +1962,8 @@ class WorldV2TurnApplication:
         if (
             latest is not None
             and latest.source_evidence_ref is not None
-            and last_model_decision in {"now", "later", "silent"}
+            and last_model_decision
+            in {"now", "later", "silent", "grounding_rejected"}
         ):
             decision_audit = next(
                 (
@@ -2032,6 +1984,8 @@ class WorldV2TurnApplication:
                     decision = None
                 if isinstance(decision, DecisionProposal):
                     last_reason = decision.brief_rationale
+                    last_impulse_summary = decision.impulse_summary
+                    last_grounding_outcome = decision.proactive_grounding_outcome
         consecutive_technical_failures = 0
         latest_message_revision = (
             projection.message_observations[-1].world_revision
@@ -2105,6 +2059,51 @@ class WorldV2TurnApplication:
             and initiative_state == "consideration_due"
         ):
             warning_reasons.append("consideration_overdue")
+        stimulus_source_count = sum(
+            item.event_type in SITUATION_STIMULUS_EVENT_TYPES
+            and (
+                logical_time is None
+                or logical_time - item.logical_time <= timedelta(minutes=10)
+            )
+            for item in projection.committed_world_event_refs
+        )
+        expectation_status_counts = Counter(
+            item.status for item in projection.response_expectation_assessments
+        )
+        terminal_expectation_plans = {
+            item.source_plan_id
+            for item in projection.response_expectation_assessments
+            if item.status in {"fulfilled", "superseded"}
+        }
+        pending_expectation_count = sum(
+            item.response_expectation is not None
+            and item.plan_id not in terminal_expectation_plans
+            and (
+                logical_time is None
+                or logical_time < item.response_expectation.expires_at
+            )
+            for item in projection.expression_plan_manifests
+        )
+        proactive_grounding_counts: Counter[str] = Counter()
+        for audit_item in projection.proposal_audits:
+            if (
+                audit_item.proposal_kind != "decision"
+                or not audit_item.proposal_id.startswith("proposal:proactive:")
+            ):
+                continue
+            try:
+                audited_decision = validate_proposal_envelope(
+                    json.loads(audit_item.proposal_json)
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(audited_decision, DecisionProposal)
+                and audited_decision.proactive_grounding_outcome is not None
+            ):
+                proactive_grounding_counts[
+                    audited_decision.proactive_grounding_outcome
+                ] += 1
 
         # Registration and proposal/audit records prove infrastructure, not
         # that the character has actually lived through anything.
@@ -2309,6 +2308,20 @@ class WorldV2TurnApplication:
             ),
             "initiative_last_model_decision": last_model_decision,
             "initiative_last_decision_reason": last_reason,
+            "initiative_last_impulse_summary": last_impulse_summary,
+            "initiative_last_grounding_outcome": last_grounding_outcome,
+            "initiative_grounding_corrected_count": proactive_grounding_counts[
+                "corrected"
+            ],
+            "initiative_grounding_rejected_count": proactive_grounding_counts[
+                "rejected"
+            ],
+            "initiative_stimulus_source_count": stimulus_source_count,
+            "initiative_stimulus_merge_window_seconds": 600,
+            "initiative_pending_expectation_count": pending_expectation_count,
+            "initiative_expectation_status_counts": dict(
+                expectation_status_counts
+            ),
             "initiative_next_consideration_at": (
                 next_consideration_at.isoformat()
                 if next_consideration_at is not None

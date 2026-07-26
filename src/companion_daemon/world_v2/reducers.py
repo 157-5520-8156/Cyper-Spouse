@@ -440,6 +440,8 @@ from .schemas import (
     MinimalReplyManifestRef,
     ExpressionPlanManifestRef,
     ExpressionPlanManifestBeatRef,
+    ResponseExpectationAssessedPayload,
+    ResponseExpectationAssessmentProjection,
     StoredMessagePayloadProjection,
     ExpressionPayloadDescriptorProjection,
     ExpressionPlanProjection,
@@ -489,7 +491,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.35"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.36"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}" for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 )
@@ -773,6 +775,9 @@ class ReducerState(FrozenModel):
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
     expression_plan_manifests: tuple[ExpressionPlanManifestRef, ...] = ()
+    response_expectation_assessments: tuple[
+        ResponseExpectationAssessmentProjection, ...
+    ] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
     expression_payload_descriptors: tuple[ExpressionPayloadDescriptorProjection, ...] = ()
     life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()
@@ -1306,6 +1311,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.32",
             "world-v2-reducers.33",
             "world-v2-reducers.34",
+            "world-v2-reducers.35",
         }:
             # .33 adds only conditional compact ecology scheduler state; .34
             # folds terminal ecology ids out of head state. Their older
@@ -1421,7 +1427,10 @@ class ReducerState(FrozenModel):
                         exclude=(
                             {"last_failure_code"}
                             if declared_reducer_bundle_version
-                            != REDUCER_BUNDLE_VERSION
+                            not in {
+                                "world-v2-reducers.35",
+                                REDUCER_BUNDLE_VERSION,
+                            }
                             else None
                         ),
                     )
@@ -1529,6 +1538,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.32",
             "world-v2-reducers.33",
             "world-v2-reducers.34",
+            "world-v2-reducers.35",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["provider_media_grants"] = tuple(
@@ -1544,7 +1554,10 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.media_plans
             )
             payload["media_unrenderable_opportunity_ids"] = self.media_unrenderable_opportunity_ids
-            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            if declared_reducer_bundle_version in {
+                "world-v2-reducers.35",
+                REDUCER_BUNDLE_VERSION,
+            }:
                 payload["media_declined_candidate_revisions"] = tuple(
                     item.model_dump(mode="json")
                     for item in self.media_declined_candidate_revisions
@@ -1557,6 +1570,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.32",
             "world-v2-reducers.33",
             "world-v2-reducers.34",
+            "world-v2-reducers.35",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_artifacts"] = tuple(
@@ -1569,6 +1583,7 @@ class ReducerState(FrozenModel):
                     "world-v2-reducers.32",
                     "world-v2-reducers.33",
                     "world-v2-reducers.34",
+                    "world-v2-reducers.35",
                     REDUCER_BUNDLE_VERSION,
                 }
                 else item.model_dump(mode="json", exclude={"repairable", "repair_scope"})
@@ -1583,6 +1598,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.32",
             "world-v2-reducers.33",
             "world-v2-reducers.34",
+            "world-v2-reducers.35",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_delivery_approvals"] = tuple(
@@ -1598,6 +1614,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.32",
                 "world-v2-reducers.33",
                 "world-v2-reducers.34",
+                "world-v2-reducers.35",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_thread_proposals"] = tuple(
@@ -1775,11 +1792,17 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.32",
                 "world-v2-reducers.33",
                 "world-v2-reducers.34",
+                "world-v2-reducers.35",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["expression_plan_manifests"] = tuple(
                     _expression_plan_manifest_semantic_dump(item)
                     for item in self.expression_plan_manifests
+                )
+            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+                payload["response_expectation_assessments"] = tuple(
+                    item.model_dump(mode="json")
+                    for item in self.response_expectation_assessments
                 )
             payload["stored_message_payloads"] = tuple(
                 item.model_dump(mode="json") for item in self.stored_message_payloads
@@ -5574,6 +5597,91 @@ def _observation_recorded(
             # not Clock authority and therefore cannot advance world time.
             "logical_time": state.logical_time or event.logical_time,
             "life_ecology_schedule": schedule,
+        }
+    )
+
+
+def _response_expectation_assessed(
+    state: ReducerState,
+    event: WorldEvent,
+) -> ReducerState:
+    payload = ResponseExpectationAssessedPayload.model_validate_json(event.payload_json)
+    committed_by_id = {
+        item.event_id: item for item in state.committed_world_event_refs
+    }
+    acceptance = committed_by_id.get(payload.source_acceptance_event_ref)
+    if acceptance is None:
+        raise ValueError(
+            "response expectation assessment must bind a committed expression acceptance"
+        )
+    observation = committed_by_id.get(payload.inbound_observation_event_ref)
+    if observation is None or observation.event_type != "ObservationRecorded":
+        raise ValueError(
+            "response expectation assessment must bind a committed inbound observation"
+        )
+    if observation.world_revision <= acceptance.world_revision:
+        raise ValueError(
+            "response expectation assessment observation must follow its source expression"
+        )
+    manifest = next(
+        (
+            item
+            for item in state.expression_plan_manifests
+            if item.plan_id == payload.source_plan_id
+            and item.acceptance_event_ref == payload.source_acceptance_event_ref
+            and item.response_expectation is not None
+        ),
+        None,
+    )
+    if manifest is None:
+        raise ValueError(
+            "response expectation assessment must bind the declared plan's expectation"
+        )
+    if acceptance.event_type not in {"ExpressionPlanAccepted", "AcceptanceRecorded"}:
+        raise ValueError(
+            "response expectation assessment must bind a committed expression acceptance"
+        )
+    observed_message = next(
+        (
+            item
+            for item in state.message_observations
+            if item.observation_id == payload.inbound_observation_id
+            and item.world_revision == observation.world_revision
+        ),
+        None,
+    )
+    if observed_message is None:
+        raise ValueError(
+            "response expectation assessment must bind the declared inbound observation"
+        )
+    if payload.assessed_at != event.logical_time:
+        raise ValueError(
+            "response expectation assessment time must match its committed event"
+        )
+    if event.causation_id != payload.inbound_observation_event_ref:
+        raise ValueError(
+            "response expectation assessment causation must be its inbound observation"
+        )
+    if any(
+        item.assessment_id == payload.assessment_id
+        or (
+            item.source_plan_id == payload.source_plan_id
+            and item.inbound_observation_id == payload.inbound_observation_id
+        )
+        for item in state.response_expectation_assessments
+    ):
+        raise ValueError("response expectation assessment is already registered")
+    assessment = ResponseExpectationAssessmentProjection(
+        **payload.model_dump(mode="python"),
+        event_ref=event.event_id,
+        world_revision=len(state.committed_world_event_refs) + 1,
+    )
+    return state.model_copy(
+        update={
+            "response_expectation_assessments": (
+                *state.response_expectation_assessments,
+                assessment,
+            )
         }
     )
 
@@ -10344,6 +10452,11 @@ _EVENTS = {
         EventDefinition("MediaDeliveryThreadUpdated", RevisionClass.WORLD, _media_thread_changed),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),
         EventDefinition(
+            "ResponseExpectationAssessed",
+            RevisionClass.WORLD,
+            _response_expectation_assessed,
+        ),
+        EventDefinition(
             "OperatorObservationRecorded",
             RevisionClass.DELIBERATION,
             _operator_observation_recorded,
@@ -10906,6 +11019,7 @@ def make_projection(
         acceptance_manifests_v3=state.acceptance_manifests_v3,
         minimal_reply_manifests=state.minimal_reply_manifests,
         expression_plan_manifests=state.expression_plan_manifests,
+        response_expectation_assessments=state.response_expectation_assessments,
         stored_message_payloads=state.stored_message_payloads,
         expression_payload_descriptors=state.expression_payload_descriptors,
         life_content_descriptors=state.life_content_descriptors,

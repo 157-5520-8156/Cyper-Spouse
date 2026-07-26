@@ -130,6 +130,171 @@ async def test_prompt_models_a_mutually_established_future_continuation_as_optio
 
 
 @pytest.mark.asyncio
+async def test_pending_expectation_is_assessed_inside_the_normal_inbound_cognition() -> None:
+    model = _Model(json.dumps({
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "哈哈，听起来确实不太对你胃口。"}],
+        "stance": "receive_the_answer",
+        "brief_rationale": "The current message directly answers the earlier question.",
+        "world_claims": [],
+        "response_expectation_assessment": {
+            "status": "fulfilled",
+            "reason": "The counterpart directly said whether the trip was enjoyable.",
+        },
+    }, ensure_ascii=False))
+    request = _qq_request().model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "logical_time": "2026-07-26T01:07:00+00:00",
+                    "slices": {
+                        "advisories": {
+                            "items": [{
+                                "value": {
+                                    "kind": "response_expectation",
+                                    "summary": "hoped for how the trip went",
+                                }
+                            }]
+                        }
+                    },
+                }
+            ),
+            "trigger_message": _qq_request().trigger_message.model_copy(
+                update={"text": "深圳说实话不是很好玩哈哈哈哈"}
+            ),
+        }
+    )
+
+    output = await ChatModelDeliberationAdapter(model=model).propose(request)
+
+    assert output.raw_proposal["response_expectation_assessment"] == {
+        "status": "fulfilled",
+        "reason": "The counterpart directly said whether the trip was enjoyable.",
+    }
+    assert "same cognition call" in model.calls[0][0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_pending_expectation_cannot_silently_omit_its_assessment() -> None:
+    missing = json.dumps({
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "我接住你这句。"}],
+        "stance": "receive_the_answer",
+        "brief_rationale": "Respond to the current message.",
+        "world_claims": [],
+    }, ensure_ascii=False)
+    model = _SequenceJsonModel([missing, missing])
+    request = _qq_request().model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "logical_time": "2026-07-26T01:07:00+00:00",
+                    "slices": {
+                        "advisories": {
+                            "items": [{
+                                "value": {
+                                    "kind": "response_expectation",
+                                    "summary": "hoped for an answer",
+                                }
+                            }]
+                        }
+                    },
+                }
+            ),
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="pending response expectation requires a same-cognition assessment",
+    ):
+        await ChatModelDeliberationAdapter(model=model).propose(request)
+
+
+@pytest.mark.asyncio
+async def test_pending_expectation_cannot_be_dropped_by_quick_recovery() -> None:
+    missing = json.dumps({
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "我接住你这句。"}],
+        "stance": "receive_the_answer",
+        "brief_rationale": "Recover the visible reply.",
+        "world_claims": [],
+    }, ensure_ascii=False)
+    model = _JsonModel(missing)
+    request = _qq_request().model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "logical_time": "2026-07-26T01:07:00+00:00",
+                    "slices": {
+                        "advisories": {
+                            "items": [{
+                                "value": {
+                                    "kind": "response_expectation",
+                                    "summary": "hoped for an answer",
+                                }
+                            }]
+                        }
+                    },
+                }
+            ),
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="pending response expectation requires a same-cognition assessment",
+    ):
+        await ChatModelDeliberationAdapter(model=model).recover(
+            request, "main_attempt_failed"
+        )
+
+
+@pytest.mark.asyncio
+async def test_quick_recovery_preserves_a_valid_expectation_assessment() -> None:
+    recovered = json.dumps({
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "嗯，你这句已经回答我了。"}],
+        "stance": "receive_the_answer",
+        "brief_rationale": "Recover the reply and preserve the semantic judgement.",
+        "world_claims": [],
+        "response_expectation_assessment": {
+            "status": "fulfilled",
+            "reason": "The current message directly answers the open question.",
+        },
+    }, ensure_ascii=False)
+    request = _qq_request().model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "logical_time": "2026-07-26T01:07:00+00:00",
+                    "slices": {
+                        "advisories": {
+                            "items": [{
+                                "value": {
+                                    "kind": "response_expectation",
+                                    "summary": "hoped for an answer",
+                                }
+                            }]
+                        }
+                    },
+                }
+            ),
+        }
+    )
+
+    output = await ChatModelDeliberationAdapter(model=_JsonModel(recovered)).recover(
+        request, "main_attempt_failed"
+    )
+
+    assert output.raw_proposal["proposal_kind"] == "minimal"
+    assert output.raw_proposal["response_expectation_assessment"] == {
+        "status": "fulfilled",
+        "reason": "The current message directly answers the open question.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_explicit_mutual_future_continuation_normalizes_a_low_pressure_expectation() -> None:
     model = _Model(json.dumps({
         "timing_choice": "now",
@@ -900,6 +1065,78 @@ async def test_expression_world_claim_must_cite_its_semantic_context_lane() -> N
 
 
 @pytest.mark.asyncio
+async def test_elliptical_just_woke_up_claim_cannot_bypass_world_evidence() -> None:
+    model = _Model(json.dumps({
+        "timing_choice": "now",
+        "beats": [{
+            "modality": "text",
+            "text": "不是难回答，就是刚睡醒脑子还有点懵。",
+        }],
+        "stance": "casual",
+        "brief_rationale": "Explain the hesitation.",
+        "world_claims": [],
+    }, ensure_ascii=False))
+
+    with pytest.raises(ValueError, match="past_world"):
+        await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "message"),
+    (
+        ("可能先整理一下照片。", "structured life_intent"),
+        ("我下午没有已经确定的安排。", "current_world"),
+    ),
+)
+async def test_uncertain_wording_cannot_invent_a_personal_schedule(
+    text: str, message: str
+) -> None:
+    model = _Model(json.dumps({
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": text}],
+        "stance": "casual",
+        "brief_rationale": "Answer the afternoon-plan question.",
+        "world_claims": [],
+    }, ensure_ascii=False))
+
+    with pytest.raises(ValueError, match=message):
+        await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+
+
+@pytest.mark.asyncio
+async def test_subjective_reaction_to_user_story_is_not_companion_autobiography() -> None:
+    model = _Model(json.dumps({
+        "timing_choice": "now",
+        "beats": [{
+            "modality": "text",
+            "text": "不过你妈随手加需求那段……我听着都麻了。",
+        }],
+        "stance": "commiserate_without_defending",
+        "brief_rationale": "React to the concrete frustration.",
+        "world_claims": [],
+    }, ensure_ascii=False))
+
+    output = await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+
+    assert output.raw_proposal["action_intents"][0]["kind"] == "reply"
+
+
+@pytest.mark.asyncio
+async def test_expression_prompt_does_not_default_to_defending_third_parties() -> None:
+    model = _Model('{"proposal_id":"proposal:third-party-attunement"}')
+
+    await ChatModelDeliberationAdapter(model=model).propose(_request())
+
+    system = model.calls[0][0][0]["content"]
+    assert "respond first to the concrete experience" in system
+    assert "Do not invent charitable motives for that third party" in system
+    assert "Do not stop at paraphrasing the counterpart" in system
+    assert "carry some of the conversational weight" in system
+    assert "planned activity is grounded only for its exact supplied window" in system
+
+
+@pytest.mark.asyncio
 async def test_current_world_question_without_matching_authority_fails_closed_before_review() -> None:
     main = _Model(json.dumps({
         "timing_choice": "now",
@@ -1422,6 +1659,28 @@ def _qq_request() -> ModelInput:
             )
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_expression_draft_keeps_visible_text_when_only_audit_metadata_is_missing() -> None:
+    model = _Model(json.dumps({
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "先不想了也好，吃点东西缓一缓。"}],
+        "world_claims": [],
+    }, ensure_ascii=False))
+
+    output = await ChatModelDeliberationAdapter(model=model).propose(_qq_request())
+
+    payload = json.loads(
+        output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+    assert payload["beat_drafts"][0]["inline_text"] == "先不想了也好，吃点东西缓一缓。"
+    assert output.raw_proposal["stance"] == "compiler_default_unspecified"
+    assert output.raw_proposal["brief_rationale"] == (
+        "Model omitted draft metadata; compiler preserved separately validated "
+        "visible content."
+    )
+    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio

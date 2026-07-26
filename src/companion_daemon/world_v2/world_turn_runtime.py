@@ -51,6 +51,9 @@ class WorldTurnRuntime:
         self._runtime = runtime
         self._identities = identities
 
+    async def reconcile_response_expectation_assessment(self) -> bool:
+        return await self._runtime.reconcile_response_expectation_assessment()
+
     async def respond(self, turn: InboundTurn) -> RuntimeOutcome:
         actor, target = self._identities.resolve(
             platform=turn.platform, platform_user_id=turn.platform_user_id

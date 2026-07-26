@@ -121,6 +121,30 @@ class QQC2CSchedulerDiagnostics:
                 "last_decision_reason": world.get(
                     "initiative_last_decision_reason"
                 ),
+                "last_impulse_summary": world.get(
+                    "initiative_last_impulse_summary"
+                ),
+                "last_grounding_outcome": world.get(
+                    "initiative_last_grounding_outcome"
+                ),
+                "grounding_corrected_count": world.get(
+                    "initiative_grounding_corrected_count", 0
+                ),
+                "grounding_rejected_count": world.get(
+                    "initiative_grounding_rejected_count", 0
+                ),
+                "stimulus_source_count": world.get(
+                    "initiative_stimulus_source_count", 0
+                ),
+                "stimulus_merge_window_seconds": world.get(
+                    "initiative_stimulus_merge_window_seconds", 600
+                ),
+                "pending_expectation_count": world.get(
+                    "initiative_pending_expectation_count", 0
+                ),
+                "expectation_status_counts": world.get(
+                    "initiative_expectation_status_counts", {}
+                ),
                 "next_consideration_at": world.get(
                     "initiative_next_consideration_at"
                 ),

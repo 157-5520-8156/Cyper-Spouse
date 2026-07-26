@@ -37,6 +37,7 @@ RESPONSE_EXPECTATION_ADVISORY_VERSION = "response-expectation-view.1"
 _ANSWERABLE_RECEIPT_STATES = frozenset({"provider_accepted", "delivered"})
 
 ExpectationTier = Literal["low", "medium", "high"]
+_TERMINAL_ASSESSMENT_STATES = frozenset({"fulfilled", "superseded"})
 
 
 def _digest(value: object) -> str:
@@ -99,6 +100,11 @@ def pending_response_expectation(
     if len(receipt_refs) != len(projection.execution_receipts):
         raise ValueError("execution receipt projection does not align with committed refs")
     pairs = tuple(zip(receipt_refs, projection.execution_receipts, strict=True))
+    terminal_plan_ids = {
+        item.source_plan_id
+        for item in getattr(projection, "response_expectation_assessments", ())
+        if item.status in _TERMINAL_ASSESSMENT_STATES
+    }
 
     if anchor_event_ref is not None:
         anchor = next((pair for pair in pairs if pair[0].event_id == anchor_event_ref), None)
@@ -123,6 +129,8 @@ def pending_response_expectation(
         )
         if manifest is None:
             return None
+        if manifest.plan_id in terminal_plan_ids:
+            return None
         expectation = manifest.response_expectation
         if logical_time >= expectation.expires_at:
             return None
@@ -141,7 +149,11 @@ def pending_response_expectation(
     candidates = []
     for manifest in projection.expression_plan_manifests:
         expectation = manifest.response_expectation
-        if expectation is None or logical_time >= expectation.expires_at:
+        if (
+            expectation is None
+            or manifest.plan_id in terminal_plan_ids
+            or logical_time >= expectation.expires_at
+        ):
             continue
         beat = next(
             (item for item in manifest.beats if item.beat_id == expectation.source_beat_id),
@@ -169,6 +181,60 @@ def pending_response_expectation(
             0, int((logical_time - delivered_ref.logical_time).total_seconds())
         ),
     )
+
+
+def pending_response_expectation_manifest(
+    projection,
+    *,
+    before_world_revision: int,
+    at_logical_time: datetime | None = None,
+):
+    """Return the exact accepted manifest behind the current inbound advisory."""
+
+    logical_time = at_logical_time or projection.logical_time
+    if logical_time is None:
+        return None
+    receipt_refs = tuple(
+        item
+        for item in projection.committed_world_event_refs
+        if item.event_type == "ExecutionReceiptRecorded"
+    )
+    if len(receipt_refs) != len(projection.execution_receipts):
+        raise ValueError("execution receipt projection does not align with committed refs")
+    delivered_by_action: dict[str, object] = {}
+    for ref, receipt in zip(receipt_refs, projection.execution_receipts, strict=True):
+        if (
+            receipt.observed_state in _ANSWERABLE_RECEIPT_STATES
+            and ref.world_revision < before_world_revision
+        ):
+            prior = delivered_by_action.get(receipt.action_id)
+            if prior is None or ref.world_revision > prior.world_revision:
+                delivered_by_action[receipt.action_id] = ref
+    terminal_plan_ids = {
+        item.source_plan_id
+        for item in getattr(projection, "response_expectation_assessments", ())
+        if item.status in _TERMINAL_ASSESSMENT_STATES
+        and item.world_revision < before_world_revision
+    }
+    candidates = []
+    for manifest in projection.expression_plan_manifests:
+        expectation = manifest.response_expectation
+        if (
+            expectation is None
+            or manifest.plan_id in terminal_plan_ids
+            or logical_time >= expectation.expires_at
+        ):
+            continue
+        beat = next(
+            (item for item in manifest.beats if item.beat_id == expectation.source_beat_id),
+            None,
+        )
+        if beat is None:
+            continue
+        delivered_ref = delivered_by_action.get(beat.action.action_id)
+        if delivered_ref is not None:
+            candidates.append((delivered_ref.world_revision, manifest))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _view(expectation, *, declared_seconds_ago: int) -> PendingResponseExpectationView:
@@ -228,5 +294,6 @@ __all__ = [
     "RESPONSE_EXPECTATION_ADVISORY_VERSION",
     "PendingResponseExpectationView",
     "pending_response_expectation",
+    "pending_response_expectation_manifest",
     "response_expectation_advisory",
 ]

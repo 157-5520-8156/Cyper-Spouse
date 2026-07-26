@@ -29,6 +29,7 @@ from companion_daemon.world_v2.production_turn_application import (
 from companion_daemon.world_v2.proposal_envelope import DecisionProposal
 from companion_daemon.world_v2.response_expectation_view import (
     pending_response_expectation,
+    pending_response_expectation_manifest,
     response_expectation_advisory,
 )
 
@@ -53,6 +54,7 @@ def _fake_projection(
     receipt_state: str = "delivered",
     with_receipt: bool = True,
     receipt_revision: int = 5,
+    assessments=(),
 ):
     action = SimpleNamespace(action_id="action:invite")
     manifest = SimpleNamespace(
@@ -74,6 +76,7 @@ def _fake_projection(
         committed_world_event_refs=(receipt_ref,) if with_receipt else (),
         execution_receipts=(receipt,) if with_receipt else (),
         expression_plan_manifests=(manifest,),
+        response_expectation_assessments=assessments,
     )
 
 
@@ -138,6 +141,22 @@ def test_resolver_never_returns_an_expired_expectation() -> None:
     assert pending_response_expectation(projection) is None
 
 
+def test_resolver_hides_an_expectation_semantically_settled_by_inbound_cognition() -> None:
+    projection = _fake_projection(
+        logical_time=NOW + timedelta(minutes=10),
+        expectation=_expectation(expires_at=NOW + timedelta(hours=1)),
+        assessments=(
+            SimpleNamespace(
+                source_plan_id="plan:invite",
+                status="fulfilled",
+                assessed_at=NOW + timedelta(minutes=2),
+            ),
+        ),
+    )
+
+    assert pending_response_expectation(projection) is None
+
+
 def test_resolver_without_anchor_requires_a_delivered_invitation() -> None:
     delivered = _fake_projection(
         logical_time=NOW + timedelta(minutes=10),
@@ -166,6 +185,31 @@ def test_resolver_revision_bound_hides_expectations_declared_after_the_message()
     assert pending_response_expectation(projection, before_world_revision=5) is None
     later = pending_response_expectation(projection, before_world_revision=6)
     assert later is not None and later.hoped_response == HOPED
+
+
+def test_historical_manifest_ignores_a_terminal_assessment_from_a_later_message() -> None:
+    projection = _fake_projection(
+        logical_time=NOW + timedelta(minutes=30),
+        expectation=_expectation(expires_at=NOW + timedelta(hours=1)),
+        receipt_revision=5,
+        assessments=(
+            SimpleNamespace(
+                source_plan_id="plan:invite",
+                status="fulfilled",
+                assessed_at=NOW + timedelta(minutes=20),
+                world_revision=8,
+            ),
+        ),
+    )
+
+    manifest = pending_response_expectation_manifest(
+        projection,
+        before_world_revision=7,
+        at_logical_time=NOW + timedelta(minutes=10),
+    )
+
+    assert manifest is not None
+    assert manifest.plan_id == "plan:invite"
 
 
 def test_advisory_carries_the_semantic_summary_without_expectation_authority() -> None:

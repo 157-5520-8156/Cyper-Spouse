@@ -155,6 +155,73 @@ def test_projection_performance_counters_distinguish_head_reads_from_history_rep
     reopened.close()
 
 
+def test_sqlite_migrates_verified_v35_head_without_rewriting_events(tmp_path) -> None:
+    path = tmp_path / "world-v2-v35-head.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-v35-migration", "obs-v35-migration")],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    expected = ledger.project()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        current_state = ReducerState.model_validate_json(
+            read_head_state_json(connection, "world-sqlite-test")
+        )
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                current_state.semantic_payload(
+                    world_id="world-sqlite-test",
+                    world_revision=expected.world_revision,
+                    reducer_bundle_version="world-v2-reducers.35",
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        legacy_state = current_state.model_dump(mode="json")
+        legacy_state.pop("response_expectation_assessments")
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM world_v2_events WHERE world_id = ?",
+            ("world-sqlite-test",),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            UPDATE world_v2_heads
+            SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
+            WHERE world_id = ?
+            """,
+            (
+                json.dumps(legacy_state, ensure_ascii=False, separators=(",", ":")),
+                legacy_hash,
+                "world-v2-reducers.35",
+                "world-sqlite-test",
+            ),
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert reopened.project() == expected
+    assert reopened.rebuild() == expected
+    reopened.close()
+    with sqlite3.connect(path) as connection:
+        migrated = connection.execute(
+            """
+            SELECT reducer_bundle_version
+            FROM world_v2_heads
+            WHERE world_id = ?
+            """,
+            ("world-sqlite-test",),
+        ).fetchone()
+        assert migrated == (REDUCER_BUNDLE_VERSION,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM world_v2_events WHERE world_id = ?",
+            ("world-sqlite-test",),
+        ).fetchone()[0] == event_count
+
+
 def test_commit_seeded_head_cache_invalidates_on_external_append(tmp_path) -> None:
     path = tmp_path / "commit-seeded-head-external-append.sqlite3"
     left = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")

@@ -32,7 +32,7 @@ _EPISTEMIC_NON_ASSERTION = re.compile(
 _SUBJECTIVE_OR_HYPOTHETICAL = re.compile(
     r"(?:如果|要是|也许|可能|假如|本来想|打算|希望)"
     r"|我.{0,8}(?:觉得|感觉|在想|想起|希望|担心|在意|难过|开心|生气|失望|走神|"
-    r"犹豫|介意|好奇|喜欢|讨厌|不舒服)"
+    r"犹豫|介意|好奇|喜欢|讨厌|不舒服|听着.{0,4}麻|头大|无语|心累)"
 )
 _SHARED_HISTORY = re.compile(
     r"你.{0,10}(?:上次|之前|以前|刚才|刚刚|说过|提过|推荐过|答应过|发过|给过|聊过)"
@@ -57,16 +57,31 @@ _CURRENT_AUTOBIOGRAPHY = re.compile(
     rf"|(?:现在|此刻|这会儿).{{0,10}}{_SPEAKER}.{{0,8}}(?:在)?{_EVENT_VERB}"
     rf"|{_SPEAKER}.{{0,10}}(?:现在|此刻|这会儿).{{0,8}}(?:在)?{_EVENT_VERB}"
 )
+_NEGATIVE_SCHEDULE_CLAIM = re.compile(
+    r"我.{0,10}(?:没有|没).{0,10}(?:安排|打算|计划)"
+)
 _PAST_AUTOBIOGRAPHY = re.compile(
     rf"{_PAST_TIME}.{{0,12}}{_SPEAKER}.{{0,8}}{_EVENT_VERB}"
     rf"|{_SPEAKER}.{{0,12}}{_PAST_TIME}.{{0,8}}{_EVENT_VERB}"
     rf"|{_SPEAKER}.{{0,10}}{_EVENT_VERB}.{{0,4}}(?:了|过)"
+)
+# Common conversational ellipsis omits “我” while still plainly asserting
+# the speaker's recent offline state.  These phrases previously let “刚睡醒”
+# and “刚忙完” bypass the same source contract as “我刚睡醒”.
+_ELLIPTICAL_PAST_AUTOBIOGRAPHY = re.compile(
+    r"(?:^|就是|才)(?:刚|刚刚)(?:睡醒|起床|忙完|吃完|回来|到家|下课|开完会)"
 )
 _NEAR_FUTURE_SELF_ACTIVITY = re.compile(
     r"^(?:那)?我(?:正好)?(?:也)?(?:先|待会儿?|等会儿?|一会儿?|晚点|准备|打算|想|去)?"
     r"(?:翻翻?书|看(?:一会儿?|会儿?)?书|读(?:一会儿?|会儿?)?书|洗澡|洗漱|出门|"
     r"出去|散步|跑步|运动|做饭|吃饭|睡觉|睡了|收拾(?:一下)?|整理(?:一下)?|"
     r"忙(?:一会儿?|会儿?)?)"
+)
+_ELLIPTICAL_NEAR_FUTURE_SELF_ACTIVITY = re.compile(
+    r"^(?:可能|大概|也许|应该会|准备|打算|待会儿?|等会儿?|一会儿?|晚点)"
+    r"(?:先|去|会|想)?(?:翻翻?书|看(?:一会儿?|会儿?)?书|读(?:一会儿?|会儿?)?书|"
+    r"洗澡|洗漱|出门|出去|散步|跑步|运动|做饭|吃饭|睡觉|睡了|收拾(?:一下)?|"
+    r"整理(?:一下)?|忙(?:一会儿?|会儿?)?)"
 )
 
 
@@ -103,7 +118,12 @@ def grounded_claim_scope_evidence(
                 _add("shared_history", clause)
             if _CURRENT_AUTOBIOGRAPHY.search(clause):
                 _add("current_world", clause)
-            elif _PAST_AUTOBIOGRAPHY.search(clause):
+            elif _NEGATIVE_SCHEDULE_CLAIM.search(clause):
+                _add("current_world", clause)
+            elif (
+                _PAST_AUTOBIOGRAPHY.search(clause)
+                or _ELLIPTICAL_PAST_AUTOBIOGRAPHY.search(clause)
+            ):
                 _add("past_world", clause)
     return {scope: tuple(clauses) for scope, clauses in evidence.items()}
 
@@ -138,12 +158,18 @@ def require_grounded_claim_declarations(
             if (
                 isinstance(scope, str)
                 and scope in {
-                    "current_world", "past_world", "shared_history", "stable_identity"
+                    "current_world",
+                    "past_world",
+                    "counterpart_history",
+                    "shared_history",
+                    "stable_identity",
                 }
                 and isinstance(refs, list)
                 and bool(refs)
             ):
                 declared.add(scope)
+    if "counterpart_history" in declared:
+        declared.add("shared_history")
     missing = sorted(frozenset(scope_evidence) - declared)
     if _STABLE_OR_PAST in missing:
         missing.remove(_STABLE_OR_PAST)
@@ -186,7 +212,10 @@ def require_structured_life_intent(
     for text in texts:
         for raw_clause in _CLAUSE_BREAK.split(text):
             clause = raw_clause.strip()
-            if clause and _NEAR_FUTURE_SELF_ACTIVITY.search(clause):
+            if clause and (
+                _NEAR_FUTURE_SELF_ACTIVITY.search(clause)
+                or _ELLIPTICAL_NEAR_FUTURE_SELF_ACTIVITY.search(clause)
+            ):
                 raise ValueError(
                     "first-person near-future activity requires a structured life_intent "
                     "with a reviewed activity token"

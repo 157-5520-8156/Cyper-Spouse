@@ -834,6 +834,7 @@ class ProactiveExpressionSourceBinding(FrozenModel):
         "spontaneous_contact",
         "response_gap",
         "ambient_presence",
+        "situation_change",
     ]
     source_event_ref: BoundedRef
     source_payload_hash: str = Field(pattern=_HASH_PATTERN)
@@ -852,12 +853,25 @@ class ProactiveOpportunityDecision(FrozenModel):
         "spontaneous_contact",
         "response_gap",
         "ambient_presence",
+        "situation_change",
     ]
     source_event_ref: BoundedRef
     source_payload_hash: str = Field(pattern=_HASH_PATTERN)
     source_world_revision: int = Field(ge=1)
-    disposition: Literal["engage_now", "engage_later", "silent_after_consideration"]
-    decision_origin: Literal["model", "local_failsafe"]
+    disposition: Literal[
+        "engage_now",
+        "engage_later",
+        "silent_after_consideration",
+        "grounding_rejected",
+    ]
+    decision_origin: Literal["model", "local_failsafe", "grounding_gate"]
+
+
+class ResponseExpectationAssessmentDraft(FrozenModel):
+    """Model judgement whose event identities are supplied by the host."""
+
+    status: Literal["fulfilled", "superseded", "still_pending", "uncertain"]
+    reason: str = Field(min_length=1, max_length=240)
 
 
 class ResponseExpectationDraftPayload(FrozenModel):
@@ -1315,6 +1329,15 @@ class DecisionProposal(ProposalEnvelope):
     proactive_opportunity_decision: ProactiveOpportunityDecision | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    impulse_summary: str | None = Field(
+        default=None, min_length=1, max_length=240, exclude_if=lambda value: value is None
+    )
+    proactive_grounding_outcome: Literal[
+        "not_required", "accepted", "corrected", "rejected"
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
+    response_expectation_assessment: ResponseExpectationAssessmentDraft | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     stance: BoundedLabel
     display_strategy: BoundedLabel
     # Timing and modality are orthogonal model decisions.  The ordinary reply
@@ -1409,6 +1432,9 @@ class MinimalProposal(ProposalEnvelope):
     response_text: str = Field(min_length=1, max_length=4_096)
     stance: Literal["defer", "acknowledge_briefly", "answer_without_world_claims"]
     fact_claims: tuple[()] = ()
+    response_expectation_assessment: ResponseExpectationAssessmentDraft | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def minimal_authority_cannot_smuggle_persistent_or_external_work(self) -> Self:

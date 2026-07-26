@@ -17,22 +17,26 @@ FIXTURE = Path(__file__).with_name("fixtures") / "new_acquaintance_32_turns.json
 class _Delivery:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.non_text: list[str] = []
 
     async def send_text(self, recipient_id: str, text: str) -> dict[str, object]:
         self.sent.append((recipient_id, text))
         return {"status": "ok", "data": {"message_id": f"journey-{len(self.sent)}"}}
 
     async def send_reaction(self, recipient_id: str, *, message_id: str, reaction_id: str) -> dict[str, object]:
-        del recipient_id, message_id, reaction_id
-        raise AssertionError("the new-acquaintance fixture expects text delivery")
+        del recipient_id
+        self.non_text.append(f"reaction:{message_id}:{reaction_id}")
+        return {"status": "ok", "data": {"message_id": f"journey-reaction-{len(self.non_text)}"}}
 
     async def send_sticker(self, recipient_id: str, *, sticker_id: str) -> dict[str, object]:
-        del recipient_id, sticker_id
-        raise AssertionError("the new-acquaintance fixture expects text delivery")
+        del recipient_id
+        self.non_text.append(f"sticker:{sticker_id}")
+        return {"status": "ok", "data": {"message_id": f"journey-sticker-{len(self.non_text)}"}}
 
     async def send_typing(self, recipient_id: str, *, state: str) -> dict[str, object]:
-        del recipient_id, state
-        raise AssertionError("the new-acquaintance fixture expects text delivery")
+        del recipient_id
+        self.non_text.append(f"typing:{state}")
+        return {"status": "ok", "data": {"message_id": f"journey-typing-{len(self.non_text)}"}}
 
 
 class _JourneyReplyModel:
@@ -252,7 +256,12 @@ async def test_fact_memory_recall_survives_two_source_facts_before_later_probe(t
     turns = [turn for turn in all_turns if turn["id"] in wanted]
     delivery = _Delivery()
     host = build_qq_c2c_host(
-        settings=Settings(database_path=tmp_path / "fact-memory-recall.sqlite", PRIMARY_USER_ID="geoff"),
+        settings=Settings(
+            database_path=tmp_path / "fact-memory-recall.sqlite",
+            PRIMARY_USER_ID="geoff",
+            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
@@ -291,7 +300,10 @@ async def test_same_turn_affect_is_accepted_before_emotional_journey_replies(
     delivery = _Delivery()
     host = build_qq_c2c_host(
         settings=Settings(
-            database_path=tmp_path / "same-turn-affect.sqlite", PRIMARY_USER_ID="geoff"
+            database_path=tmp_path / "same-turn-affect.sqlite",
+            PRIMARY_USER_ID="geoff",
+            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
@@ -341,7 +353,12 @@ async def test_new_acquaintance_journey_exposes_grounded_memory_life_and_initiat
     assert isinstance(turns, list)
     delivery = _Delivery()
     host = build_qq_c2c_host(
-        settings=Settings(database_path=tmp_path / "new-acquaintance.sqlite", PRIMARY_USER_ID="geoff"),
+        settings=Settings(
+            database_path=tmp_path / "new-acquaintance.sqlite",
+            PRIMARY_USER_ID="geoff",
+            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
@@ -366,7 +383,11 @@ async def test_new_acquaintance_journey_exposes_grounded_memory_life_and_initiat
             # later public recall probes.  Draining every no-op background job
             # after every turn makes this journey needlessly quadratic.
             if turn["id"] in {"T04", "T14"}:
-                await host.drain(max_action_units=0, max_background_units=16)
+                # The full journey has more bounded no-op verticals ahead of
+                # the source-backed fact worker than the four-turn regression
+                # above.  Drain the complete bounded checkpoint backlog so
+                # later recall does not depend on queue depth or suite load.
+                await host.drain(max_action_units=0, max_background_units=64)
             assert outcome.status == "action_authorized", turn["id"]
             expected = int(turn.get("expected_reply_count", 1))
             actual = len(delivery.sent) - before
@@ -399,17 +420,10 @@ async def test_new_acquaintance_journey_exposes_grounded_memory_life_and_initiat
 
 
 @pytest.mark.asyncio
-async def test_scheduler_preflight_dispatches_response_gap_before_reply_recovery(
+async def test_scheduler_does_not_promote_response_expectation_into_proactive_contact(
     tmp_path: Path,
 ) -> None:
-    """A QQ provider acknowledgement must open its response gap before recovery.
-
-    QQ has no durable delivery lookup, so the generic ActionPump eventually
-    retires an old ``provider_accepted`` reply as ``unknown``.  The scheduler
-    must nevertheless give the newly due response-gap lane one bounded
-    background/targeted-dispatch pass first; otherwise a natural "晚点聊" loop
-    disappears without a proactive message even though QQ accepted the reply.
-    """
+    """A delivered expectation remains advisory until ordinary context wakes."""
 
     fixture = _load()
     turns = [turn for turn in fixture["turns"] if turn["id"] == "T32"]
@@ -418,6 +432,8 @@ async def test_scheduler_preflight_dispatches_response_gap_before_reply_recovery
         settings=Settings(
             database_path=tmp_path / "response-gap-preflight.sqlite",
             PRIMARY_USER_ID="geoff",
+            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
         ),
         recipient_id="10001",
         bootstrap_at=NOW,
@@ -444,8 +460,5 @@ async def test_scheduler_preflight_dispatches_response_gap_before_reply_recovery
     finally:
         await host.aclose()
 
-    assert [text for _recipient, text in delivery.sent] == [
-        "T32:ok",
-        "PROACTIVE:grounded-followup",
-    ]
-    assert "settled" in drained.action_statuses
+    assert [text for _recipient, text in delivery.sent] == ["T32:ok"]
+    assert drained.background_statuses

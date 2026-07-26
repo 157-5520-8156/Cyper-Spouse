@@ -23,6 +23,7 @@ from .proposal_envelope import (
     DecisionProposal,
     ProposalActionIntent,
     ProposalEvidenceRef,
+    ResponseExpectationAssessmentDraft,
     TypedChange,
     VariationProfile,
 )
@@ -170,6 +171,7 @@ class WorldClaimDraft(FrozenModel):
     scope: Literal[
         "current_world",
         "past_world",
+        "counterpart_history",
         "shared_history",
         "stable_identity",
         "subjective_or_hypothetical",
@@ -178,7 +180,9 @@ class WorldClaimDraft(FrozenModel):
 
     @model_validator(mode="after")
     def source_shape_matches_scope(self) -> "WorldClaimDraft":
-        grounded = self.scope in {"current_world", "past_world", "shared_history"}
+        grounded = self.scope in {
+            "current_world", "past_world", "counterpart_history", "shared_history"
+        }
         if grounded and not self.source_refs:
             raise ValueError("world claim scope requires matching source refs")
         if self.scope == "subjective_or_hypothetical" and self.source_refs:
@@ -200,6 +204,7 @@ class ExpressionDraft(FrozenModel):
     confidence: int = Field(default=5_000, ge=0, le=10_000)
     variation_profile: VariationProfile | None = None
     response_expectation: ResponseExpectationDraft | None = None
+    response_expectation_assessment: ResponseExpectationAssessmentDraft | None = None
     world_claims: tuple[WorldClaimDraft, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
@@ -265,6 +270,42 @@ def _slice_source_tokens(context: dict[str, object], *slice_names: str) -> set[s
     return tokens
 
 
+def world_claim_source_tokens(
+    context: dict[str, object], *slice_names: str
+) -> set[str]:
+    """Return the exact source tokens exposed by selected pinned Context lanes."""
+
+    return _slice_source_tokens(context, *slice_names)
+
+
+def _has_response_expectation_advisory(context: dict[str, object]) -> bool:
+    slices = context.get("slices")
+    if not isinstance(slices, dict):
+        return False
+    advisories = slices.get("advisories")
+    if not isinstance(advisories, dict):
+        return False
+    items = advisories.get("items")
+    if not isinstance(items, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("value"), dict)
+        and item["value"].get("kind") == "response_expectation"
+        for item in items
+    )
+
+
+def request_requires_response_expectation_assessment(request: ModelInput) -> bool:
+    """Whether this exact pinned cognition must return the four-state judgement."""
+
+    try:
+        context = json.loads(request.model_content_json)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(context, dict) and _has_response_expectation_advisory(context)
+
+
 def _validate_world_claims(*, draft: ExpressionDraft, request: ModelInput) -> None:
     try:
         context = json.loads(request.model_content_json)
@@ -272,12 +313,22 @@ def _validate_world_claims(*, draft: ExpressionDraft, request: ModelInput) -> No
         raise ValueError("world claim validation requires Context JSON") from exc
     if not isinstance(context, dict):
         raise ValueError("world claim validation requires a Context object")
+    if (
+        request_requires_response_expectation_assessment(request)
+        and draft.response_expectation_assessment is None
+    ):
+        raise ValueError(
+            "pending response expectation requires a same-cognition assessment"
+        )
     allowed = {
         "current_world": _slice_source_tokens(
             context, "current_situation", "world_life"
         ),
         "past_world": _slice_source_tokens(
             context, "world_life", "recent_experiences"
+        ),
+        "counterpart_history": _slice_source_tokens(
+            context, "recent_dialogue", "user_facts"
         ),
         "shared_history": _slice_source_tokens(
             context, "recent_dialogue", "recent_experiences"
@@ -400,6 +451,7 @@ def materialize_expression_draft(
             evidence_refs=evidence,
             confidence=draft.confidence,
             brief_rationale=draft.brief_rationale,
+            response_expectation_assessment=draft.response_expectation_assessment,
             behavior_tendency="remain_silent",
             variation_profile=draft.variation_profile,
             stance=draft.stance,
@@ -505,6 +557,7 @@ def materialize_expression_draft(
         action_intents=tuple(intents),
         confidence=draft.confidence,
         brief_rationale=draft.brief_rationale,
+        response_expectation_assessment=draft.response_expectation_assessment,
         behavior_tendency="respond" if draft.timing_choice == "now" else "defer",
         variation_profile=draft.variation_profile,
         stance=draft.stance,
@@ -559,4 +612,5 @@ __all__ = [
     "TEXT_ONLY_EXPRESSION_CAPABILITIES",
     "materialize_expression_draft",
     "qq_expression_capabilities",
+    "request_requires_response_expectation_assessment",
 ]
