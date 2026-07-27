@@ -53,6 +53,7 @@ from .semantic_chat_composition import (
 from .expression_draft import qq_expression_capabilities
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
 from .recall_embedding import configured_recall_embedding
+from .recall_index import RecallEmbedding
 
 
 _LOG = logging.getLogger(__name__)
@@ -956,6 +957,7 @@ def build_qq_c2c_host(
     model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
+    source_closure_model: ChatCompletionModel | None = None,
     delivery: QQC2CDelivery | None = None,
     media_transport: MediaProviderTransport | None = None,
     media_preview: MediaPreviewDeployment | None = None,
@@ -964,6 +966,11 @@ def build_qq_c2c_host(
     perception_transport: PerceptionTransport | None = None,
     perception_budget_limit: int = 0,
     quick_reaction_model: ChatCompletionModel | None = None,
+    ingress_now: Callable[[], datetime] | None = None,
+    ingress_sleep: Callable[[float], Awaitable[None]] | None = None,
+    semantic_recall_embedding: RecallEmbedding | None = None,
+    use_configured_recall_embedding: bool = True,
+    interactive_turn_budget_policy: InteractiveTurnBudgetPolicy | None = None,
 ) -> QQC2CHost:
     """Compose the C2C lane without importing legacy chat/runtime code.
 
@@ -971,6 +978,13 @@ def build_qq_c2c_host(
     binds result bytes to idempotency keys and supports recovery lookup.  QQ
     delivery itself is deliberately text-only and is never used as an image
     provider fallback.
+
+    ``ingress_now`` and ``ingress_sleep`` are the wall-clock seam that
+    :class:`QQC2CHost` has always accepted but that no builder forwarded.  They
+    exist so an offline harness can replay a conversation without waiting out
+    the real sender-rhythm hold.  They affect only wall-clock pacing: logical
+    time, ledger content, and every world decision are unchanged.  Production
+    leaves both ``None`` and keeps the real clock and real sleep.
     """
 
     if not recipient_id:
@@ -979,12 +993,15 @@ def build_qq_c2c_host(
         settings.qq_adapter,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
     )
-    interactive_turn_budget_policy = InteractiveTurnBudgetPolicy()
+    interactive_turn_budget_policy = (
+        interactive_turn_budget_policy or InteractiveTurnBudgetPolicy()
+    )
     semantic_chat = build_semantic_chat_composition(
         settings=settings,
         flash_model=model,
         thinking_model=thinking_model,
         advisory_model=advisory_model,
+        source_closure_model=source_closure_model,
         model_id_prefix="qq-c2c-v2",
         expression_capabilities=expression_capabilities,
     )
@@ -996,6 +1013,9 @@ def build_qq_c2c_host(
         recipients_by_target={qq_c2c_target(recipient_id): recipient_id},
         now=lambda: datetime.now(UTC),
     )
+    resolved_recall_embedding = semantic_recall_embedding
+    if resolved_recall_embedding is None and use_configured_recall_embedding:
+        resolved_recall_embedding = configured_recall_embedding(settings)
     application = build_sqlite_world_v2_turn_application(
         path=Path(settings.database_path),
         config=WorldV2TurnApplicationConfig(
@@ -1063,7 +1083,7 @@ def build_qq_c2c_host(
         # local appraisal client through the adapter seam; tests inject a
         # fixture model here to exercise the lane against a fake NapCat.
         quick_reaction_model=quick_reaction_model,
-        semantic_recall_embedding=configured_recall_embedding(settings),
+        semantic_recall_embedding=resolved_recall_embedding,
         now=bootstrap_at or datetime.now(UTC),
     )
     typing_signal = None
@@ -1080,6 +1100,8 @@ def build_qq_c2c_host(
         canonical_user_id=settings.primary_user_id,
         semantic_chat=semantic_chat,
         ingress_store=SQLiteQQIngressStore(Path(settings.database_path)),
+        ingress_now=ingress_now,
+        ingress_sleep=ingress_sleep if ingress_sleep is not None else asyncio.sleep,
         typing_signal=typing_signal,
         interactive_turn_budget_policy=interactive_turn_budget_policy,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),

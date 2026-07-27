@@ -894,6 +894,21 @@ class ResponseExpectationDraftPayload(FrozenModel):
         return self
 
 
+class ExpressionPlanWorldClaim(FrozenModel):
+    """Audited source declaration retained with the expression proposal."""
+
+    claim_text: str = Field(min_length=1, max_length=512)
+    scope: Literal[
+        "current_world",
+        "past_world",
+        "counterpart_history",
+        "shared_history",
+        "stable_identity",
+        "subjective_or_hypothetical",
+    ]
+    source_refs: list[BoundedRef] = Field(default_factory=list, max_length=8)
+
+
 class ExpressionPlanPayload(FrozenModel):
     plan_id: BoundedRef
     overall_intent: str = Field(min_length=1, max_length=240)
@@ -909,6 +924,7 @@ class ExpressionPlanPayload(FrozenModel):
     response_expectation: ResponseExpectationDraftPayload | None = None
     event_share_claim: EventShareClaimBinding | None = None
     proactive_source_binding: ProactiveExpressionSourceBinding | None = None
+    world_claims: list[ExpressionPlanWorldClaim] = Field(default_factory=list, max_length=8)
 
 
 class PhotoCandidatePayload(FrozenModel):

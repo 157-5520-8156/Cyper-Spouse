@@ -1,13 +1,35 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
 from companion_daemon.world_v2.fact_memory_draft import (
     FactMemoryDraftAdapter,
+    FactMemoryDraftTechnicalFailure,
     materialize_fact_memory_draft,
 )
+
+
+class _BlockedChat:
+    model = "blocked-fact-memory"
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        del messages, temperature
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_fact_memory_provider_has_a_stable_total_deadline() -> None:
+    with pytest.raises(FactMemoryDraftTechnicalFailure) as failure:
+        await FactMemoryDraftAdapter(
+            model=_BlockedChat(),
+            timeout_seconds=0.1,
+        ).classify(predicate_code="preference.likes", source_text="我喜欢乌龙茶。")
+
+    assert failure.value.failure_code == "provider_timeout"
 
 
 def _retained() -> dict[str, object]:
@@ -66,6 +88,8 @@ class _Chat:
     model = "test-memory"
 
     async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert "emotional_residue" in messages[0]["content"]
+        assert "relationship_continuity" in messages[0]["content"]
         assert "乌龙茶" in messages[1]["content"]
         assert temperature == 0.15
         return json.dumps(_retained())

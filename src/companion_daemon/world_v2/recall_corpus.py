@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 
 from pydantic import Field
 
-from .context_capsule import FactRecallItem
+from .context_capsule import FactRecallItem, HistoricalFactRecallItem
+from .fact_reducers import INSTALLED_FACT_PREDICATE_GUIDE
 from .memory_retrieval import MemoryRetrievalItem
 from .recall_index import (
     RecallCursor,
@@ -41,6 +43,7 @@ class RecallCorpusSources(FrozenModel):
 
     recent_dialogue: tuple[RecentDialogueItem, ...] = ()
     relevant_facts: tuple[FactRecallItem, ...] = ()
+    historical_facts: tuple[HistoricalFactRecallItem, ...] = ()
     open_threads: tuple[ThreadProjection, ...] = ()
     recent_experiences: tuple[ExperienceProjection, ...] = ()
     world_life: tuple[WorldLifeContextItem, ...] = ()
@@ -49,6 +52,56 @@ class RecallCorpusSources(FrozenModel):
     private_impressions: tuple[PrivateImpressionProjection, ...] = ()
     authority_bindings: tuple[RecallSourceBinding, ...] = Field(
         default=(), max_length=4_096
+    )
+
+
+def required_recall_authority_refs(sources: RecallCorpusSources) -> frozenset[str]:
+    """Return only immutable event refs reachable from the bounded corpus."""
+
+    refs: set[str] = set()
+    for item in sources.recent_dialogue:
+        refs.update(claim.authority_event_ref for claim in item.source_claims)
+    for item in sources.relevant_facts:
+        refs.update((item.accepted_fact_event_ref, item.observation_event_ref))
+    for item in sources.historical_facts:
+        refs.update((item.accepted_fact_event_ref, item.observation_event_ref))
+    for item in sources.open_threads:
+        refs.add(item.origin.accepted_event_ref)
+        refs.update(ref.ref_id for ref in item.values.source_evidence_refs)
+        refs.update(ref.ref_id for ref in item.values.anchor_evidence_refs)
+    for item in sources.recent_experiences:
+        refs.add(item.origin.accepted_event_ref)
+        refs.update(
+            binding.authority_event_ref for binding in item.values.source_bindings
+        )
+    for item in sources.world_life:
+        refs.add(item.source.authority_event_ref)
+        if item.content is not None:
+            refs.add(item.content.descriptor_event_ref)
+    for item in sources.active_memory_candidates:
+        refs.update(
+            excerpt.authority_event_ref for excerpt in item.source_excerpts
+        )
+    for item in sources.appraisals:
+        refs.add(item.origin.accepted_event_ref)
+        refs.update(ref.ref_id for ref in item.evidence_refs)
+    for item in sources.private_impressions:
+        refs.update(item.source_refs)
+        if item.origin is not None:
+            refs.add(item.origin.accepted_event_ref)
+    return frozenset(ref for ref in refs if ref)
+
+
+def select_recall_authority_bindings(
+    *,
+    sources: RecallCorpusSources,
+    candidates: Iterable[RecallSourceBinding],
+) -> tuple[RecallSourceBinding, ...]:
+    """Select the source closure without scaling with total ledger history."""
+
+    required = required_recall_authority_refs(sources)
+    return _canonical_bindings(
+        tuple(binding for binding in candidates if binding.ref in required)
     )
 
 
@@ -146,6 +199,19 @@ class RecallCorpusCompiler:
             )
 
         facts_by_id = {item.fact_id: item for item in sources.relevant_facts}
+        fact_memory_links: dict[str, set[str]] = {}
+        for candidate in sources.active_memory_candidates:
+            for excerpt in candidate.source_excerpts:
+                if excerpt.source_kind != "fact" or excerpt.source_id not in facts_by_id:
+                    continue
+                fact_memory_links.setdefault(excerpt.source_id, set()).update(
+                    {
+                        candidate.candidate_id,
+                        candidate.cue_kind,
+                        f"retrieval_strength_bp:{candidate.retrieval_strength_bp}",
+                        *candidate.retention_rationales,
+                    }
+                )
         for item in sources.relevant_facts:
             bindings = _canonical_bindings(
                 (
@@ -178,11 +244,76 @@ class RecallCorpusCompiler:
                     source_slice="relevant_facts",
                     bindings=bindings,
                     text=item.source_excerpt,
+                    retrieval_text=(
+                        "Exact source statement: "
+                        f"{item.source_excerpt}\n"
+                        "Semantic fact slot: "
+                        f"{INSTALLED_FACT_PREDICATE_GUIDE[item.predicate_code]}"
+                        if item.predicate_code in INSTALLED_FACT_PREDICATE_GUIDE
+                        else None
+                    ),
                     actor_ref=actor_ref,
                     subject_refs=_subjects(item.subject_ref),
-                    link_refs=(item.predicate_code, item.source_observation_id),
-                    occurred_from=item.committed_at,
-                    valid_from=item.committed_at,
+                    link_refs=(
+                        item.predicate_code,
+                        item.source_observation_id,
+                        *fact_memory_links.get(item.fact_id, ()),
+                    ),
+                    occurred_from=item.occurred_at,
+                    valid_from=item.updated_at,
+                    privacy_class=item.privacy_class,
+                )
+            )
+
+        for item in sources.historical_facts:
+            bindings = _canonical_bindings(
+                (
+                    self._prefer_binding(
+                        authority=authority,
+                        fallback=RecallSourceBinding(
+                            source_kind="committed_event",
+                            authority_type="FactAuthorityEvent",
+                            ref=item.accepted_fact_event_ref,
+                            source_world_revision=item.accepted_fact_world_revision,
+                            immutable_hash=item.accepted_fact_payload_hash,
+                        ),
+                    ),
+                    self._prefer_binding(
+                        authority=authority,
+                        fallback=RecallSourceBinding(
+                            source_kind="committed_event",
+                            authority_type="ObservationRecorded",
+                            ref=item.observation_event_ref,
+                            source_world_revision=item.observation_world_revision,
+                            immutable_hash=item.observation_event_payload_hash,
+                        ),
+                    ),
+                )
+            )
+            documents.append(
+                self._document(
+                    memory_kind="semantic",
+                    source_item_ref=(
+                        f"{item.fact_id}:historical:{item.accepted_fact_world_revision}"
+                    ),
+                    source_slice="relevant_facts",
+                    bindings=bindings,
+                    text=item.source_excerpt,
+                    retrieval_text=(
+                        "Exact historical source statement: "
+                        f"{item.source_excerpt}\n"
+                        "Semantic fact slot: "
+                        f"{INSTALLED_FACT_PREDICATE_GUIDE[item.predicate_code]}"
+                        if item.predicate_code in INSTALLED_FACT_PREDICATE_GUIDE
+                        else None
+                    ),
+                    actor_ref=actor_ref,
+                    subject_refs=_subjects(item.subject_ref),
+                    link_refs=(item.fact_id, item.predicate_code, item.source_observation_id),
+                    occurred_from=item.occurred_at,
+                    valid_from=item.valid_from,
+                    valid_to=item.valid_to,
+                    status="superseded",
                     privacy_class=item.privacy_class,
                 )
             )
@@ -195,9 +326,11 @@ class RecallCorpusCompiler:
                 fact = facts_by_id.get(excerpt.source_id)
                 experience = experiences_by_id.get(excerpt.source_id)
                 if excerpt.source_kind == "fact" and fact is not None:
-                    occurred_from = fact.committed_at
-                    occurred_to = None
-                    item_subjects = _subjects(fact.subject_ref)
+                    # Fact-backed retrieval state enriches the canonical Fact
+                    # document above. Emitting a second document for the same
+                    # semantic authority would let one fact occupy two of the
+                    # six bounded hits and crowd out unrelated memories.
+                    continue
                 elif excerpt.source_kind == "experience" and experience is not None:
                     occurred_from = experience.values.occurred_from
                     occurred_to = experience.values.occurred_to
@@ -443,6 +576,7 @@ class RecallCorpusCompiler:
         source_slice: str,
         bindings: tuple[RecallSourceBinding, ...],
         text: str,
+        retrieval_text: str | None = None,
         actor_ref: str,
         subject_refs: tuple[str, ...],
         link_refs: tuple[str, ...] = (),
@@ -473,6 +607,9 @@ class RecallCorpusCompiler:
             # archive.  The immutable binding still points to the complete
             # authority while this prefix keeps the replay audit compact.
             text=text[:1_024],
+            retrieval_text=(
+                retrieval_text[:4_096] if retrieval_text is not None else None
+            ),
             actor_ref=actor_ref,
             subject_refs=_subjects(*subject_refs),
             link_refs=_subjects(*link_refs),
@@ -490,4 +627,6 @@ __all__ = [
     "RecallCorpusCompiler",
     "RecallCorpusSources",
     "MAX_RECALL_CORPUS_DOCUMENTS",
+    "required_recall_authority_refs",
+    "select_recall_authority_bindings",
 ]

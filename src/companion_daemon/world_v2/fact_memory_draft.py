@@ -8,7 +8,9 @@ memory policy already understands.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Protocol
 
 from .model_json import extract_json_object_text
@@ -21,6 +23,9 @@ from .schemas import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class FactMemoryDraftChatModel(Protocol):
     model: str
 
@@ -31,6 +36,14 @@ class FactMemoryRetentionDraft(FrozenModel):
     cue_kind: MemoryCueKind
     retention_rationales: tuple[MemoryRetentionRationale, ...]
     salience: MemorySalienceVector
+
+
+class FactMemoryDraftTechnicalFailure(RuntimeError):
+    """The bounded retention route failed to produce a valid decision."""
+
+    def __init__(self, failure_code: str) -> None:
+        super().__init__(failure_code)
+        self.failure_code = failure_code
 
 
 def _parse(raw: str) -> dict[str, object]:
@@ -48,38 +61,115 @@ class FactMemoryDraftAdapter:
 
     VERSION = "fact-memory-draft.1"
 
-    def __init__(self, *, model: FactMemoryDraftChatModel, temperature: float = 0.15) -> None:
+    def __init__(
+        self,
+        *,
+        model: FactMemoryDraftChatModel,
+        temperature: float = 0.15,
+        timeout_seconds: float = 8.0,
+    ) -> None:
         if not 0 <= temperature <= 2:
             raise ValueError("Fact-memory temperature must be between 0 and 2")
+        if not 0.1 <= timeout_seconds <= 30:
+            raise ValueError("Fact-memory timeout must be between 0.1 and 30 seconds")
         self._model = model
         self._temperature = temperature
+        self._timeout_seconds = timeout_seconds
+
+    @property
+    def model_id(self) -> str:
+        return str(getattr(self._model, "model", "fact-memory-classifier"))
+
+    @property
+    def adapter_version(self) -> str:
+        return self.VERSION
 
     async def classify(
         self, *, predicate_code: str, source_text: str
     ) -> FactMemoryRetentionDraft | None:
-        messages = self._messages(predicate_code=predicate_code, source_text=source_text)
-        raw = await self._complete(messages)
         try:
-            return materialize_fact_memory_draft(raw)
+            async with asyncio.timeout(self._timeout_seconds):
+                return await self._classify_with_retry(
+                    predicate_code=predicate_code,
+                    source_text=source_text,
+                )
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError as exc:
+            raise FactMemoryDraftTechnicalFailure("provider_timeout") from exc
+
+    async def _classify_with_retry(
+        self, *, predicate_code: str, source_text: str
+    ) -> FactMemoryRetentionDraft | None:
+        messages = self._messages(predicate_code=predicate_code, source_text=source_text)
+        try:
+            raw = await self._complete(messages)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            raise FactMemoryDraftTechnicalFailure("provider_exception") from exc
+        try:
+            draft = materialize_fact_memory_draft(raw)
+            if draft is None:
+                logger.info(
+                    "fact memory classification returned retain=false: predicate=%s",
+                    predicate_code,
+                )
+            else:
+                logger.info(
+                    "fact memory classification returned retain=true: predicate=%s cue=%s",
+                    predicate_code,
+                    draft.cue_kind,
+                )
+            return draft
         except ValueError as violation:
             # One bounded corrective pass mirroring the Fact draft adapter:
             # the retry restates the violated contract, the strict validator
             # still gates the result, and a second failure propagates.
-            corrected = await self._complete([
-                *messages,
-                {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": (
-                        "Your answer violated the contract: "
-                        + str(violation)
-                        + ". Return exactly one corrected JSON object now. Remember: salience "
-                        "values are basis-point integers 0..10000 and retain=false answers "
-                        'contain only {"retain":false}.'
-                    ),
-                },
-            ])
-            return materialize_fact_memory_draft(corrected)
+            logger.warning(
+                "fact memory classification violated contract (retrying once): "
+                "predicate=%s violation=%s",
+                predicate_code,
+                violation,
+            )
+            try:
+                corrected = await self._complete([
+                    *messages,
+                    {"role": "assistant", "content": raw},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your answer violated the contract: "
+                            + str(violation)
+                            + ". Return exactly one corrected JSON object now. Remember: salience "
+                            "values are basis-point integers 0..10000 and retain=false answers "
+                            'contain only {"retain":false}.'
+                        ),
+                    },
+                ])
+                draft = materialize_fact_memory_draft(corrected)
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError:
+                raise
+            except ValueError as exc:
+                raise FactMemoryDraftTechnicalFailure("invalid_output") from exc
+            except Exception as exc:
+                raise FactMemoryDraftTechnicalFailure("provider_exception") from exc
+            if draft is None:
+                logger.info(
+                    "fact memory classification corrected to retain=false: predicate=%s",
+                    predicate_code,
+                )
+            else:
+                logger.info(
+                    "fact memory classification corrected to retain=true: predicate=%s cue=%s",
+                    predicate_code,
+                    draft.cue_kind,
+                )
+            return draft
 
     async def _complete(self, messages: list[dict[str, str]]) -> str:
         structured = getattr(self._model, "complete_json", None)
@@ -102,6 +192,12 @@ class FactMemoryDraftAdapter:
                     "autobiographical_relevance_bp, relationship_relevance_bp, emotional_residue_bp, "
                     "unfinished_business_bp, recurrence_bp, novelty_bp, future_utility_bp, and "
                     "world_continuity_bp as basis-point integers 0..10000 (for example 7900, never 0.79). "
+                    "cue_kind must be exactly one of identity, relationship, boundary, "
+                    "unfinished_business, repeated_pattern, future_utility, emotional_residue, "
+                    "world_continuity. Every retention_rationales item must be exactly one of "
+                    "identity_relevance, relationship_continuity, boundary_relevance, "
+                    "unfinished_business, repeated_pattern, future_utility, emotional_salience, "
+                    "world_continuity. "
                     "Do not return summaries, ids, hashes, "
                     "privacy, source refs, actions, or behaviour instructions."
                 ),
@@ -162,6 +258,7 @@ def materialize_fact_memory_draft(raw: str) -> FactMemoryRetentionDraft | None:
 __all__ = [
     "FactMemoryDraftAdapter",
     "FactMemoryDraftChatModel",
+    "FactMemoryDraftTechnicalFailure",
     "FactMemoryRetentionDraft",
     "materialize_fact_memory_draft",
 ]

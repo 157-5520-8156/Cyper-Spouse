@@ -87,6 +87,10 @@ class RecallDocument(FrozenModel):
     source_bindings: tuple[RecallSourceBinding, ...] = Field(min_length=1, max_length=16)
     source_world_revision: int = Field(ge=1)
     text: str = Field(min_length=1, max_length=4_096)
+    # Optional ontology/search metadata.  ``text`` stays the exact
+    # source-bound excerpt; this field only improves accessibility for
+    # indirect cues and carries no additional factual authority.
+    retrieval_text: str | None = Field(default=None, min_length=1, max_length=4_096)
     actor_ref: str = Field(min_length=1, max_length=256)
     subject_refs: tuple[str, ...] = Field(min_length=1, max_length=8)
     link_refs: tuple[str, ...] = Field(default=(), max_length=32)
@@ -149,7 +153,7 @@ class RecallDocument(FrozenModel):
         if (
             self.valid_from is not None
             and self.valid_to is not None
-            and self.valid_to <= self.valid_from
+            and self.valid_to < self.valid_from
         ):
             raise ValueError("recall validity interval is reversed")
         if (self.memory_kind == "reflective") != (self.authority == "defeasible_interpretation"):
@@ -249,6 +253,7 @@ class FeatureHashRecallEmbedding:
 
     version = "feature-hash-ngram.1"
     dimensions = 256
+    dense_match_threshold_bp = 5_500
 
     def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         vectors: list[tuple[float, ...]] = []
@@ -281,6 +286,11 @@ class _RecallIndexCore:
         if not embedding.version or not 1 <= embedding.dimensions <= 4_096:
             raise ValueError("recall embedding identity or dimensions are invalid")
         self._embedding = embedding
+        self._dense_match_threshold_bp = int(
+            getattr(embedding, "dense_match_threshold_bp", 5_500)
+        )
+        if not 0 <= self._dense_match_threshold_bp <= 10_000:
+            raise ValueError("recall dense match threshold is invalid")
         self._index_version = f"{RECALL_INDEX_POLICY_VERSION}+embedding:{embedding.version}"
         self._last_rebuild_embedding_failure: str | None = None
 
@@ -296,7 +306,9 @@ class _RecallIndexCore:
         if any(item.source_world_revision > cursor.world_revision for item in ordered):
             raise ValueError("recall document is newer than the index cursor")
         try:
-            vectors = self._embedding.embed(tuple(item.text for item in ordered))
+            vectors = self._embedding.embed(
+                tuple(item.retrieval_text or item.text for item in ordered)
+            )
         except RecallEmbeddingUnavailable as exc:
             vectors = tuple((0.0,) * self._embedding.dimensions for _ in ordered)
             self._last_rebuild_embedding_failure = str(exc)[:128] or "embedding_unavailable"
@@ -332,15 +344,22 @@ class _RecallIndexCore:
                 continue
             lexical = _lexical_score(
                 query_features,
-                _lexical_features(document.text),
+                _lexical_features(document.retrieval_text or document.text),
             )
             dense = max(0, min(10_000, round(_cosine(query_vector, vector) * 10_000)))
             structured = _structured_score(query.link_refs, document.link_refs)
             temporal = _temporal_score(query, document)
             channels: list[Literal["lexical", "dense", "temporal", "structured"]] = []
-            if lexical >= 1_000:
+            # A remembered entity can be a two-character island inside a
+            # natural sentence ("新开的咖啡馆" recalling a prior coffee
+            # reaction). Query-coverage thresholds discard exactly those
+            # human-like associative cues as the surrounding message grows.
+            # Any real normalized n-gram overlap may enter the bounded
+            # candidate set; its small score still ranks below stronger
+            # lexical, dense and structured matches.
+            if lexical > 0:
                 channels.append("lexical")
-            if dense >= 5_500:
+            if dense >= self._dense_match_threshold_bp:
                 channels.append("dense")
             if structured:
                 channels.append("structured")
@@ -554,8 +573,8 @@ class SQLiteRecallIndex(_RecallIndexCore):
             isolation_level=None,
             check_same_thread=False,
         )
-        configure_shared_sqlite_connection(self._connection)
         with self._write_lock:
+            configure_shared_sqlite_connection(self._connection)
             self._connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS world_v2_recall_index_heads (

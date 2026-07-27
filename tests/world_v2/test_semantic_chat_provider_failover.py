@@ -26,6 +26,7 @@ async def test_world_v2_composition_installs_configured_openai_fallback() -> Non
     assert isinstance(composition.flash_model.fallback, OpenAICompatibleChatModel)
     assert composition.flash_model.fallback.model == "gpt-5.6-luna-test"
     assert composition.flash_model.fallback.proxy_url == "http://127.0.0.1:7890"
+    assert composition.main_model._owner._source_closure_reviewer is composition.flash_model
     await composition.aclose()
 
 

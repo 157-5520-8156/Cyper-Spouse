@@ -169,7 +169,16 @@ from .batch_invariants import (
     private_impression_trigger_identity,
     silence_appraisal_trigger_identity,
 )
-from .fact_trigger import interaction_fact_trigger_identity
+from .fact_trigger import (
+    INTERACTION_FACT_RETRY_DELAYS_SECONDS,
+    FactMemoryDecisionRecordedPayload,
+    InteractionFactDecisionRecordedPayload,
+    InteractionFactTechnicalFailurePayload,
+    fact_memory_decision_identity,
+    interaction_fact_decision_identity,
+    interaction_fact_trigger_identity,
+)
+from .fact_memory_draft import FactMemoryRetentionDraft
 from .commitment_events import (
     COMMITMENT_ACCEPTED_PAYLOAD_MODELS,
     CommitmentAuthorizedMutationPayload,
@@ -186,7 +195,7 @@ from .clock_authority import (
 from .fact_events import FACT_PAYLOAD_MODELS, FactAuthorizedMutationPayload, FactChangedPayload
 from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2
 from .fact_accepted_contracts import rehydrate_fact_commit_materialized_v2_json
-from .fact_reducers import reduce_fact
+from .fact_reducers import INSTALLED_FACT_PREDICATE_CARDINALITY, reduce_fact
 from .fact_v2_reducers import materialized_fact_v2_as_projection_change
 from .minimal_reply_events import (
     ExpressionBeatAuthorizedPayload,
@@ -496,7 +505,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.38"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.39"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}" for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 )
@@ -1328,6 +1337,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.35",
             "world-v2-reducers.36",
             "world-v2-reducers.37",
+            "world-v2-reducers.38",
         }:
             # .33-.36 only add current-generation conditional fields. Their
             # semantic field feature set is otherwise the current one.
@@ -1450,6 +1460,7 @@ class ReducerState(FrozenModel):
                                 "world-v2-reducers.35",
                                 "world-v2-reducers.36",
                                 "world-v2-reducers.37",
+                                "world-v2-reducers.38",
                                 REDUCER_BUNDLE_VERSION,
                             }
                             else None
@@ -1558,6 +1569,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.35",
             "world-v2-reducers.36",
             "world-v2-reducers.37",
+            "world-v2-reducers.38",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["provider_media_grants"] = tuple(
@@ -1577,6 +1589,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.35",
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
+                "world-v2-reducers.38",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_declined_candidate_revisions"] = tuple(
@@ -1593,6 +1606,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.35",
             "world-v2-reducers.36",
             "world-v2-reducers.37",
+            "world-v2-reducers.38",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_artifacts"] = tuple(
@@ -1608,6 +1622,7 @@ class ReducerState(FrozenModel):
                     "world-v2-reducers.35",
                     "world-v2-reducers.36",
                     "world-v2-reducers.37",
+                    "world-v2-reducers.38",
                     REDUCER_BUNDLE_VERSION,
                 }
                 else item.model_dump(mode="json", exclude={"repairable", "repair_scope"})
@@ -1625,6 +1640,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.35",
             "world-v2-reducers.36",
             "world-v2-reducers.37",
+            "world-v2-reducers.38",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_delivery_approvals"] = tuple(
@@ -1643,6 +1659,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.35",
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
+                "world-v2-reducers.38",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_thread_proposals"] = tuple(
@@ -1823,6 +1840,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.35",
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
+                "world-v2-reducers.38",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["expression_plan_manifests"] = tuple(
@@ -1832,6 +1850,7 @@ class ReducerState(FrozenModel):
             if declared_reducer_bundle_version in {
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
+                "world-v2-reducers.38",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["response_expectation_assessments"] = tuple(
@@ -3044,7 +3063,10 @@ def _fact_proposal_recorded(
         or proposed_payload.policy_refs != proposal.policy_refs
     ):
         raise ValueError("persisted fact proposal body does not match its index")
-    if proposal.policy_refs != INSTALLED_FACT_POLICY_REFS:
+    if proposal.policy_refs != INSTALLED_FACT_POLICY_REFS and not (
+        proposal.policy_refs == ("policy:fact-commit.2",)
+        and proposal.transition_kind in {"correct", "withdraw"}
+    ):
         raise ValueError("fact proposal references an uninstalled policy")
     _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
     reduce_fact(
@@ -7956,6 +7978,193 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
     )
 
 
+def _interaction_fact_technical_failure_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    payload = InteractionFactTechnicalFailurePayload.model_validate_json(
+        event.payload_json
+    )
+    process = next(
+        (
+            item
+            for item in state.trigger_processes
+            if item.trigger_id == payload.trigger_id
+        ),
+        None,
+    )
+    if (
+        process is None
+        or process.process_kind != "interaction_fact"
+        or process.state != "claimed"
+        or process.claim_lease is None
+        or process.claim_lease.attempt_id != payload.attempt_id
+        or payload.retry_ordinal != len(process.attempt_ids)
+        or state.logical_time is None
+        or event.logical_time != state.logical_time
+        or payload.failed_at != state.logical_time
+    ):
+        raise ValueError(
+            "interaction fact technical failure does not bind the active attempt"
+        )
+    expected_delay = INTERACTION_FACT_RETRY_DELAYS_SECONDS[
+        min(
+            max(payload.retry_ordinal, 1),
+            len(INTERACTION_FACT_RETRY_DELAYS_SECONDS),
+        )
+        - 1
+    ]
+    if payload.next_retry_at != payload.failed_at + timedelta(seconds=expected_delay):
+        raise ValueError("interaction fact technical failure retry delay is invalid")
+    return state
+
+
+def _interaction_fact_decision_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    payload = InteractionFactDecisionRecordedPayload.model_validate_json(
+        event.payload_json
+    )
+    process = next(
+        (
+            item
+            for item in state.trigger_processes
+            if item.trigger_id == payload.trigger_id
+        ),
+        None,
+    )
+    source = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.source_event_ref
+        ),
+        None,
+    )
+    decision = json.loads(payload.decision_json)
+    if (
+        process is None
+        or process.process_kind != "interaction_fact"
+        or process.state != "claimed"
+        or process.claim_lease is None
+        or process.claim_lease.attempt_id != payload.attempt_id
+        or process.source_evidence_ref != payload.source_observation_ref
+        or source is None
+        or source.event_type != "ObservationRecorded"
+        or payload.decision_id
+        != interaction_fact_decision_identity(
+            trigger_id=payload.trigger_id,
+            fact_context_hash=payload.fact_context_hash,
+        )
+        or payload.evaluated_world_revision > len(state.committed_world_event_refs)
+        or state.logical_time is None
+        or event.logical_time != state.logical_time
+        or payload.recorded_at != state.logical_time
+    ):
+        raise ValueError(
+            "interaction Fact decision does not bind the active attempt and observation"
+        )
+    if payload.decision_kind == "retain":
+        proposal = validate_fact_commit_proposal_v2(
+            decision,
+            world_id=event.world_id,
+        )
+        if (
+            proposal.trigger_ref != payload.source_event_ref
+            or proposal.evaluated_world_revision
+            != payload.evaluated_world_revision
+        ):
+            raise ValueError("recorded retain decision changed its pinned source")
+    elif payload.decision_kind == "withdraw":
+        if (
+            set(decision)
+            != {
+                "predicate_code",
+                "assertion_source_ref",
+                "confidence_bp",
+                "brief_rationale",
+            }
+            or decision.get("predicate_code")
+            not in INSTALLED_FACT_PREDICATE_CARDINALITY
+            or decision.get("assertion_source_ref")
+            != payload.source_observation_ref
+            or not isinstance(decision.get("confidence_bp"), int)
+            or isinstance(decision.get("confidence_bp"), bool)
+            or not 0 <= decision["confidence_bp"] <= 10_000
+            or not isinstance(decision.get("brief_rationale"), str)
+            or not decision["brief_rationale"]
+        ):
+            raise ValueError("recorded withdrawal decision is malformed")
+    # This is immutable external-result audit, not Fact authority.  The stable
+    # event identity prevents a second decision; runtime recovery reads the
+    # exact event bytes and resumes the later branch.
+    return state
+
+
+def _fact_memory_decision_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    payload = FactMemoryDecisionRecordedPayload.model_validate_json(
+        event.payload_json
+    )
+    process = next(
+        (
+            item
+            for item in state.trigger_processes
+            if item.trigger_id == payload.trigger_id
+        ),
+        None,
+    )
+    fact = next(
+        (
+            item
+            for item in state.facts
+            if item.fact_id == payload.fact_id
+            and item.entity_revision == payload.fact_entity_revision
+            and item.values.status == "active"
+        ),
+        None,
+    )
+    authority = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.fact_authority_event_ref
+        ),
+        None,
+    )
+    if (
+        process is None
+        or process.process_kind != "interaction_fact"
+        or process.state != "claimed"
+        or process.claim_lease is None
+        or process.claim_lease.attempt_id != payload.attempt_id
+        or process.source_evidence_ref != payload.source_observation_ref
+        or fact is None
+        or fact.origin.accepted_event_ref != payload.fact_authority_event_ref
+        or authority is None
+        or authority.world_revision != payload.fact_authority_world_revision
+        or authority.payload_hash != payload.fact_authority_payload_hash
+        or payload.decision_id
+        != fact_memory_decision_identity(
+            trigger_id=payload.trigger_id,
+            fact_authority_event_ref=payload.fact_authority_event_ref,
+        )
+        or payload.evaluated_world_revision > len(state.committed_world_event_refs)
+        or state.logical_time is None
+        or event.logical_time != state.logical_time
+        or payload.recorded_at != state.logical_time
+    ):
+        raise ValueError(
+            "Fact-memory decision does not bind the active attempt and Fact authority"
+        )
+    if payload.decision_kind == "retain":
+        FactMemoryRetentionDraft.model_validate_json(payload.decision_json)
+    # This external result is audit-only. Memory acceptance remains a
+    # separate typed authority transition and crash recovery rejoins these
+    # immutable bytes.
+    return state
+
+
 def _trigger_process_reclaimed(state: ReducerState, event: WorldEvent) -> ReducerState:
     replacement = _model_from_payload(event, "process", TriggerProcess)
     process_index = next(
@@ -9861,7 +10070,12 @@ def _commitment_clock_changed(
 def _fact_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = FactChangedPayload.model_validate_json(event.payload_json)
-    if payload.policy_refs != INSTALLED_FACT_POLICY_REFS:
+    if payload.policy_refs != INSTALLED_FACT_POLICY_REFS and not (
+        payload.policy_refs == ("policy:fact-commit.2",)
+        and payload.operation in {"correct", "withdraw"}
+        and payload.fact_before is not None
+        and payload.fact_before.origin.policy_refs == ("policy:fact-commit.2",)
+    ):
         raise ValueError("fact transition references an uninstalled policy")
     if payload.fact_after.origin.accepted_event_ref != event.event_id:
         raise ValueError("fact origin does not identify its mutation event")
@@ -10886,6 +11100,21 @@ _EVENTS = {
             partial(_action_transitioned, target="expired"),
         ),
         EventDefinition("ModelResultRecorded", RevisionClass.DELIBERATION, _model_result_recorded),
+        EventDefinition(
+            "InteractionFactTechnicalFailureRecorded",
+            RevisionClass.DELIBERATION,
+            _interaction_fact_technical_failure_recorded,
+        ),
+        EventDefinition(
+            "InteractionFactDecisionRecorded",
+            RevisionClass.DELIBERATION,
+            _interaction_fact_decision_recorded,
+        ),
+        EventDefinition(
+            "FactMemoryDecisionRecorded",
+            RevisionClass.DELIBERATION,
+            _fact_memory_decision_recorded,
+        ),
         EventDefinition(
             "AdvisoryAcceptanceRejected",
             RevisionClass.DELIBERATION,

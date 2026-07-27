@@ -693,7 +693,7 @@ async def test_http_default_composition_retains_a_fact_and_retrieval_memory_off_
             platform="simulator",
             platform_user_id="geoff",
             platform_message_id="message:http-v2:memory-consumer",
-            text="你还记得我刚才说的偏好吗？",
+            text="你还记得我刚才说的乌龙茶吗？",
             observed_at=next_time,
         )
         projection = host._host._application._ledger.project()  # type: ignore[attr-defined]

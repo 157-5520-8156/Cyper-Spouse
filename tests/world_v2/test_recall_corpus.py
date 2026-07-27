@@ -8,6 +8,7 @@ from companion_daemon.world_v2.memory_retrieval import (
 from companion_daemon.world_v2.recall_corpus import (
     RecallCorpusCompiler,
     RecallCorpusSources,
+    select_recall_authority_bindings,
 )
 from companion_daemon.world_v2.recall_index import RecallCursor, RecallSourceBinding
 from companion_daemon.world_v2.recent_dialogue import (
@@ -61,6 +62,7 @@ def _sources() -> RecallCorpusSources:
         source_excerpt="我最近开始用盖碗泡凤凰单丛。",
         confidence_bp=8_600,
         privacy_class="personal",
+        occurred_at=NOW - timedelta(days=3),
         committed_at=NOW - timedelta(days=2),
         updated_at=NOW - timedelta(days=2),
         accepted_fact_event_ref="event:fact:1",
@@ -80,6 +82,19 @@ def _sources() -> RecallCorpusSources:
         privacy_ceiling="personal",
         retrieval_strength_bp=7_800,
         source_excerpts=(
+            MemorySourceExcerpt(
+                source_kind="fact",
+                source_id="fact:tea-preference",
+                source_entity_revision=1,
+                authority_event_ref="event:fact:1",
+                authority_world_revision=19,
+                authority_payload_hash="2" * 64,
+                source_values_hash="9" * 64,
+                excerpt_ref="payload:message-1",
+                excerpt_payload_hash="3" * 64,
+                text="我最近开始用盖碗泡凤凰单丛。",
+                truncated=False,
+            ),
             MemorySourceExcerpt(
                 source_kind="experience",
                 source_id="experience:tea-shop",
@@ -228,14 +243,84 @@ def test_corpus_preserves_exact_source_text_and_memory_authority() -> None:
 
     fact = by_ref["fact:tea-preference"]
     assert fact.text == "我最近开始用盖碗泡凤凰单丛。"
+    # This fixture deliberately uses an uninstalled predicate; the compiler
+    # must not invent ontology metadata for it.
+    assert fact.retrieval_text is None
     assert fact.source_refs == ("event:fact:1", "event:observation:1")
     assert fact.memory_kind == "semantic"
     assert fact.authority == "world_fact"
+    assert "memory:tea-session" in fact.link_refs
+    assert "conversation_association" in fact.link_refs
+    assert (
+        len(
+            [
+                document
+                for document in documents
+                if document.source_item_ref == "fact:tea-preference"
+            ]
+        )
+        == 1
+    )
 
     experience = by_ref["experience:tea-shop"]
     assert experience.text == "那次在茶店里试了白瓷盖碗，香气很清楚。"
     assert experience.source_refs == ("event:experience:1",)
     assert experience.memory_kind == "episodic"
+
+
+def test_installed_fact_adds_search_metadata_without_changing_source_text() -> None:
+    sources = _sources()
+    fact = sources.relevant_facts[0].model_copy(
+        update={
+            "predicate_code": "profile.occupation",
+            "source_excerpt": "我是软件工程师。",
+        }
+    )
+
+    documents = RecallCorpusCompiler().compile(
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        sources=sources.model_copy(update={"relevant_facts": (fact,)}),
+    )
+    document = next(item for item in documents if item.source_item_ref == fact.fact_id)
+
+    assert document.text == "我是软件工程师。"
+    assert document.retrieval_text is not None
+    assert "用户工作、职业、做什么" in document.retrieval_text
+
+
+def test_authority_selection_does_not_scale_with_unrelated_ledger_history() -> None:
+    sources = _sources()
+    unbound = sources.model_copy(update={"authority_bindings": ()})
+    unrelated = tuple(
+        RecallSourceBinding(
+            source_kind="committed_event",
+            authority_type="ClockAdvanced",
+            ref=f"event:unrelated:{index}",
+            source_world_revision=index % CURSOR.world_revision,
+            immutable_hash=f"{index:064x}",
+        )
+        for index in range(5_000)
+    )
+
+    selected = select_recall_authority_bindings(
+        sources=unbound,
+        candidates=(*unrelated, *sources.authority_bindings),
+    )
+    bounded_sources = unbound.model_copy(update={"authority_bindings": selected})
+    documents = RecallCorpusCompiler().compile(
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        sources=bounded_sources,
+    )
+
+    assert {item.ref for item in selected} == {
+        item.ref for item in sources.authority_bindings
+    }
+    assert len(selected) == len(sources.authority_bindings)
+    assert documents
 
 
 def test_private_reflection_is_resolved_from_appraisal_and_never_fact_authority() -> None:

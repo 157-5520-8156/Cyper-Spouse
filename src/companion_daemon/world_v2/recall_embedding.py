@@ -32,6 +32,13 @@ class OpenAICompatibleRecallEmbedding:
     Invalid response schemas remain hard configuration errors.
     """
 
+    # OpenAI-compatible semantic vectors have a materially lower useful
+    # cosine range than the lexical feature-hash fallback. Production-trace
+    # probes put true Chinese paraphrases around 0.42-0.49 while unrelated
+    # controls stayed below 0.40. This threshold only admits a candidate to
+    # bounded attention; source closure and model choice remain unchanged.
+    dense_match_threshold_bp = 4_200
+
     def __init__(
         self,
         *,
@@ -173,6 +180,9 @@ class SQLiteCachedRecallEmbedding:
             raise ValueError("semantic recall cache requires a world id")
         self.version = delegate.version
         self.dimensions = delegate.dimensions
+        self.dense_match_threshold_bp = int(
+            getattr(delegate, "dense_match_threshold_bp", 5_500)
+        )
         self._delegate = delegate
         self._world_id = world_id
         self._lock = RLock()
@@ -745,7 +755,7 @@ def configured_recall_embedding(
 ) -> OpenAICompatibleRecallEmbedding | None:
     """Enable semantic recall when deployment credentials are actually present."""
 
-    if not settings.world_v2_recall_semantic_enabled or settings.openai_api_key is None:
+    if not settings.world_v2_recall_semantic_enabled or not settings.openai_api_key:
         return None
     return OpenAICompatibleRecallEmbedding(
         api_key=settings.openai_api_key,

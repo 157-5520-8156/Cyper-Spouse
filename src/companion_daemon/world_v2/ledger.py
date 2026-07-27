@@ -111,6 +111,14 @@ class LedgerPort(Protocol):
 
     def lookup_event_commit(self, event_id: str) -> tuple[WorldEvent, CommitResult] | None: ...
 
+    def recent_fact_transition_events(
+        self,
+        *,
+        subject_refs: frozenset[str],
+        cursor: ProjectionCursor,
+        limit: int,
+    ) -> tuple[WorldEvent, ...]: ...
+
     def find_trigger_completion(self, trigger_id: str) -> WorldEvent | None: ...
 
     def resolve_committed_event_refs(
@@ -783,6 +791,33 @@ class WorldLedger:
             if event_id in commit.result.event_ids:
                 return stored.event, commit.result
         raise RuntimeError(f"event {event_id!r} has no owning commit")
+
+    def recent_fact_transition_events(
+        self,
+        *,
+        subject_refs: frozenset[str],
+        cursor: ProjectionCursor,
+        limit: int,
+    ) -> tuple[WorldEvent, ...]:
+        if not subject_refs or not 1 <= limit <= 4096:
+            return ()
+        output: list[WorldEvent] = []
+        for stored in reversed(self._events):
+            if stored.ledger_sequence > cursor.ledger_sequence:
+                continue
+            event = stored.event
+            if event.event_type not in {"FactCorrected", "FactWithdrawn"}:
+                continue
+            before = event.payload().get("fact_before")
+            values = before.get("values") if isinstance(before, dict) else None
+            if (
+                isinstance(values, dict)
+                and values.get("subject_ref") in subject_refs
+            ):
+                output.append(event)
+                if len(output) >= limit:
+                    break
+        return tuple(output)
 
     def find_trigger_completion(self, trigger_id: str) -> WorldEvent | None:
         """Find the immutable terminal audit for one compacted trigger."""

@@ -1,0 +1,336 @@
+{
+  "scenario_id": "memory_recall_30_turns",
+  "data_classification": "fully_synthetic_test_fixture",
+  "description": "Callback-style memory eval. Facts are planted across an early session and probed obliquely 1, 3 and 8 logical days later. Oblique probes deliberately avoid restating the planted keyword so a pass cannot be earned by lexical echo. One direct probe (T29) is kept as a control: if direct passes while oblique fails, the gap isolates missing query relevance in fact ranking rather than missing storage.",
+  "started_at_local": "2026-07-01T20:00:00+08:00",
+  "value_constraint": "Every plant.value must appear verbatim in its own turn text. fact_draft_adapter rejects any draft whose value is not a literal span of the observed message (fact_draft_adapter.py, 'value not in observation.text'), which is what keeps stored facts evidence-grounded rather than model-invented. Paraphrased values are silently dropped as invalid-draft.",
+  "probe_keys": {
+    "name": "T02 profile.display_name",
+    "occupation": "T04 profile.occupation",
+    "drink": "T05 preference.likes",
+    "coffee": "T06 preference.dislikes",
+    "sister": "T07 relationship.person",
+    "demo": "T09 schedule.commitment"
+  },
+  "turns": [
+    {
+      "id": "T01",
+      "at_minutes": 0,
+      "text": "在吗，今天难得下班早",
+      "tags": ["greeting"]
+    },
+    {
+      "id": "T02",
+      "at_minutes": 3,
+      "text": "我叫林澈，英文名 Avery，你叫我 Avery 就行",
+      "tags": ["user_fact", "memory_source"],
+      "plant": {
+        "key": "name",
+        "predicate_code": "profile.display_name",
+        "value": "林澈",
+        "stub_match": "林澈"
+      }
+    },
+    {
+      "id": "T03",
+      "at_minutes": 7,
+      "text": "你平时一个人在家都做些什么呀",
+      "tags": ["rapport"]
+    },
+    {
+      "id": "T04",
+      "at_minutes": 12,
+      "text": "我这两年一直在写一个独立游戏里的天气系统，基本上是我一个人在做",
+      "tags": ["user_fact", "memory_source"],
+      "plant": {
+        "key": "occupation",
+        "predicate_code": "profile.occupation",
+        "value": "独立游戏里的天气系统",
+        "stub_match": "天气系统"
+      }
+    },
+    {
+      "id": "T05",
+      "at_minutes": 17,
+      "text": "写代码写累了就泡杯茶，我只喝乌龙，最爱桂花乌龙",
+      "tags": ["user_fact", "memory_source"],
+      "plant": {
+        "key": "drink",
+        "predicate_code": "preference.likes",
+        "value": "桂花乌龙",
+        "stub_match": "乌龙"
+      }
+    },
+    {
+      "id": "T06",
+      "at_minutes": 22,
+      "text": "咖啡是真不行，我一喝就心悸，晚上根本睡不着",
+      "tags": ["user_fact", "memory_source"],
+      "plant": {
+        "key": "coffee",
+        "predicate_code": "preference.dislikes",
+        "value": "咖啡",
+        "stub_match": "心悸"
+      }
+    },
+    {
+      "id": "T07",
+      "at_minutes": 28,
+      "text": "对了，我妹妹叫林星，今年高三，最近压力挺大的",
+      "tags": ["user_fact", "memory_source"],
+      "plant": {
+        "key": "sister",
+        "predicate_code": "relationship.person",
+        "value": "林星",
+        "stub_match": "林星"
+      }
+    },
+    {
+      "id": "T08",
+      "at_minutes": 33,
+      "text": "有时候挺想帮她，又不知道该怎么开口",
+      "tags": ["rapport"]
+    },
+    {
+      "id": "T09",
+      "at_minutes": 38,
+      "text": "还有件事，下周三我要给学校美术社做一次演示，有点紧张",
+      "tags": ["user_fact", "memory_source"],
+      "plant": {
+        "key": "demo",
+        "predicate_code": "schedule.commitment",
+        "value": "给学校美术社做一次演示",
+        "stub_match": "美术社"
+      }
+    },
+    {
+      "id": "T10",
+      "at_minutes": 43,
+      "text": "先睡了，明天还得早起",
+      "tags": ["session_close"]
+    },
+
+    {
+      "id": "T11",
+      "at_minutes": 1500,
+      "text": "今天累死了",
+      "tags": ["session_open"]
+    },
+    {
+      "id": "T12",
+      "at_minutes": 1505,
+      "text": "开了一整天会，脑子现在是空的",
+      "tags": ["rapport"]
+    },
+    {
+      "id": "T13",
+      "at_minutes": 1511,
+      "text": "想喝点热的暖暖胃，你说我该喝点什么",
+      "tags": ["cross_turn_recall", "memory_probe"],
+      "probe": {
+        "key": "drink",
+        "style": "oblique",
+        "distance_days": 1,
+        "expect_any": ["乌龙", "桂花"],
+        "context_any": ["乌龙", "桂花"],
+        "note": "Never says 茶 or 乌龙, so a hit requires stored preference rather than lexical echo."
+      }
+    },
+    {
+      "id": "T14",
+      "at_minutes": 1518,
+      "text": "公司楼下新开了家咖啡馆，装修还挺好看的",
+      "tags": ["cross_turn_recall", "memory_probe"],
+      "probe": {
+        "key": "coffee",
+        "style": "oblique",
+        "distance_days": 1,
+        "expect_any": ["心悸", "睡不着", "不能喝", "少喝", "别喝", "喝不了"],
+        "context_any": ["咖啡"],
+        "note": "Mentions 咖啡馆 as scenery. A remembering character warns about the known reaction unprompted."
+      }
+    },
+    {
+      "id": "T15",
+      "at_minutes": 1525,
+      "text": "我住在杭州，离西湖不算远",
+      "tags": ["user_fact", "memory_source"],
+      "plant": {
+        "key": "location",
+        "predicate_code": "location.home",
+        "value": "杭州",
+        "stub_match": "杭州"
+      }
+    },
+    {
+      "id": "T16",
+      "at_minutes": 1531,
+      "text": "行了我去洗澡了",
+      "tags": ["session_close"]
+    },
+
+    {
+      "id": "T17",
+      "at_minutes": 4350,
+      "text": "你窗外现在天气怎么样",
+      "tags": ["session_open"],
+      "negative_probe": {
+        "key": "unrelated_weather",
+        "forbid_any": ["林星", "美术社", "天气系统", "桂花乌龙", "心悸"],
+        "note": "An unrelated question about the companion's present surroundings must not inject old user facts."
+      }
+    },
+    {
+      "id": "T18",
+      "at_minutes": 4357,
+      "text": "我最近有点担心家里那边",
+      "tags": ["cross_turn_recall", "memory_probe"],
+      "probe": {
+        "key": "sister",
+        "style": "oblique",
+        "distance_days": 3,
+        "expect_any": ["林星", "妹妹", "高三"],
+        "context_any": ["林星", "妹妹"],
+        "note": "家里 is the only cue. Recalling the sister requires structured retrieval, not string overlap."
+      }
+    },
+    {
+      "id": "T19",
+      "at_minutes": 4364,
+      "text": "嗯，主要还是学业上的事，我也帮不上什么忙",
+      "tags": ["rapport"]
+    },
+    {
+      "id": "T20",
+      "at_minutes": 4371,
+      "text": "还有个事这周得准备，压力有点大",
+      "tags": ["cross_turn_recall", "memory_probe"],
+      "probe": {
+        "key": "demo",
+        "style": "oblique",
+        "distance_days": 3,
+        "expect_any": ["演示", "美术社", "周三", "汇报"],
+        "context_any": ["演示", "美术社"],
+        "note": "这周得准备 refers back to the committed demo without naming it."
+      }
+    },
+    {
+      "id": "T21",
+      "at_minutes": 4379,
+      "text": "算了，硬着头皮上吧",
+      "tags": ["rapport"]
+    },
+    {
+      "id": "T22",
+      "at_minutes": 4386,
+      "text": "睡了，晚安",
+      "tags": ["session_close"]
+    },
+
+    {
+      "id": "T23",
+      "at_minutes": 11520,
+      "text": "最近看了部电影，摄影挺漂亮",
+      "tags": ["session_open"],
+      "negative_probe": {
+        "key": "unrelated_movie",
+        "forbid_any": ["林星", "美术社", "天气系统", "桂花乌龙", "心悸"],
+        "note": "A new movie topic is a precision control for irrelevant autobiographical retrieval."
+      }
+    },
+    {
+      "id": "T24",
+      "at_minutes": 11527,
+      "text": "这几天一直在改一个记忆相关的模块，改得不太顺",
+      "tags": ["user_fact", "memory_source", "recency_competitor"],
+      "plant": {
+        "key": "current_work",
+        "predicate_code": "activity.current",
+        "value": "记忆相关的模块",
+        "stub_match": "记忆相关"
+      }
+    },
+    {
+      "id": "T25",
+      "at_minutes": 11534,
+      "text": "话说你平时都怎么称呼我来着",
+      "tags": ["cross_turn_recall", "memory_probe"],
+      "probe": {
+        "key": "name",
+        "style": "semi_direct",
+        "distance_days": 8,
+        "expect_any": ["林澈", "Avery", "avery"],
+        "context_any": ["林澈", "Avery"],
+        "note": "Asks for the name without supplying it. Outside the 7-day recency window."
+      }
+    },
+    {
+      "id": "T26",
+      "at_minutes": 11541,
+      "text": "现在有点困，想弄点提神的，又怕晚上睡不着",
+      "tags": ["cross_turn_recall", "memory_probe"],
+      "probe": {
+        "key": "coffee",
+        "style": "oblique",
+        "distance_days": 8,
+        "expect_any": ["乌龙", "桂花", "心悸", "咖啡"],
+        "context_any": ["乌龙", "咖啡"],
+        "note": "提神 + 怕睡不着 should collide with both the coffee reaction and the tea preference."
+      }
+    },
+    {
+      "id": "T27",
+      "at_minutes": 11549,
+      "text": "你还记得我平时是做什么的吗",
+      "tags": ["cross_turn_recall", "memory_probe"],
+      "probe": {
+        "key": "occupation",
+        "style": "direct",
+        "distance_days": 8,
+        "expect_any": ["独立游戏", "天气系统", "项目", "写代码", "程序", "开发"],
+        "context_any": ["独立游戏", "天气系统"]
+      }
+    },
+    {
+      "id": "T28",
+      "at_minutes": 11556,
+      "text": "上次说的那个演示，后来结果还行",
+      "tags": ["cross_turn_recall", "memory_probe"],
+      "probe": {
+        "key": "demo",
+        "style": "referential",
+        "distance_days": 8,
+        "expect_any": ["美术社", "周三", "紧张", "顺利", "太好了"],
+        "context_any": ["演示", "美术社"],
+        "note": "Supplies 演示 but not 美术社. A hit requires resolving the reference to the stored commitment."
+      }
+    },
+    {
+      "id": "T29",
+      "at_minutes": 11564,
+      "text": "考你一下，你还记得我的名字，还有我最爱喝什么吗",
+      "tags": ["cross_turn_recall", "memory_probe", "control"],
+      "probe": {
+        "key": "name_and_drink",
+        "style": "direct",
+        "distance_days": 8,
+        "expect_all_groups": [
+          ["林澈", "Avery", "avery"],
+          ["乌龙", "桂花"]
+        ],
+        "context_any": ["林澈", "乌龙"],
+        "note": "Control. Easiest possible probe. If this passes while the oblique probes fail, storage is fine and ranking is the defect."
+      }
+    },
+    {
+      "id": "T30",
+      "at_minutes": 11571,
+      "text": "行，那我先睡了，晚安",
+      "tags": ["session_close"]
+    }
+  ],
+  "after_silence": {
+    "advance_minutes": 180,
+    "description": "Bounded quiet window after the final session, matching the conversation audit convention."
+  }
+}

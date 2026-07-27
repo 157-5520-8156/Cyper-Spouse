@@ -39,6 +39,25 @@ class _Delivery:
         return {"status": "ok", "data": {"message_id": f"journey-typing-{len(self.non_text)}"}}
 
 
+class _JourneyRecallEmbedding:
+    """Semantic fixture for the cross-session paraphrase in T27."""
+
+    version = "new-acquaintance-semantic-fixture.1"
+    dimensions = 2
+    dense_match_threshold_bp = 4_200
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple(
+            (1.0, 0.0)
+            if any(
+                cue in text
+                for cue in ("丁奥轩", "乌龙茶", "中文名", "最喜欢喝什么")
+            )
+            else (0.0, 1.0)
+            for text in texts
+        )
+
+
 class _JourneyReplyModel:
     """External-model test double that turns supplied evidence into visible probes."""
 
@@ -57,6 +76,22 @@ class _JourneyReplyModel:
         turn = self._by_text[str(text)]
         turn_id = str(turn["id"])
         model_context = str(request.get("model_content_json", ""))
+        if len(messages) > 2:
+            model_context += "\n" + str(messages[-1].get("content", ""))
+
+        if turn_id == "T27" and not all(
+            value in model_context for value in ("丁奥轩", "乌龙茶")
+        ):
+            return json.dumps(
+                {
+                    "recall_request": {
+                        "query_text": "用户的中文名和最喜欢喝什么",
+                        "memory_kinds": ["semantic"],
+                        "limit": 4,
+                    }
+                },
+                ensure_ascii=False,
+            )
 
         probe = "ok"
         if turn_id == "T02":
@@ -271,6 +306,7 @@ async def test_fact_memory_recall_survives_two_source_facts_before_later_probe(t
         model=_JourneyReplyModel(turns),
         advisory_model=_JourneyBackgroundModel(),
         delivery=delivery,
+        semantic_recall_embedding=_JourneyRecallEmbedding(),
     )
     try:
         for turn in turns:
@@ -368,6 +404,7 @@ async def test_new_acquaintance_journey_exposes_grounded_memory_life_and_initiat
         model=_JourneyReplyModel(turns),
         advisory_model=_JourneyBackgroundModel(),
         delivery=delivery,
+        semantic_recall_embedding=_JourneyRecallEmbedding(),
     )
     reply_count_failures: list[str] = []
     try:

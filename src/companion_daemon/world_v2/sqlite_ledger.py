@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from contextlib import nullcontext
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -639,10 +639,15 @@ class SQLiteWorldLedger:
         # model objects instead of reparsing the tail a second time during
         # startup.
         self._recent_replay_event_cache: dict[str, WorldEvent] = {}
-        connection = sqlite3.connect(
-            self._database_path, isolation_level=None, timeout=10, check_same_thread=False
-        )
+        self._database_write_lock.acquire()
+        connection: sqlite3.Connection | None = None
         try:
+            connection = sqlite3.connect(
+                self._database_path,
+                isolation_level=None,
+                timeout=10,
+                check_same_thread=False,
+            )
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
@@ -689,8 +694,11 @@ class SQLiteWorldLedger:
             self._verified_data_version = self._sqlite_data_version_locked()
             self._verified_ledger_epoch = self._ledger_mutation_epoch_locked()
         except Exception:
-            connection.close()
+            if connection is not None:
+                connection.close()
             raise
+        finally:
+            self._database_write_lock.release()
 
     def close(self) -> None:
         with self._database_write_lock, self._thread_lock:
@@ -954,6 +962,17 @@ class SQLiteWorldLedger:
                     world_id,
                     ledger_sequence
                 );
+            CREATE INDEX IF NOT EXISTS world_v2_events_fact_history_lookup
+                ON world_v2_events (
+                    world_id,
+                    json_extract(
+                        json_extract(event_json, '$.payload_json'),
+                        '$.fact_before.values.subject_ref'
+                    ),
+                    ledger_sequence DESC
+                )
+                WHERE json_extract(event_json, '$.event_type')
+                    IN ('FactCorrected', 'FactWithdrawn');
             CREATE TABLE IF NOT EXISTS world_v2_legacy_plan_events (
                 world_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
@@ -2881,6 +2900,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.35",
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
+                "world-v2-reducers.38",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -2893,6 +2913,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.33",
                     "world-v2-reducers.36",
                     "world-v2-reducers.37",
+                    "world-v2-reducers.38",
                 }:
                     canonical_legacy_state = json.dumps(
                         json.loads(legacy_state_json),
@@ -2938,6 +2959,7 @@ class SQLiteWorldLedger:
                 if installed in {
                     "world-v2-reducers.36",
                     "world-v2-reducers.37",
+                    "world-v2-reducers.38",
                 }:
                     # .37 added optional non-factual reflection prose and .38
                     # adds optional reflection/audit lineage to the pending
@@ -3204,6 +3226,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.35",
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
+                "world-v2-reducers.38",
             }:
                 state = ReducerState.model_validate_json(
                     json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
@@ -3745,7 +3768,22 @@ class SQLiteWorldLedger:
                         elapsed,
                         ",".join(event.event_type for event in events),
                     )
-                return result
+        return result
+
+    @contextmanager
+    def serialized_commit_sequence(self) -> Iterator[None]:
+        """Keep a required multi-commit protocol adjacent inside this process.
+
+        Some typed proposal families intentionally require the deliberation
+        proposal and its revision-pinned acceptance to be separate commits,
+        while also requiring that no sibling World commit intervene. The
+        individual ``commit`` calls remain independently crash-consistent;
+        this narrow coordinator only prevents another local worker from
+        winning the gap between them.
+        """
+
+        with self._database_write_lock, self._thread_lock:
+            yield
 
     def commit_at_cursor(
         self,
@@ -5161,6 +5199,69 @@ class SQLiteWorldLedger:
             if event is None:
                 raise LedgerIntegrityError("event is absent from its owning commit")
             return event, result
+
+    def recent_fact_transition_events(
+        self,
+        *,
+        subject_refs: frozenset[str],
+        cursor: ProjectionCursor,
+        limit: int,
+    ) -> tuple[WorldEvent, ...]:
+        """Read only the newest bounded Fact history through its SQLite index."""
+
+        if not subject_refs or not 1 <= limit <= 4096:
+            return ()
+        ordered_subjects = tuple(sorted(subject_refs))
+        with self._thread_lock:
+            self._refresh_verified_external_history_locked()
+            # Query each subject separately so the composite
+            # (world_id, subject_ref, ledger_sequence DESC) index satisfies
+            # both filtering and order.  An IN query across subjects makes
+            # SQLite build a temp B-tree and can scan the full matching
+            # history before applying LIMIT.
+            bounded_rows: dict[str, int] = {}
+            for subject_ref in ordered_subjects:
+                rows = self._connection.execute(
+                    """
+                    SELECT event_id, ledger_sequence
+                    FROM world_v2_events
+                    WHERE world_id = ?
+                      AND ledger_sequence <= ?
+                      AND json_extract(event_json, '$.event_type')
+                          IN ('FactCorrected', 'FactWithdrawn')
+                      AND json_extract(
+                            json_extract(event_json, '$.payload_json'),
+                            '$.fact_before.values.subject_ref'
+                          ) = ?
+                    ORDER BY ledger_sequence DESC
+                    LIMIT ?
+                    """,
+                    (
+                        self._world_id,
+                        cursor.ledger_sequence,
+                        subject_ref,
+                        limit,
+                    ),
+                ).fetchall()
+                for row in rows:
+                    bounded_rows[str(row["event_id"])] = int(row["ledger_sequence"])
+            event_ids = tuple(
+                event_id
+                for event_id, _sequence in sorted(
+                    bounded_rows.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:limit]
+            )
+        output: list[WorldEvent] = []
+        for event_id in event_ids:
+            located = self.lookup_event_commit(event_id)
+            if located is None:
+                raise LedgerIntegrityError(
+                    "indexed historical Fact event is unavailable"
+                )
+            output.append(located[0])
+        return tuple(output)
 
     def find_trigger_completion(self, trigger_id: str) -> WorldEvent | None:
         """Find and verify the immutable terminal audit for a compacted trigger."""

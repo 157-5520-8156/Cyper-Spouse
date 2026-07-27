@@ -11,8 +11,9 @@ import json
 
 
 _CHAT_OMITTED_SLICES = frozenset({"action_budget", "available_capabilities"})
+CHAT_RECENT_DIALOGUE_ITEM_LIMIT = 6
 _CHAT_ITEM_LIMITS = {
-    "recent_dialogue": 6,
+    "recent_dialogue": CHAT_RECENT_DIALOGUE_ITEM_LIMIT,
     "current_situation": 1,
     "relationship_slice": 2,
     "character_core": 2,
@@ -70,23 +71,33 @@ def _context_items_for_chat(name: str, items: list[object], limit: int) -> list[
         ]
         if not injected:
             return items[:limit]
-        retained = injected[:limit]
-        retained_ids = {id(item) for item in retained}
-        retained.extend(item for item in items if id(item) not in retained_ids)
-        return retained[:limit]
+        # Audited recall hits supplement the slice instead of competing with
+        # it for the ordinary budget.  The previous shared cap meant a
+        # successful retrieval evicted the capsule's own ranked items, so net
+        # remembered material stayed flat even when the recall channel worked.
+        # Injection is already bounded upstream (prefetch/pull limit <= 6), so
+        # the provider view grows by at most that many verified items.
+        injected_ids = {id(item) for item in injected}
+        remainder = [item for item in items if id(item) not in injected_ids]
+        return injected + remainder[:limit]
+    injected = [
+        item for item in items if isinstance(item, dict) and item.get("recall_injected") is True
+    ]
+    injected_ids = {id(item) for item in injected}
+    ordinary = [item for item in items if id(item) not in injected_ids]
     keyed: list[tuple[tuple[str, int, str], object]] = []
-    for index, item in enumerate(items):
+    for index, item in enumerate(ordinary):
         if not isinstance(item, dict):
-            return items[-limit:]
+            return ordinary[-limit:] + injected
         value = item.get("value")
         if not isinstance(value, dict):
-            return items[-limit:]
+            return ordinary[-limit:] + injected
         occurred_at = value.get("occurred_at")
         sequence = value.get("sequence")
         if not isinstance(occurred_at, str) and not isinstance(sequence, int):
             # Small synthetic/legacy packets may not expose chronology; keep
             # their established tail behavior rather than inventing an order.
-            return items[-limit:]
+            return ordinary[-limit:] + injected
         keyed.append(
             (
                 (
@@ -97,7 +108,9 @@ def _context_items_for_chat(name: str, items: list[object], limit: int) -> list[
                 item,
             )
         )
-    return [item for _, item in sorted(keyed, key=lambda pair: pair[0])[-limit:]]
+    return [
+        item for _, item in sorted(keyed, key=lambda pair: pair[0])[-limit:]
+    ] + injected
 
 
 def compact_model_facing_context(raw: str) -> str:

@@ -685,6 +685,16 @@ class FakeCompanionModel:
             return json.dumps(
                 {"decision": "select", "opening_token": opening_token}, ensure_ascii=False
             )
+        if "Audit only factual source closure" in joined:
+            return json.dumps(
+                {
+                    "decision": "supported",
+                    "unsupported_claim_indexes": [],
+                    "undeclared_fact_fragments": [],
+                    "brief_reason": "Fake simulator accepts its source-free fixture reply.",
+                },
+                ensure_ascii=False,
+            )
         if "exactly two keys: appraisal_draft and expression_draft" in joined:
             return json.dumps(
                 {

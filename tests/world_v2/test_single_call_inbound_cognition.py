@@ -11,7 +11,6 @@ from companion_daemon.world_v2.chat_model_deliberation_adapter import CompanionI
 from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, TriggerMessage
 from companion_daemon.world_v2.proposal_envelope import (
     DecisionProposal,
-    MinimalProposal,
     ProposalEvidenceRef,
 )
 from companion_daemon.world_v2.immediate_emotion_gate import (
@@ -31,9 +30,6 @@ from companion_daemon.world_v2.recall_index import (
 from companion_daemon.world_v2.recall_runtime import (
     RecallCoordinator,
     verify_trusted_recall_trace,
-)
-from companion_daemon.world_v2.chat_model_deliberation_adapter import (
-    ChatModelDeliberationAdapter,
 )
 from companion_daemon.world_v2.production_turn_application import (
     build_sqlite_world_v2_turn_application,
@@ -211,6 +207,74 @@ class _OrdinaryCombinedProvider(_CombinedProvider):
         )
 
 
+class _SubjectMixupCombinedProvider(_CombinedProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self._replies = (
+            "家里那边怎么了？嘉兴最近天气不太好吗？",
+            "家里那边怎么了？",
+        )
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        text = self._replies[min(len(self.calls) - 1, len(self._replies) - 1)]
+        return json.dumps(
+            {
+                "appraisal_draft": {
+                    "appraise": False,
+                    "brief_rationale": "No durable appraisal.",
+                    "behavior_tendency": "attend",
+                    "stance": "concerned",
+                    "display_strategy": "natural",
+                    "confidence": 6000,
+                },
+                "expression_draft": {
+                    "timing_choice": "now",
+                    "beats": [{"modality": "text", "text": text}],
+                    "stance": "concerned",
+                    "brief_rationale": "Ask what happened.",
+                    "confidence": 7600,
+                    "world_claims": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
+class _SourceClosureReviewer:
+    model = "local-source-closure"
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        del temperature
+        if "Audit only factual source closure" not in messages[0]["content"]:
+            raise ValueError("fixture only implements source-closure review")
+        self.calls.append(messages)
+        unsupported = len(self.calls) == 1
+        return json.dumps(
+            {
+                "decision": "unsupported" if unsupported else "supported",
+                "unsupported_claim_indexes": [],
+                "undeclared_fact_fragments": (
+                    ["嘉兴最近天气不太好吗？"] if unsupported else []
+                ),
+                "brief_reason": (
+                    "The companion hometown was used as a counterpart premise."
+                    if unsupported
+                    else "The corrected question has no factual premise."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+
 class _RecallThenCombinedProvider(_CombinedProvider):
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
@@ -279,6 +343,29 @@ class _LooseTextCombinedProvider(_CombinedProvider):
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
+        if len(self.calls) > 1:
+            expression = {
+                    "timing_choice": "now",
+                    "beats": [{"modality": "text", "text": "你好呀，我是沈知栀。"}],
+                    "stance": "warm",
+                    "brief_rationale": "Greet naturally.",
+                    "confidence": 7000,
+                    "world_claims": [],
+            }
+            return json.dumps(
+                {
+                    "appraisal_draft": {
+                        "appraise": False,
+                        "brief_rationale": "Ordinary greeting.",
+                        "behavior_tendency": "engage",
+                        "stance": "open",
+                        "display_strategy": "natural",
+                        "confidence": 7000,
+                    },
+                    "expression_draft": expression,
+                },
+                ensure_ascii=False,
+            )
         return json.dumps(
             {
                 "appraisal_draft": {
@@ -303,6 +390,32 @@ class _LooseMultiMessageCombinedProvider(_CombinedProvider):
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
+        if len(self.calls) > 1:
+            expression = {
+                    "timing_choice": "now",
+                    "beats": [
+                        {"modality": "text", "text": "先说第一件事。"},
+                        {"modality": "text", "text": "还有第二件事。"},
+                    ],
+                    "stance": "continue_in_two_beats",
+                    "brief_rationale": "Two short messages fit the conversational rhythm.",
+                    "confidence": 7000,
+                    "world_claims": [],
+            }
+            return json.dumps(
+                {
+                    "appraisal_draft": {
+                        "appraise": False,
+                        "brief_rationale": "No material emotional shift.",
+                        "behavior_tendency": "engage",
+                        "stance": "open",
+                        "display_strategy": "natural",
+                        "confidence": 7000,
+                    },
+                    "expression_draft": expression,
+                },
+                ensure_ascii=False,
+            )
         return json.dumps(
             {
                 "appraisal_draft": {
@@ -326,13 +439,54 @@ class _LooseMultiMessageCombinedProvider(_CombinedProvider):
 
 
 class _LooseExpressionShapeProvider(_CombinedProvider):
-    def __init__(self, expression: dict[str, object]) -> None:
+    def __init__(self, expression: dict[str, object], *, repair: bool = True) -> None:
         super().__init__()
         self._expression = expression
+        self._repair = repair
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
+        if len(self.calls) > 1 and self._repair:
+            texts: list[str] = []
+            for value in self._expression.values():
+                if isinstance(value, str):
+                    texts = [value]
+                    break
+                if isinstance(value, list):
+                    texts = [
+                        str(item.get("text", ""))
+                        if isinstance(item, dict)
+                        else str(item)
+                        for item in value
+                    ]
+                    break
+            expression = {
+                    "timing_choice": "now",
+                    "beats": [
+                        {"modality": "text", "text": text}
+                        for text in texts
+                        if text
+                    ],
+                    "stance": "continue",
+                    "brief_rationale": "Corrected to the exact expression contract.",
+                    "confidence": 7000,
+                    "world_claims": [],
+            }
+            return json.dumps(
+                {
+                    "appraisal_draft": {
+                        "appraise": False,
+                        "brief_rationale": "No material emotional shift.",
+                        "behavior_tendency": "engage",
+                        "stance": "open",
+                        "display_strategy": "natural",
+                        "confidence": 7000,
+                    },
+                    "expression_draft": expression,
+                },
+                ensure_ascii=False,
+            )
         return json.dumps(
             {
                 "appraisal_draft": {
@@ -385,7 +539,32 @@ class _UnsupportedGreetingClaimProvider(_CombinedProvider):
         del temperature
         self.calls.append(messages)
         if len(self.calls) > 1:
-            raise TimeoutError("claim correction timed out")
+            return json.dumps(
+                {
+                    "appraisal_draft": {
+                        "appraise": False,
+                        "brief_rationale": "A casual greeting does not change affect.",
+                        "behavior_tendency": "engage",
+                        "stance": "warm",
+                        "display_strategy": "natural",
+                        "confidence": 6200,
+                    },
+                    "expression_draft": {
+                        "timing_choice": "now",
+                        "beats": [
+                            {
+                                "modality": "text",
+                                "text": "午安呀。你今天过得怎么样？",
+                            }
+                        ],
+                        "stance": "warm_greeting",
+                        "brief_rationale": "Remove the unsupported activity claim.",
+                        "confidence": 7600,
+                        "world_claims": [],
+                    },
+                },
+                ensure_ascii=False,
+            )
         return json.dumps(
             {
                 "appraisal_draft": {
@@ -456,15 +635,30 @@ class _QuickExpressionProvider:
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
-        return json.dumps(
-            {
-                "response_text": "我接到了，刚才只是慢了一拍。",
-                "stance": "acknowledge_briefly",
-                "brief_rationale": "Bounded backup response after the main model failed.",
-                "confidence": 6000,
-            },
-            ensure_ascii=False,
-        )
+        expression = {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": "我接到了，刚才只是慢了一拍。"}],
+            "stance": "acknowledge_briefly",
+            "brief_rationale": "Bounded backup response after the main model failed.",
+            "confidence": 6000,
+            "world_claims": [],
+        }
+        if "appraisal_draft and expression_draft" in messages[0]["content"]:
+            return json.dumps(
+                {
+                    "appraisal_draft": {
+                        "appraise": False,
+                        "brief_rationale": "No emotional transition is required.",
+                        "behavior_tendency": "engage",
+                        "stance": "present",
+                        "display_strategy": "natural",
+                        "confidence": 6000,
+                    },
+                    "expression_draft": expression,
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(expression, ensure_ascii=False)
 
 
 class _SeparateAppraisalProvider:
@@ -486,6 +680,59 @@ class _SeparateAppraisalProvider:
                 "affect": "open",
                 "affect_dimension": "hurt",
                 "affect_intensity_bp": 2200,
+            },
+            ensure_ascii=False,
+        )
+
+
+class _SeparateSourceMixupExpressionProvider:
+    model = "separate-source-mixup"
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        text = (
+            "家里那边怎么了？嘉兴最近天气不太好吗？"
+            if len(self.calls) == 1
+            else "家里那边怎么了？"
+        )
+        return json.dumps(
+            {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": text}],
+                "stance": "concerned",
+                "brief_rationale": "Ask what happened.",
+                "confidence": 7600,
+                "world_claims": [],
+            },
+            ensure_ascii=False,
+        )
+
+
+class _ProvisionalBackupProvider:
+    model = "independent-provisional"
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        return json.dumps(
+            {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": "我在，先听你说。"}],
+                "stance": "present",
+                "brief_rationale": "An independently useful first beat.",
+                "confidence": 8000,
+                "world_claims": [],
             },
             ensure_ascii=False,
         )
@@ -562,7 +809,52 @@ def _request(*, revision: int, call: str) -> ModelInput:
 
 
 @pytest.mark.asyncio
-async def test_invalid_world_claim_prefix_does_not_erase_a_valid_greeting() -> None:
+async def test_combined_cognition_repairs_undeclared_subject_mixup_with_character_model() -> None:
+    provider = _SubjectMixupCombinedProvider()
+    reviewer = _SourceClosureReviewer()
+    cognition = SingleCallInboundCognition(
+        flash_model=provider,
+        appraisal_model=reviewer,
+        source_closure_model=reviewer,
+        identity_frame=CompanionIdentityFrame(
+            companion_name="沈知栀",
+            counterpart_name="geoff",
+            relationship_frame="已经聊过一阵",
+            stable_identity_facts=("来自嘉兴",),
+        ),
+    )
+    request = _request(revision=3, call="call:source-closure")
+
+    await cognition.appraisal.propose(request)
+    expression = await cognition.expression.propose(
+        request.model_copy(update={"call_id": "call:source-closure-expression"})
+    )
+
+    rendered = json.dumps(expression.raw_proposal, ensure_ascii=False)
+    assert "家里那边怎么了？" in rendered
+    assert "嘉兴" not in rendered
+    assert len(provider.calls) == 2
+    assert len(reviewer.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_combined_prompt_reasserts_two_object_envelope_after_inner_contracts() -> None:
+    provider = _CombinedProvider()
+    cognition = SingleCallInboundCognition(flash_model=provider)
+
+    await cognition.appraisal.propose(_request(revision=3, call="call:shape-contract"))
+
+    system = provider.calls[0][0]["content"]
+    envelope_at = system.rindex("COMBINED OUTPUT ENVELOPE")
+    expression_at = system.index("EXPRESSION DRAFT CONTRACT")
+    assert envelope_at > expression_at
+    assert '{"appraisal_draft":{...},"expression_draft":{...}}' in system[envelope_at:]
+    assert "never use content" in system[envelope_at:]
+    assert "confidence is an integer from 0 through 10000" in system[envelope_at:]
+
+
+@pytest.mark.asyncio
+async def test_invalid_world_claim_prefix_is_rewritten_by_character_model() -> None:
     provider = _UnsupportedGreetingClaimProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     base = _request(revision=3, call="call:unsupported-greeting")
@@ -610,7 +902,7 @@ async def test_invalid_world_claim_prefix_does_not_erase_a_valid_greeting() -> N
 
     assert visible == ["午安呀。你今天过得怎么样？"]
     assert expression.model_version != "local-expression-failsafe.1"
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -688,6 +980,25 @@ async def test_backup_failure_enters_local_recovery_without_a_third_model_call()
 
     assert len(primary.calls) == 1
     assert len(backup.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_provisional_episode_uses_independent_recovery_provider() -> None:
+    backup = _ProvisionalBackupProvider()
+    primary = _FailingProviderWithFallback(backup)
+    cognition = SingleCallInboundCognition(flash_model=primary)
+
+    expression = await cognition.expression.propose_provisional(
+        _request(revision=3, call="call:independent-provisional-expression")
+    )
+    appraisal_lane = await cognition.appraisal.propose_provisional(
+        _request(revision=3, call="call:independent-provisional-appraisal")
+    )
+
+    assert expression.model_id == "independent-provisional"
+    assert appraisal_lane.model_id == "independent-provisional"
+    assert not primary.calls
+    assert len(backup.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -984,13 +1295,38 @@ async def test_opt_in_separate_local_appraiser_keeps_expression_on_main_model() 
     )
 
     appraisal = DecisionProposal.model_validate_json(json.dumps(appraisal_output.raw_proposal))
-    expression = MinimalProposal.model_validate_json(json.dumps(expression_output.raw_proposal))
+    expression = DecisionProposal.model_validate_json(json.dumps(expression_output.raw_proposal))
     assert appraisal_output.model_id == "qwen-local"
     assert expression_output.model_id == "backup-flash"
     assert len(appraiser.calls) == 1
     assert len(expression_provider.calls) == 1
     assert appraisal.proposed_changes[0].kind == "appraisal_transition"
     assert len(expression.action_intents) == 1
+
+
+@pytest.mark.asyncio
+async def test_separate_appraisal_expression_still_runs_source_closure_review() -> None:
+    appraiser = _SeparateAppraisalProvider()
+    expression_provider = _SeparateSourceMixupExpressionProvider()
+    reviewer = _SourceClosureReviewer()
+    cognition = SingleCallInboundCognition(
+        flash_model=expression_provider,
+        appraisal_model=appraiser,
+        source_closure_model=reviewer,
+    )
+
+    await cognition.appraisal.propose(
+        _request(revision=3, call="call:separate-source-appraisal")
+    )
+    expression_output = await cognition.expression.propose(
+        _request(revision=4, call="call:separate-source-expression")
+    )
+
+    rendered = json.dumps(expression_output.raw_proposal, ensure_ascii=False)
+    assert "家里那边怎么了？" in rendered
+    assert "嘉兴" not in rendered
+    assert len(expression_provider.calls) == 2
+    assert len(reviewer.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -1115,7 +1451,11 @@ async def test_paired_cognition_honors_character_recall_and_replays_trace(
 @pytest.mark.asyncio
 async def test_shadow_episode_runs_real_candidate_without_extra_action(tmp_path) -> None:
     provider = _EpisodeCombinedProvider()
-    cognition = SingleCallInboundCognition(flash_model=provider)
+    recovery = _EpisodeCombinedProvider()
+    cognition = SingleCallInboundCognition(
+        flash_model=provider,
+        recovery_model=recovery,
+    )
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "single-call-episode-shadow.sqlite",
         config=replace(_config(), expression_episode_mode="shadow"),
@@ -1147,7 +1487,8 @@ async def test_shadow_episode_runs_real_candidate_without_extra_action(tmp_path)
     assert outcome.status == "action_authorized"
     # A resumed claimed episode may need one role-model recovery, but never a
     # local authored beat.
-    assert len(provider.calls) <= 3
+    assert len(provider.calls) <= 2
+    assert len(recovery.calls) == 1
     # The full fixture intentionally contains two beats; shadow adds none.
     assert len(evidence.projection.actions) == 2
     episode = diagnostics["expression_episode"]
@@ -1155,6 +1496,65 @@ async def test_shadow_episode_runs_real_candidate_without_extra_action(tmp_path)
     assert episode["turns"] == 1
     assert episode["candidate_valid"] == 1
     assert episode["slot_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_source_closure_uses_shadow_slot_instead_of_launching_a_second_author(
+    tmp_path,
+) -> None:
+    provider = _SubjectMixupCombinedProvider()
+    reviewer = _SourceClosureReviewer()
+    cognition = SingleCallInboundCognition(
+        flash_model=provider,
+        source_closure_model=reviewer,
+        identity_frame=CompanionIdentityFrame(
+            companion_name="沈知栀",
+            counterpart_name="geoff",
+            relationship_frame="刚认识",
+            stable_identity_facts=("来自嘉兴",),
+        ),
+    )
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "single-call-source-closure-shadow.sqlite",
+        config=replace(_config(), expression_episode_mode="shadow"),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:source-closure-shadow",
+                text="我最近有点担心家里那边",
+                observed_at=NOW,
+                trace_id="trace:source-closure-shadow",
+            )
+        )
+        projection = app.export_replay_evidence().projection
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    payloads = tuple(
+        item.text
+        for item in projection.stored_message_payloads
+        if item.text is not None
+    )
+    assert any("家里那边怎么了？" in item for item in payloads)
+    assert all("嘉兴" not in item for item in payloads)
+    assert len(provider.calls) == 2
+    assert all(
+        "provisional first beat" not in message["content"]
+        for call in provider.calls
+        for message in call
+    )
+    assert len(reviewer.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -1285,14 +1685,18 @@ async def test_episode_restart_before_author_resumes_claimed_trigger(tmp_path, m
 @pytest.mark.asyncio
 async def test_on_episode_appends_only_after_provisional_receipt(tmp_path) -> None:
     provider = _AppendEpisodeProvider()
-    expression = ChatModelDeliberationAdapter(model=provider)
+    recovery = _AppendEpisodeProvider()
+    cognition = SingleCallInboundCognition(
+        flash_model=provider,
+        recovery_model=recovery,
+    )
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "single-call-episode-append.sqlite",
         config=replace(_config(), expression_episode_mode="on"),
         identities=_Identities(),
         router=_Router(),
-        main_model=expression,
-        quick_recovery=expression,
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
         appraisal_model=None,
         transport=_DeliveredTransport(),
         now=NOW,
@@ -1315,7 +1719,8 @@ async def test_on_episode_appends_only_after_provisional_receipt(tmp_path) -> No
 
     assert outcome.status == "action_authorized"
     assert delivery is not None and delivery.status == "settled"
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 1
+    assert len(recovery.calls) == 1
     assert len(projection.expression_plan_manifests) == 2
     assert len(projection.actions) == 2
     states = {item.state for item in projection.actions}
@@ -1335,14 +1740,18 @@ async def test_on_episode_cancels_undispatched_provisional_atomically(
     tmp_path, disposition
 ) -> None:
     provider = _AppendEpisodeProvider(disposition)
-    expression = ChatModelDeliberationAdapter(model=provider)
+    recovery = _AppendEpisodeProvider()
+    cognition = SingleCallInboundCognition(
+        flash_model=provider,
+        recovery_model=recovery,
+    )
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / f"single-call-episode-{disposition}.sqlite",
         config=replace(_config(), expression_episode_mode="on"),
         identities=_Identities(),
         router=_Router(),
-        main_model=expression,
-        quick_recovery=expression,
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
         appraisal_model=None,
         transport=_DeliveredTransport(),
         now=NOW,
@@ -1363,7 +1772,8 @@ async def test_on_episode_cancels_undispatched_provisional_atomically(
         app.close()
 
     assert outcome.status == "observed_only"
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 1
+    assert len(recovery.calls) == 1
     assert projection.actions
     assert {item.state for item in projection.actions} == {"cancelled"}
     assert {
@@ -1575,7 +1985,7 @@ async def test_latency_segment_covers_combined_provider_once_not_cached_audit(tm
 
 
 @pytest.mark.asyncio
-async def test_loose_combined_reply_text_is_salvaged_without_another_provider_call(
+async def test_loose_combined_reply_text_is_reselected_by_the_character_model(
     tmp_path,
 ) -> None:
     provider = _LooseTextCombinedProvider()
@@ -1607,11 +2017,11 @@ async def test_loose_combined_reply_text_is_salvaged_without_another_provider_ca
         app.close()
 
     assert outcome.status == "action_authorized"
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 @pytest.mark.asyncio
-async def test_loose_combined_messages_preserve_two_visible_beats_without_retry() -> None:
+async def test_loose_combined_messages_are_reselected_with_two_visible_beats() -> None:
     provider = _LooseMultiMessageCombinedProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
 
@@ -1622,7 +2032,7 @@ async def test_loose_combined_messages_preserve_two_visible_beats_without_retry(
 
     proposal = DecisionProposal.model_validate_json(json.dumps(output.raw_proposal))
     assert output.model_id == "combined-flash"
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
     assert [item.kind for item in proposal.action_intents] == ["reply", "reply"]
 
 
@@ -1658,7 +2068,7 @@ async def test_common_explicit_text_arrays_preserve_all_visible_beats(
     )
 
     proposal = DecisionProposal.model_validate_json(json.dumps(output.raw_proposal))
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
     assert [item.kind for item in proposal.action_intents] == ["reply", "reply"]
 
 
@@ -1672,10 +2082,10 @@ async def test_common_explicit_text_arrays_preserve_all_visible_beats(
     ),
 )
 @pytest.mark.asyncio
-async def test_structural_salvage_rejects_roles_tools_and_nested_text(
+async def test_structural_reselection_rejects_roles_tools_and_nested_text(
     unsafe_shape: dict[str, object], caplog: pytest.LogCaptureFixture
 ) -> None:
-    provider = _LooseExpressionShapeProvider(unsafe_shape)
+    provider = _LooseExpressionShapeProvider(unsafe_shape, repair=False)
     cognition = SingleCallInboundCognition(flash_model=provider)
     request = _request(revision=3, call="call:unsafe-expression")
 
@@ -1688,7 +2098,7 @@ async def test_structural_salvage_rejects_roles_tools_and_nested_text(
         observation_ref=trigger.observation_ref,
         event_payload_hash=trigger.event_payload_hash,
     )
-    assert "structural normalization rejected" in caplog.text
+    assert "failed its exact contract" in caplog.text
     assert "不应被" not in caplog.text
 
 
@@ -1723,18 +2133,14 @@ async def test_loose_unsupported_autobiography_never_reaches_an_action(tmp_path)
     finally:
         app.close()
 
-    assert outcome.status == "action_authorized"
-    assert all("看电影" not in body for body in transport.bodies)
+    assert outcome.status == "observed_only"
+    assert not transport.bodies
     audits = [
         json.loads(item.event.payload()["audit_json"])
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
-    assert audits[-1]["model_version"] == "single-call-inbound-cognition.1"
-    # The paired appraisal already failed closed, so the expression lane now
-    # materializes its bounded local repair directly instead of opening a
-    # second Deliberation recovery attempt.
-    assert audits[-1]["status"] == "proposal_validated"
+    assert audits[-1]["status"] == "recovery_failed"
 
 
 @pytest.mark.asyncio
@@ -1779,17 +2185,15 @@ async def test_model_expression_is_not_replaced_by_a_local_role_template(
     finally:
         app.close()
 
-    assert outcome.status == "action_authorized"
-    assert delivery is not None and delivery.status == "settled"
-    assert len(transport.bodies) == 1
-    reply = transport.bodies[0]
-    assert reply == "我刚才一直在看电影。"
+    assert outcome.status == "observed_only"
+    assert delivery.status == "idle"
+    assert not transport.bodies
     audits = [
         json.loads(item.event.payload()["audit_json"])
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
-    assert audits[-1]["model_version"] != "local-expression-failsafe.1"
+    assert audits[-1]["status"] == "recovery_failed"
 
 
 @pytest.mark.asyncio
@@ -1826,19 +2230,16 @@ async def test_model_owned_world_answer_is_not_rewritten_by_a_keyword_gate(
     finally:
         app.close()
 
-    assert outcome.status == "action_authorized"
-    assert delivery is not None and delivery.status == "settled"
-    assert len(provider.calls) == 1
-    assert len(transport.bodies) == 1
-    reply = transport.bodies[0]
-    assert reply == "我刚才一直在看电影。"
+    assert outcome.status == "observed_only"
+    assert delivery.status == "idle"
+    assert len(provider.calls) >= 2
+    assert not transport.bodies
     audits = [
         json.loads(item.event.payload()["audit_json"])
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
-    assert audits[-1]["model_version"] == "single-call-inbound-cognition.1"
-    assert audits[-1]["status"] == "proposal_validated"
+    assert audits[-1]["status"] == "recovery_failed"
 
 
 @pytest.mark.asyncio
@@ -1885,8 +2286,8 @@ async def test_grounded_context_recovery_is_still_owned_by_a_role_model() -> Non
         }
     )
     output = await cognition.expression.propose(expression_request)
-    proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
-    assert proposal.response_text == "我接到了，刚才只是慢了一拍。"
+    proposal = DecisionProposal.model_validate_json(json.dumps(output.raw_proposal))
+    assert len(proposal.action_intents) == 1
     assert output.model_version != "local-expression-failsafe.1"
     assert len(provider.calls) == 2
     assert len(recovery.calls) == 1

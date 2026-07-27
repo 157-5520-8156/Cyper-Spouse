@@ -2930,7 +2930,15 @@ def build_sqlite_world_v2_turn_application(
                 # Preserve dialogue/world/affect continuity even when their
                 # complete proof envelopes coincide.  Chat still trims low-
                 # value capability and accounting slices below.
-                hard_max_characters=32_000,
+                #
+                # 40k, not 32k: the global eviction loop removes the lowest-
+                # ranked items first and Facts rank below fresh dialogue, so
+                # at 32k the 30-turn recall eval pinned relevant_facts at its
+                # two-item deep-eviction floor every turn while six more
+                # committed facts stayed invisible.  The provider prompt is
+                # the compacted view (~12k), so this only grows the internal
+                # verified capsule.
+                hard_max_characters=40_000,
                 available_capabilities=SliceBudget(
                     max_items=4, max_fields=48, max_characters=1_200
                 ),

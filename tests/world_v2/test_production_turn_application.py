@@ -2207,7 +2207,7 @@ async def test_production_application_exposes_accepted_fact_memory_to_the_next_t
                 platform="test",
                 platform_user_id="user.1",
                 platform_message_id="message:next-turn-memory-consumer",
-                text="你还记得我刚才说的偏好吗？",
+                text="你还记得我刚才说的乌龙茶吗？",
                 observed_at=NOW,
                 trace_id="trace:next-turn-memory-consumer",
             )

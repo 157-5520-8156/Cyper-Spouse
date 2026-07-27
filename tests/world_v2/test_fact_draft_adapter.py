@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -7,6 +8,7 @@ import json
 import pytest
 
 from companion_daemon.world_v2.fact_draft_adapter import (
+    FactDraftTechnicalFailure,
     FactObservationProposalAdapter,
     _PREDICATE_GUIDE,
     materialize_fact_observation_draft,
@@ -16,6 +18,15 @@ from companion_daemon.world_v2.schemas import Observation, WorldEvent
 
 
 NOW = datetime(2026, 7, 15, 17, 0, tzinfo=UTC)
+
+
+class _BlockedChat:
+    model = "blocked-fact-draft"
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        del messages, temperature
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 def _observation() -> tuple[Observation, WorldEvent]:
@@ -37,6 +48,23 @@ def _observation() -> tuple[Observation, WorldEvent]:
         correlation_id=observation.correlation_id, idempotency_key="observation:fact-draft",
         payload=observation.model_dump(mode="json"),
     )
+
+
+@pytest.mark.asyncio
+async def test_fact_draft_provider_has_a_stable_total_deadline() -> None:
+    observation, event = _observation()
+
+    with pytest.raises(FactDraftTechnicalFailure) as failure:
+        await FactObservationProposalAdapter(
+            model=_BlockedChat(),
+            timeout_seconds=0.1,
+        ).propose(
+            observation=observation,
+            observation_event=event,
+            source_world_revision=1,
+        )
+
+    assert failure.value.failure_code == "provider_timeout"
 
 
 def test_materializes_one_fact_proposal_from_an_exact_message_substring() -> None:
@@ -184,7 +212,7 @@ async def test_adapter_fails_closed_after_exactly_one_retry() -> None:
     observation, event = _observation()
     chat = _AlwaysInvalidChat()
 
-    with pytest.raises(ValueError):
+    with pytest.raises(FactDraftTechnicalFailure, match="invalid_output"):
         await FactObservationProposalAdapter(model=chat).propose(
             observation=observation, observation_event=event, source_world_revision=1,
         )
@@ -238,7 +266,10 @@ def test_everyday_life_predicates_materialize_from_casual_statements() -> None:
 def test_prompt_lists_every_installed_predicate_with_its_cardinality() -> None:
     observation, _event = _observation()
 
-    system = FactObservationProposalAdapter._messages(observation)[0]["content"]
+    system = FactObservationProposalAdapter._messages(
+        observation,
+        source_world_revision=1,
+    )[0]["content"]
 
     for code, cardinality in INSTALLED_FACT_PREDICATE_CARDINALITY.items():
         assert f"{code} ({cardinality})" in system

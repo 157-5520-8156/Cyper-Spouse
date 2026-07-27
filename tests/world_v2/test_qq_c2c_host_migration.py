@@ -1046,7 +1046,7 @@ async def test_napcat_expression_is_selected_by_the_single_main_model_and_reache
         await host.aclose()
 
     assert result.status == "action_authorized"
-    assert model.calls == 2
+    assert model.calls == 1
     assert delivery.sent[-1] == ("10001", expected)
     assert len([item for item in delivery.sent if item[1] != "typing:composing"]) <= 1
     # NapCat's synchronous response proves provider acceptance, not terminal
@@ -1087,7 +1087,7 @@ async def test_napcat_main_model_can_refuse_every_available_expression_without_a
         await host.aclose()
 
     assert result.status == "observed_only" and result.action_id is None
-    assert model.calls == 2
+    assert model.calls == 1
     assert _visible(delivery) == [] and projection.actions == ()
     assert projection.proposal_audits[-1].proposal_id.startswith("proposal:expression:")
 

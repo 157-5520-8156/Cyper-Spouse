@@ -31,7 +31,11 @@ from .chat_model_deliberation_adapter import (
     _combine_usage,
     _parse_character_recall_request,
     claim_repair_instruction,
+    companion_identity_source_ref,
+    expression_draft_shape_contract,
+    review_expression_source_closure,
     shape_repair_instruction,
+    source_closure_violation,
 )
 from .deliberation import (
     ModelInput,
@@ -119,109 +123,7 @@ _REMOTE_APPRAISAL_CUES = (
     "一直不",
     "怎么都",
 )
-_VISIBLE_TEXT_KEYS = ("response_text", "text", "reply", "message")
-_VISIBLE_TEXT_LIST_KEYS = ("beats", "messages", "responses")
-_UNSAFE_VISIBLE_KEYS = ("role", "tool", "tool_calls", "function_call", "arguments")
-
-
 logger = logging.getLogger(__name__)
-
-
-def _salvage_expression_without_invalid_world_claims(
-    *,
-    value: dict[str, object],
-    violation: str,
-    request: ModelInput,
-    capabilities: ExpressionDraftCapabilities,
-) -> str | None:
-    """Drop exact unsupported claim clauses while preserving the honest reply.
-
-    The claim validator has already rejected the draft at this point.  When
-    every declared world claim appears verbatim in visible text, removing
-    those exact clauses is narrower and safer than discarding unrelated
-    greeting/reaction text or asking a second model to rewrite the whole turn.
-    The ordinary materializer runs again afterwards, so undeclared residual
-    autobiography and malformed shapes still fail closed.
-    """
-
-    if not (
-        violation.startswith("world claim cites authority outside its semantic source lane:")
-        or violation.startswith("source-bound world claim declaration missing required scope(s):")
-    ):
-        return None
-    claims = value.get("world_claims")
-    if not isinstance(claims, list) or not claims:
-        return None
-    claim_texts: list[str] = []
-    for claim in claims:
-        if not isinstance(claim, dict):
-            return None
-        scope = claim.get("scope")
-        claim_text = claim.get("claim_text")
-        if (
-            scope == "subjective_or_hypothetical"
-            or not isinstance(claim_text, str)
-            or not claim_text.strip()
-        ):
-            continue
-        claim_texts.append(claim_text.strip())
-    if not claim_texts:
-        return None
-
-    salvaged = dict(value)
-    found = {claim_text: False for claim_text in claim_texts}
-
-    def strip_claims(text: str) -> str:
-        repaired = text
-        for claim_text in claim_texts:
-            if claim_text in repaired:
-                found[claim_text] = True
-                repaired = repaired.replace(claim_text, "")
-        return repaired.strip().lstrip("，,。.!！?？；;：:、").lstrip()
-
-    response_text = salvaged.get("response_text")
-    if isinstance(response_text, str):
-        repaired_response = strip_claims(response_text)
-        if not repaired_response:
-            return None
-        salvaged["response_text"] = repaired_response
-    else:
-        beats = salvaged.get("beats")
-        if not isinstance(beats, list):
-            return None
-        repaired_beats: list[object] = []
-        for beat in beats:
-            if not isinstance(beat, dict):
-                repaired_beats.append(beat)
-                continue
-            text = beat.get("text")
-            if not isinstance(text, str):
-                repaired_beats.append(beat)
-                continue
-            repaired_text = strip_claims(text)
-            if repaired_text:
-                repaired_beats.append({**beat, "text": repaired_text})
-        if not repaired_beats:
-            return None
-        salvaged["beats"] = repaired_beats
-    if not all(found.values()):
-        return None
-
-    # Remove every factual declaration, not just the invalid ref.  Any
-    # remaining factual assertion must independently survive the standard
-    # undeclared-claim gate below.
-    salvaged["world_claims"] = []
-    raw = json.dumps(salvaged, ensure_ascii=False, separators=(",", ":"))
-    try:
-        materialize_expression_draft(
-            raw=raw,
-            request=request,
-            capabilities=capabilities,
-            quick_recovery=False,
-        )
-    except (TypeError, ValueError):
-        return None
-    return raw
 
 
 def _cache_key(request: ModelInput) -> tuple[str, str, str]:
@@ -392,6 +294,16 @@ class SingleCallAppraisalAdapter:
     def has_hedge_provider(self, _request: ModelInput) -> bool:
         return self._owner._recovery_model is not None
 
+    def source_closure_review_enabled(self) -> bool:
+        """The paired appraisal pass also authors the expression under review."""
+
+        return self._owner._source_closure_reviewer is not None
+
+    def provisional_provider_available(self, _request: ModelInput) -> bool:
+        """Only reserve an episode slot when it has an independent provider."""
+
+        return self._owner._recovery_model is not None
+
     async def propose_provisional(self, request: ModelInput) -> ModelOutput:
         return await self._owner._propose_episode_candidate(request)
 
@@ -456,13 +368,26 @@ class SingleCallExpressionAdapter:
     def has_hedge_provider(self, _request: ModelInput) -> bool:
         return self._owner._recovery_expression is not None
 
+    def source_closure_review_enabled(self) -> bool:
+        """Reserve the alternate author slot for the factual truth boundary."""
+
+        return self._owner._source_closure_reviewer is not None
+
+    def provisional_provider_available(self, _request: ModelInput) -> bool:
+        """Only reserve an episode slot when it has an independent provider."""
+
+        return self._owner._recovery_expression is not None
+
     def install_recall_coordinator(self, coordinator: RecallCoordinator) -> None:
         self._owner.install_recall_coordinator(coordinator)
 
     async def propose_provisional(self, request: ModelInput) -> ModelOutput:
-        """Use the selected real provider for one strict provisional beat."""
+        """Use the independent recovery provider for one strict provisional beat."""
 
-        return await self._owner._selected_expression(request).propose_provisional(request)
+        adapter = self._owner._recovery_expression
+        if adapter is None:
+            raise RuntimeError("expression episode requires an independent recovery provider")
+        return await adapter.propose_provisional(request)
 
     def episode_provisional_already_evaluated(self, request: ModelInput) -> bool:
         return _cache_key(request) in self._owner._episode_provisional_started
@@ -591,6 +516,7 @@ class SingleCallExpressionAdapter:
                 request=expression_request,
                 capabilities=self._owner._capabilities,
                 quick_recovery=False,
+                stable_identity_source_refs=self._owner._stable_identity_source_refs,
             )
         except (TypeError, ValueError):
             # A paired draft can become invalid when acceptance advances the
@@ -708,6 +634,7 @@ class SingleCallInboundCognition:
         flash_model: ChatCompletionModel,
         thinking_model: ChatCompletionModel | None = None,
         appraisal_model: ChatCompletionModel | None = None,
+        source_closure_model: ChatCompletionModel | None = None,
         recovery_model: ChatCompletionModel | None = None,
         contextual_failsafe_model: ChatCompletionModel | None = None,
         contextual_failsafe_reviewer_model: ChatCompletionModel | None = None,
@@ -736,6 +663,15 @@ class SingleCallInboundCognition:
         self._temperature = temperature
         self._capabilities = expression_capabilities
         self._identity_frame = identity_frame
+        # Semantic source-closure review is an explicit deployment capability,
+        # not an implicit consequence of installing a local appraisal model.
+        # A synchronous reviewer on every ordinary turn doubled provider
+        # latency and converted otherwise valid replies into deadline misses.
+        # The normal source-token/materializer boundary remains active; an
+        # explicitly installed reviewer can still run the bounded correction
+        # path for experiments or higher-risk lanes.
+        resolved_source_closure_model = source_closure_model
+        self._source_closure_reviewer = resolved_source_closure_model
         self._recall: RecallCoordinator | None = None
         self._flash_expression = ChatModelDeliberationAdapter(
             model=flash_model,
@@ -744,6 +680,7 @@ class SingleCallInboundCognition:
             expression_capabilities=expression_capabilities,
             identity_frame=identity_frame,
             semantic_boundary_reviewer=flash_model,
+            source_closure_reviewer=resolved_source_closure_model,
         )
         self._thinking_expression = (
             ChatModelDeliberationAdapter(
@@ -753,6 +690,7 @@ class SingleCallInboundCognition:
                 expression_capabilities=expression_capabilities,
                 identity_frame=identity_frame,
                 semantic_boundary_reviewer=flash_model,
+                source_closure_reviewer=resolved_source_closure_model,
             )
             if thinking_model is not None
             else None
@@ -765,6 +703,7 @@ class SingleCallInboundCognition:
             temperature=temperature,
             expression_capabilities=expression_capabilities,
             identity_frame=identity_frame,
+            source_closure_reviewer=resolved_source_closure_model,
         )
         self._recovery_expression = (
             ChatModelDeliberationAdapter(
@@ -773,10 +712,8 @@ class SingleCallInboundCognition:
                 temperature=temperature,
                 expression_capabilities=expression_capabilities,
                 identity_frame=identity_frame,
-                # One backup completion is the recovery budget.  The normal
-                # materializer still enforces source-bound claims, so a
-                # second semantic reviewer is unnecessary here.
                 semantic_boundary_reviewer=None,
+                source_closure_reviewer=resolved_source_closure_model,
             )
             if self._recovery_model is not None
             else None
@@ -854,6 +791,12 @@ class SingleCallInboundCognition:
         self.appraisal = SingleCallAppraisalAdapter(self)
         self.expression = SingleCallExpressionAdapter(self)
 
+    @property
+    def _stable_identity_source_refs(self) -> frozenset[str]:
+        if self._identity_frame is None:
+            return frozenset()
+        return frozenset((companion_identity_source_ref(self._identity_frame),))
+
     def install_recall_coordinator(self, coordinator: RecallCoordinator) -> None:
         if (
             self._recall is not None
@@ -886,7 +829,10 @@ class SingleCallInboundCognition:
     async def _propose_episode_candidate(self, request: ModelInput) -> ModelOutput:
         key = _cache_key(request)
         self._episode_provisional_started.add(key)
-        return await self._selected_expression(request).propose_provisional(request)
+        adapter = self._recovery_expression
+        if adapter is None:
+            raise RuntimeError("expression episode requires an independent recovery provider")
+        return await adapter.propose_provisional(request)
 
     def _accept_candidate_pending(self, request: ModelInput) -> None:
         key = _cache_key(request)
@@ -1007,6 +953,7 @@ class SingleCallInboundCognition:
                 request=request,
                 capabilities=self._capabilities,
                 quick_recovery=False,
+                stable_identity_source_refs=self._stable_identity_source_refs,
             )
         except asyncio.CancelledError:
             raise
@@ -1072,6 +1019,7 @@ class SingleCallInboundCognition:
                 request=request,
                 capabilities=self._capabilities,
                 quick_recovery=False,
+                stable_identity_source_refs=self._stable_identity_source_refs,
             ),
         )
 
@@ -1161,7 +1109,7 @@ class SingleCallInboundCognition:
                 }
             )
         elif self._recall_available(request) and self._recall is not None:
-            prefetch_trace = self._recall.take_ready_scheduled_prefetch(
+            prefetch_trace = await self._recall.await_scheduled_prefetch(
                 expected_cursor=expected_cursor,
                 trigger_ref=request.trigger_ref,
             )
@@ -1207,6 +1155,12 @@ class SingleCallInboundCognition:
                     + appraisal_messages[0]["content"]
                     + "\n\nEXPRESSION DRAFT CONTRACT:\n"
                     + expression_messages[0]["content"]
+                    + "\n\nCOMBINED OUTPUT ENVELOPE:\n"
+                    "The standalone return-format sentences embedded in the two contracts above "
+                    "describe each inner object; for this simultaneous call, return exactly "
+                    "{\"appraisal_draft\":{...},\"expression_draft\":{...}} and no standalone "
+                    "draft. "
+                    + expression_draft_shape_contract()
                 ),
             },
             expression_messages[1],
@@ -1408,51 +1362,64 @@ class SingleCallInboundCognition:
                 request=expression_request,
                 capabilities=self._capabilities,
                 quick_recovery=False,
+                stable_identity_source_refs=self._stable_identity_source_refs,
             )
         except (TypeError, ValueError) as exc:
             violation = str(exc)
-            normalized = _normalize_visible_expression(expression_value)
-            if normalized is None:
-                logger.warning(
-                    "combined expression structural normalization rejected: shape=%s error=%s",
-                    _visible_expression_shape(expression_value),
-                    violation[:300],
-                )
-                expression_valid = False
-            else:
-                expression_raw = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
-                try:
-                    # Normalization is only a structural repair.  The normal
-                    # epistemic-claim and capability gates remain authoritative.
-                    materialize_expression_draft(
-                        raw=expression_raw,
-                        request=expression_request,
-                        capabilities=self._capabilities,
-                        quick_recovery=False,
-                    )
-                except (TypeError, ValueError) as retry_exc:
-                    violation = str(retry_exc)
-                    expression_valid = False
-                else:
-                    expression_valid = True
+            logger.warning(
+                "combined expression failed its exact contract: shape=%s error=%s",
+                _visible_expression_shape(expression_value),
+                violation[:300],
+            )
+            expression_valid = False
         else:
             expression_valid = True
-        if not expression_valid and violation is not None:
-            salvaged = _salvage_expression_without_invalid_world_claims(
-                value=expression_value,
-                violation=violation,
-                request=expression_request,
-                capabilities=self._capabilities,
-            )
-            if salvaged is not None:
-                expression_raw = salvaged
-                expression_valid = True
-                logger.warning("unsupported world-claim clause removed without losing the reply")
-                record_claim_repair()
         corrective_spent = False
+        if expression_valid and self._source_closure_reviewer is not None:
+            review = await review_expression_source_closure(
+                reviewer=self._source_closure_reviewer,
+                request=expression_request,
+                raw=expression_raw,
+                identity_frame=self._identity_frame,
+            )
+            if review is not None and review.decision == "unsupported":
+                violation = source_closure_violation(review)
+                repair_timeout = fit_secondary_call_timeout(
+                    _CLAIM_REPAIR_TIMEOUT_SECONDS
+                )
+                corrective_spent = True
+                if repair_timeout is None:
+                    expression_valid = False
+                else:
+                    repaired = await self._repair_expression_claims(
+                        request=expression_request,
+                        provider=provider,
+                        messages=repair_messages,
+                        raw=raw,
+                        violation=violation,
+                        timeout_seconds=repair_timeout,
+                    )
+                    if repaired is None:
+                        expression_valid = False
+                    else:
+                        corrected_review = await review_expression_source_closure(
+                            reviewer=self._source_closure_reviewer,
+                            request=expression_request,
+                            raw=repaired,
+                            identity_frame=self._identity_frame,
+                        )
+                        if (
+                            corrected_review is not None
+                            and corrected_review.decision == "unsupported"
+                        ):
+                            violation = source_closure_violation(corrected_review)
+                            expression_valid = False
+                        else:
+                            expression_raw = repaired
         if (
             not expression_valid
             and violation is not None
+            and not corrective_spent
             and not expression_episode_provider_slots_active()
         ):
             # A structural near-miss (claim bookkeeping, beat shape, later
@@ -1560,96 +1527,6 @@ class SingleCallInboundCognition:
             self._failed_details.popitem(last=False)
 
 
-def _normalize_visible_expression(
-    value: dict[str, Any],
-) -> dict[str, object] | None:
-    """Repair only an explicit, user-visible reply shape.
-
-    This intentionally does not recurse: rationale, tool results, metadata, or
-    arbitrary nested ``text`` fields must never become a companion utterance.
-    Conflicting top-level aliases are rejected instead of guessed between.
-    """
-
-    if any(key in value for key in _UNSAFE_VISIBLE_KEYS):
-        return None
-
-    candidates: list[tuple[str, ...]] = []
-    for key in _VISIBLE_TEXT_KEYS:
-        raw = value.get(key)
-        if isinstance(raw, str) and raw.strip():
-            candidates.append((raw.strip(),))
-        elif isinstance(raw, list):
-            texts = _normalize_visible_text_list(raw)
-            if texts is None:
-                return None
-            candidates.append(texts)
-    for key in _VISIBLE_TEXT_LIST_KEYS:
-        raw = value.get(key)
-        if raw is None:
-            continue
-        if not isinstance(raw, list):
-            return None
-        texts = _normalize_visible_text_list(raw)
-        if texts is None:
-            return None
-        candidates.append(texts)
-
-    distinct = set(candidates)
-    if len(distinct) != 1:
-        return None
-    texts = next(iter(distinct))
-    if not texts or any(len(text) > 4_096 for text in texts):
-        return None
-    stance = value.get("stance")
-    rationale = value.get("brief_rationale")
-    confidence = value.get("confidence")
-    claims = value.get("world_claims")
-    return {
-        "timing_choice": "now",
-        "beats": [{"modality": "text", "text": text} for text in texts],
-        "stance": (stance if isinstance(stance, str) and 1 <= len(stance) <= 128 else "open"),
-        "brief_rationale": (
-            rationale
-            if isinstance(rationale, str) and 1 <= len(rationale) <= 240
-            else "Normalized an explicit visible-text response."
-        ),
-        "confidence": (
-            confidence
-            if isinstance(confidence, int)
-            and not isinstance(confidence, bool)
-            and 0 <= confidence <= 10_000
-            else 5_000
-        ),
-        "world_claims": claims if isinstance(claims, list) else [],
-    }
-
-
-def _normalize_visible_text_list(value: list[object]) -> tuple[str, ...] | None:
-    """Normalize one declared visible-text list without recursive extraction."""
-
-    if not value:
-        return None
-    texts: list[str] = []
-    for item in value:
-        if isinstance(item, str):
-            text = item.strip()
-        elif isinstance(item, dict):
-            if not set(item).issubset({"text", "modality"}):
-                return None
-            if item.get("modality", "text") != "text":
-                return None
-            raw_text = item.get("text")
-            if not isinstance(raw_text, str):
-                return None
-            text = raw_text.strip()
-        else:
-            return None
-        if not text:
-            return None
-        texts.append(text)
-    return tuple(texts)
-
-
 def _visible_expression_shape(value: dict[str, Any]) -> str:
     """Return bounded structural diagnostics without logging proposed prose."""
 
@@ -1698,21 +1575,9 @@ def _parse_combined(raw: str) -> dict[str, dict[str, Any]]:
         if set(aliases) == {"appraisal_draft", "expression_draft"}:
             value = aliases
     if set(value) != {"appraisal_draft", "expression_draft"}:
-        # Compatibility for a provider that obeys the embedded ExpressionDraft
-        # contract but misses the new two-key wrapper.  State fails closed to a
-        # source-bound no-change appraisal; the provider bytes are still
-        # validated independently as an expression after the acceptance seam.
-        return {
-            "appraisal_draft": {
-                "appraise": False,
-                "brief_rationale": "No material appraisal was supplied in the combined response.",
-                "behavior_tendency": "observe",
-                "stance": "wait",
-                "display_strategy": "withhold",
-                "confidence": 0,
-            },
-            "expression_draft": value,
-        }
+        raise ValueError(
+            "combined cognition must contain exactly appraisal_draft and expression_draft"
+        )
     if not all(isinstance(value[key], dict) for key in value):
         raise ValueError("combined cognition drafts must be objects")
     return value  # type: ignore[return-value]

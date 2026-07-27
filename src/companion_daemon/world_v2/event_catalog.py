@@ -23,6 +23,11 @@ from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS
 from .commitment_events import COMMITMENT_PAYLOAD_MODELS
 from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS
 from .fact_events import FACT_PAYLOAD_MODELS
+from .fact_trigger import (
+    FactMemoryDecisionRecordedPayload,
+    InteractionFactDecisionRecordedPayload,
+    InteractionFactTechnicalFailurePayload,
+)
 from .fact_proposal_audit_v2 import FactCommitProposalRecordedPayloadV2
 from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
 from .media_selection_acceptance_manifest import (
@@ -143,7 +148,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.38"
+    reducer_bundle: str = "world-v2-reducers.39"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -374,6 +379,9 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
                 "runtime_outcome_ref": _ID,
             },
         ),
+        "InteractionFactTechnicalFailureRecorded": InteractionFactTechnicalFailurePayload,
+        "InteractionFactDecisionRecorded": InteractionFactDecisionRecordedPayload,
+        "FactMemoryDecisionRecorded": FactMemoryDecisionRecordedPayload,
         "ToolRequestAccepted": ToolRequestAcceptedPayload,
         "ToolResultAccepted": ToolResultAcceptedPayload,
         "PerceptionRequestAccepted": PerceptionRequestAcceptedPayload,
@@ -513,6 +521,15 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "TriggerProcessOpened": "world_id+trigger_id+opened",
         "TriggerProcessReclaimed": "world_id+trigger_id+attempt_id+reclaimed",
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
+        "InteractionFactTechnicalFailureRecorded": (
+            "world_id+trigger_id+attempt_id+technical_failure"
+        ),
+        "InteractionFactDecisionRecorded": (
+            "world_id+trigger_id+fact_context_hash+decision_id"
+        ),
+        "FactMemoryDecisionRecorded": (
+            "world_id+trigger_id+fact_authority_event_ref+decision_id"
+        ),
         "ToolRequestAccepted": "world_id+request_id",
         "ToolResultAccepted": "world_id+result_id",
         "PerceptionRequestAccepted": "world_id+request_id",
@@ -903,6 +920,51 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     "ExternalObservationProcessed",
                 ),
                 evidence_types=("runtime_outcome",),
+            ),
+            _contract(
+                "InteractionFactTechnicalFailureRecorded",
+                "world_runtime",
+                "deliberation",
+                "InteractionFactTechnicalFailurePayload",
+                allowed_predecessors=(
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                ),
+                evidence_types=("model_failure", "retry_schedule"),
+                successors=("TriggerProcessReclaimed",),
+            ),
+            _contract(
+                "InteractionFactDecisionRecorded",
+                "world_runtime",
+                "deliberation",
+                "InteractionFactDecisionRecordedPayload",
+                allowed_predecessors=(
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                ),
+                evidence_types=("model_result", "committed_observation"),
+                successors=(
+                    "FactCommitProposalRecorded",
+                    "FactWithdrawn",
+                    "TriggerProcessCompleted",
+                ),
+            ),
+            _contract(
+                "FactMemoryDecisionRecorded",
+                "world_runtime",
+                "deliberation",
+                "FactMemoryDecisionRecordedPayload",
+                allowed_predecessors=(
+                    "FactCommittedV2",
+                    "FactCorrected",
+                    "TriggerProcessReclaimed",
+                ),
+                evidence_types=("model_result", "accepted_fact"),
+                successors=(
+                    "MemoryCandidateOpened",
+                    "MemoryCandidateRevised",
+                    "TriggerProcessCompleted",
+                ),
             ),
             _contract(
                 "ModelResultRecorded",

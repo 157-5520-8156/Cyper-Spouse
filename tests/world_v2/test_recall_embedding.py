@@ -247,8 +247,8 @@ def test_embedding_auth_rejection_is_a_hard_configuration_error() -> None:
         embedding.close()
 
 
-def test_semantic_embedding_is_on_by_default_with_credentials_and_can_be_disabled() -> None:
-    enabled_by_default = Settings(  # type: ignore[call-arg]
+def test_semantic_embedding_is_opt_in_even_with_credentials() -> None:
+    disabled_by_default = Settings(  # type: ignore[call-arg]
         _env_file=None,
         OPENAI_API_KEY="secret",
     )
@@ -261,19 +261,13 @@ def test_semantic_embedding_is_on_by_default_with_credentials_and_can_be_disable
         _env_file=None,
         OPENAI_API_KEY="secret",
         OPENAI_BASE_URL="https://embedding.test/v1",
+        WORLD_V2_RECALL_SEMANTIC_ENABLED=True,
         WORLD_V2_RECALL_EMBEDDING_MODEL="semantic-fixture",
         WORLD_V2_RECALL_EMBEDDING_DIMENSIONS=2,
     )
 
     assert configured_recall_embedding(disabled) is None
-    default_embedding = configured_recall_embedding(enabled_by_default)
-    assert default_embedding is not None
-    try:
-        assert default_embedding.version.startswith(
-            "openai-compatible:text-embedding-3-small:dimensions=512:endpoint="
-        )
-    finally:
-        default_embedding.close()
+    assert configured_recall_embedding(disabled_by_default) is None
     embedding = configured_recall_embedding(enabled)
     assert embedding is not None
     try:
@@ -282,6 +276,15 @@ def test_semantic_embedding_is_on_by_default_with_credentials_and_can_be_disable
         )
     finally:
         embedding.close()
+
+
+def test_blank_embedding_credential_disables_semantic_recall() -> None:
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        OPENAI_API_KEY="",
+    )
+
+    assert configured_recall_embedding(settings) is None
 
 
 def test_semantic_embedding_cache_is_incremental_and_survives_restart(tmp_path) -> None:

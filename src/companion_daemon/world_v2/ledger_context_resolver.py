@@ -23,6 +23,7 @@ from .context_capsule import (
     ContextCapsuleCompiler,
     ContextCapsuleRequest,
     FactRecallItem,
+    HistoricalFactRecallItem,
     InnerAdvisoryProjection,
     MAX_INPUT_ITEMS_PER_SLICE,
     MAX_RESOLVER_DOMAIN_SCAN_ITEMS,
@@ -50,6 +51,7 @@ from .conversation_continuity import (
     ConversationContinuityCompiler,
 )
 from .fact_accepted_contracts import rehydrate_fact_commit_materialized_v2_json
+from .fact_events import FactChangedPayload
 from .context_resolver import (
     ContextCompileQuery,
     ResolvedContextResult,
@@ -67,8 +69,14 @@ from .perception_result_context import (
     PerceptionResultReader,
 )
 from .expression_payload_store import ImmutableExpressionPayloadStore
+from .model_facing_context import CHAT_RECENT_DIALOGUE_ITEM_LIMIT
 from .recent_dialogue import RecentDialogueCompiler, RecentDialogueItem
-from .recall_corpus import RecallCorpusSources
+from .recall_corpus import (
+    MAX_RECALL_CORPUS_DOCUMENTS,
+    RecallCorpusSources,
+    required_recall_authority_refs,
+    select_recall_authority_bindings,
+)
 from .recall_index import RecallCursor, RecallSourceBinding
 from .recall_runtime import RecallCoordinator
 from .schema_core import PrivacyClass
@@ -80,6 +88,8 @@ from .schemas import (
     LedgerProjection,
     Observation,
     PrivateImpressionProjection,
+    ProjectionCursor,
+    WorldEvent,
 )
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
 from .world_life_context import WorldLifeContextCompiler, WorldLifeContextItem
@@ -539,11 +549,7 @@ def fact_recall_items(
             continue
         fact_ref = committed.get(fact.origin.accepted_event_ref)
         fact_located = ledger.lookup_event_commit(fact.origin.accepted_event_ref)
-        if (
-            fact_ref is None
-            or fact_ref.event_type != "FactCommittedV2"
-            or fact_located is None
-        ):
+        if fact_ref is None or fact_located is None:
             continue
         fact_event, fact_commit = fact_located
         if (
@@ -555,14 +561,23 @@ def fact_recall_items(
         ):
             continue
         try:
-            materialized = rehydrate_fact_commit_materialized_v2_json(fact_event.payload_json)
+            if fact_ref.event_type == "FactCommittedV2":
+                materialized = rehydrate_fact_commit_materialized_v2_json(
+                    fact_event.payload_json
+                )
+                values_match = (
+                    materialized.fact_id == fact.fact_id
+                    and materialized.values.model_dump(mode="json")
+                    == fact.values.model_dump(mode="json")
+                )
+            elif fact_ref.event_type == "FactCorrected":
+                corrected = FactChangedPayload.model_validate_json(fact_event.payload_json)
+                values_match = corrected.operation == "correct" and corrected.fact_after == fact
+            else:
+                values_match = False
         except ValueError:
             continue
-        if (
-            materialized.fact_id != fact.fact_id
-            or materialized.values.model_dump(mode="json")
-            != fact.values.model_dump(mode="json")
-        ):
+        if not values_match:
             continue
 
         observation_candidates = observations_by_id.get(binding.source_ref, [])
@@ -620,6 +635,7 @@ def fact_recall_items(
             source_excerpt=observation.text,
             confidence_bp=fact.values.confidence_bp,
             privacy_class=fact.values.privacy_class,
+            occurred_at=observation.logical_time,
             committed_at=fact.committed_at,
             updated_at=fact.updated_at,
             accepted_fact_event_ref=fact_ref.event_id,
@@ -632,6 +648,82 @@ def fact_recall_items(
             assertion_payload_ref=observation.payload_ref,
             assertion_payload_hash=observation.payload_hash,
         ))
+    return tuple(output)
+
+
+def historical_fact_recall_items(
+    *,
+    ledger: LedgerPort,
+    projection: LedgerProjection,
+    subject_refs: frozenset[str],
+) -> tuple[HistoricalFactRecallItem, ...]:
+    """Rehydrate superseded Fact before-images from immutable transition lineage."""
+
+    reader = getattr(ledger, "recent_fact_transition_events", None)
+    if callable(reader):
+        events = reader(
+            subject_refs=subject_refs,
+            cursor=ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            ),
+            limit=MAX_RECALL_CORPUS_DOCUMENTS,
+        )
+    else:
+        # Compatibility for narrow test/decorator LedgerPorts.  Production
+        # SQLite uses the indexed method above and never scans this projection.
+        fallback: list[WorldEvent] = []
+        for transition in reversed(projection.fact_transitions):
+            if (
+                transition.operation not in {"correct", "withdraw"}
+                or transition.values_before is None
+                or transition.values_before.subject_ref not in subject_refs
+            ):
+                continue
+            located = ledger.lookup_event_commit(transition.accepted_event_ref)
+            if located is not None:
+                fallback.append(located[0])
+            if len(fallback) >= MAX_RECALL_CORPUS_DOCUMENTS:
+                break
+        events = tuple(fallback)
+    prepared: list[tuple[WorldEvent, FactProjection]] = []
+    for event in events:
+        try:
+            payload = FactChangedPayload.model_validate_json(event.payload_json)
+        except ValueError:
+            continue
+        historical = payload.fact_before
+        if (
+            event.event_type not in {"FactCorrected", "FactWithdrawn"}
+            or payload.operation not in {"correct", "withdraw"}
+            or historical is None
+            or historical.values.subject_ref not in subject_refs
+            or payload.fact_after.fact_id != historical.fact_id
+            or payload.fact_after.entity_revision != historical.entity_revision + 1
+        ):
+            continue
+        prepared.append((event, historical))
+    resolved = {
+        item.accepted_fact_event_ref: item
+        for item in fact_recall_items(
+            ledger=ledger,
+            projection=projection,
+            facts=tuple(item[1] for item in prepared),
+        )
+    }
+    output: list[HistoricalFactRecallItem] = []
+    for event, historical in prepared:
+        item = resolved.get(historical.origin.accepted_event_ref)
+        if item is None or event.logical_time < historical.updated_at:
+            continue
+        output.append(
+            HistoricalFactRecallItem(
+                **item.model_dump(mode="python", exclude={"status"}),
+                valid_from=historical.updated_at,
+                valid_to=event.logical_time,
+            )
+        )
     return tuple(output)
 
 
@@ -885,6 +977,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             projection=projection,
             facts=scoped_facts,
         )
+        historical_facts = historical_fact_recall_items(
+            ledger=self._ledger,
+            projection=projection,
+            subject_refs=subject_refs,
+        )
         fact_ms = (time.perf_counter() - domain_phase_started) * 1000
         domain_phase_started = time.perf_counter()
         scoped_threads = tuple(
@@ -1026,6 +1123,34 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         )
         recent_dialogue = continuity.dialogue
         continuity_rank_overrides = continuity.rank_overrides
+        is_inbound_dialogue_turn = any(
+            claim.authority_event_ref == query.trigger_ref
+            for item in dialogue_candidates
+            if item.speaker == "counterpart"
+            for claim in item.source_claims
+        )
+        context_facts = (
+            tuple(
+                item
+                for item in recalled_facts
+                if ("relevant_facts", item.fact_id) in continuity_rank_overrides
+            )
+            if is_inbound_dialogue_turn
+            else recalled_facts
+        )
+        context_memories = (
+            tuple(
+                item
+                for item in memory_retrievals.items
+                if (
+                    "active_memory_candidates",
+                    item.candidate_id,
+                )
+                in continuity_rank_overrides
+            )
+            if is_inbound_dialogue_turn
+            else memory_retrievals.items
+        )
         memory_ms = (time.perf_counter() - domain_phase_started) * 1000
         domain_phase_started = time.perf_counter()
         appraisal_by_id = {item.appraisal_id: item for item in projection.appraisals}
@@ -1063,16 +1188,58 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 ledger_sequence=query.ledger_sequence,
             )
             try:
-                recall_authority = tuple(
-                    RecallSourceBinding(
-                        source_kind="committed_event",
-                        authority_type=item.event_type,
-                        ref=item.event_id,
-                        source_world_revision=item.world_revision,
-                        immutable_hash=item.payload_hash,
-                    )
-                    for item in projection.committed_world_event_refs
-                    if item.world_revision <= query.world_revision
+                # Dialogue inside the bounded working-memory window is already
+                # guaranteed a place in the compiled Context, so "recalling"
+                # it is a no-op that crowds facts, threads and older dialogue
+                # out of the small bounded hit set.  The 30-turn recall eval
+                # measured exactly that: 28 of 29 prefetch traces surfaced
+                # only in-window dialogue echoes.  Recall therefore searches
+                # what the character could have forgotten — everything
+                # outside the window — mirroring the chat recent_dialogue
+                # item budget below.
+                recall_dialogue = tuple(
+                    sorted(dialogue_candidates, key=lambda item: item.occurred_at)
+                )[:-CHAT_RECENT_DIALOGUE_ITEM_LIMIT]
+                recall_sources = RecallCorpusSources(
+                    recent_dialogue=recall_dialogue,
+                    relevant_facts=recalled_facts,
+                    historical_facts=historical_facts,
+                    open_threads=open_threads_for_continuity,
+                    recent_experiences=tuple(
+                        item
+                        for item in scoped_experiences
+                        if hasattr(item, "origin")
+                    ),
+                    world_life=world_life,
+                    active_memory_candidates=memory_retrievals.items,
+                    appraisals=tuple(
+                        item
+                        for item in scoped_appraisals
+                        if isinstance(item, AppraisalProjection)
+                    ),
+                    private_impressions=tuple(
+                        item
+                        for item in projection.private_impressions
+                        if item.subject_ref in subject_refs and item.origin is not None
+                    ),
+                )
+                required_authority_refs = required_recall_authority_refs(
+                    recall_sources
+                )
+                recall_authority = select_recall_authority_bindings(
+                    sources=recall_sources,
+                    candidates=(
+                        RecallSourceBinding(
+                            source_kind="committed_event",
+                            authority_type=item.event_type,
+                            ref=item.event_id,
+                            source_world_revision=item.world_revision,
+                            immutable_hash=item.payload_hash,
+                        )
+                        for item in projection.committed_world_event_refs
+                        if item.world_revision <= query.world_revision
+                        and item.event_id in required_authority_refs
+                    ),
                 )
                 self._recall.refresh(
                     cursor=recall_cursor,
@@ -1080,28 +1247,8 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     subject_refs=tuple(sorted(scope.subject_refs)),
                     logical_time=situation.logical_time,
                     trigger_ref=query.trigger_ref,
-                    sources=RecallCorpusSources(
-                        recent_dialogue=dialogue_candidates,
-                        relevant_facts=recalled_facts,
-                        open_threads=open_threads_for_continuity,
-                        recent_experiences=tuple(
-                            item
-                            for item in scoped_experiences
-                            if hasattr(item, "origin")
-                        ),
-                        world_life=world_life,
-                        active_memory_candidates=memory_retrievals.items,
-                        appraisals=tuple(
-                            item
-                            for item in scoped_appraisals
-                            if isinstance(item, AppraisalProjection)
-                        ),
-                        private_impressions=tuple(
-                            item
-                            for item in projection.private_impressions
-                            if item.subject_ref in subject_refs and item.origin is not None
-                        ),
-                        authority_bindings=recall_authority,
+                    sources=recall_sources.model_copy(
+                        update={"authority_bindings": recall_authority}
                     ),
                 )
                 trigger_dialogue = next(
@@ -1157,10 +1304,10 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             "appraisals": scoped_appraisals,
             "affect_episodes": scoped_affect,
             "open_threads": tuple(item for item in scoped_threads if item.values.status == "open"),
-            "relevant_facts": recalled_facts,
+            "relevant_facts": context_facts,
             "recent_experiences": scoped_experiences,
             "world_life": world_life,
-            "active_memory_candidates": memory_retrievals.items,
+            "active_memory_candidates": context_memories,
             "available_capabilities": tuple(
                 item
                 for item in projection.capability_grants

@@ -179,12 +179,12 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_proxy_url: str | None = Field(default=None, alias="OPENAI_PROXY_URL")
-    # Semantic lane for the rebuildable World-v2 Recall Index.  It activates
-    # when deployment credentials exist, remains explicitly disable-able, and
-    # only runs for a character-chosen deep recall.  Exact/temporal/structured
-    # channels remain the fail-open path on provider failure.
+    # Semantic lane for the rebuildable World-v2 Recall Index.  It is opt-in
+    # because character-chosen deep recall sends source text to a remote
+    # provider; possessing a general chat credential is not consent to that
+    # additional disclosure. Automatic attention remains local.
     world_v2_recall_semantic_enabled: bool = Field(
-        default=True,
+        default=False,
         alias="WORLD_V2_RECALL_SEMANTIC_ENABLED",
     )
     world_v2_recall_embedding_model: str = Field(
@@ -276,7 +276,7 @@ class Settings(BaseSettings):
         alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_API_KEY",
     )
     world_v2_expression_episode_mode: Literal["off", "shadow", "on"] = Field(
-        default="shadow", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
+        default="off", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
     )
     world_v2_recorded_cadence_mode: Literal["off", "shadow", "on"] = Field(
         default="shadow", alias="WORLD_V2_RECORDED_CADENCE_MODE"

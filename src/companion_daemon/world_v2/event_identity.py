@@ -290,6 +290,27 @@ def _life_identity_components(
         return world_id, payload.get("trigger_ref"), payload.get("proposal_id")
     if event_type == "FactCommitProposalRecorded":
         return world_id, payload.get("proposal_id"), payload.get("proposal_hash")
+    if event_type == "InteractionFactTechnicalFailureRecorded":
+        return (
+            world_id,
+            payload.get("trigger_id"),
+            payload.get("attempt_id"),
+            "technical_failure",
+        )
+    if event_type == "InteractionFactDecisionRecorded":
+        return (
+            world_id,
+            payload.get("trigger_id"),
+            payload.get("fact_context_hash"),
+            payload.get("decision_id"),
+        )
+    if event_type == "FactMemoryDecisionRecorded":
+        return (
+            world_id,
+            payload.get("trigger_id"),
+            payload.get("fact_authority_event_ref"),
+            payload.get("decision_id"),
+        )
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == "acceptance-manifest.2"

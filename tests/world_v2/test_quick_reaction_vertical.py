@@ -906,7 +906,7 @@ async def test_qq_host_delivers_the_quick_reaction_before_the_ordinary_reply(
 
     assert result.status == "action_authorized"
     assert gate_model.calls == 1
-    assert model.calls == 2
+    assert model.calls == 1
     visible = [item for item in delivery.sent if not item[1].startswith("typing:")]
     # The reaction binds the exact inbound provider message and lands before
     # the ordinary text reply.

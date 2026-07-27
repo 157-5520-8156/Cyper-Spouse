@@ -60,6 +60,37 @@ class _CountingSemanticFixtureEmbedding(_SemanticFixtureEmbedding):
         return super().embed(texts)
 
 
+class _CalibratedSemanticFixtureEmbedding:
+    version = "calibrated-semantic-fixture.1"
+    dimensions = 2
+    dense_match_threshold_bp = 4_200
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        vectors = {
+            "间接地问起旧事": (1.0, 0.0),
+            "一条语义相关但没有共同字词的记忆": (0.45, 0.893),
+        }
+        return tuple(vectors[text] for text in texts)
+
+
+class _RetrievalTextFixtureEmbedding:
+    version = "retrieval-text-fixture.1"
+    dimensions = 2
+    dense_match_threshold_bp = 4_200
+
+    def __init__(self) -> None:
+        self.embedded_texts: list[str] = []
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        self.embedded_texts.extend(texts)
+        vectors = {
+            "你还记得我是做什么的吗": (1.0, 0.0),
+            "我是软件工程师。": (0.0, 1.0),
+            "用户工作、职业、做什么；原话：我是软件工程师。": (0.99, 0.01),
+        }
+        return tuple(vectors[text] for text in texts)
+
+
 def _bindings(*refs: str, revision: int) -> tuple[RecallSourceBinding, ...]:
     return tuple(
         RecallSourceBinding(
@@ -230,6 +261,112 @@ def test_dense_recall_can_surface_a_source_bound_association_without_word_overla
         hit.document.source_item_ref not in {"fact:other", "fact:old-tea"}
         for hit in result.hits
     )
+
+
+def test_superseded_fact_requires_explicit_historical_recall() -> None:
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(cursor=CURSOR, documents=_documents())
+
+    current = index.search(_query(query_text="旧的茶偏好", limit=4))
+    historical = index.search(
+        _query(query_text="旧的茶偏好", include_historical=True, limit=4)
+    )
+
+    assert all(
+        hit.document.source_item_ref != "fact:old-tea" for hit in current.hits
+    )
+    old = next(
+        hit for hit in historical.hits if hit.document.source_item_ref == "fact:old-tea"
+    )
+    assert old.document.status == "superseded"
+    assert old.document.valid_to == NOW.replace(day=1)
+
+
+def test_semantic_adapter_can_calibrate_dense_candidate_threshold() -> None:
+    document = RecallDocument(
+        document_id="recall:calibrated",
+        memory_kind="semantic",
+        source_item_ref="fact:calibrated",
+        source_slice="relevant_facts",
+        source_refs=("event:fact:calibrated",),
+        source_bindings=_bindings("event:fact:calibrated", revision=7),
+        source_world_revision=7,
+        text="一条语义相关但没有共同字词的记忆",
+        actor_ref="agent:companion",
+        subject_refs=("user:primary",),
+        occurred_from=NOW,
+        privacy_class="personal",
+    )
+    index = InMemoryRecallIndex(embedding=_CalibratedSemanticFixtureEmbedding())
+    index.rebuild(cursor=CURSOR, documents=(document,))
+
+    result = index.search(_query(query_text="间接地问起旧事"))
+
+    assert len(result.hits) == 1
+    assert result.hits[0].dense_score_bp == 4_500
+    assert result.hits[0].match_channels == ("dense",)
+
+
+def test_recall_embeds_search_metadata_but_returns_exact_source_text() -> None:
+    embedding = _RetrievalTextFixtureEmbedding()
+    document = RecallDocument(
+        document_id="recall:occupation",
+        memory_kind="semantic",
+        source_item_ref="fact:occupation",
+        source_slice="relevant_facts",
+        source_refs=("event:fact:occupation",),
+        source_bindings=_bindings("event:fact:occupation", revision=7),
+        source_world_revision=7,
+        text="我是软件工程师。",
+        retrieval_text="用户工作、职业、做什么；原话：我是软件工程师。",
+        actor_ref="agent:companion",
+        subject_refs=("user:primary",),
+        occurred_from=NOW,
+        privacy_class="personal",
+    )
+    index = InMemoryRecallIndex(embedding=embedding)
+    index.rebuild(cursor=CURSOR, documents=(document,))
+
+    result = index.search(_query(query_text="你还记得我是做什么的吗", limit=1))
+
+    assert result.hits[0].document.text == "我是软件工程师。"
+    assert result.hits[0].document.retrieval_text == document.retrieval_text
+    assert "dense" in result.hits[0].match_channels
+    assert document.retrieval_text in embedding.embedded_texts
+
+
+def test_lexical_recall_keeps_a_short_entity_cue_inside_a_long_message() -> None:
+    document = RecallDocument(
+        document_id="recall:coffee-reaction",
+        memory_kind="semantic",
+        source_item_ref="fact:coffee-reaction",
+        source_slice="relevant_facts",
+        source_refs=("event:fact:coffee-reaction",),
+        source_bindings=_bindings("event:fact:coffee-reaction", revision=7),
+        source_world_revision=7,
+        text="咖啡是真不行，我一喝就心悸。",
+        retrieval_text=(
+            "Exact source statement: 咖啡是真不行，我一喝就心悸。 "
+            "Semantic fact slot: 用户健康状况、过敏或受伤"
+        ),
+        actor_ref="agent:companion",
+        subject_refs=("user:primary",),
+        occurred_from=NOW,
+        privacy_class="private",
+    )
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(cursor=CURSOR, documents=(document,))
+
+    result = index.search(
+        _query(
+            query_text="公司楼下新开了家咖啡馆，装修还挺好看的",
+            limit=1,
+        )
+    )
+
+    assert result.hits
+    assert result.hits[0].document.source_item_ref == "fact:coffee-reaction"
+    assert "lexical" in result.hits[0].match_channels
 
 
 def test_pinned_snapshot_keeps_exact_rows_after_newer_index_rebuild() -> None:

@@ -128,12 +128,37 @@ class ScenarioVerificationError(AssertionError):
 # same Capsule item shape as other source-bound material, and is audited.
 # Role-authored private reflection and the credential-gated semantic default
 # also change model/capsule identities without changing scenario predicates.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.18"
+# ``.19`` makes automatic recall actually reach the first cognition pass.  The
+# 30-turn recall eval exposed four independent losses: the zero-wait prefetch
+# race, successful injections evicting ranked capsule items, in-window
+# dialogue echoes crowding out facts, and the global capsule cap repeatedly
+# collapsing the fact lane to its deep-eviction floor. The first pass now
+# joins once within a small fixed bound, injection supplements current
+# dialogue, the corpus excludes the exact provider-visible working window,
+# and the verified internal capsule has room for several independently
+# sourced facts. Capsule and audit identities legitimately shift; every fixed
+# scenario predicate remains the executable gate.
+# ``.20`` tightens the model-facing source contract so first-person biography,
+# relatives, past experiences, and enduring preferences are explicitly
+# included in the existing source-closure boundary. It also makes a missing
+# response-expectation assessment non-fatal to an otherwise valid reply; the
+# unresolved expectation retains its existing expiry instead of being
+# semantically settled by local code.
+# ``.21`` keeps the independent expression episode available as an explicit
+# experiment but disables its shadow call by default after real-provider
+# testing showed queue inflation without a user-visible effect. The expression
+# truth contract also states that unlisted people and past occurrences cannot
+# be invented merely as conversational analogies.
+# ``.22`` adds source-closed correction/withdrawal history and the durable
+# hybrid recall seam.  The frozen scenarios do not change their outcomes, but
+# their pinned capsule and reducer identities now include those new authority
+# fields.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.22"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "0e21334e16508b74c467837c4f4b2aeb976a097fcb07da32bb6322fd87978ccd"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "2c07afc105b01237a0ade252f316da13120dd23fb5e1f850703691016ae71cbe"
 
 
 class _FixedScenarioRouter:

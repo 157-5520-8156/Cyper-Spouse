@@ -528,6 +528,7 @@ def build_http_v2_capture_host(
     model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
+    source_closure_model: ChatCompletionModel | None = None,
     media_transport: MediaProviderTransport | None = None,
     media_preview: MediaPreviewDeployment | None = None,
     perception_model: DeliberationModelAdapter | None = None,
@@ -554,6 +555,7 @@ def build_http_v2_capture_host(
         flash_model=model,
         thinking_model=thinking_model,
         advisory_model=advisory_model,
+        source_closure_model=source_closure_model,
         model_id_prefix="http-v2",
     )
     _LOG.warning(

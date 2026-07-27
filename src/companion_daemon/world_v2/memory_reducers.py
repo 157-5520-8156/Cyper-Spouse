@@ -291,20 +291,20 @@ def _validate_transition(
         if before.status == "active" and after.reviewed_at != logical_time:
             raise ValueError("active memory revision must record review time")
         if before.status == "active":
-            if after.cue_kind != before.cue_kind:
-                raise ValueError("active memory revision cannot change cue kind")
             if (
-                after.salience != before.salience
-                or after.retrieval_strength_bp != before.retrieval_strength_bp
-                or after.reinforcement_count != before.reinforcement_count
-                or after.future_use_refs != before.future_use_refs
+                after.future_use_refs != before.future_use_refs
                 or after.review_due_at != before.review_due_at
             ):
                 raise ValueError("active memory revision cannot simulate reinforcement")
             if payload.revise_kind in {"compress", "clarify"} and (
                 after.source_bindings != before.source_bindings
+                or after.cue_kind != before.cue_kind
+                or after.salience != before.salience
+                or after.retrieval_strength_bp != before.retrieval_strength_bp
             ):
-                raise ValueError("compress/clarify cannot rewrite memory source authority")
+                raise ValueError(
+                    "compress/clarify cannot rewrite source authority or retrieval semantics"
+                )
             if payload.revise_kind == "correct":
                 if after.source_bindings == before.source_bindings:
                     raise ValueError("memory correction requires a source authority change")

@@ -23,6 +23,32 @@ class _ReplyModel:
         self, messages: list[dict[str, str]], *, temperature: float = 0.8
     ) -> str:
         self.calls.append(messages)
+        system = messages[0]["content"]
+        if "appraisal_draft" in system and "expression_draft" in system:
+            return json.dumps(
+                {
+                    "appraisal_draft": {
+                        "appraise": False,
+                        "affect": "no_change",
+                        "brief_rationale": "No durable emotional implication is required.",
+                        "behavior_tendency": "maintain",
+                        "stance": "open",
+                        "display_strategy": "natural",
+                        "confidence": 7_000,
+                    },
+                    "expression_draft": {
+                        "timing_choice": "now",
+                        "beats": [{"modality": "text", "text": self.text}],
+                        "stance": "answer_without_world_claims",
+                        "brief_rationale": (
+                            "I noticed the alternatives and chose my own response."
+                        ),
+                        "confidence": 7_600,
+                        "world_claims": [],
+                    },
+                },
+                ensure_ascii=False,
+            )
         return json.dumps(
             {
                 "response_text": self.text,
@@ -172,10 +198,11 @@ async def test_slow_semantic_advice_fails_open_with_a_bounded_delay_and_flash_re
     host = build_http_v2_capture_host(
         settings=Settings(
             database_path=tmp_path / "advisory-timeout.sqlite",
-            WORLD_V2_ADVISORY_TIMEOUT_SECONDS=0.05,
-            # Keep this advisory-timeout test independent of the developer
-            # machine's optional local appraisal endpoint and its 1.5s gate.
-            LOCAL_APPRAISAL_ENABLED=False,
+                WORLD_V2_ADVISORY_TIMEOUT_SECONDS=0.05,
+                # Keep this advisory-timeout test independent of the developer
+                # machine's optional local appraisal and semantic-recall endpoints.
+                LOCAL_APPRAISAL_ENABLED=False,
+                WORLD_V2_RECALL_SEMANTIC_ENABLED=False,
         ),
         bootstrap_at=NOW,
         model=flash,
@@ -229,7 +256,7 @@ async def test_qq_production_composition_uses_the_same_same_turn_semantic_module
 
     assert result.action_id is not None
     assert delivery.sent == [("10001", reply.text)]
-    assert len(reply.calls) == 2
+    assert len(reply.calls) == 1
     assert "appraisal_draft" in reply.calls[0][0]["content"]
     assert "user_affect.signal" in reply.calls[0][1]["content"]
     assert "withdrawing" in reply.calls[0][1]["content"]

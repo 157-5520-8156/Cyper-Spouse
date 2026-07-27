@@ -97,6 +97,7 @@ class FactRecallItem(_FrozenModel):
     confidence_bp: int = Field(ge=1, le=10_000)
     privacy_class: PrivacyClass
     status: Literal["active"] = "active"
+    occurred_at: datetime
     committed_at: datetime
     updated_at: datetime
     accepted_fact_event_ref: str = Field(min_length=1)
@@ -121,6 +122,20 @@ class FactRecallItem(_FrozenModel):
             raise ValueError("Fact recall requires distinct Fact and Observation events")
         if self.observation_world_revision >= self.accepted_fact_world_revision:
             raise ValueError("Fact recall Observation must precede its accepted Fact")
+        return self
+
+
+class HistoricalFactRecallItem(FactRecallItem):
+    """One superseded Fact image with an exact validity interval."""
+
+    status: Literal["historical"] = "historical"
+    valid_from: datetime
+    valid_to: datetime
+
+    @model_validator(mode="after")
+    def validity_interval_is_forward(self) -> "HistoricalFactRecallItem":
+        if self.valid_to < self.valid_from:
+            raise ValueError("historical Fact validity interval must not be reversed")
         return self
 
 
@@ -437,13 +452,14 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
     )
     relevant_facts: SliceBudget = Field(
         # A verified FactRecall item deliberately carries both the accepted
-        # Fact and source Observation authority.  At 4k, that proof envelope
-        # retained only one of two active facts in the real 32-turn journey:
-        # the user's name survived while their drink preference vanished.
-        # Reserve enough for at least two independently sourced recalls; the
-        # item/field/global caps still bound the lane and provider-facing
-        # compaction removes the cryptographic proof noise.
-        default_factory=lambda: SliceBudget(max_items=16, max_fields=192, max_characters=12_000)
+        # Fact and source Observation authority — roughly 5-6k characters per
+        # fact.  The 30-turn recall eval showed 12k pinned this slice at
+        # exactly two facts for 25 consecutive turns while six more committed
+        # facts stayed invisible, so even a direct "do you remember my name"
+        # probe missed.  24k holds four fully sourced recalls; the global
+        # hard cap still bounds the whole capsule, and provider-facing
+        # compaction strips the proof envelopes before the prompt.
+        default_factory=lambda: SliceBudget(max_items=16, max_fields=192, max_characters=24_000)
     )
     recent_experiences: SliceBudget = Field(default_factory=SliceBudget)
     world_life: SliceBudget = Field(default_factory=SliceBudget)

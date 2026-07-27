@@ -11,6 +11,10 @@ from legacy_migration_support import read_head_state_json, strip_v16_state_field
 
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.fact_events import FactChangedPayload, fact_mutation_hash
+from companion_daemon.world_v2.fact_memory_candidate_lifecycle import (
+    FactMemoryCandidateLifecycle,
+)
+from companion_daemon.world_v2.fact_memory_draft import FactMemoryRetentionDraft
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.memory_events import (
     MemoryCandidateChangedPayload,
@@ -756,6 +760,8 @@ def reduce(
     facts,
     fact_history,
     committed,
+    threads=(),
+    thread_history=(),
 ):
     return reduce_memory_candidate(
         candidates,
@@ -775,8 +781,8 @@ def reduce(
         fact_history=fact_history,
         experiences=(),
         experience_history=(),
-        threads=(),
-        thread_history=(),
+        threads=threads,
+        thread_history=thread_history,
         committed_events=committed,
     )
 
@@ -930,6 +936,107 @@ def test_active_correction_replaces_stale_source_without_reinforcement() -> None
     )
     assert heads[0].values.reinforcement_count == 0
     assert history[0].revise_kind == "correct"
+
+
+def test_active_correction_preserves_other_current_reinforcement_sources() -> None:
+    fact1, transition1, committed1 = fact_authority()
+    source1 = binding(fact1, transition1, committed1)
+    thread, thread_transition, thread_committed, thread_source = thread_authority(
+        terminal=True
+    )
+    active = candidate(
+        source1,
+        revision=2,
+        status="active",
+        reviewed_at=NOW,
+        accepted_event_ref="event:memory:accepted",
+        sources=(source1, thread_source),
+    )
+    fact2, transition2, committed2 = fact_authority(
+        revision=2,
+        event_ref="event:fact:2",
+        value_hash="e" * 64,
+    )
+    source2 = binding(fact2, transition2, committed2)
+    corrected = FactMemoryCandidateLifecycle._corrected_candidate(
+        before=active,
+        source=source2,
+        draft=FactMemoryRetentionDraft(
+            cue_kind=active.values.cue_kind,
+            retention_rationales=active.values.retention_rationales,
+            salience=active.values.salience,
+        ),
+        privacy_ceiling=fact2.values.privacy_class,
+        logical_time=NOW + timedelta(minutes=1),
+    )
+
+    assert corrected.values.source_bindings == (source2, thread_source)
+    heads, history = reduce(
+        (active,),
+        (),
+        mutation(
+            corrected,
+            operation="revise",
+            before=active,
+            revise_kind="correct",
+        ),
+        facts=(fact2,),
+        fact_history=(transition1, transition2),
+        threads=(thread,),
+        thread_history=(thread_transition,),
+        committed=(committed1, committed2, thread_committed),
+    )
+    assert heads == (corrected,)
+    assert history[0].revise_kind == "correct"
+
+
+def test_source_retirement_preserves_independently_current_memory_authority() -> None:
+    fact1, transition1, committed1 = fact_authority()
+    source1 = binding(fact1, transition1, committed1)
+    thread, thread_transition, thread_committed, thread_source = thread_authority(
+        terminal=True
+    )
+    active = candidate(
+        source1,
+        revision=2,
+        status="active",
+        reviewed_at=NOW,
+        accepted_event_ref="event:memory:accepted",
+        sources=(source1, thread_source),
+    )
+    fact2, transition2, committed2 = fact_authority(
+        revision=2,
+        event_ref="event:fact:2",
+        value_hash="e" * 64,
+    )
+    retired = FactMemoryCandidateLifecycle._candidate_without_superseded_fact(
+        before=active,
+        remaining=(thread_source,),
+        logical_time=NOW + timedelta(minutes=1),
+    )
+
+    assert retired.values.source_bindings == (thread_source,)
+    assert retired.values.consumed_source_authority_ids == (
+        active.values.consumed_source_authority_ids
+    )
+    assert retired.values.status == "active"
+    heads, history = reduce(
+        (active,),
+        (),
+        mutation(
+            retired,
+            operation="revise",
+            before=active,
+            revise_kind="correct",
+        ),
+        facts=(fact2,),
+        fact_history=(transition1, transition2),
+        threads=(thread,),
+        thread_history=(thread_transition,),
+        committed=(committed1, committed2, thread_committed),
+    )
+    assert heads == (retired,)
+    assert history[-1].operation == "revise"
 
 
 def test_reinforcement_strength_cannot_be_arbitrarily_reported() -> None:
@@ -1674,7 +1781,7 @@ def test_sqlite_migrates_nonempty_v13_head_to_v14_and_rebuilds(tmp_path) -> None
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projected = migrated.project()
-    assert projected.reducer_bundle_version == "world-v2-reducers.38"
+    assert projected.reducer_bundle_version == "world-v2-reducers.39"
     assert projected.facts == before.facts
     assert projected.memory_candidates == ()
     assert migrated.rebuild() == projected

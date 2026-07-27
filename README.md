@@ -157,9 +157,9 @@ Current multimodal status:
 Cost control and visual identity notes:
 
 - Budget settings live in `.env` as `MONTHLY_BUDGET_CNY`, `DAILY_BUDGET_CNY`, `SOFT_DAILY_BUDGET_CNY`, and monthly multimodal limits.
-- With `OPENAI_API_KEY`, character-chosen deep recall uses cached
-  `text-embedding-3-small` semantic vectors by default. Set
-  `WORLD_V2_RECALL_SEMANTIC_ENABLED=false` to force exact/local recall only;
+- Character-chosen deep semantic recall is off by default. Set
+  `WORLD_V2_RECALL_SEMANTIC_ENABLED=true` with `OPENAI_API_KEY` to use cached
+  `text-embedding-3-small` vectors; otherwise recall remains exact/local only.
   `WORLD_V2_RECALL_EMBEDDING_MODEL` and
   `WORLD_V2_RECALL_EMBEDDING_DIMENSIONS` select another compatible embedding.
   Provider calls are additionally bounded by

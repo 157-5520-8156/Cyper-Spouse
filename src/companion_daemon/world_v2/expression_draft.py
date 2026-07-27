@@ -346,20 +346,18 @@ def request_requires_response_expectation_assessment(request: ModelInput) -> boo
     return isinstance(context, dict) and _has_response_expectation_advisory(context)
 
 
-def _validate_world_claims(*, draft: ExpressionDraft, request: ModelInput) -> None:
+def _validate_world_claims(
+    *,
+    draft: ExpressionDraft,
+    request: ModelInput,
+    stable_identity_source_refs: frozenset[str] = frozenset(),
+) -> None:
     try:
         context = json.loads(request.model_content_json)
     except (TypeError, json.JSONDecodeError) as exc:  # already validated upstream
         raise ValueError("world claim validation requires Context JSON") from exc
     if not isinstance(context, dict):
         raise ValueError("world claim validation requires a Context object")
-    if (
-        request_requires_response_expectation_assessment(request)
-        and draft.response_expectation_assessment is None
-    ):
-        raise ValueError(
-            "pending response expectation requires a same-cognition assessment"
-        )
     allowed = {
         "current_world": _slice_source_tokens(
             context, "current_situation", "world_life"
@@ -373,9 +371,20 @@ def _validate_world_claims(*, draft: ExpressionDraft, request: ModelInput) -> No
         "shared_history": _slice_source_tokens(
             context, "recent_dialogue", "recent_experiences"
         ),
-        "stable_identity": _slice_source_tokens(context, "character_core"),
+        "stable_identity": (
+            _slice_source_tokens(context, "character_core")
+            | set(stable_identity_source_refs)
+        ),
     }
     for claim in draft.world_claims:
+        if (
+            claim.scope == "stable_identity"
+            and stable_identity_source_refs
+            and not claim.source_refs
+        ):
+            raise ValueError(
+                "stable identity world claim requires the exact private identity source ref"
+            )
         permitted = allowed.get(claim.scope)
         if permitted is not None and not set(claim.source_refs).issubset(permitted):
             outside = sorted(set(claim.source_refs) - permitted)
@@ -389,12 +398,14 @@ def _world_claim_evidence(
     *,
     draft: ExpressionDraft,
     request: ModelInput,
+    non_ledger_source_refs: frozenset[str] = frozenset(),
 ) -> tuple[ProposalEvidenceRef, ...]:
     cited = {
         ref
         for claim in draft.world_claims
         if claim.scope != "subjective_or_hypothetical"
         for ref in claim.source_refs
+        if ref not in non_ledger_source_refs
     }
     if not cited:
         return ()
@@ -529,6 +540,7 @@ def materialize_expression_draft(
     request: ModelInput,
     capabilities: ExpressionDraftCapabilities,
     cadence_draws: tuple[CadenceDraw, ...] | None = None,
+    stable_identity_source_refs: frozenset[str] = frozenset(),
 ) -> DecisionProposal:
     """Bind one model choice to the verified trigger and immutable effects."""
 
@@ -540,7 +552,11 @@ def materialize_expression_draft(
     # JSON arrays are the natural wire representation of immutable tuples.
     # Field validators remain strict about every scalar and cross-field rule.
     draft = ExpressionDraft.model_validate_json(_canonical_json(value), strict=True)
-    _validate_world_claims(draft=draft, request=request)
+    _validate_world_claims(
+        draft=draft,
+        request=request,
+        stable_identity_source_refs=stable_identity_source_refs,
+    )
     if len(draft.beats) > capabilities.max_beats:
         raise ValueError("expression draft exceeds the deployment beat limit")
     if draft.timing_choice == "later" and len(draft.beats) > capabilities.max_later_beats:
@@ -622,7 +638,11 @@ def materialize_expression_draft(
             source_world_revision=trigger.source_world_revision,
             immutable_hash=trigger.event_payload_hash,
         ),
-        *_world_claim_evidence(draft=draft, request=request),
+        *_world_claim_evidence(
+            draft=draft,
+            request=request,
+            non_ledger_source_refs=stable_identity_source_refs,
+        ),
     )
     if draft.timing_choice == "silent":
         return DecisionProposal(
@@ -785,6 +805,9 @@ def materialize_expression_draft(
                     if draft.response_expectation is not None
                     else None
                 ),
+                "world_claims": [
+                    item.model_dump(mode="json") for item in draft.world_claims
+                ],
             },
         ),
     )

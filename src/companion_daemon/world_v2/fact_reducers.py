@@ -73,6 +73,34 @@ INSTALLED_FACT_PREDICATE_CARDINALITY = MappingProxyType(
     }
 )
 
+# Shared semantic metadata for the installed predicate authority above.
+# These glosses describe what a slot means; they never decide whether a
+# statement should be retained or how the character should use it.  Keeping
+# one catalog prevents extraction and disposable recall from assigning two
+# different meanings to the same predicate.
+INSTALLED_FACT_PREDICATE_GUIDE = MappingProxyType(
+    {
+        "location.current": "where the user is right now（用户当前在哪里、当前位置）",
+        "profile.display_name": "the user's name or what they want to be called（用户姓名、称呼）",
+        "profile.timezone": "the user's timezone（用户时区）",
+        "preference.likes": "a food, thing, or style the user says they like（用户喜欢、偏好的事物）",
+        "preference.dislikes": "a food, thing, or style the user says they dislike（用户不喜欢、讨厌的事物）",
+        "relationship.affiliation": "a group, school, company, or team the user belongs to（用户所属组织、学校、公司或团队）",
+        "profile.occupation": "the user's job or professional identity（用户工作、职业、做什么）",
+        "profile.education": "the user's study stage, school, or major（用户学业阶段、学校、专业）",
+        "location.home": "the city or area where the user lives（用户居住地、住在哪里）",
+        "location.hometown": "where the user is from（用户家乡、老家、来自哪里）",
+        "schedule.commitment": "a dated or upcoming plan, appointment, contest, exam, or trip the user states（用户有日期的计划、约定、比赛、考试或行程）",
+        "situation.recent": "a recent life circumstance or notable thing that happened to the user（用户近期处境或发生的事）",
+        "activity.current": "what the user says they are doing right now（用户正在做的事）",
+        "relationship.person": "a family member, friend, or colleague in the user's life（用户的家人、朋友或同事）",
+        "health.condition": "a health condition, allergy, or injury the user states（用户健康状况、过敏或受伤）",
+        "routine.habit": "a recurring habit or sleep/wake routine the user states（用户习惯、作息）",
+        "interest.activity": "a hobby or activity the user does or practices（用户兴趣、爱好、常做的活动）",
+        "possession.item": "an item, device, or pet the user owns（用户拥有的物品、设备或宠物）",
+    }
+)
+
 
 def reduce_fact(
     facts: tuple[FactProjection, ...],

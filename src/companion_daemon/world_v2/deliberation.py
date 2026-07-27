@@ -1037,9 +1037,23 @@ class Deliberation:
         already_evaluated = getattr(
             self._main, "episode_provisional_already_evaluated", None
         )
+        source_closure_enabled = getattr(
+            self._main, "source_closure_review_enabled", None
+        )
+        provisional_provider_available = getattr(
+            self._main, "provisional_provider_available", None
+        )
         episode_enabled = (
             self._expression_episode_mode != "off"
             and callable(provisional_operation)
+            and (
+                not callable(provisional_provider_available)
+                or provisional_provider_available(model_input)
+            )
+            and not (
+                callable(source_closure_enabled)
+                and source_closure_enabled()
+            )
             and not (
                 callable(already_evaluated)
                 and already_evaluated(model_input)
@@ -1172,7 +1186,20 @@ class Deliberation:
                 if not active:
                     break
                 done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
-                if hedge_timer in done and primary_result is None:
+                # A source-closure pass starts after the author returns and
+                # needs the same remaining provider budget.  A time-based
+                # speculative hedge cannot see that draft, so starting it
+                # first only consumes the correction lane and turns a
+                # repairable factual mismatch into silence.  Fast failure of
+                # the author still starts normal recovery below.
+                if (
+                    hedge_timer in done
+                    and primary_result is None
+                    and not (
+                        callable(source_closure_enabled)
+                        and source_closure_enabled()
+                    )
+                ):
                     start_backup("main_timeout")
                 if primary_task in done and primary_result is None:
                     primary_result = primary_task.result()

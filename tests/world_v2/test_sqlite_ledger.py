@@ -1352,3 +1352,35 @@ def test_empty_aspirations_stay_out_of_durable_state_bytes_and_hash() -> None:
 
     assert "aspirations" not in dumped
     assert '"aspirations"' not in SQLiteWorldLedger._encode_state(ReducerState())
+
+
+def test_fact_history_subject_query_uses_ordered_index_without_temp_sort(
+    tmp_path,
+) -> None:
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "fact-history-query-plan.sqlite3",
+        world_id="world-sqlite-test",
+    )
+    plan = ledger._connection.execute(  # noqa: SLF001 - query-plan regression seam
+        """
+        EXPLAIN QUERY PLAN
+        SELECT event_id, ledger_sequence
+        FROM world_v2_events
+        WHERE world_id = ?
+          AND ledger_sequence <= ?
+          AND json_extract(event_json, '$.event_type')
+              IN ('FactCorrected', 'FactWithdrawn')
+          AND json_extract(
+                json_extract(event_json, '$.payload_json'),
+                '$.fact_before.values.subject_ref'
+              ) = ?
+        ORDER BY ledger_sequence DESC
+        LIMIT ?
+        """,
+        ("world-sqlite-test", 100, "user:one", 32),
+    ).fetchall()
+    details = tuple(str(row["detail"]) for row in plan)
+
+    assert any("world_v2_events_fact_history_lookup" in item for item in details)
+    assert all("USE TEMP B-TREE" not in item for item in details)
+    ledger.close()

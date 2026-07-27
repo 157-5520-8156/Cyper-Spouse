@@ -66,6 +66,7 @@ def build_semantic_chat_composition(
     flash_model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
+    source_closure_model: ChatCompletionModel | None = None,
     contextual_failsafe_model: ChatCompletionModel | None = None,
     contextual_failsafe_reviewer_model: ChatCompletionModel | None = None,
     model_id_prefix: str,
@@ -225,6 +226,15 @@ def build_semantic_chat_composition(
         flash_model=flash_model,
         thinking_model=thinking_model,
         appraisal_model=local_appraisal_model,
+        # The built-in production route always installs semantic truth
+        # closure.  Tests and embedding callers that inject their own author
+        # model must also inject a reviewer explicitly; silently repurposing
+        # an arbitrary fixture/provider for a second JSON contract makes the
+        # composition unusable and does not prove a real deployment boundary.
+        source_closure_model=(
+            flash_model if auto_flash and source_closure_model is None
+            else source_closure_model
+        ),
         contextual_failsafe_model=contextual_failsafe_model,
         contextual_failsafe_reviewer_model=contextual_failsafe_reviewer_model,
         contextual_failsafe_enabled=settings.world_v2_contextual_failsafe_enabled,

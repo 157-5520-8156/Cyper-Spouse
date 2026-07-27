@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime
 from hashlib import sha256
 import threading
+import time
 
 import pytest
 
@@ -12,6 +13,7 @@ from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     ChatModelDeliberationAdapter,
     CompanionIdentityFrame,
     RoutedChatModelDeliberationAdapter,
+    companion_identity_source_ref,
 )
 from companion_daemon.world_v2.expression_draft import (
     QQ_NAPCAT_EXPRESSION_CAPABILITIES,
@@ -34,6 +36,7 @@ from companion_daemon.world_v2.recall_audit import CharacterRecallRequest
 from companion_daemon.world_v2.recall_corpus import RecallCorpusSources
 from companion_daemon.world_v2.recall_runtime import (
     RecallCoordinator,
+    perform_character_recall,
     verify_trusted_recall_trace,
 )
 
@@ -114,13 +117,20 @@ class _BlockingPrefetchEmbedding:
     def __init__(self) -> None:
         self.started = threading.Event()
         self.release = threading.Event()
+        self.closed = threading.Event()
+        self.used_after_close = threading.Event()
         self._delegate = FeatureHashRecallEmbedding()
 
     def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         if texts == ("并行预取",):
             self.started.set()
             self.release.wait(timeout=2)
+        if self.closed.is_set():
+            self.used_after_close.set()
         return self._delegate.embed(texts)
+
+    def close(self) -> None:
+        self.closed.set()
 
 
 class _ObservablePrefetchEmbedding:
@@ -136,6 +146,36 @@ class _ObservablePrefetchEmbedding:
         if texts == ("窗边听雨",):
             self.finished.set()
         return result
+
+
+class _MalformedPrefetchEmbedding:
+    version = "malformed-prefetch-fixture.1"
+    dimensions = FeatureHashRecallEmbedding.dimensions
+
+    def __init__(self) -> None:
+        self._delegate = FeatureHashRecallEmbedding()
+        self.calls = 0
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        self.calls += 1
+        if texts == ("损坏的查询",):
+            return ()
+        return self._delegate.embed(texts)
+
+
+class _DelayedSemanticPrefetchEmbedding:
+    version = "delayed-semantic-prefetch-fixture.1"
+    dimensions = FeatureHashRecallEmbedding.dimensions
+
+    def __init__(self) -> None:
+        self._delegate = FeatureHashRecallEmbedding()
+        self.calls = 0
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        self.calls += 1
+        if texts == ("稍晚完成的语义查询",):
+            time.sleep(0.45)
+        return self._delegate.embed(texts)
 
 
 @pytest.mark.asyncio
@@ -435,6 +475,67 @@ async def test_ready_parallel_prefetch_is_visible_in_first_pass_and_audited() ->
 
 
 @pytest.mark.asyncio
+async def test_first_pass_does_not_wait_for_remote_semantic_query_latency() -> None:
+    semantic = _DelayedSemanticPrefetchEmbedding()
+    cursor = RecallCursor(
+        world_revision=3,
+        deliberation_revision=0,
+        ledger_sequence=0,
+    )
+    document = RecallDocument(
+        document_id="recall:delayed-semantic",
+        memory_kind="semantic",
+        source_item_ref="fact:delayed-semantic",
+        source_slice="relevant_facts",
+        source_refs=("event:delayed-semantic",),
+        source_bindings=(
+            RecallSourceBinding(
+                source_kind="committed_event",
+                authority_type="FactCommitted",
+                ref="event:delayed-semantic",
+                source_world_revision=2,
+                immutable_hash="a" * 64,
+            ),
+        ),
+        source_world_revision=2,
+        text="稍晚完成的语义查询仍应进入首轮上下文。",
+        actor_ref="agent:companion",
+        subject_refs=("user:primary",),
+        occurred_from=datetime(2026, 7, 25, 12, tzinfo=UTC),
+        privacy_class="personal",
+    )
+    primary = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    primary.rebuild(cursor=cursor, documents=(document,))
+    coordinator = RecallCoordinator.from_built_index(
+        index=primary,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+        semantic_embedding=semantic,
+        trigger_ref="trigger:delayed-semantic",
+    )
+    coordinator.schedule_prefetch(
+        query_text="稍晚完成的语义查询",
+        accessibility_seed="draw:delayed-semantic",
+        trigger_ref="trigger:delayed-semantic",
+    )
+
+    trace = await coordinator.await_scheduled_prefetch(
+        expected_cursor=cursor,
+        trigger_ref="trigger:delayed-semantic",
+    )
+    coordinator.close()
+
+    assert trace is not None
+    assert (
+        verify_trusted_recall_trace(trace).hits[0].document.source_item_ref
+        == "fact:delayed-semantic"
+    )
+    assert semantic.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_blocked_prefetch_is_daemonized_and_close_remains_bounded() -> None:
     embedding = _BlockingPrefetchEmbedding()
     cursor = RecallCursor(
@@ -450,6 +551,7 @@ async def test_blocked_prefetch_is_daemonized_and_close_remains_bounded() -> Non
         actor_ref="agent:companion",
         subject_refs=("agent:companion", "user:primary"),
         logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+        semantic_embedding=embedding,
         trigger_ref="trigger:blocked-close",
     )
     coordinator.schedule_prefetch(
@@ -463,10 +565,197 @@ async def test_blocked_prefetch_is_daemonized_and_close_remains_bounded() -> Non
     try:
         coordinator.close()
         elapsed = loop.time() - started
+        assert not embedding.closed.is_set()
     finally:
         embedding.release.set()
 
     assert elapsed < 0.1
+    assert await asyncio.to_thread(embedding.closed.wait, 0.5)
+    assert not embedding.used_after_close.is_set()
+
+
+@pytest.mark.asyncio
+async def test_close_defers_embedding_shutdown_until_deep_recall_finishes() -> None:
+    embedding = _BlockingPrefetchEmbedding()
+    cursor = RecallCursor(world_revision=3, deliberation_revision=0, ledger_sequence=0)
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(cursor=cursor, documents=())
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+        semantic_embedding=embedding,
+        trigger_ref="trigger:blocked-deep-recall",
+    )
+    task = asyncio.create_task(
+        perform_character_recall(
+            coordinator,
+            request=CharacterRecallRequest(query_text="并行预取", limit=2),
+            accessibility_seed="draw:blocked-deep-recall",
+            expected_cursor=cursor,
+            trigger_ref="trigger:blocked-deep-recall",
+            timeout_seconds=1.0,
+        )
+    )
+    assert await asyncio.to_thread(embedding.started.wait, 0.5)
+    started = asyncio.get_running_loop().time()
+    try:
+        coordinator.close()
+        assert asyncio.get_running_loop().time() - started < 0.1
+        assert not embedding.closed.is_set()
+    finally:
+        embedding.release.set()
+
+    await task
+    assert await asyncio.to_thread(embedding.closed.wait, 0.5)
+    assert not embedding.used_after_close.is_set()
+
+
+@pytest.mark.asyncio
+async def test_first_pass_timeout_preserves_prefetch_and_only_joins_once() -> None:
+    embedding = _BlockingPrefetchEmbedding()
+    cursor = RecallCursor(
+        world_revision=3,
+        deliberation_revision=0,
+        ledger_sequence=0,
+    )
+    document = RecallDocument(
+        document_id="recall:preserved",
+        memory_kind="semantic",
+        source_item_ref="fact:preserved",
+        source_slice="relevant_facts",
+        source_refs=("event:preserved",),
+        source_bindings=(
+            RecallSourceBinding(
+                source_kind="committed_event",
+                authority_type="FactCommitted",
+                ref="event:preserved",
+                source_world_revision=2,
+                immutable_hash="f" * 64,
+            ),
+        ),
+        source_world_revision=2,
+        text="并行预取完成后仍应可见。",
+        actor_ref="agent:companion",
+        subject_refs=("user:primary",),
+        occurred_from=datetime(2026, 7, 25, 12, tzinfo=UTC),
+        privacy_class="personal",
+    )
+    index = InMemoryRecallIndex(embedding=embedding)
+    index.rebuild(cursor=cursor, documents=(document,))
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+        semantic_embedding=embedding,
+        trigger_ref="trigger:preserved",
+    )
+    coordinator.schedule_prefetch(
+        query_text="并行预取",
+        accessibility_seed="draw:preserved",
+        trigger_ref="trigger:preserved",
+    )
+    assert await asyncio.to_thread(embedding.started.wait, 0.5)
+
+    assert (
+        await coordinator.await_scheduled_prefetch(
+            expected_cursor=cursor,
+            trigger_ref="trigger:preserved",
+            timeout_seconds=0.01,
+        )
+        is None
+    )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    assert (
+        await coordinator.await_scheduled_prefetch(
+            expected_cursor=cursor,
+            trigger_ref="trigger:preserved",
+            timeout_seconds=0.2,
+        )
+        is None
+    )
+    assert loop.time() - started < 0.05
+
+    embedding.release.set()
+    trace = None
+    for _ in range(50):
+        trace = coordinator.take_ready_scheduled_prefetch(
+            expected_cursor=cursor,
+            trigger_ref="trigger:preserved",
+        )
+        if trace is not None:
+            break
+        await asyncio.sleep(0.01)
+    coordinator.close()
+
+    assert trace is not None
+    assert verify_trusted_recall_trace(trace).hits[0].document.source_item_ref == "fact:preserved"
+
+
+@pytest.mark.asyncio
+async def test_automatic_prefetch_does_not_enter_the_remote_semantic_lane() -> None:
+    cursor = RecallCursor(
+        world_revision=3,
+        deliberation_revision=0,
+        ledger_sequence=0,
+    )
+    document = RecallDocument(
+        document_id="recall:malformed",
+        memory_kind="semantic",
+        source_item_ref="fact:malformed",
+        source_slice="relevant_facts",
+        source_refs=("event:malformed",),
+        source_bindings=(
+            RecallSourceBinding(
+                source_kind="committed_event",
+                authority_type="FactCommitted",
+                ref="event:malformed",
+                source_world_revision=2,
+                immutable_hash="e" * 64,
+            ),
+        ),
+        source_world_revision=2,
+        text="损坏的查询仍共享词面。",
+        actor_ref="agent:companion",
+        subject_refs=("user:primary",),
+        occurred_from=datetime(2026, 7, 25, 12, tzinfo=UTC),
+        privacy_class="personal",
+    )
+    base = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    base.rebuild(cursor=cursor, documents=(document,))
+    semantic = _MalformedPrefetchEmbedding()
+    coordinator = RecallCoordinator.from_built_index(
+        index=base,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+        semantic_embedding=semantic,
+        trigger_ref="trigger:malformed",
+    )
+    coordinator.schedule_prefetch(
+        query_text="损坏的查询",
+        accessibility_seed="draw:malformed",
+        trigger_ref="trigger:malformed",
+    )
+
+    trace = await coordinator.await_scheduled_prefetch(
+        expected_cursor=cursor,
+        trigger_ref="trigger:malformed",
+        timeout_seconds=0.5,
+    )
+    coordinator.close()
+
+    assert trace is not None
+    audit = verify_trusted_recall_trace(trace)
+    assert audit.hits[0].document.source_item_ref == "fact:malformed"
+    assert semantic.calls == 0
+    assert coordinator.semantic_health()["last_prefetch_status"] == "ready"
 
 
 def test_character_recall_uses_older_pinned_context_after_newer_refresh() -> None:
@@ -618,7 +907,7 @@ async def test_pending_expectation_is_assessed_inside_the_normal_inbound_cogniti
 
 
 @pytest.mark.asyncio
-async def test_pending_expectation_cannot_silently_omit_its_assessment() -> None:
+async def test_missing_expectation_assessment_does_not_discard_a_valid_reply() -> None:
     missing = json.dumps({
         "timing_choice": "now",
         "beats": [{"modality": "text", "text": "我接住你这句。"}],
@@ -647,15 +936,14 @@ async def test_pending_expectation_cannot_silently_omit_its_assessment() -> None
         }
     )
 
-    with pytest.raises(
-        ValueError,
-        match="pending response expectation requires a same-cognition assessment",
-    ):
-        await ChatModelDeliberationAdapter(model=model).propose(request)
+    output = await ChatModelDeliberationAdapter(model=model).propose(request)
+
+    assert output.raw_proposal.get("response_expectation_assessment") is None
+    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_pending_expectation_cannot_be_dropped_by_quick_recovery() -> None:
+async def test_quick_recovery_keeps_reply_when_expectation_assessment_is_missing() -> None:
     missing = json.dumps({
         "timing_choice": "now",
         "beats": [{"modality": "text", "text": "我接住你这句。"}],
@@ -684,13 +972,12 @@ async def test_pending_expectation_cannot_be_dropped_by_quick_recovery() -> None
         }
     )
 
-    with pytest.raises(
-        ValueError,
-        match="pending response expectation requires a same-cognition assessment",
-    ):
-        await ChatModelDeliberationAdapter(model=model).recover(
-            request, "main_attempt_failed"
-        )
+    output = await ChatModelDeliberationAdapter(model=model).recover(
+        request, "main_attempt_failed"
+    )
+
+    assert output.raw_proposal["proposal_kind"] == "minimal"
+    assert output.raw_proposal.get("response_expectation_assessment") is None
 
 
 @pytest.mark.asyncio
@@ -923,6 +1210,69 @@ async def test_identity_frame_carries_personality_boundaries_and_world_claim_dis
 
 
 @pytest.mark.asyncio
+async def test_private_identity_frame_exposes_one_exact_auditable_source_ref() -> None:
+    identity = CompanionIdentityFrame(
+        companion_name="沈知栀",
+        counterpart_name="geoff",
+        relationship_frame="刚认识",
+        stable_identity_facts=("汉语言文学专业",),
+    )
+    source_ref = companion_identity_source_ref(identity)
+    model = _Model(json.dumps({
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "我叫沈知栀，学的是汉语言文学。"}],
+        "stance": "introduce_myself",
+        "brief_rationale": "Answer with my configured identity.",
+        "world_claims": [{
+            "claim_text": "我叫沈知栀，学的是汉语言文学",
+            "scope": "stable_identity",
+            "source_refs": [source_ref],
+        }],
+    }, ensure_ascii=False))
+    adapter = ChatModelDeliberationAdapter(model=model, identity_frame=identity)
+
+    output = await adapter.propose(_qq_request())
+
+    payload = output.raw_proposal["proposed_changes"][0]["payload"]
+    decoded = json.loads(payload["canonical_json"])
+    assert decoded["world_claims"] == [{
+        "claim_text": "我叫沈知栀，学的是汉语言文学",
+        "scope": "stable_identity",
+        "source_refs": [source_ref],
+    }]
+    system = model.calls[0][0][0]["content"]
+    assert source_ref in system
+    assert "stable_identity claims supported by this frame" in system
+
+
+@pytest.mark.asyncio
+async def test_private_identity_frame_rejects_a_forged_source_ref_after_one_retry() -> None:
+    identity = CompanionIdentityFrame(
+        companion_name="沈知栀",
+        counterpart_name="geoff",
+        relationship_frame="刚认识",
+        stable_identity_facts=("汉语言文学专业",),
+    )
+    model = _Model(json.dumps({
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "我在成都长大。"}],
+        "stance": "invent_background",
+        "brief_rationale": "Use an unsupported identity detail.",
+        "world_claims": [{
+            "claim_text": "我在成都长大",
+            "scope": "stable_identity",
+            "source_refs": ["private_identity_frame"],
+        }],
+    }, ensure_ascii=False))
+    adapter = ChatModelDeliberationAdapter(model=model, identity_frame=identity)
+
+    with pytest.raises(ValueError, match="semantic source lane"):
+        await adapter.propose(_qq_request())
+
+    assert len(model.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_identity_prompt_keeps_companion_identity_stable_when_challenged() -> None:
     model = _Model('{"proposal_id":"proposal:persona"}')
     adapter = ChatModelDeliberationAdapter(
@@ -978,6 +1328,145 @@ def _identity_review(
         },
         ensure_ascii=False,
     )
+
+
+def _source_closure_review(
+    *,
+    decision: str,
+    unsupported_claim_indexes: tuple[int, ...] = (),
+    undeclared_fact_fragments: tuple[str, ...] = (),
+) -> str:
+    return json.dumps(
+        {
+            "decision": decision,
+            "unsupported_claim_indexes": list(unsupported_claim_indexes),
+            "undeclared_fact_fragments": list(undeclared_fact_fragments),
+            "brief_reason": "Check semantic support and subject attribution.",
+        },
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_source_closure_repairs_companion_hometown_used_as_user_premise() -> None:
+    identity = CompanionIdentityFrame(
+        companion_name="沈知栀",
+        counterpart_name="geoff",
+        relationship_frame="已经聊过一阵",
+        stable_identity_facts=("来自嘉兴",),
+    )
+    main = _SequenceJsonModel(
+        [
+            json.dumps(
+                {
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": "家里那边怎么了？嘉兴最近天气不太好吗？",
+                        }
+                    ],
+                    "stance": "concerned",
+                    "brief_rationale": "Ask what happened.",
+                    "confidence": 7600,
+                    "world_claims": [],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "timing_choice": "now",
+                    "beats": [{"modality": "text", "text": "家里那边怎么了？"}],
+                    "stance": "concerned",
+                    "brief_rationale": "Ask without inventing a location.",
+                    "confidence": 7600,
+                    "world_claims": [],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    reviewer = _SequenceJsonModel(
+        [
+            _source_closure_review(
+                decision="unsupported",
+                undeclared_fact_fragments=("嘉兴最近天气不太好吗？",),
+            ),
+            _source_closure_review(decision="supported"),
+        ]
+    )
+    request = _qq_request().model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "slices": {
+                        "recent_dialogue": {
+                            "availability": "available",
+                            "items": [
+                                {
+                                    "item_ref": "event:older-dialogue",
+                                    "value": {
+                                        "speaker": "counterpart",
+                                        "text": "前面聊过别的事情。",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+
+    output = await ChatModelDeliberationAdapter(
+        model=main,
+        identity_frame=identity,
+        source_closure_reviewer=reviewer,
+    ).propose(request)
+
+    rendered = json.dumps(output.raw_proposal, ensure_ascii=False)
+    assert "家里那边怎么了？" in rendered
+    assert "嘉兴" not in rendered
+    assert len(main.calls) == 2
+    assert len(reviewer.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_source_closure_fails_closed_when_character_correction_is_still_unsupported() -> None:
+    bad = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": "嘉兴最近天气不太好吗？"}],
+            "stance": "guess",
+            "brief_rationale": "Assume the user's location.",
+            "confidence": 7000,
+            "world_claims": [],
+        },
+        ensure_ascii=False,
+    )
+    main = _SequenceJsonModel([bad, bad])
+    reviewer = _SequenceJsonModel(
+        [
+            _source_closure_review(
+                decision="unsupported",
+                undeclared_fact_fragments=("嘉兴最近天气不太好吗？",),
+            ),
+            _source_closure_review(
+                decision="unsupported",
+                undeclared_fact_fragments=("嘉兴最近天气不太好吗？",),
+            ),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="semantic source closure rejected"):
+        await ChatModelDeliberationAdapter(
+            model=main,
+            source_closure_reviewer=reviewer,
+        ).propose(_qq_request())
+
+    assert len(main.calls) == 2
+    assert len(reviewer.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -2595,3 +3084,24 @@ async def test_expression_draft_later_rejects_uninstalled_nontext_effect() -> No
 
     with pytest.raises(ValueError, match="later expression supports only"):
         await adapter.propose(_qq_request())
+
+
+def test_expression_prompt_exposes_exact_executable_field_types() -> None:
+    adapter = ChatModelDeliberationAdapter(
+        model=_Model("{}"),
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+
+    system = adapter._messages(  # noqa: SLF001 - contract regression test
+        request=_qq_request(),
+        quick_recovery=False,
+        provisional=False,
+        failure_code=None,
+    )[0]["content"]
+
+    assert 'modality="text"' in system
+    assert "never use content" in system
+    assert "confidence is an integer from 0 through 10000" in system
+    assert "counterpart_history" in system
+    assert "never use conversation or user_fact" in system
+    assert "response_expectation_assessment" in system
