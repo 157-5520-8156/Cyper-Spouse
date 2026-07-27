@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -12,12 +13,24 @@ import httpx
 
 from .batch_invariants import appraisal_trigger_identity
 from .event_identity import domain_idempotency_key
+from .errors import ConcurrencyConflict, IdempotencyConflict
 from .experience_memory_candidate_lifecycle import ExperienceMemoryCandidateLifecycle
+from .experience_memory_decision import (
+    ExperienceMemoryDecisionRecordedPayload,
+    canonical_experience_memory_decision_json,
+    experience_memory_decision_event_id,
+    experience_memory_decision_hash,
+    experience_memory_decision_identity,
+)
 from .experience_events import ExperienceCommittedPayload, experience_mutation_hash
 from .fact_memory_draft import FactMemoryDraftAdapter, FactMemoryRetentionDraft
 from .life_author_seed import ReviewedLifeSeedCatalog
 from .life_content_events import LifeContentRecordedPayload
-from .life_content_store import ImmutableLifeContentStore, StoredLifeContent, life_content_payload_hash
+from .life_content_store import (
+    ImmutableLifeContentStore,
+    StoredLifeContent,
+    life_content_payload_hash,
+)
 from .life_events import (
     OutcomeObservationRecordedPayload,
     OutcomeProposalRecordedPayload,
@@ -48,8 +61,6 @@ from .schemas import (
     ExperienceProposalProjection,
     ExperienceProposedMutation,
     ExperienceValues,
-    MEMORY_SALIENCE_MATRIX_DIGEST,
-    MemorySalienceVector,
     OutcomeObservationProjection,
     ProjectionCursor,
     TriggerProcess,
@@ -82,14 +93,22 @@ def _experience_privacy(source_privacy: str) -> str:
     it must not broaden the companion's internal autobiographical record.
     """
 
-    return source_privacy if _PRIVACY_RANK[source_privacy] >= _PRIVACY_RANK["personal"] else "personal"
+    return (
+        source_privacy if _PRIVACY_RANK[source_privacy] >= _PRIVACY_RANK["personal"] else "personal"
+    )
 
 
 _LOG = logging.getLogger(__name__)
 
 
 class LifeAftermathResult(FrozenModel):
-    status: Literal["occurrence_opened", "settled", "recovered_experience", "no_op"]
+    status: Literal[
+        "occurrence_opened",
+        "settled",
+        "recovered_experience",
+        "recovered_memory",
+        "no_op",
+    ]
     reason_code: str
     occurrence_id: str | None = None
     experience_id: str | None = None
@@ -106,9 +125,13 @@ class LifeAftermathRuntime:
     """
 
     def __init__(
-        self, *, ledger, catalog: ReviewedLifeSeedCatalog,
+        self,
+        *,
+        ledger,
+        catalog: ReviewedLifeSeedCatalog,
         occurrence_content: OccurrenceContentCoordinator,
-        content_store: ImmutableLifeContentStore, owner_actor_ref: str,
+        content_store: ImmutableLifeContentStore,
+        owner_actor_ref: str,
         experience_memory_lifecycle: ExperienceMemoryCandidateLifecycle | None = None,
         outcome_selection_model: OutcomeSelectionModel | None = None,
         memory_adapter: FactMemoryDraftAdapter | None = None,
@@ -137,6 +160,7 @@ class LifeAftermathRuntime:
         self._owner_actor_ref = owner_actor_ref
         self._actor = actor
         self._random = RandomAuthority(ledger=ledger, source="world-v2:life-aftermath-random")
+        self._memory_decision_locks: dict[str, asyncio.Lock] = {}
 
     async def advance_once(
         self, *, wake_event_ref: str, trace_id: str, correlation_id: str
@@ -144,36 +168,89 @@ class LifeAftermathRuntime:
         projection = self._ledger.project()
         wake = next(
             (
-                item for item in projection.committed_world_event_refs
+                item
+                for item in projection.committed_world_event_refs
                 if item.event_id == wake_event_ref
                 and item.event_type in {"ClockAdvanced", "ActivityCompleted", "ActivityAbandoned"}
             ),
             None,
         )
-        if wake is None or projection.logical_time is None or wake.logical_time > projection.logical_time:
-            return LifeAftermathResult(status="no_op", reason_code="life_aftermath.wake_unavailable")
+        if (
+            wake is None
+            or projection.logical_time is None
+            or wake.logical_time > projection.logical_time
+        ):
+            return LifeAftermathResult(
+                status="no_op", reason_code="life_aftermath.wake_unavailable"
+            )
+
+        if self._experience_memory_lifecycle is not None:
+            settled_experience_ids = {
+                binding.source_id
+                for candidate in projection.memory_candidates
+                if candidate.values.status != "pending"
+                for binding in candidate.values.source_bindings
+                if binding.source_kind == "experience"
+            }
+            settled_experience_ids.update(
+                item.experience_id
+                for item in projection.experiences
+                if isinstance(item, ExperienceProjection)
+                and self._has_no_change_memory_decision(item)
+            )
+            unremembered = next(
+                (
+                    item
+                    for item in projection.experiences
+                    if isinstance(item, ExperienceProjection)
+                    and item.experience_id not in settled_experience_ids
+                ),
+                None,
+            )
+            if unremembered is not None:
+                materialized = await self._materialize_experience_memory(
+                    experience_id=unremembered.experience_id,
+                    logical_time=projection.logical_time,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+                if materialized == "retained":
+                    return LifeAftermathResult(
+                        status="recovered_memory",
+                        reason_code="life_aftermath.experience_memory_recovered",
+                        experience_id=unremembered.experience_id,
+                    )
+                projection = self._ledger.project()
 
         recoverable = next(
             (
-                item for item in projection.world_occurrences
-                if item.status == "settled" and not self._has_experience(projection, item.occurrence_id)
+                item
+                for item in projection.world_occurrences
+                if item.status == "settled"
+                and not self._has_experience(projection, item.occurrence_id)
             ),
             None,
         )
         if recoverable is not None:
             experience_id = await self._commit_experience(
-                occurrence=recoverable, logical_time=projection.logical_time,
-                trace_id=trace_id, correlation_id=correlation_id,
+                occurrence=recoverable,
+                logical_time=projection.logical_time,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
             )
             return LifeAftermathResult(
-                status="recovered_experience", reason_code="life_aftermath.experience_recovered",
-                occurrence_id=recoverable.occurrence_id, experience_id=experience_id,
+                status="recovered_experience",
+                reason_code="life_aftermath.experience_recovered",
+                occurrence_id=recoverable.occurrence_id,
+                experience_id=experience_id,
             )
 
         active = next(
             (
-                item for item in projection.world_occurrences
-                if item.status == "active" and item.activated_at is not None
+                item
+                for item in projection.world_occurrences
+                if item.status == "active"
+                and item.activated_at is not None
                 and (
                     item.activated_at < wake.logical_time
                     or wake.event_type in {"ActivityCompleted", "ActivityAbandoned"}
@@ -183,37 +260,52 @@ class LifeAftermathRuntime:
         )
         if active is not None:
             experience_id = await self._settle(
-                occurrence=active, wake=wake, logical_time=projection.logical_time,
-                trace_id=trace_id, correlation_id=correlation_id,
+                occurrence=active,
+                wake=wake,
+                logical_time=projection.logical_time,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
             )
             return LifeAftermathResult(
-                status="settled", reason_code="life_aftermath.settled",
-                occurrence_id=active.occurrence_id, experience_id=experience_id,
+                status="settled",
+                reason_code="life_aftermath.settled",
+                occurrence_id=active.occurrence_id,
+                experience_id=experience_id,
             )
 
         existing_plan_ids = {item.trigger_ref for item in projection.world_occurrences}
         plan = next(
             (
-                item for item in projection.plans
-                if item.owner_actor_ref == self._owner_actor_ref and item.status == "active"
-                and item.plan_id not in existing_plan_ids and item.location_ref is not None
+                item
+                for item in projection.plans
+                if item.owner_actor_ref == self._owner_actor_ref
+                and item.status == "active"
+                and item.plan_id not in existing_plan_ids
+                and item.location_ref is not None
                 and self._catalog.outcomes_for_activity(item.activity_kind)
             ),
             None,
         )
         if plan is None:
-            return LifeAftermathResult(status="no_op", reason_code="life_aftermath.no_eligible_activity")
+            return LifeAftermathResult(
+                status="no_op", reason_code="life_aftermath.no_eligible_activity"
+            )
         occurrence_id = self._open_occurrence(
-            plan=plan, wake=wake, logical_time=projection.logical_time,
-            trace_id=trace_id, correlation_id=correlation_id,
+            plan=plan,
+            wake=wake,
+            logical_time=projection.logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
         )
         return LifeAftermathResult(
-            status="occurrence_opened", reason_code="life_aftermath.occurrence_opened",
+            status="occurrence_opened",
+            reason_code="life_aftermath.occurrence_opened",
             occurrence_id=occurrence_id,
         )
 
-    def _open_occurrence(self, *, plan, wake, logical_time: datetime,
-                         trace_id: str, correlation_id: str) -> str:
+    def _open_occurrence(
+        self, *, plan, wake, logical_time: datetime, trace_id: str, correlation_id: str
+    ) -> str:
         outcomes = self._catalog.outcomes_for_activity(plan.activity_kind)
         suffix = _digest({"world": self._ledger.world_id, "plan": plan.plan_id})
         occurrence_id = "occurrence:life-aftermath:" + suffix
@@ -234,11 +326,15 @@ class LifeAftermathRuntime:
         )
         wake_evidence = self._event_evidence(wake, purpose="life_transition")
         plan_evidence = EvidenceRef(
-            ref_id=plan.plan_id, evidence_type="active_plan", claim_purpose="life_transition",
+            ref_id=plan.plan_id,
+            evidence_type="active_plan",
+            claim_purpose="life_transition",
             immutable_hash=canonical_plan_evidence_hash(plan),
         )
         occurrence = WorldOccurrenceProjection(
-            occurrence_id=occurrence_id, entity_revision=1, trigger_ref=plan.plan_id,
+            occurrence_id=occurrence_id,
+            entity_revision=1,
+            trigger_ref=plan.plan_id,
             participant_refs=tuple(dict.fromkeys((self._owner_actor_ref, *plan.participant_refs))),
             location_ref=plan.location_ref,
             time_window=DueWindow(
@@ -249,78 +345,119 @@ class LifeAftermathRuntime:
                 ),
             ),
             candidate_outcome_refs=tuple(item.candidate_result_ref for item in candidate_contents),
-            visibility=plan.privacy_class, status="committed",
+            visibility=plan.privacy_class,
+            status="committed",
         )
-        self._occurrence_content.commit(OccurrenceContentCommitRequest(
-            world_id=self._ledger.world_id, occurrence=occurrence,
-            candidate_contents=candidate_contents,
-            change_id="change:life-aftermath:occurrence:" + suffix,
-            transition_id="transition:life-aftermath:occurrence:" + suffix,
-            evidence_refs=(plan_evidence, wake_evidence),
-            policy_refs=("policy:life-aftermath.1",), logical_time=logical_time,
-            created_at=logical_time, actor=self._actor, source="world-v2:life-aftermath",
-            trace_id=trace_id, causation_id=wake.event_id, correlation_id=correlation_id,
-        ))
+        self._occurrence_content.commit(
+            OccurrenceContentCommitRequest(
+                world_id=self._ledger.world_id,
+                occurrence=occurrence,
+                candidate_contents=candidate_contents,
+                change_id="change:life-aftermath:occurrence:" + suffix,
+                transition_id="transition:life-aftermath:occurrence:" + suffix,
+                evidence_refs=(plan_evidence, wake_evidence),
+                policy_refs=("policy:life-aftermath.1",),
+                logical_time=logical_time,
+                created_at=logical_time,
+                actor=self._actor,
+                source="world-v2:life-aftermath",
+                trace_id=trace_id,
+                causation_id=wake.event_id,
+                correlation_id=correlation_id,
+            )
+        )
         projected = self._ledger.project()
-        committed = next(item for item in projected.world_occurrences if item.occurrence_id == occurrence_id)
+        committed = next(
+            item for item in projected.world_occurrences if item.occurrence_id == occurrence_id
+        )
         payload = WorldOccurrenceActivatedPayload(
             change_id="change:life-aftermath:activate:" + suffix,
             transition_id="transition:life-aftermath:activate:" + suffix,
-            expected_entity_revision=1, evidence_refs=(wake_evidence,),
-            policy_refs=("policy:life-aftermath.1",), occurrence_id=occurrence_id,
-            activated_at=logical_time, satisfied_precondition_refs=(),
+            expected_entity_revision=1,
+            evidence_refs=(wake_evidence,),
+            policy_refs=("policy:life-aftermath.1",),
+            occurrence_id=occurrence_id,
+            activated_at=logical_time,
+            satisfied_precondition_refs=(),
         )
         event = self._event(
             event_id="event:life-aftermath:activate:" + suffix,
-            event_type="WorldOccurrenceActivated", payload=payload.model_dump(mode="json"),
-            logical_time=logical_time, trace_id=trace_id, causation_id=wake.event_id,
+            event_type="WorldOccurrenceActivated",
+            payload=payload.model_dump(mode="json"),
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=wake.event_id,
             correlation_id=correlation_id,
         )
         self._commit((event,), commit_id="commit:life-aftermath:activate:" + suffix)
         return committed.occurrence_id
 
-    async def _settle(self, *, occurrence, wake, logical_time: datetime,
-                trace_id: str, correlation_id: str) -> str:
+    async def _settle(
+        self, *, occurrence, wake, logical_time: datetime, trace_id: str, correlation_id: str
+    ) -> str:
         wake_evidence = self._event_evidence(wake, purpose="life_transition")
         suffix = occurrence.occurrence_id.removeprefix("occurrence:life-aftermath:")
-        observation_id = "observation:life-aftermath:" + _digest([occurrence.occurrence_id, wake.event_id])
+        observation_id = "observation:life-aftermath:" + _digest(
+            [occurrence.occurrence_id, wake.event_id]
+        )
         observation = OutcomeObservationProjection(
-            observation_id=observation_id, occurrence_id=occurrence.occurrence_id,
-            source_kind="committed_world_event", source_refs=(wake.event_id,),
-            observed_payload_ref=wake.event_id, observed_payload_hash=wake.payload_hash,
-            observed_at=logical_time, confidence_bp=10_000,
+            observation_id=observation_id,
+            occurrence_id=occurrence.occurrence_id,
+            source_kind="committed_world_event",
+            source_refs=(wake.event_id,),
+            observed_payload_ref=wake.event_id,
+            observed_payload_hash=wake.payload_hash,
+            observed_at=logical_time,
+            confidence_bp=10_000,
         )
         observation_payload = OutcomeObservationRecordedPayload(
             change_id="change:life-aftermath:observation:" + suffix,
             transition_id="transition:life-aftermath:observation:" + suffix,
             expected_entity_revision=occurrence.entity_revision,
-            evidence_refs=(wake_evidence,), policy_refs=("policy:life-aftermath.1",),
+            evidence_refs=(wake_evidence,),
+            policy_refs=("policy:life-aftermath.1",),
             observation=observation,
         )
         observation_event = self._event(
             event_id=f"event:outcome-observation:{observation_id}",
             event_type="OutcomeObservationRecorded",
-            payload=observation_payload.model_dump(mode="json"), logical_time=logical_time,
-            trace_id=trace_id, causation_id=wake.event_id, correlation_id=correlation_id,
+            payload=observation_payload.model_dump(mode="json"),
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=wake.event_id,
+            correlation_id=correlation_id,
         )
         if self._ledger.lookup_event_commit(observation_event.event_id) is None:
-            self._commit((observation_event,), commit_id="commit:life-aftermath:observation:" + suffix)
+            self._commit(
+                (observation_event,), commit_id="commit:life-aftermath:observation:" + suffix
+            )
 
         projection = self._ledger.project()
-        occurrence = next(item for item in projection.world_occurrences if item.occurrence_id == occurrence.occurrence_id)
+        occurrence = next(
+            item
+            for item in projection.world_occurrences
+            if item.occurrence_id == occurrence.occurrence_id
+        )
         draw = self._random.draw(
-            attempt_id="attempt:life-aftermath:" + _digest([occurrence.occurrence_id, wake.event_id]),
+            attempt_id="attempt:life-aftermath:"
+            + _digest([occurrence.occurrence_id, wake.event_id]),
             candidate_refs=occurrence.candidate_outcome_refs,
-            catalog_version="life-aftermath.1", logical_time=logical_time,
-            seed_instant=wake.logical_time, actor=self._actor, trace_id=trace_id,
+            catalog_version="life-aftermath.1",
+            logical_time=logical_time,
+            seed_instant=wake.logical_time,
+            actor=self._actor,
+            trace_id=trace_id,
             correlation_id=correlation_id,
         )
         projection = self._ledger.project()
         chosen = next(
-            item for item in occurrence.candidate_outcomes
+            item
+            for item in occurrence.candidate_outcomes
             if item.candidate_result_ref == draw.selected_candidate_ref
         )
-        proposal_id = "proposal:life-aftermath:outcome:" + _digest([occurrence.occurrence_id, wake.event_id])
+        proposal_id = "proposal:life-aftermath:outcome:" + _digest(
+            [occurrence.occurrence_id, wake.event_id]
+        )
         proposal_event_id = "event:life-aftermath:outcome-proposal:" + suffix
         existing_proposal = self._ledger.lookup_event_commit(proposal_event_id)
         if existing_proposal is not None:
@@ -358,17 +495,21 @@ class LifeAftermathRuntime:
                 )
         change_id = "change:life-aftermath:settle:" + suffix
         change_hash = outcome_mutation_hash(
-            change_id=change_id, occurrence_id=occurrence.occurrence_id,
+            change_id=change_id,
+            occurrence_id=occurrence.occurrence_id,
             evaluated_entity_revision=occurrence.entity_revision,
             evaluated_world_revision=projection.world_revision,
-            candidate_result_ref=chosen.candidate_result_ref, result_id=chosen.result_id,
+            candidate_result_ref=chosen.candidate_result_ref,
+            result_id=chosen.result_id,
             result_payload_ref=chosen.result_payload_ref,
             result_payload_hash=chosen.result_payload_hash,
             observation_refs=(observation_id,),
         )
         proposal_payload = OutcomeProposalRecordedPayload(
-            outcome_proposal_id=proposal_id, decision_proposal_id=proposal_id,
-            change_id=change_id, occurrence_id=occurrence.occurrence_id,
+            outcome_proposal_id=proposal_id,
+            decision_proposal_id=proposal_id,
+            change_id=change_id,
+            occurrence_id=occurrence.occurrence_id,
             evaluated_entity_revision=occurrence.entity_revision,
             evaluated_world_revision=projection.world_revision,
             trigger_ref=occurrence.trigger_ref,
@@ -376,15 +517,20 @@ class LifeAftermathRuntime:
             proposed_result_id=chosen.result_id,
             proposed_result_payload_ref=chosen.result_payload_ref,
             proposed_result_payload_hash=chosen.result_payload_hash,
-            proposed_change_hash=change_hash, observation_refs=(observation_id,),
+            proposed_change_hash=change_hash,
+            observation_refs=(observation_id,),
             precondition_refs=occurrence.satisfied_precondition_refs,
-            evidence_refs=(wake_evidence,), confidence_bp=10_000,
+            evidence_refs=(wake_evidence,),
+            confidence_bp=10_000,
             expires_at=logical_time + timedelta(minutes=5),
         )
         proposal_event = self._event(
             event_id=proposal_event_id,
-            event_type="OutcomeProposalRecorded", payload=proposal_payload.model_dump(mode="json"),
-            logical_time=logical_time, trace_id=trace_id, causation_id=observation_event.event_id,
+            event_type="OutcomeProposalRecorded",
+            payload=proposal_payload.model_dump(mode="json"),
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=observation_event.event_id,
             correlation_id=correlation_id,
         )
         if self._ledger.lookup_event_commit(proposal_event.event_id) is None:
@@ -393,43 +539,65 @@ class LifeAftermathRuntime:
         projection = self._ledger.project()
         acceptance_id = "acceptance:life-aftermath:" + suffix
         acceptance_payload = {
-            "status": "accepted", "acceptance_id": acceptance_id,
-            "proposal_id": proposal_id, "evaluated_world_revision": projection.world_revision,
-            "accepted_change_id": change_id, "accepted_change_hash": change_hash,
+            "status": "accepted",
+            "acceptance_id": acceptance_id,
+            "proposal_id": proposal_id,
+            "evaluated_world_revision": projection.world_revision,
+            "accepted_change_id": change_id,
+            "accepted_change_hash": change_hash,
         }
         acceptance_event = self._event(
             event_id="event:life-aftermath:acceptance:" + suffix,
-            event_type="AcceptanceRecorded", payload=acceptance_payload,
-            logical_time=logical_time, trace_id=trace_id, causation_id=proposal_event.event_id,
+            event_type="AcceptanceRecorded",
+            payload=acceptance_payload,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=proposal_event.event_id,
             correlation_id=correlation_id,
         )
         trigger_id = appraisal_trigger_identity(occurrence.occurrence_id, chosen.result_id)
         settlement_payload = WorldOccurrenceSettledPayload(
-            change_id=change_id, transition_id="transition:life-aftermath:settle:" + suffix,
+            change_id=change_id,
+            transition_id="transition:life-aftermath:settle:" + suffix,
             expected_entity_revision=occurrence.entity_revision,
-            evidence_refs=(wake_evidence,), policy_refs=("policy:outcome-v1",),
-            acceptance_id=acceptance_id, evaluated_world_revision=projection.world_revision,
-            accepted_change_hash=change_hash, occurrence_id=occurrence.occurrence_id,
-            outcome_proposal_id=proposal_id, candidate_result_ref=chosen.candidate_result_ref,
-            result_id=chosen.result_id, observation_refs=(observation_id,),
+            evidence_refs=(wake_evidence,),
+            policy_refs=("policy:outcome-v1",),
+            acceptance_id=acceptance_id,
+            evaluated_world_revision=projection.world_revision,
+            accepted_change_hash=change_hash,
+            occurrence_id=occurrence.occurrence_id,
+            outcome_proposal_id=proposal_id,
+            candidate_result_ref=chosen.candidate_result_ref,
+            result_id=chosen.result_id,
+            observation_refs=(observation_id,),
             result_payload_ref=chosen.result_payload_ref,
-            result_payload_hash=chosen.result_payload_hash, settled_at=logical_time,
+            result_payload_hash=chosen.result_payload_hash,
+            settled_at=logical_time,
             appraisal_trigger_ref=trigger_id,
         )
         settlement_event = self._event(
             event_id="event:life-aftermath:settlement:" + suffix,
-            event_type="WorldOccurrenceSettled", payload=settlement_payload.model_dump(mode="json"),
-            logical_time=logical_time, trace_id=trace_id, causation_id=acceptance_event.event_id,
+            event_type="WorldOccurrenceSettled",
+            payload=settlement_payload.model_dump(mode="json"),
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=acceptance_event.event_id,
             correlation_id=correlation_id,
         )
         trigger = TriggerProcess(
-            trigger_id=trigger_id, trigger_ref=trigger_id, process_kind="npc_world_appraisal",
-            source_evidence_ref=settlement_event.event_id, state="open",
+            trigger_id=trigger_id,
+            trigger_ref=trigger_id,
+            process_kind="npc_world_appraisal",
+            source_evidence_ref=settlement_event.event_id,
+            state="open",
         )
         trigger_event = self._event(
             event_id="event:life-aftermath:appraisal-trigger:" + suffix,
-            event_type="TriggerProcessOpened", payload={"process": trigger.model_dump(mode="json")},
-            logical_time=logical_time, trace_id=trace_id, causation_id=settlement_event.event_id,
+            event_type="TriggerProcessOpened",
+            payload={"process": trigger.model_dump(mode="json")},
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=settlement_event.event_id,
             correlation_id=correlation_id,
         )
         if self._ledger.lookup_event_commit(settlement_event.event_id) is None:
@@ -439,45 +607,57 @@ class LifeAftermathRuntime:
             )
 
         result_record = StoredLifeContent(
-            content_ref=chosen.result_payload_ref, content_kind="occurrence_result",
+            content_ref=chosen.result_payload_ref,
+            content_kind="occurrence_result",
             content_payload_hash=chosen.result_payload_hash,
             text=self._candidate_text(chosen.content_ref, chosen.content_payload_hash),
         )
         self._content_store.put_if_absent(result_record)
         settled_projection = self._ledger.project()
         settlement_ref = next(
-            item for item in settled_projection.committed_world_event_refs
+            item
+            for item in settled_projection.committed_world_event_refs
             if item.event_id == settlement_event.event_id
         )
         descriptor = LifeContentRecordedPayload(
             content_id="life-content:occurrence:" + suffix,
-            content_kind="occurrence_result", content_ref=result_record.content_ref,
+            content_kind="occurrence_result",
+            content_ref=result_record.content_ref,
             content_payload_hash=result_record.content_payload_hash,
-            privacy_class=chosen.privacy_class, source_kind="occurrence_settlement",
+            privacy_class=chosen.privacy_class,
+            source_kind="occurrence_settlement",
             source_event_ref=settlement_ref.event_id,
             source_world_revision=settlement_ref.world_revision,
             source_payload_hash=settlement_ref.payload_hash,
-            source_entity_id=occurrence.occurrence_id, source_entity_revision=4,
+            source_entity_id=occurrence.occurrence_id,
+            source_entity_revision=4,
         )
         descriptor_event = self._event(
             event_id="event:life-content:occurrence:" + suffix,
-            event_type="LifeContentRecorded", payload=descriptor.model_dump(mode="json"),
-            logical_time=logical_time, trace_id=trace_id, causation_id=settlement_event.event_id,
+            event_type="LifeContentRecorded",
+            payload=descriptor.model_dump(mode="json"),
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=settlement_event.event_id,
             correlation_id=correlation_id,
         )
         if self._ledger.lookup_event_commit(descriptor_event.event_id) is None:
             self._commit((descriptor_event,), commit_id="commit:life-content:occurrence:" + suffix)
         settled = next(
-            item for item in self._ledger.project().world_occurrences
+            item
+            for item in self._ledger.project().world_occurrences
             if item.occurrence_id == occurrence.occurrence_id
         )
         return await self._commit_experience(
-            occurrence=settled, logical_time=logical_time,
-            trace_id=trace_id, correlation_id=correlation_id,
+            occurrence=settled,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
         )
 
-    async def _commit_experience(self, *, occurrence, logical_time: datetime,
-                           trace_id: str, correlation_id: str) -> str:
+    async def _commit_experience(
+        self, *, occurrence, logical_time: datetime, trace_id: str, correlation_id: str
+    ) -> str:
         suffix = occurrence.occurrence_id.removeprefix("occurrence:life-aftermath:")
         experience_id = "experience:life-aftermath:" + suffix
         if self._has_experience(self._ledger.project(), occurrence.occurrence_id):
@@ -493,13 +673,18 @@ class LifeAftermathRuntime:
             raise ValueError("settled aftermath has no durable settlement event")
         settlement_event, settlement_commit = settlement
         result_content = self._content_store.read_exact(content_ref=occurrence.result_payload_ref)
-        if result_content is None or result_content.content_payload_hash != occurrence.result_payload_hash:
+        if (
+            result_content is None
+            or result_content.content_payload_hash != occurrence.result_payload_hash
+        ):
             descriptor = next(
-                item for item in occurrence.candidate_outcomes
+                item
+                for item in occurrence.candidate_outcomes
                 if item.result_id == occurrence.result_id
             )
             result_content = StoredLifeContent(
-                content_ref=occurrence.result_payload_ref, content_kind="occurrence_result",
+                content_ref=occurrence.result_payload_ref,
+                content_kind="occurrence_result",
                 content_payload_hash=occurrence.result_payload_hash,
                 text=self._candidate_text(descriptor.content_ref, descriptor.content_payload_hash),
             )
@@ -512,9 +697,11 @@ class LifeAftermathRuntime:
         ):
             descriptor = LifeContentRecordedPayload(
                 content_id="life-content:occurrence:" + suffix,
-                content_kind="occurrence_result", content_ref=result_content.content_ref,
+                content_kind="occurrence_result",
+                content_ref=result_content.content_ref,
                 content_payload_hash=result_content.content_payload_hash,
-                privacy_class=occurrence.visibility, source_kind="occurrence_settlement",
+                privacy_class=occurrence.visibility,
+                source_kind="occurrence_settlement",
                 source_event_ref=settlement_event.event_id,
                 source_world_revision=settlement_commit.world_revision,
                 source_payload_hash=settlement_event.payload_hash,
@@ -523,16 +710,18 @@ class LifeAftermathRuntime:
             )
             descriptor_event = self._event(
                 event_id="event:life-content:occurrence:" + suffix,
-                event_type="LifeContentRecorded", payload=descriptor.model_dump(mode="json"),
-                logical_time=logical_time, trace_id=trace_id,
-                causation_id=settlement_event.event_id, correlation_id=correlation_id,
+                event_type="LifeContentRecorded",
+                payload=descriptor.model_dump(mode="json"),
+                logical_time=logical_time,
+                trace_id=trace_id,
+                causation_id=settlement_event.event_id,
+                correlation_id=correlation_id,
             )
-            self._commit(
-                (descriptor_event,), commit_id="commit:life-content:occurrence:" + suffix
-            )
+            self._commit((descriptor_event,), commit_id="commit:life-content:occurrence:" + suffix)
         summary_ref = "content:experience-summary:" + suffix
         summary = StoredLifeContent(
-            content_ref=summary_ref, content_kind="experience_summary",
+            content_ref=summary_ref,
+            content_kind="experience_summary",
             content_payload_hash=life_content_payload_hash(result_content.text),
             text=result_content.text,
         )
@@ -548,91 +737,135 @@ class LifeAftermathRuntime:
             authority_payload_hash=settlement_event.payload_hash,
             occurrence_id=occurrence.occurrence_id,
             occurrence_entity_revision=occurrence.entity_revision,
-            result_id=occurrence.result_id, result_payload_ref=occurrence.result_payload_ref,
+            result_id=occurrence.result_id,
+            result_payload_ref=occurrence.result_payload_ref,
             result_payload_hash=occurrence.result_payload_hash,
         )
         experience_privacy = _experience_privacy(occurrence.visibility)
         values = ExperienceValues(
-            summary_ref=summary_ref, summary_payload_hash=summary.content_payload_hash,
-            occurred_from=occurrence.activated_at, occurred_to=occurrence.settled_at,
-            participant_refs=occurrence.participant_refs, source_bindings=(binding,),
+            summary_ref=summary_ref,
+            summary_payload_hash=summary.content_payload_hash,
+            occurred_from=occurrence.activated_at,
+            occurred_to=occurrence.settled_at,
+            participant_refs=occurrence.participant_refs,
+            source_bindings=(binding,),
             privacy_class=experience_privacy,
         )
         origin = ExperienceOrigin(
-            change_id=change_id, transition_id=transition_id,
-            policy_refs=policy_refs, accepted_event_ref=experience_event_id,
+            change_id=change_id,
+            transition_id=transition_id,
+            policy_refs=policy_refs,
+            accepted_event_ref=experience_event_id,
         )
         experience = ExperienceProjection(
             experience_id=experience_id,
-            semantic_fingerprint=experience_semantic_fingerprint(values=values, policy_refs=policy_refs),
-            values=values, origin=origin,
+            semantic_fingerprint=experience_semantic_fingerprint(
+                values=values, policy_refs=policy_refs
+            ),
+            values=values,
+            origin=origin,
         )
         proposal_id = "proposal:life-aftermath:experience:" + suffix
         evidence = EvidenceRef(
-            ref_id=settlement_event.event_id, evidence_type="settled_world_event",
-            claim_purpose="past_experience", source_world_revision=settlement_commit.world_revision,
+            ref_id=settlement_event.event_id,
+            evidence_type="settled_world_event",
+            claim_purpose="past_experience",
+            source_world_revision=settlement_commit.world_revision,
             immutable_hash=settlement_event.payload_hash,
         )
         base = {
-            "change_id": change_id, "transition_id": transition_id,
-            "expected_entity_revision": 0, "evidence_refs": (evidence,),
-            "policy_refs": policy_refs, "acceptance_id": "acceptance:life-aftermath:experience:" + suffix,
-            "proposal_id": proposal_id, "evaluated_world_revision": projection.world_revision,
-            "accepted_change_hash": "0" * 64, "experience": experience,
+            "change_id": change_id,
+            "transition_id": transition_id,
+            "expected_entity_revision": 0,
+            "evidence_refs": (evidence,),
+            "policy_refs": policy_refs,
+            "acceptance_id": "acceptance:life-aftermath:experience:" + suffix,
+            "proposal_id": proposal_id,
+            "evaluated_world_revision": projection.world_revision,
+            "accepted_change_hash": "0" * 64,
+            "experience": experience,
         }
         base["accepted_change_hash"] = experience_mutation_hash(base)
         mutation = ExperienceCommittedPayload.model_validate(base)
         proposal = ExperienceProposalProjection(
-            proposal_id=proposal_id, proposal_encoding="typed-authority-v1",
-            authority_contract_ref="proposal-contract:experience.1", change_id=change_id,
-            transition_id=transition_id, evaluated_world_revision=projection.world_revision,
-            proposed_change_hash=mutation.accepted_change_hash, evidence_refs=(evidence,),
+            proposal_id=proposal_id,
+            proposal_encoding="typed-authority-v1",
+            authority_contract_ref="proposal-contract:experience.1",
+            change_id=change_id,
+            transition_id=transition_id,
+            evaluated_world_revision=projection.world_revision,
+            proposed_change_hash=mutation.accepted_change_hash,
+            evidence_refs=(evidence,),
             policy_refs=policy_refs,
             proposed_mutation=ExperienceProposedMutation(
-                payload_json=json.dumps(mutation.model_dump(mode="json"), ensure_ascii=False,
-                                        sort_keys=True, separators=(",", ":"))
+                payload_json=json.dumps(
+                    mutation.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             ),
         )
         proposal_event = self._event(
             event_id="event:life-aftermath:experience-proposal:" + suffix,
-            event_type="ProposalRecorded", payload=proposal.model_dump(mode="json"),
-            logical_time=logical_time, trace_id=trace_id,
-            causation_id=settlement_event.event_id, correlation_id=correlation_id,
+            event_type="ProposalRecorded",
+            payload=proposal.model_dump(mode="json"),
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=settlement_event.event_id,
+            correlation_id=correlation_id,
         )
         if self._ledger.lookup_event_commit(proposal_event.event_id) is None:
-            self._commit((proposal_event,), commit_id="commit:life-aftermath:experience-proposal:" + suffix)
+            self._commit(
+                (proposal_event,), commit_id="commit:life-aftermath:experience-proposal:" + suffix
+            )
         acceptance_payload = {
-            "status": "accepted", "acceptance_id": mutation.acceptance_id,
-            "proposal_id": proposal_id, "evaluated_world_revision": mutation.evaluated_world_revision,
-            "accepted_change_id": change_id, "accepted_change_hash": mutation.accepted_change_hash,
+            "status": "accepted",
+            "acceptance_id": mutation.acceptance_id,
+            "proposal_id": proposal_id,
+            "evaluated_world_revision": mutation.evaluated_world_revision,
+            "accepted_change_id": change_id,
+            "accepted_change_hash": mutation.accepted_change_hash,
         }
         acceptance_event = self._event(
             event_id="event:life-aftermath:experience-acceptance:" + suffix,
-            event_type="AcceptanceRecorded", payload=acceptance_payload,
-            logical_time=logical_time, trace_id=trace_id, causation_id=proposal_event.event_id,
+            event_type="AcceptanceRecorded",
+            payload=acceptance_payload,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=proposal_event.event_id,
             correlation_id=correlation_id,
         )
         experience_event = self._event(
-            event_id=experience_event_id, event_type="ExperienceCommitted",
-            payload=mutation.model_dump(mode="json"), logical_time=logical_time,
-            trace_id=trace_id, causation_id=acceptance_event.event_id,
+            event_id=experience_event_id,
+            event_type="ExperienceCommitted",
+            payload=mutation.model_dump(mode="json"),
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=acceptance_event.event_id,
             correlation_id=correlation_id,
         )
         projected = self._ledger.project()
         content_payload = LifeContentRecordedPayload(
             content_id="life-content:experience:" + suffix,
-            content_kind="experience_summary", content_ref=summary_ref,
+            content_kind="experience_summary",
+            content_ref=summary_ref,
             content_payload_hash=summary.content_payload_hash,
-            privacy_class=experience_privacy, source_kind="experience",
+            privacy_class=experience_privacy,
+            source_kind="experience",
             source_event_ref=experience_event.event_id,
             source_world_revision=projected.world_revision + 2,
             source_payload_hash=experience_event.payload_hash,
-            source_entity_id=experience_id, source_entity_revision=1,
+            source_entity_id=experience_id,
+            source_entity_revision=1,
         )
         content_event = self._event(
             event_id="event:life-content:experience:" + suffix,
-            event_type="LifeContentRecorded", payload=content_payload.model_dump(mode="json"),
-            logical_time=logical_time, trace_id=trace_id, causation_id=experience_event.event_id,
+            event_type="LifeContentRecorded",
+            payload=content_payload.model_dump(mode="json"),
+            logical_time=logical_time,
+            trace_id=trace_id,
+            causation_id=experience_event.event_id,
             correlation_id=correlation_id,
         )
         self._commit(
@@ -654,36 +887,60 @@ class LifeAftermathRuntime:
         logical_time: datetime,
         trace_id: str,
         correlation_id: str,
-    ) -> None:
+    ) -> Literal["retained", "no_change"] | None:
+        """Single-flight one Experience decision inside this worker process."""
+
+        lock = self._memory_decision_locks.setdefault(
+            experience_id,
+            asyncio.Lock(),
+        )
+        async with lock:
+            return await self._materialize_experience_memory_owned(
+                experience_id=experience_id,
+                logical_time=logical_time,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+
+    async def _materialize_experience_memory_owned(
+        self,
+        *,
+        experience_id: str,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> Literal["retained", "no_change"] | None:
         """Retain settled lived history through the existing memory authority.
 
         The semantic text remains the immutable sidecar and the candidate is
         still source-bound, private, replayable, and subject to normal memory
         withdrawal/decay.  An optional model may refine retention and salience
-        inside the installed matrix without changing this authority seam; the
-        continuity draft below is the deterministic fallback.
+        inside the installed matrix without changing this authority seam.
         """
 
         lifecycle = self._experience_memory_lifecycle
         if lifecycle is None:
-            return
+            return None
         projection = self._ledger.project()
         experience = next(
             (
                 item
                 for item in projection.experiences
-                if isinstance(item, ExperienceProjection)
-                and item.experience_id == experience_id
+                if isinstance(item, ExperienceProjection) and item.experience_id == experience_id
             ),
             None,
         )
         if experience is None:
-            return
+            return None
         if any(
-            any(binding.source_id == experience_id for binding in item.values.source_bindings)
+            item.values.status != "pending"
+            and any(
+                binding.source_id == experience_id
+                for binding in item.values.source_bindings
+            )
             for item in projection.memory_candidates
         ):
-            return
+            return None
         transition = next(
             item
             for item in projection.experience_transitions
@@ -694,59 +951,251 @@ class LifeAftermathRuntime:
         located = self._ledger.lookup_event_commit(experience.origin.accepted_event_ref)
         if located is None:
             raise ValueError("committed Experience has no durable event")
-        event, commit = located
-        draft = FactMemoryRetentionDraft(
-            cue_kind="world_continuity",
-            retention_rationales=("world_continuity",),
-            salience=MemorySalienceVector(
-                autobiographical_relevance_bp=7_000,
-                relationship_relevance_bp=2_000,
-                emotional_residue_bp=2_000,
-                unfinished_business_bp=1_000,
-                recurrence_bp=3_000,
-                novelty_bp=6_000,
-                future_utility_bp=5_000,
-                world_continuity_bp=9_000,
-                matrix_digest=MEMORY_SALIENCE_MATRIX_DIGEST,
+        event, _ = located
+        committed_experience = next(
+            (
+                item
+                for item in projection.committed_world_event_refs
+                if item.event_id == experience.origin.accepted_event_ref
             ),
+            None,
         )
-        if self._memory_adapter is not None:
-            try:
-                summary = self._content_store.read_exact(content_ref=experience.values.summary_ref)
-                if summary is None or summary.content_payload_hash != experience.values.summary_payload_hash:
-                    raise ValueError("experience summary sidecar is unavailable for memory classification")
-                classified = await self._memory_adapter.classify(
-                    predicate_code="world.experience",
-                    source_text=summary.text,
+        if committed_experience is None:
+            raise ValueError("committed Experience has no event projection")
+        pending = next(
+            (
+                item
+                for item in projection.memory_candidates
+                if item.values.status == "pending"
+                and any(
+                    binding.source_kind == "experience"
+                    and binding.source_id == experience_id
+                    for binding in item.values.source_bindings
                 )
-            except (TimeoutError, ConnectionError, OSError, httpx.HTTPError, ValueError) as exc:
-                _LOG.warning(
-                    "experience memory model unavailable; using continuity fallback: %s", exc
+            ),
+            None,
+        )
+        decision = self._experience_memory_decision(experience)
+        if decision is not None and decision.decision_kind == "no_change":
+            return "no_change"
+        if decision is not None:
+            draft = FactMemoryRetentionDraft.model_validate_json(
+                decision.decision_json
+            )
+        elif pending is not None:
+            # Legacy pending candidates predate the durable decision audit and
+            # could only have been opened from retain=true.
+            draft = FactMemoryRetentionDraft(
+                cue_kind=pending.values.cue_kind,
+                retention_rationales=pending.values.retention_rationales,
+                salience=pending.values.salience,
+            )
+        else:
+            if self._memory_adapter is None:
+                return None
+            summary = self._content_store.read_exact(
+                content_ref=experience.values.summary_ref
+            )
+            if (
+                summary is None
+                or summary.content_payload_hash
+                != experience.values.summary_payload_hash
+            ):
+                raise ValueError(
+                    "experience summary sidecar is unavailable for memory classification"
                 )
-            else:
-                if classified is not None:
-                    draft = classified
-                else:
-                    # A settled Experience is her lived history: continuity
-                    # retention is the design default and decay/withdrawal own
-                    # forgetting.  The model refines salience when it engages;
-                    # its fact-shaped "retain=false" must not silently erase
-                    # the lived day (in production it declined every single
-                    # experience and she accumulated zero memories).
-                    _LOG.warning(
-                        "experience memory model declined; keeping continuity draft for %s",
-                        experience_id,
-                    )
-        lifecycle.accept(
+            classified = await self._memory_adapter.classify(
+                predicate_code="world.experience",
+                source_text=summary.text,
+            )
+            decision = self._record_experience_memory_decision(
+                experience=experience,
+                committed_experience=committed_experience,
+                evaluated_projection=projection,
+                source_text=summary.text,
+                decision=classified,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+            if decision.decision_kind == "no_change":
+                return "no_change"
+            draft = FactMemoryRetentionDraft.model_validate_json(
+                decision.decision_json
+            )
+        accepted = lifecycle.accept(
             experience=experience,
             transition=transition,
             experience_event=event,
-            experience_world_revision=commit.world_revision,
+            # lookup_event_commit returns the cursor after the whole batch.
+            # ExperienceCommitted may be followed by a LifeContentRecorded
+            # event in that batch, so only its own committed-event projection
+            # carries the exact source revision required by memory authority.
+            experience_world_revision=committed_experience.world_revision,
             draft=draft,
             logical_time=logical_time,
             created_at=logical_time,
             trace_id=trace_id,
             correlation_id=correlation_id,
+        )
+        if accepted is None:
+            _LOG.warning(
+                "experience memory lifecycle found existing authority for %s",
+                experience_id,
+            )
+            return None
+        elif not any(
+            item.candidate_id == accepted.candidate_id
+            for item in self._ledger.project().memory_candidates
+        ):
+            raise RuntimeError("experience memory lifecycle returned without durable projection")
+        return "retained"
+
+    def _has_no_change_memory_decision(
+        self, experience: ExperienceProjection
+    ) -> bool:
+        decision = self._experience_memory_decision(experience)
+        return decision is not None and decision.decision_kind == "no_change"
+
+    def _experience_memory_decision(
+        self, experience: ExperienceProjection
+    ) -> ExperienceMemoryDecisionRecordedPayload | None:
+        located = self._ledger.lookup_event_commit(
+            experience_memory_decision_event_id(
+                experience_authority_event_ref=experience.origin.accepted_event_ref
+            )
+        )
+        if located is None:
+            return None
+        event, _ = located
+        if event.event_type != "ExperienceMemoryDecisionRecorded":
+            raise ValueError(
+                "Experience-memory decision identity resolved to another event"
+            )
+        payload = ExperienceMemoryDecisionRecordedPayload.model_validate_json(
+            event.payload_json
+        )
+        if (
+            payload.experience_id != experience.experience_id
+            or payload.experience_entity_revision != experience.entity_revision
+            or payload.experience_authority_event_ref
+            != experience.origin.accepted_event_ref
+        ):
+            raise ValueError(
+                "Experience-memory decision does not bind its Experience"
+            )
+        return payload
+
+    def _record_experience_memory_decision(
+        self,
+        *,
+        experience: ExperienceProjection,
+        committed_experience,
+        evaluated_projection,
+        source_text: str,
+        decision: FactMemoryRetentionDraft | None,
+        trace_id: str,
+        correlation_id: str,
+    ) -> ExperienceMemoryDecisionRecordedPayload:
+        existing = self._experience_memory_decision(experience)
+        if existing is not None:
+            return existing
+        if self._memory_adapter is None:
+            raise ValueError(
+                "Experience-memory decision requires a configured character model"
+            )
+        if decision is None:
+            decision_kind = "no_change"
+            decision_value: object = {"decision": "no_change"}
+        else:
+            decision_kind = "retain"
+            decision_value = decision.model_dump(mode="json")
+        decision_json = canonical_experience_memory_decision_json(
+            decision_value
+        )
+        request_hash = _digest(
+            {
+                "adapter_version": self._memory_adapter.adapter_version,
+                "experience": experience.model_dump(mode="json"),
+                "experience_authority_event_ref": (
+                    experience.origin.accepted_event_ref
+                ),
+                "experience_authority_payload_hash": (
+                    committed_experience.payload_hash
+                ),
+                "source_text_hash": hashlib.sha256(
+                    source_text.encode()
+                ).hexdigest(),
+                "evaluated_cursor": {
+                    "world_revision": evaluated_projection.world_revision,
+                    "deliberation_revision": (
+                        evaluated_projection.deliberation_revision
+                    ),
+                    "ledger_sequence": evaluated_projection.ledger_sequence,
+                },
+            }
+        )
+        for _attempt in range(8):
+            current = self._ledger.project()
+            recorded_at = current.logical_time
+            if recorded_at is None:
+                raise ValueError(
+                    "Experience-memory decision requires World logical time"
+                )
+            payload = ExperienceMemoryDecisionRecordedPayload(
+                decision_id=experience_memory_decision_identity(
+                    experience_authority_event_ref=(
+                        experience.origin.accepted_event_ref
+                    )
+                ),
+                experience_id=experience.experience_id,
+                experience_entity_revision=experience.entity_revision,
+                experience_authority_event_ref=(
+                    experience.origin.accepted_event_ref
+                ),
+                experience_authority_world_revision=(
+                    committed_experience.world_revision
+                ),
+                experience_authority_payload_hash=(
+                    committed_experience.payload_hash
+                ),
+                evaluated_world_revision=evaluated_projection.world_revision,
+                adapter_version=self._memory_adapter.adapter_version,
+                model_id=self._memory_adapter.model_id,
+                request_hash=request_hash,
+                decision_kind=decision_kind,
+                decision_json=decision_json,
+                decision_hash=experience_memory_decision_hash(decision_json),
+                recorded_at=recorded_at,
+            )
+            event = self._event(
+                event_id=experience_memory_decision_event_id(
+                    experience_authority_event_ref=(
+                        experience.origin.accepted_event_ref
+                    )
+                ),
+                event_type="ExperienceMemoryDecisionRecorded",
+                payload=payload.model_dump(mode="json"),
+                logical_time=recorded_at,
+                trace_id=trace_id,
+                causation_id=experience.origin.accepted_event_ref,
+                correlation_id=correlation_id,
+            )
+            try:
+                self._ledger.commit(
+                    (event,),
+                    expected_world_revision=current.world_revision,
+                    expected_deliberation_revision=(
+                        current.deliberation_revision
+                    ),
+                )
+            except (ConcurrencyConflict, IdempotencyConflict):
+                joined = self._experience_memory_decision(experience)
+                if joined is not None:
+                    return joined
+                continue
+            return payload
+        raise ConcurrencyConflict(
+            "Experience-memory decision could not join a stable ledger cursor"
         )
 
     def _candidate_text(self, content_ref: str | None, content_hash: str | None) -> str:
@@ -772,22 +1221,40 @@ class LifeAftermathRuntime:
     @staticmethod
     def _event_evidence(event_ref, *, purpose: str) -> EvidenceRef:
         return EvidenceRef(
-            ref_id=event_ref.event_id, evidence_type="committed_world_event",
-            claim_purpose=purpose, source_world_revision=event_ref.world_revision,
+            ref_id=event_ref.event_id,
+            evidence_type="committed_world_event",
+            claim_purpose=purpose,
+            source_world_revision=event_ref.world_revision,
             immutable_hash=event_ref.payload_hash,
         )
 
-    def _event(self, *, event_id: str, event_type: str, payload: dict[str, object],
-               logical_time: datetime, trace_id: str, causation_id: str,
-               correlation_id: str) -> WorldEvent:
+    def _event(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        logical_time: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+    ) -> WorldEvent:
         return WorldEvent.from_payload(
-            schema_version="world-v2.1", event_id=event_id, world_id=self._ledger.world_id,
-            event_type=event_type, logical_time=logical_time, created_at=logical_time,
-            actor=self._actor, source="world-v2:life-aftermath", trace_id=trace_id,
-            causation_id=causation_id, correlation_id=correlation_id,
+            schema_version="world-v2.1",
+            event_id=event_id,
+            world_id=self._ledger.world_id,
+            event_type=event_type,
+            logical_time=logical_time,
+            created_at=logical_time,
+            actor=self._actor,
+            source="world-v2:life-aftermath",
+            trace_id=trace_id,
+            causation_id=causation_id,
+            correlation_id=correlation_id,
             idempotency_key=domain_idempotency_key(
                 event_type=event_type, world_id=self._ledger.world_id, payload=payload
-            ) or f"life-aftermath:{event_type}:{_digest([self._ledger.world_id, event_id, payload])}",
+            )
+            or f"life-aftermath:{event_type}:{_digest([self._ledger.world_id, event_id, payload])}",
             payload=payload,
         )
 

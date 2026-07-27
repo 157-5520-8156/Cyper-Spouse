@@ -43,6 +43,17 @@ from companion_daemon.world_v2.production_turn_application import (
 )
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.qq_c2c_transport import QQC2CPlatformTransport
+from companion_daemon.world_v2.recall_index import (
+    FeatureHashRecallEmbedding,
+    InMemoryRecallIndex,
+    RecallCursor,
+    RecallDocument,
+    RecallSourceBinding,
+)
+from companion_daemon.world_v2.recall_runtime import (
+    RecallCoordinator,
+    verify_trusted_recall_trace,
+)
 from companion_daemon.world_v2.social_initiative import SocialInitiativePolicy
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import (
@@ -90,25 +101,29 @@ def _proactive_model_request() -> ModelInput:
                 "logical_time": NOW.isoformat(),
                 "slices": {
                     "advisories": {
-                        "items": [{
-                            "value": {
-                                "kind": "proactive_opportunity",
-                                "candidate_refs": ["ambient_presence:epoch:1"],
-                                "source_refs": [source_ref],
-                                "candidates": [{"value": "ambient context"}],
+                        "items": [
+                            {
+                                "value": {
+                                    "kind": "proactive_opportunity",
+                                    "candidate_refs": ["ambient_presence:epoch:1"],
+                                    "source_refs": [source_ref],
+                                    "candidates": [{"value": "ambient context"}],
+                                }
                             }
-                        }]
+                        ]
                     },
                     "recent_dialogue": {
                         "availability": "available",
                         "source_refs": ["event:user:shenzhen"],
-                        "items": [{
-                            "item_ref": "event:user:shenzhen",
-                            "value": {
-                                "speaker": "counterpart",
-                                "text": "深圳说实话不是很好玩哈哈哈哈",
-                            },
-                        }],
+                        "items": [
+                            {
+                                "item_ref": "event:user:shenzhen",
+                                "value": {
+                                    "speaker": "counterpart",
+                                    "text": "深圳说实话不是很好玩哈哈哈哈",
+                                },
+                            }
+                        ],
                     },
                     "user_facts": {"availability": "available", "items": []},
                 },
@@ -124,12 +139,24 @@ class _ProactiveReplySequence:
     def __init__(self, replies: list[dict[str, object] | str]) -> None:
         self.replies = list(replies)
         self.calls = 0
+        self.messages: list[list[dict[str, str]]] = []
 
-    async def complete(self, _messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+    async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
         del temperature
         self.calls += 1
+        self.messages.append(messages)
         reply = self.replies.pop(0)
         return reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False)
+
+
+class _RainAssociationEmbedding:
+    version = "rain-association-fixture.1"
+    dimensions = 2
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple(
+            (1.0, 0.0) if ("听雨" in value or "雨夜" in value) else (0.0, 1.0) for value in texts
+        )
 
 
 def _proactive_draft(text: str, *, claims: list[dict[str, object]] | None = None):
@@ -148,63 +175,75 @@ def _proactive_draft(text: str, *, claims: list[dict[str, object]] | None = None
 
 @pytest.mark.asyncio
 async def test_proactive_history_claim_is_corrected_once_against_pinned_sources() -> None:
-    model = _ProactiveReplySequence([
-        _proactive_draft(
-            "你之前说去成都看熊猫，后来怎么样？",
-            claims=[{
-                "claim_text": "你之前说去成都看熊猫",
-                "scope": "counterpart_history",
-                "source_refs": ["event:user:chengdu:not-in-context"],
-            }],
-        ),
-        _proactive_draft(
-            "你之前说深圳不太好玩，后来回想起来还是这个感觉吗？",
-            claims=[{
-                "claim_text": "你之前说深圳不太好玩",
-                "scope": "counterpart_history",
-                "source_refs": ["event:user:shenzhen"],
-            }],
-        ),
-    ])
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "你之前说去成都看熊猫，后来怎么样？",
+                claims=[
+                    {
+                        "claim_text": "你之前说去成都看熊猫",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:user:chengdu:not-in-context"],
+                    }
+                ],
+            ),
+            _proactive_draft(
+                "你之前说深圳不太好玩，后来回想起来还是这个感觉吗？",
+                claims=[
+                    {
+                        "claim_text": "你之前说深圳不太好玩",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:user:shenzhen"],
+                    }
+                ],
+            ),
+        ]
+    )
 
-    output = await ProactiveDraftAdapter(
-        model=model, target="user:primary"
-    ).propose(_proactive_model_request())
+    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
+        _proactive_model_request()
+    )
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
 
     assert model.calls == 2
     assert proposal.proactive_grounding_outcome == "corrected"
     assert proposal.impulse_summary == "突然想到对方，想顺着这个念头问一句。"
-    assert "成都" not in proposal.proposed_changes[0].payload.value()["beat_drafts"][0][
-        "inline_text"
-    ]
+    assert (
+        "成都" not in proposal.proposed_changes[0].payload.value()["beat_drafts"][0]["inline_text"]
+    )
 
 
 @pytest.mark.asyncio
 async def test_proactive_history_claim_is_rejected_after_one_bad_correction() -> None:
-    model = _ProactiveReplySequence([
-        _proactive_draft(
-            "你之前说去成都看熊猫，后来怎么样？",
-            claims=[{
-                "claim_text": "你之前说去成都看熊猫",
-                "scope": "counterpart_history",
-                "source_refs": ["event:user:chengdu:not-in-context"],
-            }],
-        ),
-        _proactive_draft(
-            "你之前说成都熊猫很好玩，对吧？",
-            claims=[{
-                "claim_text": "你之前说成都熊猫很好玩",
-                "scope": "counterpart_history",
-                "source_refs": ["event:user:chengdu:not-in-context"],
-            }],
-        ),
-    ])
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "你之前说去成都看熊猫，后来怎么样？",
+                claims=[
+                    {
+                        "claim_text": "你之前说去成都看熊猫",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:user:chengdu:not-in-context"],
+                    }
+                ],
+            ),
+            _proactive_draft(
+                "你之前说成都熊猫很好玩，对吧？",
+                claims=[
+                    {
+                        "claim_text": "你之前说成都熊猫很好玩",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:user:chengdu:not-in-context"],
+                    }
+                ],
+            ),
+        ]
+    )
 
-    output = await ProactiveDraftAdapter(
-        model=model, target="user:primary"
-    ).propose(_proactive_model_request())
+    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
+        _proactive_model_request()
+    )
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
 
@@ -221,39 +260,45 @@ async def test_companion_old_reply_cannot_prove_a_counterpart_experience() -> No
     context["slices"]["recent_dialogue"] = {
         "availability": "available",
         "source_refs": ["event:companion:chengdu"],
-        "items": [{
-            "item_ref": "event:companion:chengdu",
-            "value": {
-                "speaker": "companion",
-                "text": "你之前说去成都看熊猫。",
-            },
-        }],
+        "items": [
+            {
+                "item_ref": "event:companion:chengdu",
+                "value": {
+                    "speaker": "companion",
+                    "text": "你之前说去成都看熊猫。",
+                },
+            }
+        ],
     }
     request = request.model_copy(
         update={"model_content_json": json.dumps(context, ensure_ascii=False)}
     )
-    model = _ProactiveReplySequence([
-        _proactive_draft(
-            "你之前说去成都看熊猫，后来怎么样？",
-            claims=[{
-                "claim_text": "你之前说去成都看熊猫",
-                "scope": "counterpart_history",
-                "source_refs": ["event:companion:chengdu"],
-            }],
-        ),
-        _proactive_draft(
-            "你之前说去成都看熊猫，后来怎么样？",
-            claims=[{
-                "claim_text": "你之前说去成都看熊猫",
-                "scope": "counterpart_history",
-                "source_refs": ["event:companion:chengdu"],
-            }],
-        ),
-    ])
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "你之前说去成都看熊猫，后来怎么样？",
+                claims=[
+                    {
+                        "claim_text": "你之前说去成都看熊猫",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:companion:chengdu"],
+                    }
+                ],
+            ),
+            _proactive_draft(
+                "你之前说去成都看熊猫，后来怎么样？",
+                claims=[
+                    {
+                        "claim_text": "你之前说去成都看熊猫",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:companion:chengdu"],
+                    }
+                ],
+            ),
+        ]
+    )
 
-    output = await ProactiveDraftAdapter(
-        model=model, target="user:primary"
-    ).propose(request)
+    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(request)
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
     assert proposal.proactive_grounding_outcome == "rejected"
@@ -261,13 +306,13 @@ async def test_companion_old_reply_cannot_prove_a_counterpart_experience() -> No
 
 @pytest.mark.asyncio
 async def test_claim_free_proactive_question_does_not_add_a_review_call() -> None:
-    model = _ProactiveReplySequence([
-        _proactive_draft("突然有点好奇，你最近有没有遇到什么让你眼前一亮的东西？")
-    ])
+    model = _ProactiveReplySequence(
+        [_proactive_draft("突然有点好奇，你最近有没有遇到什么让你眼前一亮的东西？")]
+    )
 
-    output = await ProactiveDraftAdapter(
-        model=model, target="user:primary"
-    ).propose(_proactive_model_request())
+    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
+        _proactive_model_request()
+    )
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
 
@@ -276,21 +321,95 @@ async def test_claim_free_proactive_question_does_not_add_a_review_call() -> Non
 
 
 @pytest.mark.asyncio
-async def test_valid_grounded_proactive_claim_does_not_add_a_review_call() -> None:
-    model = _ProactiveReplySequence([
-        _proactive_draft(
-            "你之前说深圳不太好玩。",
-            claims=[{
-                "claim_text": "你之前说深圳不太好玩",
-                "scope": "counterpart_history",
-                "source_refs": ["event:user:shenzhen"],
-            }],
-        )
-    ])
+async def test_proactive_decision_sees_semantic_memory_from_its_current_situation() -> None:
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["current_situation"] = {
+        "availability": "available",
+        "source_refs": ["event:ambient:1"],
+        "items": [
+            {
+                "item_ref": "situation:rain",
+                "value": {"activity": "在窗边听雨，手边放着一杯热茶"},
+            }
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    cursor = RecallCursor(
+        world_revision=request.evaluated_world_revision,
+        deliberation_revision=request.evaluated_deliberation_revision,
+        ledger_sequence=request.evaluated_ledger_sequence,
+    )
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(
+        cursor=cursor,
+        documents=(
+            RecallDocument(
+                document_id="recall:experience:rain",
+                memory_kind="episodic",
+                source_item_ref="experience:rain",
+                source_slice="recent_experiences",
+                source_refs=("event:experience:rain",),
+                source_bindings=(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type="ExperienceCommitted",
+                        ref="event:experience:rain",
+                        source_world_revision=7,
+                        immutable_hash="c" * 64,
+                    ),
+                ),
+                source_world_revision=7,
+                text="上次雨夜回宿舍时，她在便利店买了热乌龙。",
+                actor_ref="agent:companion",
+                subject_refs=("agent:companion",),
+                occurred_from=NOW - timedelta(days=12),
+                privacy_class="private",
+            ),
+        ),
+    )
+    recall = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=NOW,
+        semantic_embedding=_RainAssociationEmbedding(),
+        trigger_ref=request.trigger_ref,
+    )
+    model = _ProactiveReplySequence([_proactive_draft("雨声让我突然想起一件旧事。")])
+    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
+    adapter.install_recall_coordinator(recall)
 
-    output = await ProactiveDraftAdapter(
-        model=model, target="user:primary"
-    ).propose(_proactive_model_request())
+    output = await adapter.propose(request)
+
+    assert output.prefetch_trace is not None
+    assert verify_trusted_recall_trace(output.prefetch_trace).hits
+    assert any("上次雨夜回宿舍" in str(call) for call in model.messages)
+
+
+@pytest.mark.asyncio
+async def test_valid_grounded_proactive_claim_does_not_add_a_review_call() -> None:
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "你之前说深圳不太好玩。",
+                claims=[
+                    {
+                        "claim_text": "你之前说深圳不太好玩",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:user:shenzhen"],
+                    }
+                ],
+            )
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
+        _proactive_model_request()
+    )
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
     assert model.calls == 1
@@ -299,118 +418,190 @@ async def test_valid_grounded_proactive_claim_does_not_add_a_review_call() -> No
 
 @pytest.mark.asyncio
 async def test_malformed_grounding_correction_remains_a_technical_failure() -> None:
-    model = _ProactiveReplySequence([
-        _proactive_draft(
-            "你之前说去成都看熊猫，后来怎么样？",
-            claims=[{
-                "claim_text": "你之前说去成都看熊猫",
-                "scope": "counterpart_history",
-                "source_refs": ["event:user:chengdu:not-in-context"],
-            }],
-        ),
-        "{not-json",
-    ])
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "你之前说去成都看熊猫，后来怎么样？",
+                claims=[
+                    {
+                        "claim_text": "你之前说去成都看熊猫",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:user:chengdu:not-in-context"],
+                    }
+                ],
+            ),
+            "{not-json",
+        ]
+    )
 
     with pytest.raises(ValueError):
-        await ProactiveDraftAdapter(
-            model=model, target="user:primary"
-        ).propose(_proactive_model_request())
+        await ProactiveDraftAdapter(model=model, target="user:primary").propose(
+            _proactive_model_request()
+        )
     assert model.calls == 2
 
 
-def _event(event_id: str, event_type: str, payload: dict[str, object], *, at: datetime = NOW) -> WorldEvent:
+def _event(
+    event_id: str, event_type: str, payload: dict[str, object], *, at: datetime = NOW
+) -> WorldEvent:
     return WorldEvent.from_payload(
-        schema_version="world-v2.1", event_id=event_id, world_id=WORLD,
-        event_type=event_type, logical_time=at, created_at=at,
-        actor="system:test", source="test", trace_id="trace:proactive",
-        causation_id="cause:proactive", correlation_id="conversation:proactive",
-        idempotency_key=(domain_idempotency_key(
-            event_type=event_type, world_id=WORLD, payload=payload
-        ) or "test:" + event_id), payload=payload,
+        schema_version="world-v2.1",
+        event_id=event_id,
+        world_id=WORLD,
+        event_type=event_type,
+        logical_time=at,
+        created_at=at,
+        actor="system:test",
+        source="test",
+        trace_id="trace:proactive",
+        causation_id="cause:proactive",
+        correlation_id="conversation:proactive",
+        idempotency_key=(
+            domain_idempotency_key(event_type=event_type, world_id=WORLD, payload=payload)
+            or "test:" + event_id
+        ),
+        payload=payload,
     )
 
 
 def _commit(ledger: WorldLedger, *events: WorldEvent) -> None:
     projection = ledger.project()
-    ledger.commit(events, expected_world_revision=projection.world_revision,
-                  expected_deliberation_revision=projection.deliberation_revision)
+    ledger.commit(
+        events,
+        expected_world_revision=projection.world_revision,
+        expected_deliberation_revision=projection.deliberation_revision,
+    )
 
 
 def _seed_due_thread(ledger: WorldLedger) -> None:
     source = EvidenceRef(
-        ref_id="operator:unfinished-thought", evidence_type="operator_observation",
-        claim_purpose="conversation_continuity", immutable_hash="a" * 64,
+        ref_id="operator:unfinished-thought",
+        evidence_type="operator_observation",
+        claim_purpose="conversation_continuity",
+        immutable_hash="a" * 64,
     )
-    _commit(ledger, _event("event:operator:unfinished", "OperatorObservationRecorded", {
-        "observation_id": source.ref_id, "observation_hash": source.immutable_hash,
-    }))
+    _commit(
+        ledger,
+        _event(
+            "event:operator:unfinished",
+            "OperatorObservationRecorded",
+            {
+                "observation_id": source.ref_id,
+                "observation_hash": source.immutable_hash,
+            },
+        ),
+    )
     projection = ledger.project()
     origin = ThreadOrigin(
-        change_id="change:thread:pulse:1", transition_id="transition:thread:pulse:1",
-        policy_refs=("policy:thread-v1",), accepted_event_ref="event:thread:pulse:opened",
+        change_id="change:thread:pulse:1",
+        transition_id="transition:thread:pulse:1",
+        policy_refs=("policy:thread-v1",),
+        accepted_event_ref="event:thread:pulse:opened",
     )
     values = ThreadValues(
-        kind="topic_open", subject_ref="subject:unfinished-thought",
-        conversation_ref="conversation:proactive", anchor_evidence_refs=(source,),
-        source_evidence_refs=(source,), importance_bp=7_000,
-        due_window=DueWindow(opens_at=NOW + timedelta(minutes=1),
-                             closes_at=NOW + timedelta(hours=6)),
+        kind="topic_open",
+        subject_ref="subject:unfinished-thought",
+        conversation_ref="conversation:proactive",
+        anchor_evidence_refs=(source,),
+        source_evidence_refs=(source,),
+        importance_bp=7_000,
+        due_window=DueWindow(
+            opens_at=NOW + timedelta(minutes=1), closes_at=NOW + timedelta(hours=6)
+        ),
         expires_at=NOW + timedelta(hours=8),
-        resolution_contract_ref="resolution:unfinished-thought", privacy_class="private",
+        resolution_contract_ref="resolution:unfinished-thought",
+        privacy_class="private",
     )
     thread = ThreadProjection(
-        thread_id="thread:pulse:1", entity_revision=1,
+        thread_id="thread:pulse:1",
+        entity_revision=1,
         semantic_fingerprint=thread_semantic_fingerprint(
-            kind=values.kind, subject_ref=values.subject_ref,
+            kind=values.kind,
+            subject_ref=values.subject_ref,
             conversation_ref=values.conversation_ref,
             anchor_evidence_refs=values.anchor_evidence_refs,
             resolution_contract_ref=values.resolution_contract_ref,
             policy_refs=origin.policy_refs,
         ),
-        values=values, origin=origin, opened_at=NOW, updated_at=NOW,
+        values=values,
+        origin=origin,
+        opened_at=NOW,
+        updated_at=NOW,
     )
     raw: dict[str, object] = {
-        "change_id": origin.change_id, "transition_id": origin.transition_id,
-        "expected_entity_revision": 0, "evidence_refs": (source,),
-        "policy_refs": origin.policy_refs, "acceptance_id": "acceptance:thread:pulse:1",
+        "change_id": origin.change_id,
+        "transition_id": origin.transition_id,
+        "expected_entity_revision": 0,
+        "evidence_refs": (source,),
+        "policy_refs": origin.policy_refs,
+        "acceptance_id": "acceptance:thread:pulse:1",
         "proposal_id": "proposal:thread:pulse:1",
         "evaluated_world_revision": projection.world_revision,
-        "accepted_change_hash": "0" * 64, "operation": "open",
-        "thread_before": None, "thread_after": thread,
+        "accepted_change_hash": "0" * 64,
+        "operation": "open",
+        "thread_before": None,
+        "thread_after": thread,
         "compensates_transition_id": None,
     }
     raw["accepted_change_hash"] = thread_mutation_hash(raw)
     changed = ThreadChangedPayload.model_validate(raw)
     proposed = ThreadProposalProjection(
-        proposal_id=changed.proposal_id, proposal_encoding="typed-authority-v1",
-        authority_contract_ref="proposal-contract:thread.1", transition_kind="open",
-        change_id=changed.change_id, transition_id=changed.transition_id,
+        proposal_id=changed.proposal_id,
+        proposal_encoding="typed-authority-v1",
+        authority_contract_ref="proposal-contract:thread.1",
+        transition_kind="open",
+        change_id=changed.change_id,
+        transition_id=changed.transition_id,
         evaluated_world_revision=changed.evaluated_world_revision,
-        expected_entity_revision=0, proposed_change_hash=changed.accepted_change_hash,
-        evidence_refs=changed.evidence_refs, policy_refs=changed.policy_refs,
+        expected_entity_revision=0,
+        proposed_change_hash=changed.accepted_change_hash,
+        evidence_refs=changed.evidence_refs,
+        policy_refs=changed.policy_refs,
         proposed_mutation=ThreadProposedMutation(
             event_type="ThreadOpened",
-            payload_json=json.dumps(changed.model_dump(mode="json"), ensure_ascii=False,
-                                    sort_keys=True, separators=(",", ":")),
+            payload_json=json.dumps(
+                changed.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         ),
     )
-    _commit(ledger, _event("event:proposal:thread:pulse:1", "ProposalRecorded",
-                           proposed.model_dump(mode="json")))
     _commit(
         ledger,
-        _event("event:acceptance:thread:pulse:1", "AcceptanceRecorded", {
-            "acceptance_id": changed.acceptance_id, "status": "accepted",
-            "proposal_id": changed.proposal_id,
-            "evaluated_world_revision": changed.evaluated_world_revision,
-            "accepted_change_id": changed.change_id,
-            "accepted_change_hash": changed.accepted_change_hash,
-        }),
+        _event(
+            "event:proposal:thread:pulse:1", "ProposalRecorded", proposed.model_dump(mode="json")
+        ),
+    )
+    _commit(
+        ledger,
+        _event(
+            "event:acceptance:thread:pulse:1",
+            "AcceptanceRecorded",
+            {
+                "acceptance_id": changed.acceptance_id,
+                "status": "accepted",
+                "proposal_id": changed.proposal_id,
+                "evaluated_world_revision": changed.evaluated_world_revision,
+                "accepted_change_id": changed.change_id,
+                "accepted_change_hash": changed.accepted_change_hash,
+            },
+        ),
         _event(origin.accepted_event_ref, "ThreadOpened", changed.model_dump(mode="json")),
     )
     due = NOW + timedelta(minutes=2)
-    _commit(ledger, _event("event:clock:thread-due", "ClockAdvanced", {
-        "logical_time_from": NOW.isoformat(), "logical_time_to": due.isoformat(),
-    }, at=due))
+    _commit(
+        ledger,
+        _event(
+            "event:clock:thread-due",
+            "ClockAdvanced",
+            {
+                "logical_time_from": NOW.isoformat(),
+                "logical_time_to": due.isoformat(),
+            },
+            at=due,
+        ),
+    )
 
 
 class _Router:
@@ -691,11 +882,7 @@ async def test_inbound_cognition_durably_fulfills_the_exact_prior_expectation(
 
         async def conflict_twice(runtime, events, **kwargs):  # type: ignore[no-untyped-def]
             nonlocal conflicts
-            if (
-                events
-                and events[0].event_type == "ResponseExpectationAssessed"
-                and conflicts < 2
-            ):
+            if events and events[0].event_type == "ResponseExpectationAssessed" and conflicts < 2:
                 conflicts += 1
                 raise ConcurrencyConflict("simulated assessment CAS race")
             return await original_commit(runtime, events, **kwargs)
@@ -792,16 +979,30 @@ def _runtime(*, choice: str, budget: int = 100):
     ledger = WorldLedger.in_memory(world_id=WORLD, accepted_batch_issuer=issuer)
     _commit(ledger, _event("event:world:start", "WorldStarted", {}))
     if ledger.project().logical_time != NOW:
-        _commit(ledger, _event("event:clock", "ClockAdvanced", {
-            "logical_time_from": (ledger.project().logical_time or NOW - timedelta(minutes=2)).isoformat(),
-            "logical_time_to": NOW.isoformat(),
-        }))
+        _commit(
+            ledger,
+            _event(
+                "event:clock",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": (
+                        ledger.project().logical_time or NOW - timedelta(minutes=2)
+                    ).isoformat(),
+                    "logical_time_to": NOW.isoformat(),
+                },
+            ),
+        )
     account = BudgetAccount(
         account_id="account:proactive", category="proactive", window_id="day:1", limit=budget
     )
-    _commit(ledger, _event("event:budget:proactive", "BudgetAccountConfigured", {
-        "account": account.model_dump(mode="json")
-    }))
+    _commit(
+        ledger,
+        _event(
+            "event:budget:proactive",
+            "BudgetAccountConfigured",
+            {"account": account.model_dump(mode="json")},
+        ),
+    )
     _seed_due_thread(ledger)
     model = _DraftModel(choice)
     runtime, turn = _make_proactive_runtime(ledger=ledger, issuer=issuer, model=model)
@@ -811,9 +1012,11 @@ def _runtime(*, choice: str, budget: int = 100):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("choice", "status", "action_kind"),
-    [("now", "authorized", "proactive_message"),
-     ("later", "authorized", "followup"),
-     ("silent", "silent", None)],
+    [
+        ("now", "authorized", "proactive_message"),
+        ("later", "authorized", "followup"),
+        ("silent", "silent", None),
+    ],
 )
 async def test_due_thread_is_a_model_opportunity_not_a_timer_message(
     choice: str, status: str, action_kind: str | None
@@ -1171,8 +1374,16 @@ async def test_restart_reuses_the_terminal_decision_without_a_second_model_call(
     await runtime.drain_one()
     assert (await runtime.drain_one()).status == "idle"
     assert model.calls == 1
-    assert len([item for item in ledger.project().trigger_processes
-                if item.process_kind == "proactive_action_deliberation"]) == 1
+    assert (
+        len(
+            [
+                item
+                for item in ledger.project().trigger_processes
+                if item.process_kind == "proactive_action_deliberation"
+            ]
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -1206,9 +1417,7 @@ async def test_sqlite_restart_resumes_open_proactive_process_once(tmp_path) -> N
     ledger.close()
 
     reopened_issuer = AcceptedLedgerBatchIssuer()
-    reopened = SQLiteWorldLedger(
-        path=path, world_id=WORLD, accepted_batch_issuer=reopened_issuer
-    )
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD, accepted_batch_issuer=reopened_issuer)
     resumed_model = _DraftModel("now")
     resumed, _ = _make_proactive_runtime(
         ledger=reopened,
@@ -1222,9 +1431,7 @@ async def test_sqlite_restart_resumes_open_proactive_process_once(tmp_path) -> N
     reopened.close()
 
     terminal_issuer = AcceptedLedgerBatchIssuer()
-    terminal = SQLiteWorldLedger(
-        path=path, world_id=WORLD, accepted_batch_issuer=terminal_issuer
-    )
+    terminal = SQLiteWorldLedger(path=path, world_id=WORLD, accepted_batch_issuer=terminal_issuer)
     unused_model = _DraftModel("now")
     duplicate, _ = _make_proactive_runtime(
         ledger=terminal,
@@ -1242,18 +1449,27 @@ async def test_sqlite_restart_resumes_open_proactive_process_once(tmp_path) -> N
 async def test_concurrent_proactive_workers_authorize_one_chain_and_one_model_call() -> None:
     ledger, model, first, turn = _runtime(choice="now")
     policy = ExpressionPlanBudgetPolicy(
-        account_id="account:proactive", amount_limit_per_action=10,
-        actor="actor:companion", allowed_targets=("user:primary",),
-        recovery_policy="effect_once", category="proactive",
+        account_id="account:proactive",
+        amount_limit_per_action=10,
+        actor="actor:companion",
+        allowed_targets=("user:primary",),
+        recovery_policy="effect_once",
+        category="proactive",
     )
     second = ProactiveActionRuntime(
-        ledger=ledger, turn=turn, batch_issuer=ledger._accepted_batch_issuer,
-        policy=policy, owner_id="worker:proactive:second",
+        ledger=ledger,
+        turn=turn,
+        batch_issuer=ledger._accepted_batch_issuer,
+        policy=policy,
+        owner_id="worker:proactive:second",
     )
     assert (await first.drain_one()).status == "opened"
     results = await asyncio.gather(first.drain_one(), second.drain_one())
     assert {item.status for item in results} <= {
-        "authorized", "owned_elsewhere", "stale", "completed_existing"
+        "authorized",
+        "owned_elsewhere",
+        "stale",
+        "completed_existing",
     }
     assert sum(item.status == "authorized" for item in results) == 1
     assert model.calls == 1
@@ -1268,10 +1484,13 @@ async def test_proactive_source_hash_cannot_be_rebound_to_a_committed_event() ->
     located = ledger.lookup_event_commit(source_ref)
     assert located is not None
     forged = ProactiveOpportunity(
-        source_kind="thread", source_id=projection.threads[-1].thread_id,
-        source_event_ref=source_ref, source_event_hash="f" * 64,
+        source_kind="thread",
+        source_id=projection.threads[-1].thread_id,
+        source_event_ref=source_ref,
+        source_event_hash="f" * 64,
         source_world_revision=located[1].world_revision,
-        trace_id=located[0].trace_id, correlation_id=located[0].correlation_id,
+        trace_id=located[0].trace_id,
+        correlation_id=located[0].correlation_id,
         created_at=located[0].created_at,
     )
     with pytest.raises(ValueError, match="exact committed authority"):
@@ -1291,17 +1510,27 @@ async def test_sqlite_production_composition_installs_proactive_budget_without_a
     app = build_sqlite_world_v2_turn_application(
         path=path,
         config=WorldV2TurnApplicationConfig(
-            world_id="world:proactive-composed", companion_actor_ref="actor:companion",
-            reply_target="user:primary", action_pump_owner="worker:actions",
+            world_id="world:proactive-composed",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
         ),
-        identities=_Identities(), router=_Router(), main_model=_InvalidMain(),
-        quick_recovery=_InvalidQuick(), transport=_NoDispatchTransport(),
-        proactive_model=proactive, now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_InvalidMain(),
+        quick_recovery=_InvalidQuick(),
+        transport=_NoDispatchTransport(),
+        proactive_model=proactive,
+        now=NOW,
     )
     try:
         outcome = await app.inbound(
-            platform="http", platform_user_id="user.1", platform_message_id="message:1",
-            text="今天有点累", observed_at=NOW, trace_id="trace:ordinary",
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:1",
+            text="今天有点累",
+            observed_at=NOW,
+            trace_id="trace:ordinary",
         )
         assert not outcome.authorized_action_ids
         assert proactive.calls == 0
@@ -1311,8 +1540,11 @@ async def test_sqlite_production_composition_installs_proactive_budget_without_a
         app.close()
     ledger = SQLiteWorldLedger(path=path, world_id="world:proactive-composed")
     try:
-        account = next(item for item in ledger.project().budget_accounts
-                       if item.account_id == "account:world-v2:proactive")
+        account = next(
+            item
+            for item in ledger.project().budget_accounts
+            if item.account_id == "account:world-v2:proactive"
+        )
         assert account.category == "proactive"
         assert account.limit == 1_000
     finally:
@@ -1334,11 +1566,11 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
             companion_actor_ref="actor:companion",
             reply_target="user:primary",
             action_pump_owner="worker:actions",
-                social_initiative_policy=SocialInitiativePolicy(
-                    spontaneous_idle_seconds=60,
-                    spontaneous_expiry_seconds=3_600,
-                    consideration_band_override_seconds=(60, 60),
-                ),
+            social_initiative_policy=SocialInitiativePolicy(
+                spontaneous_idle_seconds=60,
+                spontaneous_expiry_seconds=3_600,
+                consideration_band_override_seconds=(60, 60),
+            ),
         ),
         identities=_Identities(),
         router=_Router(),
@@ -1387,9 +1619,7 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
             await app.drain_background_once()
         assert proactive.calls == 1
         capsule = proactive.captured_capsule()
-        assert {"relationship_slice", "affect_episodes", "world_life"} <= set(
-            capsule["slices"]
-        )
+        assert {"relationship_slice", "affect_episodes", "world_life"} <= set(capsule["slices"])
         assert "我先去忙一会儿" in json.dumps(capsule, ensure_ascii=False)
         assert "spontaneous_contact" in json.dumps(capsule, ensure_ascii=False)
         assert transport.bodies == ["好，你先忙。", "刚才那件事我又想了一下。"]
@@ -1459,13 +1689,16 @@ async def test_model_silence_is_reconsidered_in_the_next_cadence_epoch(tmp_path)
         assert (await app.drain_background_once()).status == "opened"
         assert (await app.drain_background_once()).status == "authorized"
         assert proactive.calls == 2
-        assert len(
-            {
-                item.trigger_id
-                for item in app._ledger.project().trigger_processes  # noqa: SLF001
-                if item.process_kind == ProactiveActionRuntime.PROCESS_KIND
-            }
-        ) == 2
+        assert (
+            len(
+                {
+                    item.trigger_id
+                    for item in app._ledger.project().trigger_processes  # noqa: SLF001
+                    if item.process_kind == ProactiveActionRuntime.PROCESS_KIND
+                }
+            )
+            == 2
+        )
     finally:
         app.close()
 
@@ -1524,10 +1757,7 @@ async def test_ambient_presence_clock_can_open_model_owned_contact_after_source_
         proposal = json.loads(
             app._ledger.project().proposal_audits[-1].proposal_json  # noqa: SLF001
         )
-        assert (
-            proposal["proactive_opportunity_decision"]["source_kind"]
-            == "ambient_presence"
-        )
+        assert proposal["proactive_opportunity_decision"]["source_kind"] == "ambient_presence"
         assert proactive.calls == 1
     finally:
         app.close()
@@ -1771,9 +2001,7 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
 async def test_delivered_response_expectation_does_not_open_a_proactive_lane(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
-    proactive = _LooseProactiveModel(
-        {"choice": "now", "text": "刚才说晚点聊，我还记着。"}
-    )
+    proactive = _LooseProactiveModel({"choice": "now", "text": "刚才说晚点聊，我还记着。"})
     transport = _DeliveredTransport()
     chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
     app = build_sqlite_world_v2_turn_application(
@@ -1840,27 +2068,40 @@ async def test_real_qq_provider_expectation_remains_advisory_only(
         path=tmp_path / "response-gap-qq-provider-accepted.sqlite3",
         config=WorldV2TurnApplicationConfig(
             world_id="world:response-gap-qq-provider-accepted",
-            companion_actor_ref="actor:companion", reply_target="user:primary",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
             action_pump_owner="worker:actions",
             social_initiative_policy=SocialInitiativePolicy(
-                spontaneous_idle_seconds=3_600, spontaneous_expiry_seconds=7_200,
+                spontaneous_idle_seconds=3_600,
+                spontaneous_expiry_seconds=7_200,
             ),
         ),
-        identities=_Identities(), router=_Router(), main_model=chat,
-        quick_recovery=chat, transport=transport, proactive_model=proactive, now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=transport,
+        proactive_model=proactive,
+        now=NOW,
     )
     try:
         await app.inbound(
-            platform="http", platform_user_id="user.1",
-            platform_message_id="message:qq-expectation", text="我先忙一下",
-            observed_at=NOW, trace_id="trace:qq-expectation",
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:qq-expectation",
+            text="我先忙一下",
+            observed_at=NOW,
+            trace_id="trace:qq-expectation",
         )
         assert (await app.drain_actions_once()).status == "settled"
         await app.tick(
-            tick_id="tick:qq-response-gap", logical_time_from=NOW,
+            tick_id="tick:qq-response-gap",
+            logical_time_from=NOW,
             logical_time_to=NOW + timedelta(seconds=61),
-            observed_at=NOW + timedelta(seconds=61), trace_id="trace:qq-response-gap",
-            causation_id="scheduler:test", correlation_id="conversation:qq-response-gap",
+            observed_at=NOW + timedelta(seconds=61),
+            trace_id="trace:qq-response-gap",
+            causation_id="scheduler:test",
+            correlation_id="conversation:qq-response-gap",
             reason="test_qq_response_gap",
         )
         opened = await app.drain_background_once()
@@ -1876,33 +2117,48 @@ async def test_failed_qq_send_never_opens_a_response_gap(tmp_path) -> None:  # t
     delivery = _QQDelivery(failed=True)
     transport = QQC2CPlatformTransport(
         delivery=delivery,  # type: ignore[arg-type]
-        recipients_by_target={"user:primary": "qq-user-1"}, now=lambda: NOW,
+        recipients_by_target={"user:primary": "qq-user-1"},
+        now=lambda: NOW,
     )
     chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "response-gap-qq-failed.sqlite3",
         config=WorldV2TurnApplicationConfig(
-            world_id="world:response-gap-qq-failed", companion_actor_ref="actor:companion",
-            reply_target="user:primary", action_pump_owner="worker:actions",
+            world_id="world:response-gap-qq-failed",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
             social_initiative_policy=SocialInitiativePolicy(
-                spontaneous_idle_seconds=3_600, spontaneous_expiry_seconds=7_200,
+                spontaneous_idle_seconds=3_600,
+                spontaneous_expiry_seconds=7_200,
             ),
         ),
-        identities=_Identities(), router=_Router(), main_model=chat,
-        quick_recovery=chat, transport=transport, proactive_model=proactive, now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=transport,
+        proactive_model=proactive,
+        now=NOW,
     )
     try:
         await app.inbound(
-            platform="http", platform_user_id="user.1",
-            platform_message_id="message:qq-failed", text="我先忙一下",
-            observed_at=NOW, trace_id="trace:qq-failed",
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:qq-failed",
+            text="我先忙一下",
+            observed_at=NOW,
+            trace_id="trace:qq-failed",
         )
         assert (await app.drain_actions_once()).status == "settled"
         await app.tick(
-            tick_id="tick:qq-failed", logical_time_from=NOW,
+            tick_id="tick:qq-failed",
+            logical_time_from=NOW,
             logical_time_to=NOW + timedelta(seconds=61),
-            observed_at=NOW + timedelta(seconds=61), trace_id="trace:qq-failed-tick",
-            causation_id="scheduler:test", correlation_id="conversation:qq-failed",
+            observed_at=NOW + timedelta(seconds=61),
+            trace_id="trace:qq-failed-tick",
+            causation_id="scheduler:test",
+            correlation_id="conversation:qq-failed",
             reason="test_qq_failed_gap",
         )
         assert await app.drain_background_once() is None
@@ -1917,33 +2173,48 @@ async def test_unknown_qq_send_never_opens_a_response_gap(tmp_path) -> None:  # 
     delivery = _QQDelivery()
     transport = QQC2CPlatformTransport(
         delivery=delivery,  # type: ignore[arg-type]
-        recipients_by_target={"user:primary": "qq-user-1"}, now=lambda: NOW,
+        recipients_by_target={"user:primary": "qq-user-1"},
+        now=lambda: NOW,
     )
     chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "response-gap-qq-unknown.sqlite3",
         config=WorldV2TurnApplicationConfig(
-            world_id="world:response-gap-qq-unknown", companion_actor_ref="actor:companion",
-            reply_target="user:primary", action_pump_owner="worker:actions",
+            world_id="world:response-gap-qq-unknown",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
             social_initiative_policy=SocialInitiativePolicy(
-                spontaneous_idle_seconds=3_600, spontaneous_expiry_seconds=7_200,
+                spontaneous_idle_seconds=3_600,
+                spontaneous_expiry_seconds=7_200,
             ),
         ),
-        identities=_Identities(), router=_Router(), main_model=chat,
-        quick_recovery=chat, transport=transport, proactive_model=proactive, now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=transport,
+        proactive_model=proactive,
+        now=NOW,
     )
     try:
         await app.inbound(
-            platform="http", platform_user_id="user.1",
-            platform_message_id="message:qq-unknown", text="我先忙一下",
-            observed_at=NOW, trace_id="trace:qq-unknown",
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:qq-unknown",
+            text="我先忙一下",
+            observed_at=NOW,
+            trace_id="trace:qq-unknown",
         )
         assert (await app.drain_actions_once()).status == "settled"
         await app.tick(
-            tick_id="tick:qq-unknown", logical_time_from=NOW,
+            tick_id="tick:qq-unknown",
+            logical_time_from=NOW,
             logical_time_to=NOW + timedelta(seconds=121),
-            observed_at=NOW + timedelta(seconds=121), trace_id="trace:qq-unknown-tick",
-            causation_id="scheduler:test", correlation_id="conversation:qq-unknown",
+            observed_at=NOW + timedelta(seconds=121),
+            trace_id="trace:qq-unknown-tick",
+            causation_id="scheduler:test",
+            correlation_id="conversation:qq-unknown",
             reason="test_qq_unknown_gap",
         )
         assert (await app.drain_actions_once()).status == "marked_unknown"
@@ -1959,27 +2230,39 @@ async def test_persisted_qq_provider_expectation_does_not_reopen_after_restart(
 ) -> None:  # type: ignore[no-untyped-def]
     path = tmp_path / "response-gap-qq-restart.sqlite3"
     config = WorldV2TurnApplicationConfig(
-        world_id="world:response-gap-qq-restart", companion_actor_ref="actor:companion",
-        reply_target="user:primary", action_pump_owner="worker:actions",
+        world_id="world:response-gap-qq-restart",
+        companion_actor_ref="actor:companion",
+        reply_target="user:primary",
+        action_pump_owner="worker:actions",
         social_initiative_policy=SocialInitiativePolicy(
-            spontaneous_idle_seconds=3_600, spontaneous_expiry_seconds=7_200,
+            spontaneous_idle_seconds=3_600,
+            spontaneous_expiry_seconds=7_200,
         ),
     )
     chat = ChatModelDeliberationAdapter(model=_ResponseExpectingChat())
     first = build_sqlite_world_v2_turn_application(
-        path=path, config=config, identities=_Identities(), router=_Router(), main_model=chat,
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
         quick_recovery=chat,
         transport=QQC2CPlatformTransport(
             delivery=_QQDelivery(),  # type: ignore[arg-type]
-            recipients_by_target={"user:primary": "qq-user-1"}, now=lambda: NOW,
+            recipients_by_target={"user:primary": "qq-user-1"},
+            now=lambda: NOW,
         ),
-        proactive_model=_DraftModel("silent"), now=NOW,
+        proactive_model=_DraftModel("silent"),
+        now=NOW,
     )
     try:
         await first.inbound(
-            platform="http", platform_user_id="user.1",
-            platform_message_id="message:qq-restart", text="我先忙一下",
-            observed_at=NOW, trace_id="trace:qq-restart",
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:qq-restart",
+            text="我先忙一下",
+            observed_at=NOW,
+            trace_id="trace:qq-restart",
         )
         assert (await first.drain_actions_once()).status == "settled"
     finally:
@@ -1987,20 +2270,29 @@ async def test_persisted_qq_provider_expectation_does_not_reopen_after_restart(
 
     restarted_proactive = _DraftModel("silent")
     restarted = build_sqlite_world_v2_turn_application(
-        path=path, config=config, identities=_Identities(), router=_Router(), main_model=chat,
+        path=path,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
         quick_recovery=chat,
         transport=QQC2CPlatformTransport(
             delivery=_QQDelivery(),  # type: ignore[arg-type]
-            recipients_by_target={"user:primary": "qq-user-1"}, now=lambda: NOW,
+            recipients_by_target={"user:primary": "qq-user-1"},
+            now=lambda: NOW,
         ),
-        proactive_model=restarted_proactive, now=NOW,
+        proactive_model=restarted_proactive,
+        now=NOW,
     )
     try:
         await restarted.tick(
-            tick_id="tick:qq-restart", logical_time_from=NOW,
+            tick_id="tick:qq-restart",
+            logical_time_from=NOW,
             logical_time_to=NOW + timedelta(seconds=61),
-            observed_at=NOW + timedelta(seconds=61), trace_id="trace:qq-restart-tick",
-            causation_id="scheduler:test", correlation_id="conversation:qq-restart",
+            observed_at=NOW + timedelta(seconds=61),
+            trace_id="trace:qq-restart-tick",
+            causation_id="scheduler:test",
+            correlation_id="conversation:qq-restart",
             reason="test_qq_restart_gap",
         )
         opened = await restarted.drain_background_once()
@@ -2029,21 +2321,32 @@ async def test_production_application_does_not_infer_response_gap_from_message_t
                 spontaneous_expiry_seconds=7_200,
             ),
         ),
-        identities=_Identities(), router=_Router(), main_model=chat,
-        quick_recovery=chat, transport=transport, proactive_model=proactive, now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=transport,
+        proactive_model=proactive,
+        now=NOW,
     )
     try:
         await app.inbound(
-            platform="http", platform_user_id="user.1",
-            platform_message_id="message:no-expectation", text="你在吗？",
-            observed_at=NOW, trace_id="trace:no-expectation",
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:no-expectation",
+            text="你在吗？",
+            observed_at=NOW,
+            trace_id="trace:no-expectation",
         )
         await app.drain_actions_once()
         await app.tick(
-            tick_id="tick:no-response-gap", logical_time_from=NOW,
+            tick_id="tick:no-response-gap",
+            logical_time_from=NOW,
             logical_time_to=NOW + timedelta(seconds=61),
-            observed_at=NOW + timedelta(seconds=61), trace_id="trace:no-response-gap",
-            causation_id="scheduler:test", correlation_id="conversation:no-response-gap",
+            observed_at=NOW + timedelta(seconds=61),
+            trace_id="trace:no-response-gap",
+            causation_id="scheduler:test",
+            correlation_id="conversation:no-response-gap",
             reason="test_no_response_gap",
         )
         assert await app.drain_background_once() is None
@@ -2064,28 +2367,41 @@ async def test_failed_spontaneous_delivery_is_settled_once_and_not_resent(
         path=path,
         config=WorldV2TurnApplicationConfig(
             world_id="world:social-initiative-failed",
-            companion_actor_ref="actor:companion", reply_target="user:primary",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
             action_pump_owner="worker:actions",
-                social_initiative_policy=SocialInitiativePolicy(
-                    spontaneous_idle_seconds=60, spontaneous_expiry_seconds=3_600,
-                    consideration_band_override_seconds=(60, 60),
-                ),
+            social_initiative_policy=SocialInitiativePolicy(
+                spontaneous_idle_seconds=60,
+                spontaneous_expiry_seconds=3_600,
+                consideration_band_override_seconds=(60, 60),
+            ),
         ),
-        identities=_Identities(), router=_Router(), main_model=chat,
-        quick_recovery=chat, transport=transport, proactive_model=proactive, now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=transport,
+        proactive_model=proactive,
+        now=NOW,
     )
     try:
         await app.inbound(
-            platform="http", platform_user_id="user.1",
-            platform_message_id="message:failed-source", text="我去忙了",
-            observed_at=NOW, trace_id="trace:failed-source",
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:failed-source",
+            text="我去忙了",
+            observed_at=NOW,
+            trace_id="trace:failed-source",
         )
         await app.drain_actions_once()
         await app.tick(
-            tick_id="tick:failed-contact", logical_time_from=NOW,
+            tick_id="tick:failed-contact",
+            logical_time_from=NOW,
             logical_time_to=NOW + timedelta(seconds=61),
-            observed_at=NOW + timedelta(seconds=61), trace_id="trace:failed-contact",
-            causation_id="scheduler:test", correlation_id="conversation:failed-contact",
+            observed_at=NOW + timedelta(seconds=61),
+            trace_id="trace:failed-contact",
+            causation_id="scheduler:test",
+            correlation_id="conversation:failed-contact",
             reason="test_failed_contact",
         )
         assert (await app.drain_background_once()).status == "opened"

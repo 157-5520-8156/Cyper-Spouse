@@ -28,6 +28,7 @@ from .recall_index import (
     InMemoryRecallIndex,
     RecallCursor,
     RecallEmbedding,
+    RecallEmbeddingUnavailable,
     RecallIndex,
     RecallIndexSnapshot,
     RecallQuery,
@@ -82,8 +83,9 @@ class _PinnedRecallContext:
 class _PrefetchJob:
     future: Future[TrustedRecallTrace | None]
     cancelled: threading.Event
-    thread: threading.Thread
+    thread: threading.Thread | None
     epoch: int
+    local_fallback: TrustedRecallTrace
 
     def cancel(self) -> None:
         self.cancelled.set()
@@ -192,6 +194,11 @@ class RecallCoordinator:
         self._prefetch_slots = threading.BoundedSemaphore(value=4)
         self._prefetch_futures: OrderedDict[_RecallPrefetchKey, _PrefetchJob] = OrderedDict()
         self._prefetch_join_attempted: set[_RecallPrefetchKey] = set()
+        # Futures leave the keyed map when a caller consumes or abandons
+        # them, but their non-cancellable provider threads may still be
+        # running. Keep an independent shutdown registry until thread exit.
+        self._prefetch_worker_guard = threading.Lock()
+        self._prefetch_worker_threads: set[threading.Thread] = set()
         self._prefetch_epoch = 0
         self._prefetch_health_lock = threading.Lock()
         self._prefetch_health = _PrefetchHealth(
@@ -353,7 +360,7 @@ class RecallCoordinator:
             context=context,
             request=request,
             accessibility_seed=accessibility_seed,
-            semantic=False,
+            semantic=self._semantic_embedding is not None,
         )
         trace = self._issue_trace(
             mode="prefetch",
@@ -374,6 +381,9 @@ class RecallCoordinator:
     ) -> None:
         """Start bounded local attention search without delaying the first model call."""
 
+        with self._active_recall_guard:
+            if self._closed:
+                raise RuntimeError("recall coordinator is closed")
         context_key = self._context_key
         if context_key is None:
             raise ValueError("recall corpus has not been refreshed")
@@ -383,11 +393,45 @@ class RecallCoordinator:
             raise ValueError("prefetch trigger does not match the pinned Context")
         prefetch_key = (cursor, trigger_ref)
         request = CharacterRecallRequest(query_text=query_text, limit=min(limit, 6))
+        local_fallback = self._issue_trace(
+            mode="prefetch",
+            trigger_ref=trigger_ref,
+            request=request,
+            result=self._search(
+                context=context,
+                request=request,
+                accessibility_seed=accessibility_seed,
+                semantic=False,
+            ),
+            evaluated_cursor=cursor,
+        )
         previous = self._prefetch_futures.pop(prefetch_key, None)
         self._prefetch_join_attempted.discard(prefetch_key)
         if previous is not None:
             previous.cancel()
         if not self._prefetch_slots.acquire(blocking=False):
+            # Provider saturation must not darken the automatic memory lane:
+            # the source-bound local result is already available, so publish
+            # it as a completed job for this exact Context identity.
+            self._prefetch_epoch += 1
+            future: Future[TrustedRecallTrace | None] = Future()
+            future.set_result(local_fallback)
+            self._prefetch_futures[prefetch_key] = _PrefetchJob(
+                future=future,
+                cancelled=threading.Event(),
+                thread=None,
+                epoch=self._prefetch_epoch,
+                local_fallback=local_fallback,
+            )
+            self._set_prefetch_health(
+                epoch=self._prefetch_epoch,
+                status="degraded",
+                failure_code="prefetch_capacity",
+            )
+            while len(self._prefetch_futures) > _MAX_PINNED_RECALL_CONTEXTS:
+                evicted_key, evicted = self._prefetch_futures.popitem(last=False)
+                self._prefetch_join_attempted.discard(evicted_key)
+                evicted.cancel()
             return
         self._prefetch_epoch += 1
         epoch = self._prefetch_epoch
@@ -413,9 +457,24 @@ class RecallCoordinator:
             cancelled=cancelled,
             thread=thread,
             epoch=epoch,
+            local_fallback=local_fallback,
         )
         self._prefetch_futures[prefetch_key] = job
-        thread.start()
+        # Closing the embedding and publishing a new provider worker share the
+        # same lifecycle latch.  If close won the race, unwind the unstarted
+        # job; if schedule won, close will see the worker registry before it
+        # can close the shared provider.
+        with self._active_recall_guard:
+            if self._closed:
+                if self._prefetch_futures.get(prefetch_key) is job:
+                    self._prefetch_futures.pop(prefetch_key, None)
+                self._prefetch_join_attempted.discard(prefetch_key)
+                job.cancel()
+                self._prefetch_slots.release()
+                return
+            with self._prefetch_worker_guard:
+                self._prefetch_worker_threads.add(thread)
+                thread.start()
         while len(self._prefetch_futures) > _MAX_PINNED_RECALL_CONTEXTS:
             evicted_key, evicted = self._prefetch_futures.popitem(last=False)
             self._prefetch_join_attempted.discard(evicted_key)
@@ -520,7 +579,7 @@ class RecallCoordinator:
             # configured; otherwise the first call races past useful lexical
             # memories on nearly every cold thread.
             if key in self._prefetch_join_attempted:
-                return None
+                return job.local_fallback
             self._prefetch_join_attempted.add(key)
             try:
                 async with asyncio.timeout(timeout_seconds):
@@ -528,11 +587,12 @@ class RecallCoordinator:
             except TimeoutError:
                 logger.warning(
                     "recall prefetch missed the bounded first-pass join "
-                    "(%.0f ms); leaving it for the character pull: trigger=%s",
+                    "(%.0f ms); using local fallback and leaving semantic "
+                    "work for the character pull: trigger=%s",
                     timeout_seconds * 1000,
                     trigger_ref,
                 )
-                return None
+                return job.local_fallback
             except Exception:
                 self._prefetch_futures.pop(key, None)
                 self._prefetch_join_attempted.discard(key)
@@ -540,7 +600,7 @@ class RecallCoordinator:
                 logger.warning(
                     "recall prefetch search failed: trigger=%s", trigger_ref, exc_info=True
                 )
-                return None
+                return job.local_fallback
         self._prefetch_futures.pop(key, None)
         self._prefetch_join_attempted.discard(key)
         try:
@@ -712,16 +772,16 @@ class RecallCoordinator:
         trigger_ref: str,
         evaluated_cursor: RecallCursor,
     ) -> TrustedRecallTrace:
-        # Automatic attention must be ready before the first author call, so it
-        # stays on the fast local lexical/temporal/structured channels. Oblique
-        # association remains available through the character-chosen semantic
-        # pull below; a remote embedding request must never sit in front of the
-        # visible reply or keep shutdown waiting after the reply was delivered.
+        # Automatic attention may use the configured semantic lane. It runs in
+        # its own daemon thread and the first author call joins it only through
+        # the bounded deadline above, so an embedding outage cannot hold the
+        # visible reply hostage. The result is still only source-bound
+        # attention material; it does not choose a response or behavior.
         result = self._search(
             context=context,
             request=request,
             accessibility_seed=accessibility_seed,
-            semantic=False,
+            semantic=self._semantic_embedding is not None,
         )
         return self._issue_trace(
             mode="prefetch",
@@ -759,8 +819,8 @@ class RecallCoordinator:
                 return
             self._set_prefetch_health(
                 epoch=epoch,
-                status="ready",
-                failure_code=None,
+                status=("degraded" if trace.audit.embedding_status == "degraded" else "ready"),
+                failure_code=trace.audit.embedding_failure_code,
             )
             if not future.done() and not cancelled.is_set():
                 future.set_result(trace)
@@ -782,6 +842,8 @@ class RecallCoordinator:
                 future.set_result(None)
             cancelled.set()
             self._prefetch_slots.release()
+            with self._prefetch_worker_guard:
+                self._prefetch_worker_threads.discard(threading.current_thread())
 
     def _set_prefetch_health(
         self,
@@ -824,12 +886,26 @@ class RecallCoordinator:
         )
         if not semantic or self._semantic_embedding is None:
             return context.snapshot.search(query)
-        semantic = InMemoryRecallIndex(embedding=self._semantic_embedding)
-        semantic.rebuild(
-            cursor=context.snapshot.cursor,
-            documents=context.snapshot.documents,
-        )
-        return semantic.search(query)
+        try:
+            semantic_index = InMemoryRecallIndex(embedding=self._semantic_embedding)
+            semantic_index.rebuild(
+                cursor=context.snapshot.cursor,
+                documents=context.snapshot.documents,
+            )
+            return semantic_index.search(query)
+        except (RecallEmbeddingUnavailable, ValueError) as exc:
+            # Embedding is an accessibility channel, not factual authority and
+            # not a prerequisite for speaking. A provider/contract failure
+            # therefore falls back to the already-pinned local index while the
+            # trace and health surface retain the exact degraded reason.
+            logger.warning("semantic recall degraded to local index", exc_info=True)
+            local = context.snapshot.search(query)
+            return local.model_copy(
+                update={
+                    "embedding_status": "degraded",
+                    "embedding_failure_code": (f"{type(exc).__name__}:{str(exc)}"[:128]),
+                }
+            )
 
     def _remember(
         self,
@@ -879,16 +955,18 @@ class RecallCoordinator:
             job.cancel()
         self._prefetch_futures.clear()
         self._prefetch_join_attempted.clear()
+        with self._prefetch_worker_guard:
+            worker_threads = tuple(self._prefetch_worker_threads)
         close_embedding = getattr(self._semantic_embedding, "close", None)
         if not callable(close_embedding):
             return
         deadline = time.monotonic() + 0.05
-        for job in jobs:
+        for thread in worker_threads:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            job.thread.join(timeout=remaining)
-        alive = tuple(job.thread for job in jobs if job.thread.is_alive())
+            thread.join(timeout=remaining)
+        alive = tuple(thread for thread in worker_threads if thread.is_alive())
         if not alive and self._active_recalls_drained.is_set():
             close_embedding()
             return

@@ -81,6 +81,7 @@ class RecallDocument(FrozenModel):
         "recent_experiences",
         "world_life",
         "active_memory_candidates",
+        "recalled_emotional_associations",
         "private_impressions",
     ]
     source_refs: tuple[str, ...] = Field(min_length=1, max_length=16)
@@ -294,9 +295,7 @@ class _RecallIndexCore:
         if not embedding.version or not 1 <= embedding.dimensions <= 4_096:
             raise ValueError("recall embedding identity or dimensions are invalid")
         self._embedding = embedding
-        self._dense_match_threshold_bp = int(
-            getattr(embedding, "dense_match_threshold_bp", 5_500)
-        )
+        self._dense_match_threshold_bp = int(getattr(embedding, "dense_match_threshold_bp", 5_500))
         if not 0 <= self._dense_match_threshold_bp <= 10_000:
             raise ValueError("recall dense match threshold is invalid")
         self._index_version = f"{RECALL_INDEX_POLICY_VERSION}+embedding:{embedding.version}"

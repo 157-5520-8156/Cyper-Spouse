@@ -42,7 +42,15 @@ from .affect_trigger_runtime import AffectTriggerRunResult
 from .fact_draft_adapter import FactDraftChatModel, FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
 from .experience_memory_candidate_lifecycle import ExperienceMemoryCandidateLifecycle
-from .fact_memory_draft import FactMemoryDraftChatModel, FactMemoryDraftAdapter
+from .experience_memory_decision import (
+    ExperienceMemoryDecisionRecordedPayload,
+    experience_memory_decision_event_id,
+)
+from .fact_memory_draft import (
+    ExperienceMemoryDraftAdapter,
+    FactMemoryDraftAdapter,
+    FactMemoryDraftChatModel,
+)
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
@@ -2213,6 +2221,33 @@ class WorldV2TurnApplication:
         pending_trigger_counts = Counter(
             item.process_kind for item in projection.trigger_processes if item.state != "terminal"
         )
+        memory_status_counts = Counter(item.values.status for item in projection.memory_candidates)
+        experience_memory_decision_counts: Counter[str] = Counter()
+        for experience in projection.experiences:
+            located_decision = self._ledger.lookup_event_commit(
+                experience_memory_decision_event_id(
+                    experience_authority_event_ref=(
+                        experience.origin.accepted_event_ref
+                    )
+                )
+            )
+            if located_decision is None:
+                continue
+            decision_event, _ = located_decision
+            try:
+                experience_memory_decision_counts[
+                    ExperienceMemoryDecisionRecordedPayload.model_validate_json(
+                        decision_event.payload_json
+                    ).decision_kind
+                ] += 1
+            except ValueError:
+                experience_memory_decision_counts["invalid"] += 1
+        memory_source_candidate_counts: Counter[str] = Counter()
+        for candidate in projection.memory_candidates:
+            for source_kind in {
+                binding.source_kind for binding in candidate.values.source_bindings
+            }:
+                memory_source_candidate_counts[source_kind] += 1
 
         def _activity_view(plan) -> dict[str, object]:
             window = plan.scheduled_window
@@ -2325,6 +2360,16 @@ class WorldV2TurnApplication:
                 "candidate_count": len(projection.memory_candidates),
                 "active_candidate_count": sum(
                     item.values.status == "active" for item in projection.memory_candidates
+                ),
+                "candidate_status_counts": dict(sorted(memory_status_counts.items())),
+                "candidate_source_counts": dict(sorted(memory_source_candidate_counts.items())),
+                "experience_decision_counts": dict(
+                    sorted(experience_memory_decision_counts.items())
+                ),
+                "last_candidate_transition_at": (
+                    max(item.updated_at for item in projection.memory_candidates).isoformat()
+                    if projection.memory_candidates
+                    else None
                 ),
             },
             "relationship": {
@@ -2588,8 +2633,7 @@ class WorldV2TurnApplication:
             if (
                 reflection_failure_code is None
                 and active_reflection is not None
-                and last_reflection_audit.evaluated_world_revision
-                < projection.world_revision
+                and last_reflection_audit.evaluated_world_revision < projection.world_revision
             ):
                 reflection_failure_code = "context_advanced"
         reflection_status = (
@@ -3011,6 +3055,7 @@ def build_sqlite_world_v2_turn_application(
                 target=config.reply_target,
                 identity_frame=proactive_identity_frame,
             )
+            proactive_adapter.install_recall_coordinator(recall_coordinator)
             proactive_runtime = ProactiveActionRuntime(
                 ledger=ledger,
                 turn=ProactiveDeliberationTurn(
@@ -3818,7 +3863,9 @@ def build_sqlite_world_v2_turn_application(
                 ),
                 outcome_selection_model=outcome_draft_model,
                 memory_adapter=(
-                    FactMemoryDraftAdapter(model=memory_model) if memory_model is not None else None
+                    ExperienceMemoryDraftAdapter(model=memory_model)
+                    if memory_model is not None
+                    else None
                 ),
             )
             if config.life_ecology is not None and life_seed_catalog is not None

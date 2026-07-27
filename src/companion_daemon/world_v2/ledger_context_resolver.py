@@ -18,6 +18,8 @@ from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .affect_events import AffectEpisodeOpenedPayload
+from .appraisal_events import AppraisalAcceptedPayload
 from .context_capsule import (
     ContextCapsuleBudgetPolicy,
     ContextCapsuleCompiler,
@@ -72,6 +74,7 @@ from .expression_payload_store import ImmutableExpressionPayloadStore
 from .model_facing_context import CHAT_RECENT_DIALOGUE_ITEM_LIMIT
 from .recent_dialogue import RecentDialogueCompiler, RecentDialogueItem
 from .recall_corpus import (
+    AffectOpeningRecallItem,
     MAX_RECALL_CORPUS_DOCUMENTS,
     RecallCorpusSources,
     required_recall_authority_refs,
@@ -116,6 +119,53 @@ _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
 
 _LOG = logging.getLogger(__name__)
+
+
+def _recall_attention_cue(
+    *,
+    observation_text: str,
+    affect_episodes: tuple[BaseModel, ...] | None,
+    situation: BaseModel,
+) -> str:
+    """Combine the new observation with source-bound present attention.
+
+    This does not infer a motive or require the character to use a memory.  It
+    gives the semantic accessibility lane the same kind of state-dependent
+    cue people have: what was said, how the character currently feels, and
+    what she is doing can each make an old association easier to notice.
+    """
+
+    present_affect: list[dict[str, object]] = []
+    for episode in affect_episodes or ():
+        components = getattr(episode, "components", ())
+        for component in components:
+            present_affect.append(
+                {
+                    "dimension": component.dimension,
+                    "source_cluster_ref": component.source_cluster_ref,
+                }
+            )
+    situation_value = situation.model_dump(mode="json")
+    present_situation = {
+        key: situation_value[key]
+        for key in (
+            "time_segment",
+            "activity_slices",
+            "attention_slice",
+            "social_environment",
+        )
+        if key in situation_value
+    }
+    return json.dumps(
+        {
+            "new_observation": observation_text,
+            "present_affect": present_affect[:8],
+            "present_situation": present_situation,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )[:2_048]
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,18 +380,22 @@ def _typed_authority_claims(
         # to reinterpret its durable observation identifier as an event id.
         return ()
     if isinstance(item, FactRecallItem):
-        return tuple(sorted((
-            (
-                item.accepted_fact_event_ref,
-                item.accepted_fact_world_revision,
-                item.accepted_fact_payload_hash,
-            ),
-            (
-                item.observation_event_ref,
-                item.observation_world_revision,
-                item.observation_event_payload_hash,
-            ),
-        )))
+        return tuple(
+            sorted(
+                (
+                    (
+                        item.accepted_fact_event_ref,
+                        item.accepted_fact_world_revision,
+                        item.accepted_fact_payload_hash,
+                    ),
+                    (
+                        item.observation_event_ref,
+                        item.observation_world_revision,
+                        item.observation_event_payload_hash,
+                    ),
+                )
+            )
+        )
     if isinstance(item, WorldLifeContextItem):
         authorities = {
             (
@@ -562,9 +616,7 @@ def fact_recall_items(
             continue
         try:
             if fact_ref.event_type == "FactCommittedV2":
-                materialized = rehydrate_fact_commit_materialized_v2_json(
-                    fact_event.payload_json
-                )
+                materialized = rehydrate_fact_commit_materialized_v2_json(fact_event.payload_json)
                 values_match = (
                     materialized.fact_id == fact.fact_id
                     and materialized.values.model_dump(mode="json")
@@ -628,26 +680,28 @@ def fact_recall_items(
             or binding.asserted_subject_ref != fact.values.subject_ref
         ):
             continue
-        output.append(FactRecallItem(
-            fact_id=fact.fact_id,
-            subject_ref=fact.values.subject_ref,
-            predicate_code=fact.values.predicate_code,
-            source_excerpt=observation.text,
-            confidence_bp=fact.values.confidence_bp,
-            privacy_class=fact.values.privacy_class,
-            occurred_at=observation.logical_time,
-            committed_at=fact.committed_at,
-            updated_at=fact.updated_at,
-            accepted_fact_event_ref=fact_ref.event_id,
-            accepted_fact_world_revision=fact_ref.world_revision,
-            accepted_fact_payload_hash=fact_ref.payload_hash,
-            observation_event_ref=source_ref.event_id,
-            observation_world_revision=source_ref.world_revision,
-            observation_event_payload_hash=source_ref.payload_hash,
-            source_observation_id=observation.observation_id,
-            assertion_payload_ref=observation.payload_ref,
-            assertion_payload_hash=observation.payload_hash,
-        ))
+        output.append(
+            FactRecallItem(
+                fact_id=fact.fact_id,
+                subject_ref=fact.values.subject_ref,
+                predicate_code=fact.values.predicate_code,
+                source_excerpt=observation.text,
+                confidence_bp=fact.values.confidence_bp,
+                privacy_class=fact.values.privacy_class,
+                occurred_at=observation.logical_time,
+                committed_at=fact.committed_at,
+                updated_at=fact.updated_at,
+                accepted_fact_event_ref=fact_ref.event_id,
+                accepted_fact_world_revision=fact_ref.world_revision,
+                accepted_fact_payload_hash=fact_ref.payload_hash,
+                observation_event_ref=source_ref.event_id,
+                observation_world_revision=source_ref.world_revision,
+                observation_event_payload_hash=source_ref.payload_hash,
+                source_observation_id=observation.observation_id,
+                assertion_payload_ref=observation.payload_ref,
+                assertion_payload_hash=observation.payload_hash,
+            )
+        )
     return tuple(output)
 
 
@@ -811,9 +865,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             or event.actor == query.actor_ref
         ):
             return ContextRelevanceScope(actor_ref=query.actor_ref)
-        return ContextRelevanceScope(
-            actor_ref=query.actor_ref, related_subject_refs=(event.actor,)
-        )
+        return ContextRelevanceScope(actor_ref=query.actor_ref, related_subject_refs=(event.actor,))
 
     def _budget_authority_refs(
         self, projection: LedgerProjection
@@ -855,7 +907,10 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         # unavailable is the same fail-closed result as the bounded loop
         # below, and does not expose or infer any balance.
         if (
-            sum(ref.event_type in budget_event_types for ref in projection.committed_world_event_refs)
+            sum(
+                ref.event_type in budget_event_types
+                for ref in projection.committed_world_event_refs
+            )
             > MAX_SOURCE_REFS_PER_ITEM
         ):
             return {account_id: None for account_id in accounts}
@@ -914,12 +969,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         # chat turn.  Until budget checkpoints provide a compact authority,
         # fail the optional slice closed as unavailable instead of presenting
         # a partial balance or raising after many turns.
-        slice_refs = {
-            ref
-            for refs in result.values()
-            if refs is not None
-            for ref in refs
-        }
+        slice_refs = {ref for refs in result.values() if refs is not None for ref in refs}
         if len(slice_refs) > MAX_SOURCE_REFS_PER_ITEM:
             return {account_id: None for account_id in accounts}
         return result
@@ -1074,9 +1124,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     dialogue_text_by_ref[original_ref] = observation.text
                     dialogue_text_by_ref[event_ref] = observation.text
         facts_for_continuity = (
-            recalled_facts
-            if len(recalled_facts) <= MAX_RESOLVER_DOMAIN_SCAN_ITEMS
-            else ()
+            recalled_facts if len(recalled_facts) <= MAX_RESOLVER_DOMAIN_SCAN_ITEMS else ()
         )
         memories_for_continuity = (
             memory_retrievals.items
@@ -1181,6 +1229,144 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             for item in projection.appraisals
             if item.status == "active" and item.subject_ref in subject_refs
         )
+        # Current Affect stays in working Context. Historical affective
+        # accessibility is rebuilt from the appraisal acceptances that carry
+        # their own exact event/evidence closure; AffectEpisodeProjection does
+        # not retain every update event identity and therefore is not itself
+        # safe historical recall authority.
+        recall_appraisal_candidates = tuple(
+            sorted(
+                (
+                    item
+                    for item in projection.appraisals
+                    if item.subject_ref in subject_refs
+                ),
+                key=lambda item: (item.accepted_at, item.appraisal_id),
+                reverse=True,
+            )[:32]
+        )
+        recall_appraisals = tuple(
+            normalized
+            for item in recall_appraisal_candidates
+            for normalized in (
+                _normalize_observation_evidence(item, observation_aliases=observation_aliases),
+            )
+            if isinstance(normalized, AppraisalProjection)
+        )
+        recall_affect_openings = []
+        for episode in sorted(
+            projection.affect_episodes,
+            key=lambda item: (item.opened_at, item.episode_id),
+            reverse=True,
+        )[:32]:
+            located = self._ledger.lookup_event_commit(
+                episode.origin.accepted_event_ref
+            )
+            if located is None:
+                continue
+            event, _ = located
+            committed = next(
+                (
+                    ref
+                    for ref in projection.committed_world_event_refs
+                    if ref.event_id == event.event_id
+                ),
+                None,
+            )
+            if (
+                committed is None
+                or event.event_type != "AffectEpisodeOpened"
+                or committed.world_revision > query.world_revision
+                or committed.payload_hash != event.payload_hash
+            ):
+                continue
+            try:
+                opening = AffectEpisodeOpenedPayload.model_validate_json(
+                    event.payload_json
+                ).episode
+            except ValueError:
+                continue
+            if (
+                opening.episode_id != episode.episode_id
+                or opening.origin.accepted_event_ref != event.event_id
+            ):
+                continue
+            scoped_appraisal_subjects: set[str] = set()
+            subject_authority_refs: set[str] = set()
+            subject_scope_is_closed = True
+            for meaning_ref in {
+                (meaning.appraisal_id, meaning.hypothesis_id)
+                for component in opening.components
+                for meaning in component.appraisal_refs
+            }:
+                appraisal = next(
+                    (
+                        item
+                        for item in projection.appraisals
+                        if item.appraisal_id == meaning_ref[0]
+                    ),
+                    None,
+                )
+                if appraisal is None or appraisal.subject_ref not in subject_refs:
+                    subject_scope_is_closed = False
+                    break
+                appraisal_located = self._ledger.lookup_event_commit(
+                    appraisal.origin.accepted_event_ref
+                )
+                appraisal_committed = next(
+                    (
+                        ref
+                        for ref in projection.committed_world_event_refs
+                        if ref.event_id
+                        == appraisal.origin.accepted_event_ref
+                    ),
+                    None,
+                )
+                if appraisal_located is None or appraisal_committed is None:
+                    subject_scope_is_closed = False
+                    break
+                appraisal_event, _ = appraisal_located
+                if (
+                    appraisal_event.event_type != "AppraisalAccepted"
+                    or appraisal_committed.world_revision > query.world_revision
+                    or appraisal_committed.payload_hash
+                    != appraisal_event.payload_hash
+                ):
+                    subject_scope_is_closed = False
+                    break
+                try:
+                    accepted_appraisal = (
+                        AppraisalAcceptedPayload.model_validate_json(
+                            appraisal_event.payload_json
+                        ).appraisal
+                    )
+                except ValueError:
+                    subject_scope_is_closed = False
+                    break
+                if (
+                    accepted_appraisal.appraisal_id != appraisal.appraisal_id
+                    or accepted_appraisal.subject_ref != appraisal.subject_ref
+                    or meaning_ref[1]
+                    not in {
+                        hypothesis.hypothesis_id
+                        for hypothesis in accepted_appraisal.hypotheses
+                    }
+                ):
+                    subject_scope_is_closed = False
+                    break
+                scoped_appraisal_subjects.add(appraisal.subject_ref)
+                subject_authority_refs.add(appraisal_event.event_id)
+            if not subject_scope_is_closed or not scoped_appraisal_subjects:
+                continue
+            recall_affect_openings.append(
+                AffectOpeningRecallItem(
+                    episode=opening,
+                    subject_refs=tuple(sorted(scoped_appraisal_subjects)),
+                    subject_authority_refs=tuple(
+                        sorted(subject_authority_refs)
+                    ),
+                )
+            )
         if self._recall is not None:
             recall_cursor = RecallCursor(
                 world_revision=query.world_revision,
@@ -1206,26 +1392,19 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     historical_facts=historical_facts,
                     open_threads=open_threads_for_continuity,
                     recent_experiences=tuple(
-                        item
-                        for item in scoped_experiences
-                        if hasattr(item, "origin")
+                        item for item in scoped_experiences if hasattr(item, "origin")
                     ),
                     world_life=world_life,
                     active_memory_candidates=memory_retrievals.items,
-                    appraisals=tuple(
-                        item
-                        for item in scoped_appraisals
-                        if isinstance(item, AppraisalProjection)
-                    ),
+                    affect_openings=tuple(recall_affect_openings),
+                    appraisals=recall_appraisals,
                     private_impressions=tuple(
                         item
                         for item in projection.private_impressions
                         if item.subject_ref in subject_refs and item.origin is not None
                     ),
                 )
-                required_authority_refs = required_recall_authority_refs(
-                    recall_sources
-                )
+                required_authority_refs = required_recall_authority_refs(recall_sources)
                 recall_authority = select_recall_authority_bindings(
                     sources=recall_sources,
                     candidates=(
@@ -1264,7 +1443,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 )
                 if trigger_dialogue is not None:
                     self._recall.schedule_prefetch(
-                        query_text=trigger_dialogue.text,
+                        query_text=_recall_attention_cue(
+                            observation_text=trigger_dialogue.text,
+                            affect_episodes=scoped_affect,
+                            situation=situation,
+                        ),
                         accessibility_seed=(
                             f"recall-prefetch:{query.trigger_ref}:{query.ledger_sequence}"
                         ),
@@ -1317,7 +1500,9 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             "private_impressions": tuple(
                 item
                 for item in projection.private_impressions
-                if item.status == "active" and item.subject_ref in subject_refs and item.origin is not None
+                if item.status == "active"
+                and item.subject_ref in subject_refs
+                and item.origin is not None
             ),
             "advisories": None,
         }
@@ -1456,9 +1641,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         if scope.actor_ref != query.actor_ref:
             raise ValueError("Context relevance scope belongs to another actor")
         frozen = tuple(
-            InnerAdvisoryProjection.model_validate(
-                item.model_dump(mode="python", warnings="error")
-            )
+            InnerAdvisoryProjection.model_validate(item.model_dump(mode="python", warnings="error"))
             for item in advisories
         )
         if len({item.advisory_id for item in frozen}) != len(frozen):

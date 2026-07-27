@@ -153,12 +153,16 @@ class ScenarioVerificationError(AssertionError):
 # hybrid recall seam.  The frozen scenarios do not change their outcomes, but
 # their pinned capsule and reducer identities now include those new authority
 # fields.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.22"
+# ``.25`` installs reducer bundle .40 for the source-bound
+# ExperienceMemoryDecisionRecorded audit. The event is deliberation-only and
+# changes no fixed scenario predicate, but the installed reducer identity is
+# intentionally part of every scenario manifest.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.25"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "2c07afc105b01237a0ade252f316da13120dd23fb5e1f850703691016ae71cbe"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "de0e7a73cd06816c5417bd2fb68b39a5ad553be5f80257c39d8b4c1b67be2c94"
 
 
 class _FixedScenarioRouter:

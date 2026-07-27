@@ -2901,6 +2901,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
                 "world-v2-reducers.38",
+                "world-v2-reducers.39",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -2914,6 +2915,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.36",
                     "world-v2-reducers.37",
                     "world-v2-reducers.38",
+                    "world-v2-reducers.39",
                 }:
                     canonical_legacy_state = json.dumps(
                         json.loads(legacy_state_json),
@@ -2960,6 +2962,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.36",
                     "world-v2-reducers.37",
                     "world-v2-reducers.38",
+                    "world-v2-reducers.39",
                 }:
                     # .37 added optional non-factual reflection prose and .38
                     # adds optional reflection/audit lineage to the pending
@@ -3227,6 +3230,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
                 "world-v2-reducers.38",
+                "world-v2-reducers.39",
             }:
                 state = ReducerState.model_validate_json(
                     json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),

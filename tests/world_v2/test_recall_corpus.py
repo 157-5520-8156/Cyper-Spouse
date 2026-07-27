@@ -6,6 +6,7 @@ from companion_daemon.world_v2.memory_retrieval import (
     MemorySourceExcerpt,
 )
 from companion_daemon.world_v2.recall_corpus import (
+    AffectOpeningRecallItem,
     RecallCorpusCompiler,
     RecallCorpusSources,
     select_recall_authority_bindings,
@@ -28,6 +29,8 @@ from companion_daemon.world_v2.schemas import (
     PrivateImpressionProjection,
     experience_semantic_fingerprint,
 )
+
+import test_affect_module as affect
 
 
 NOW = datetime(2026, 7, 27, 14, 30, tzinfo=UTC)
@@ -199,11 +202,22 @@ def _sources() -> RecallCorpusSources:
             accepted_event_ref="event:impression:1",
         ),
     )
+    affect_opening = affect.episode(
+        episode_id="affect:remembered-rain",
+        at=NOW - timedelta(hours=18),
+    )
     return RecallCorpusSources(
         recent_dialogue=(dialogue,),
         relevant_facts=(fact,),
         recent_experiences=(experience,),
         active_memory_candidates=(memory,),
+        affect_openings=(
+            AffectOpeningRecallItem(
+                episode=affect_opening,
+                subject_refs=("user:primary",),
+                subject_authority_refs=("event:appraisal:1",),
+            ),
+        ),
         appraisals=(appraisal,),
         private_impressions=(impression,),
         authority_bindings=(
@@ -227,6 +241,20 @@ def _sources() -> RecallCorpusSources:
                 ref="event:observation:1",
                 source_world_revision=18,
                 immutable_hash="1" * 64,
+            ),
+            RecallSourceBinding(
+                source_kind="committed_event",
+                authority_type="AffectEpisodeOpened",
+                ref="event:affect:remembered-rain",
+                source_world_revision=24,
+                immutable_hash="c" * 64,
+            ),
+            RecallSourceBinding(
+                source_kind="committed_event",
+                authority_type="ObservationRecorded",
+                ref="message:1",
+                source_world_revision=17,
+                immutable_hash="d" * 64,
             ),
         ),
     )
@@ -316,9 +344,7 @@ def test_authority_selection_does_not_scale_with_unrelated_ledger_history() -> N
         sources=bounded_sources,
     )
 
-    assert {item.ref for item in selected} == {
-        item.ref for item in sources.authority_bindings
-    }
+    assert {item.ref for item in selected} == {item.ref for item in sources.authority_bindings}
     assert len(selected) == len(sources.authority_bindings)
     assert documents
 
@@ -341,4 +367,114 @@ def test_private_reflection_is_resolved_from_appraisal_and_never_fact_authority(
         "event:appraisal:1",
         "event:impression:1",
         "event:observation:1",
+    )
+
+
+def test_appraisal_becomes_source_bound_affective_reflective_recall() -> None:
+    documents = RecallCorpusCompiler().compile(
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        sources=_sources(),
+    )
+    emotion = next(
+        document for document in documents if document.source_item_ref == "appraisal:care"
+    )
+
+    assert emotion.memory_kind == "reflective"
+    assert emotion.source_slice == "recalled_emotional_associations"
+    assert emotion.authority == "defeasible_interpretation"
+    assert "care" in emotion.text
+    assert emotion.source_refs == (
+        "event:appraisal:1",
+        "event:observation:1",
+    )
+
+
+def test_exact_affect_opening_dimension_is_source_bound_recall() -> None:
+    documents = RecallCorpusCompiler().compile(
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        sources=_sources(),
+    )
+    emotion = next(
+        document
+        for document in documents
+        if document.source_item_ref == "affect-opening:affect:remembered-rain"
+    )
+
+    assert emotion.memory_kind == "reflective"
+    assert emotion.authority == "defeasible_interpretation"
+    assert "hurt=4000bp" in emotion.text
+    assert emotion.source_refs == (
+        "event:affect:remembered-rain",
+        "event:appraisal:1",
+        "message:1",
+    )
+
+
+def test_affect_opening_from_another_subject_is_not_relabelled_to_current_user() -> None:
+    sources = _sources()
+    foreign = sources.affect_openings[0].model_copy(
+        update={"subject_refs": ("npc:someone-else",)}
+    )
+
+    documents = RecallCorpusCompiler().compile(
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        sources=sources.model_copy(update={"affect_openings": (foreign,)}),
+    )
+
+    assert all(
+        document.source_item_ref
+        != "affect-opening:affect:remembered-rain"
+        for document in documents
+    )
+
+
+def test_oversized_appraisal_is_skipped_instead_of_truncating_source_closure() -> None:
+    sources = _sources()
+    evidence = tuple(
+        EvidenceRef(
+            ref_id=f"event:oversized-appraisal-evidence:{index}",
+            evidence_type="observed_message",
+            claim_purpose="private_hypothesis",
+        )
+        for index in range(16)
+    )
+    appraisal = sources.appraisals[0].model_copy(
+        update={"evidence_refs": evidence}
+    )
+    bindings = (
+        *sources.authority_bindings,
+        *(
+            RecallSourceBinding(
+                source_kind="committed_event",
+                authority_type="ObservationRecorded",
+                ref=item.ref_id,
+                source_world_revision=10 + index,
+                immutable_hash=f"{index + 100:064x}",
+            )
+            for index, item in enumerate(evidence)
+        ),
+    )
+
+    documents = RecallCorpusCompiler().compile(
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        sources=sources.model_copy(
+            update={
+                "appraisals": (appraisal,),
+                "private_impressions": (),
+                "authority_bindings": bindings,
+            }
+        ),
+    )
+
+    assert all(
+        document.source_item_ref != appraisal.appraisal_id
+        for document in documents
     )

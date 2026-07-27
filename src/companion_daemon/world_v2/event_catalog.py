@@ -28,6 +28,7 @@ from .fact_trigger import (
     InteractionFactDecisionRecordedPayload,
     InteractionFactTechnicalFailurePayload,
 )
+from .experience_memory_decision import ExperienceMemoryDecisionRecordedPayload
 from .fact_proposal_audit_v2 import FactCommitProposalRecordedPayloadV2
 from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
 from .media_selection_acceptance_manifest import (
@@ -148,7 +149,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.39"
+    reducer_bundle: str = "world-v2-reducers.40"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -382,6 +383,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "InteractionFactTechnicalFailureRecorded": InteractionFactTechnicalFailurePayload,
         "InteractionFactDecisionRecorded": InteractionFactDecisionRecordedPayload,
         "FactMemoryDecisionRecorded": FactMemoryDecisionRecordedPayload,
+        "ExperienceMemoryDecisionRecorded": ExperienceMemoryDecisionRecordedPayload,
         "ToolRequestAccepted": ToolRequestAcceptedPayload,
         "ToolResultAccepted": ToolResultAcceptedPayload,
         "PerceptionRequestAccepted": PerceptionRequestAcceptedPayload,
@@ -529,6 +531,9 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         ),
         "FactMemoryDecisionRecorded": (
             "world_id+trigger_id+fact_authority_event_ref+decision_id"
+        ),
+        "ExperienceMemoryDecisionRecorded": (
+            "world_id+experience_authority_event_ref+decision_id"
         ),
         "ToolRequestAccepted": "world_id+request_id",
         "ToolResultAccepted": "world_id+result_id",
@@ -965,6 +970,15 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     "MemoryCandidateRevised",
                     "TriggerProcessCompleted",
                 ),
+            ),
+            _contract(
+                "ExperienceMemoryDecisionRecorded",
+                "life_aftermath",
+                "deliberation",
+                "ExperienceMemoryDecisionRecordedPayload",
+                allowed_predecessors=("ExperienceCommitted",),
+                evidence_types=("model_result", "accepted_experience"),
+                successors=("MemoryCandidateOpened",),
             ),
             _contract(
                 "ModelResultRecorded",

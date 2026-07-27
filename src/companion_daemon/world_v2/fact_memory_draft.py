@@ -213,6 +213,49 @@ class FactMemoryDraftAdapter:
         ]
 
 
+class ExperienceMemoryDraftAdapter(FactMemoryDraftAdapter):
+    """Ask the character model whether one lived Experience remains useful."""
+
+    VERSION = "experience-memory-draft.1"
+
+    @staticmethod
+    def _messages(*, predicate_code: str, source_text: str) -> list[dict[str, str]]:
+        del predicate_code
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Decide whether one verified lived Experience from your own life should become "
+                    "a retrieval memory. This is your retention decision: retain=false is valid "
+                    "when the Experience leaves no understanding or association worth carrying "
+                    "forward. If retain=true, describe only its retrieval shape using cue_kind, "
+                    "retention_rationales, and salience. salience must contain exactly "
+                    "autobiographical_relevance_bp, relationship_relevance_bp, emotional_residue_bp, "
+                    "unfinished_business_bp, recurrence_bp, novelty_bp, future_utility_bp, and "
+                    "world_continuity_bp as basis-point integers 0..10000 (for example 7900, never "
+                    "0.79). cue_kind must be exactly one of identity, relationship, boundary, "
+                    "unfinished_business, repeated_pattern, future_utility, emotional_residue, "
+                    "world_continuity. Every retention_rationales item must be exactly one of "
+                    "identity_relevance, relationship_continuity, boundary_relevance, "
+                    "unfinished_business, repeated_pattern, future_utility, emotional_salience, "
+                    "world_continuity. Do not return summaries, ids, hashes, privacy, source refs, "
+                    "actions, behaviour instructions, or claims not present in the Experience."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "source_kind": "companion_lived_experience",
+                        "verified_experience_text": source_text,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+
+
 def materialize_fact_memory_draft(raw: str) -> FactMemoryRetentionDraft | None:
     """Validate the narrow, non-authoritative part of a retention decision."""
 
@@ -256,6 +299,7 @@ def materialize_fact_memory_draft(raw: str) -> FactMemoryRetentionDraft | None:
 
 
 __all__ = [
+    "ExperienceMemoryDraftAdapter",
     "FactMemoryDraftAdapter",
     "FactMemoryDraftChatModel",
     "FactMemoryDraftTechnicalFailure",

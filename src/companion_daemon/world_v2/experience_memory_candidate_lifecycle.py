@@ -69,6 +69,53 @@ class ExperienceMemoryCandidateLifecycle(FactMemoryCandidateLifecycle):
         trace_id: str,
         correlation_id: str,
     ) -> MemoryCandidateProjection | None:
+        """Serialize open→accept and re-anchor it to current World time."""
+
+        with self._ledger.serialized_commit_sequence():
+            projection = self._ledger.project()
+            current = next(
+                (
+                    item
+                    for item in projection.experiences
+                    if item.experience_id == experience.experience_id
+                ),
+                None,
+            )
+            if current != experience:
+                return None
+            if (
+                projection.logical_time is not None
+                and logical_time > projection.logical_time
+            ):
+                raise ValueError(
+                    "Experience-memory lifecycle cannot advance World logical time"
+                )
+            effective_logical_time = projection.logical_time or logical_time
+            return self._accept_serialized(
+                experience=experience,
+                transition=transition,
+                experience_event=experience_event,
+                experience_world_revision=experience_world_revision,
+                draft=draft,
+                logical_time=effective_logical_time,
+                created_at=max(created_at, effective_logical_time),
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+
+    def _accept_serialized(
+        self,
+        *,
+        experience: ExperienceProjection,
+        transition: ExperienceTransitionProjection,
+        experience_event: WorldEvent,
+        experience_world_revision: int,
+        draft: FactMemoryRetentionDraft,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> MemoryCandidateProjection | None:
         source = self._source_binding(
             experience=experience,
             transition=transition,
@@ -77,35 +124,53 @@ class ExperienceMemoryCandidateLifecycle(FactMemoryCandidateLifecycle):
         )
         candidate_id = "memory:experience:" + _canonical_hash(source)
         projection = self._ledger.project()
-        if any(
-            item.candidate_id == candidate_id
-            or source.authority_event_ref
-            in {binding.authority_event_ref for binding in item.values.source_bindings}
-            for item in projection.memory_candidates
-        ):
+        existing = next(
+            (
+                item
+                for item in projection.memory_candidates
+                if item.candidate_id == candidate_id
+                or source.authority_event_ref
+                in {
+                    binding.authority_event_ref
+                    for binding in item.values.source_bindings
+                }
+            ),
+            None,
+        )
+        if existing is not None and existing.values.status != "pending":
             return None
-        opened_event_id = f"event:memory:opened:{_digest(candidate_id)}"
-        opened = self._candidate(
-            candidate_id=candidate_id,
-            source=source,
-            draft=draft,
-            privacy_ceiling=experience.values.privacy_class,
-            entity_revision=1,
-            status="pending",
-            opened_at=logical_time,
-            updated_at=logical_time,
-            reviewed_at=None,
-            accepted_event_ref=opened_event_id,
-        )
-        self._record_and_accept(
-            after=opened,
-            before=None,
-            operation="open",
-            logical_time=logical_time,
-            created_at=created_at,
-            trace_id=trace_id,
-            correlation_id=correlation_id,
-        )
+        if existing is None:
+            opened_event_id = f"event:memory:opened:{_digest(candidate_id)}"
+            opened = self._candidate(
+                candidate_id=candidate_id,
+                source=source,
+                draft=draft,
+                privacy_ceiling=experience.values.privacy_class,
+                entity_revision=1,
+                status="pending",
+                opened_at=logical_time,
+                updated_at=logical_time,
+                reviewed_at=None,
+                accepted_event_ref=opened_event_id,
+            )
+            self._record_and_accept(
+                after=opened,
+                before=None,
+                operation="open",
+                logical_time=logical_time,
+                created_at=created_at,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+        else:
+            # Resume the exact accepted pending candidate. A fresh model
+            # classification cannot rewrite the first attempt after a crash.
+            opened = existing
+            draft = FactMemoryRetentionDraft(
+                cue_kind=opened.values.cue_kind,
+                retention_rationales=opened.values.retention_rationales,
+                salience=opened.values.salience,
+            )
         active = self._candidate(
             candidate_id=candidate_id,
             source=source,

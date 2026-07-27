@@ -222,6 +222,108 @@ def test_sqlite_migrates_verified_v35_head_without_rewriting_events(tmp_path) ->
         ).fetchone()[0] == event_count
 
 
+def test_sqlite_migrates_verified_v39_head_and_cold_replays_same_history(tmp_path) -> None:
+    """The immediately previous bundle remains an authenticated replay boundary."""
+
+    path = tmp_path / "world-v2-v39-head.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-v39-migration", "obs-v39-migration")],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    expected = ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=expected.world_revision,
+        deliberation_revision=expected.deliberation_revision,
+        ledger_sequence=expected.ledger_sequence,
+    )
+    legacy_state = ledger._state_from_projection(expected)  # noqa: SLF001
+    legacy_state_json = ledger._encode_state(legacy_state)  # noqa: SLF001
+    canonical_legacy_state = json.dumps(
+        json.loads(legacy_state_json),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    legacy_semantic_hash = hashlib.sha256(
+        json.dumps(
+            legacy_state.semantic_payload(
+                world_id="world-sqlite-test",
+                world_revision=expected.world_revision,
+                reducer_bundle_version="world-v2-reducers.39",
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    legacy_state_hash = hashlib.sha256(
+        ledger._state_hash_material(  # noqa: SLF001
+            canonical_state=canonical_legacy_state,
+            cursor=cursor,
+            reducer_bundle_version="world-v2-reducers.39",
+        )
+    ).hexdigest()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        before = connection.execute(
+            """
+            SELECT COUNT(*), MAX(ledger_sequence), MAX(event_hash)
+            FROM world_v2_events
+            WHERE world_id = ?
+            """,
+            ("world-sqlite-test",),
+        ).fetchone()
+        connection.execute(
+            "DELETE FROM world_v2_head_state_items WHERE world_id = ?",
+            ("world-sqlite-test",),
+        )
+        connection.execute(
+            """
+            UPDATE world_v2_heads
+            SET state_json = ?, semantic_hash = ?, state_hash = ?,
+                reducer_bundle_version = ?
+            WHERE world_id = ?
+            """,
+            (
+                legacy_state_json,
+                legacy_semantic_hash,
+                legacy_state_hash,
+                "world-v2-reducers.39",
+                "world-sqlite-test",
+            ),
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    migrated = reopened.project()
+    assert migrated == expected
+    assert migrated.reducer_bundle_version == REDUCER_BUNDLE_VERSION
+    assert (
+        migrated.world_revision,
+        migrated.deliberation_revision,
+        migrated.ledger_sequence,
+    ) == (
+        cursor.world_revision,
+        cursor.deliberation_revision,
+        cursor.ledger_sequence,
+    )
+    assert reopened.rebuild() == migrated
+    reopened.close()
+
+    with sqlite3.connect(path) as connection:
+        after = connection.execute(
+            """
+            SELECT COUNT(*), MAX(ledger_sequence), MAX(event_hash)
+            FROM world_v2_events
+            WHERE world_id = ?
+            """,
+            ("world-sqlite-test",),
+        ).fetchone()
+        assert after == before
+
+
 def test_historical_projection_replay_reuses_verified_ascending_prefixes(tmp_path) -> None:
     path = tmp_path / "historical-prefix.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")

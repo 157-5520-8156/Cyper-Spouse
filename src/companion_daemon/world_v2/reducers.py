@@ -179,6 +179,10 @@ from .fact_trigger import (
     interaction_fact_trigger_identity,
 )
 from .fact_memory_draft import FactMemoryRetentionDraft
+from .experience_memory_decision import (
+    ExperienceMemoryDecisionRecordedPayload,
+    experience_memory_decision_identity,
+)
 from .commitment_events import (
     COMMITMENT_ACCEPTED_PAYLOAD_MODELS,
     CommitmentAuthorizedMutationPayload,
@@ -505,7 +509,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.39"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.40"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}" for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 )
@@ -1338,6 +1342,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.36",
             "world-v2-reducers.37",
             "world-v2-reducers.38",
+            "world-v2-reducers.39",
         }:
             # .33-.36 only add current-generation conditional fields. Their
             # semantic field feature set is otherwise the current one.
@@ -1461,6 +1466,7 @@ class ReducerState(FrozenModel):
                                 "world-v2-reducers.36",
                                 "world-v2-reducers.37",
                                 "world-v2-reducers.38",
+                                "world-v2-reducers.39",
                                 REDUCER_BUNDLE_VERSION,
                             }
                             else None
@@ -1570,6 +1576,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.36",
             "world-v2-reducers.37",
             "world-v2-reducers.38",
+            "world-v2-reducers.39",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["provider_media_grants"] = tuple(
@@ -1590,6 +1597,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
                 "world-v2-reducers.38",
+                "world-v2-reducers.39",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_declined_candidate_revisions"] = tuple(
@@ -1607,6 +1615,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.36",
             "world-v2-reducers.37",
             "world-v2-reducers.38",
+            "world-v2-reducers.39",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_artifacts"] = tuple(
@@ -1623,6 +1632,7 @@ class ReducerState(FrozenModel):
                     "world-v2-reducers.36",
                     "world-v2-reducers.37",
                     "world-v2-reducers.38",
+                    "world-v2-reducers.39",
                     REDUCER_BUNDLE_VERSION,
                 }
                 else item.model_dump(mode="json", exclude={"repairable", "repair_scope"})
@@ -1641,6 +1651,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.36",
             "world-v2-reducers.37",
             "world-v2-reducers.38",
+            "world-v2-reducers.39",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_delivery_approvals"] = tuple(
@@ -1660,6 +1671,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
                 "world-v2-reducers.38",
+                "world-v2-reducers.39",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_thread_proposals"] = tuple(
@@ -1841,6 +1853,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
                 "world-v2-reducers.38",
+                "world-v2-reducers.39",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["expression_plan_manifests"] = tuple(
@@ -1851,6 +1864,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.36",
                 "world-v2-reducers.37",
                 "world-v2-reducers.38",
+                "world-v2-reducers.39",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["response_expectation_assessments"] = tuple(
@@ -8165,6 +8179,60 @@ def _fact_memory_decision_recorded(
     return state
 
 
+def _experience_memory_decision_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    payload = ExperienceMemoryDecisionRecordedPayload.model_validate_json(
+        event.payload_json
+    )
+    experience = next(
+        (
+            item
+            for item in state.experiences
+            if isinstance(item, ExperienceProjection)
+            and item.experience_id == payload.experience_id
+            and item.entity_revision == payload.experience_entity_revision
+        ),
+        None,
+    )
+    authority = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.experience_authority_event_ref
+        ),
+        None,
+    )
+    if (
+        experience is None
+        or experience.origin.accepted_event_ref
+        != payload.experience_authority_event_ref
+        or authority is None
+        or authority.world_revision
+        != payload.experience_authority_world_revision
+        or authority.payload_hash != payload.experience_authority_payload_hash
+        or event.causation_id != payload.experience_authority_event_ref
+        or payload.decision_id
+        != experience_memory_decision_identity(
+            experience_authority_event_ref=payload.experience_authority_event_ref
+        )
+        or not (
+            authority.world_revision
+            <= payload.evaluated_world_revision
+            <= len(state.committed_world_event_refs)
+        )
+        or state.logical_time is None
+        or event.logical_time != state.logical_time
+        or payload.recorded_at != state.logical_time
+    ):
+        raise ValueError(
+            "Experience-memory decision does not bind current Experience authority"
+        )
+    if payload.decision_kind == "retain":
+        FactMemoryRetentionDraft.model_validate_json(payload.decision_json)
+    return state
+
+
 def _trigger_process_reclaimed(state: ReducerState, event: WorldEvent) -> ReducerState:
     replacement = _model_from_payload(event, "process", TriggerProcess)
     process_index = next(
@@ -11114,6 +11182,11 @@ _EVENTS = {
             "FactMemoryDecisionRecorded",
             RevisionClass.DELIBERATION,
             _fact_memory_decision_recorded,
+        ),
+        EventDefinition(
+            "ExperienceMemoryDecisionRecorded",
+            RevisionClass.DELIBERATION,
+            _experience_memory_decision_recorded,
         ),
         EventDefinition(
             "AdvisoryAcceptanceRejected",

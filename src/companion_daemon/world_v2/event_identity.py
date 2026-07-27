@@ -311,6 +311,12 @@ def _life_identity_components(
             payload.get("fact_authority_event_ref"),
             payload.get("decision_id"),
         )
+    if event_type == "ExperienceMemoryDecisionRecorded":
+        return (
+            world_id,
+            payload.get("experience_authority_event_ref"),
+            payload.get("decision_id"),
+        )
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == "acceptance-manifest.2"

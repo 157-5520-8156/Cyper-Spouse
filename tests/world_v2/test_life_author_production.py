@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
@@ -8,7 +9,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from companion_daemon.world_v2.errors import IdempotencyConflict
 from companion_daemon.world_v2.life_author_seed import ReviewedLifeSeedCatalog
+from companion_daemon.world_v2.experience_memory_decision import (
+    experience_memory_decision_event_id,
+)
 from companion_daemon.world_v2.local_chronology import LocalChronology
 from companion_daemon.world_v2.random_authority import RandomDrawRecordedPayload
 from companion_daemon.world_v2.production_turn_application import (
@@ -16,7 +21,51 @@ from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+
 NOW = datetime(2026, 7, 17, 0, 0, tzinfo=UTC)
+
+
+class _MemoryChat:
+    model = "test-experience-memory"
+
+    def __init__(self, *, retain: bool = True) -> None:
+        self.retain = retain
+        self.calls = 0
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        assert temperature == 0.15
+        assert "lived Experience from your own life" in messages[0]["content"]
+        if not self.retain:
+            return '{"retain":false}'
+        return json.dumps(
+            {
+                "retain": True,
+                "cue_kind": "world_continuity",
+                "retention_rationales": ["world_continuity"],
+                "salience": {
+                    "autobiographical_relevance_bp": 7000,
+                    "relationship_relevance_bp": 2000,
+                    "emotional_residue_bp": 2000,
+                    "unfinished_business_bp": 1000,
+                    "recurrence_bp": 3000,
+                    "novelty_bp": 6000,
+                    "future_utility_bp": 5000,
+                    "world_continuity_bp": 9000,
+                },
+            }
+        )
+
+
+class _NeverMemoryChat:
+    model = "test-experience-memory-never"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        raise AssertionError("durable Experience-memory decision must be rejoined")
 
 
 def test_production_seed_offers_a_real_clock_bound_sleep_wake_opening() -> None:
@@ -27,16 +76,16 @@ def test_production_seed_offers_a_real_clock_bound_sleep_wake_opening() -> None:
     local = datetime(2026, 7, 20, 23, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
     candidates = catalog.candidates_at(
-        instant=local.astimezone(UTC), wake_event_ref="event:clock:bedtime",
-        plans=(), npcs=tuple(
-            SimpleNamespace(npc_id=item.npc_id, status="active")
-            for item in catalog.reviewed_npcs
+        instant=local.astimezone(UTC),
+        wake_event_ref="event:clock:bedtime",
+        plans=(),
+        npcs=tuple(
+            SimpleNamespace(npc_id=item.npc_id, status="active") for item in catalog.reviewed_npcs
         ),
     )
 
     sleep = next(
-        item for item in candidates
-        if item.opening.activity_kind == "sleep.prepare_for_bed"
+        item for item in candidates if item.opening.activity_kind == "sleep.prepare_for_bed"
     )
     assert sleep.opening.source == "routine"
     assert sleep.opening.domain == "sleep_wake"
@@ -51,8 +100,7 @@ def test_production_seed_has_continuous_reviewed_night_coverage_after_midnight()
         chronology=LocalChronology("Asia/Shanghai"),
     )
     active_npcs = tuple(
-        SimpleNamespace(npc_id=item.npc_id, status="active")
-        for item in catalog.reviewed_npcs
+        SimpleNamespace(npc_id=item.npc_id, status="active") for item in catalog.reviewed_npcs
     )
 
     by_hour = {
@@ -62,7 +110,9 @@ def test_production_seed_has_continuous_reviewed_night_coverage_after_midnight()
                 instant=datetime(
                     2026, 7, 20, hour, 15, tzinfo=ZoneInfo("Asia/Shanghai")
                 ).astimezone(UTC),
-                wake_event_ref=f"event:clock:night:{hour}", plans=(), npcs=active_npcs,
+                wake_event_ref=f"event:clock:night:{hour}",
+                plans=(),
+                npcs=active_npcs,
             )
         }
         for hour in range(0, 8)
@@ -100,8 +150,10 @@ def test_after_midnight_bedtime_does_not_consume_the_next_evenings_quota() -> No
     offered = {
         item.opening.activity_kind
         for item in catalog.candidates_at(
-            instant=tonight, wake_event_ref="event:clock:tonight",
-            plans=(last_night_bedtime,), npcs=(),
+            instant=tonight,
+            wake_event_ref="event:clock:tonight",
+            plans=(last_night_bedtime,),
+            npcs=(),
         )
     }
     assert "sleep.prepare_for_bed" in offered
@@ -120,7 +172,8 @@ def test_after_midnight_bedtime_does_not_consume_the_next_evenings_quota() -> No
         for item in catalog.candidates_at(
             instant=datetime(2026, 7, 20, 23, 30, tzinfo=tz).astimezone(UTC),
             wake_event_ref="event:clock:tonight-later",
-            plans=(tonight_bedtime,), npcs=(),
+            plans=(tonight_bedtime,),
+            npcs=(),
         )
     }
     assert "sleep.prepare_for_bed" not in still_offered
@@ -134,9 +187,13 @@ async def test_post_midnight_scheduler_ticks_produce_a_real_lived_sleep_event(
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "post-midnight-life.sqlite",
         config=_config(Path("configs/world_seed.yaml")),
-        identities=_Identities(), router=_Router(), main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(), now=start,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        now=start,
     )
     previous = start
     try:
@@ -150,10 +207,14 @@ async def test_post_midnight_scheduler_ticks_produce_a_real_lived_sleep_event(
         ):
             at = local.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(UTC)
             await app.tick(
-                tick_id=f"post-midnight:{phase}", logical_time_from=previous,
-                logical_time_to=at, observed_at=at,
-                trace_id=f"trace:post-midnight:{phase}", causation_id="scheduler:test",
-                correlation_id="correlation:post-midnight", reason="night-coverage-test",
+                tick_id=f"post-midnight:{phase}",
+                logical_time_from=previous,
+                logical_time_to=at,
+                observed_at=at,
+                trace_id=f"trace:post-midnight:{phase}",
+                causation_id="scheduler:test",
+                correlation_id="correlation:post-midnight",
+                reason="night-coverage-test",
             )
             previous = at
 
@@ -354,11 +415,13 @@ def test_reviewed_candidates_compile_soft_daypart_fit_from_local_window(
 
     edge = catalog.candidates_at(
         instant=datetime(2026, 7, 17, 7, tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(UTC),
-        wake_event_ref="event:clock:edge", plans=(),
+        wake_event_ref="event:clock:edge",
+        plans=(),
     )[0]
     middle = catalog.candidates_at(
         instant=datetime(2026, 7, 17, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(UTC),
-        wake_event_ref="event:clock:middle", plans=(),
+        wake_event_ref="event:clock:middle",
+        plans=(),
     )[0]
 
     assert edge.daypart_fit_bp == 6_000
@@ -381,28 +444,56 @@ def test_production_catalog_proves_every_opening_has_a_joint_availability_witnes
     assert all(item.witness_weekday is not None for item in report)
     assert all(item.witness_minute is not None for item in report)
     assert {item.opening_id for item in report} == {
-        "settle-morning-routine", "prepare-for-bed", "focused-reading",
-        "make-a-drink", "edit-photo-notes", "short-walk",
-        "tidy-small-things", "quiet-recovery",
-        "unhurried-digital-leisure", "literature-club-reading-list",
-        "late-night-wind-down", "early-morning-wake",
-        "write-reading-notes", "attend-lecture", "essay-deadline-push",
-        "library-self-study", "write-short-essay", "scan-film-photos",
-        "write-diary", "do-laundry", "pick-up-parcel", "buy-fruit-snacks",
-        "canteen-meal", "dorm-cooking-experiment", "evening-stretch",
-        "listen-podcast", "window-daydream", "afternoon-nap",
-        "call-home-bookstore", "roommate-evening-chat",
-        "literature-club-admin", "campus-cycling", "print-shop-run",
+        "settle-morning-routine",
+        "prepare-for-bed",
+        "focused-reading",
+        "make-a-drink",
+        "edit-photo-notes",
+        "short-walk",
+        "tidy-small-things",
+        "quiet-recovery",
+        "unhurried-digital-leisure",
+        "literature-club-reading-list",
+        "late-night-wind-down",
+        "early-morning-wake",
+        "write-reading-notes",
+        "attend-lecture",
+        "essay-deadline-push",
+        "library-self-study",
+        "write-short-essay",
+        "scan-film-photos",
+        "write-diary",
+        "do-laundry",
+        "pick-up-parcel",
+        "buy-fruit-snacks",
+        "canteen-meal",
+        "dorm-cooking-experiment",
+        "evening-stretch",
+        "listen-podcast",
+        "window-daydream",
+        "afternoon-nap",
+        "call-home-bookstore",
+        "roommate-evening-chat",
+        "literature-club-admin",
+        "campus-cycling",
+        "print-shop-run",
         "browse-old-book-stall",
-        "future-literature-club-meetup", "future-lakeside-walk",
-        "future-photo-batch-sort", "future-shared-movie-call",
-        "future-jiaxing-bookstore-help", "future-fanyuan-exhibition",
-        "future-bund-night-photo", "future-library-seminar-room",
+        "future-literature-club-meetup",
+        "future-lakeside-walk",
+        "future-photo-batch-sort",
+        "future-shared-movie-call",
+        "future-jiaxing-bookstore-help",
+        "future-fanyuan-exhibition",
+        "future-bund-night-photo",
+        "future-library-seminar-room",
         "future-book-market-hunt",
-        "npc-fan-yuan-borrow-book", "npc-fan-yuan-impromptu-reading-list",
+        "npc-fan-yuan-borrow-book",
+        "npc-fan-yuan-impromptu-reading-list",
         "npc-fan-yuan-reading-list-disagreement",
-        "npc-fan-yuan-share-manuscript", "npc-fan-yuan-lecture-pull",
-        "npc-fan-yuan-book-recommend", "npc-lin-wan-late-snack",
+        "npc-fan-yuan-share-manuscript",
+        "npc-fan-yuan-lecture-pull",
+        "npc-fan-yuan-book-recommend",
+        "npc-lin-wan-late-snack",
         "npc-lin-wan-borrow-charger",
     }
 
@@ -512,18 +603,18 @@ async def test_production_life_author_creates_one_clock_bound_abstract_plan_and_
         assert model.last_author_payload["authoritative_eligibility"]["logical_time"]
         assert projection.life_ecology_schedule is not None
         assert projection.life_ecology_schedule.last_wake_event_ref == wake
-        assert (
-            projection.life_ecology_schedule.last_outcome_ref
-            == "life-ecology:author_planned"
-        )
+        assert projection.life_ecology_schedule.last_outcome_ref == "life-ecology:author_planned"
 
         events = app._ledger.export_replay_evidence().events  # noqa: SLF001
         assert [item.event.event_type for item in events].count("RandomDrawRecorded") == 1
         assert [item.event.event_type for item in events].count("LifeAuthorDecisionRecorded") == 1
-        draw_record = RandomDrawRecordedPayload.model_validate_json(next(
-            item.event.payload_json
-            for item in events if item.event.event_type == "RandomDrawRecorded"
-        ))
+        draw_record = RandomDrawRecordedPayload.model_validate_json(
+            next(
+                item.event.payload_json
+                for item in events
+                if item.event.event_type == "RandomDrawRecorded"
+            )
+        )
         assert draw_record.sampler_version == "random-authority.2"
         assert draw_record.weight_policy_version == "life-author-weight.4"
         assert sum(item.weight_ppm for item in draw_record.weight_vector) == 1_000_000
@@ -543,9 +634,7 @@ async def test_production_life_author_creates_one_clock_bound_abstract_plan_and_
         )
         assert len(app._ledger.project().plans) == 1  # noqa: SLF001
         assert model.author_calls == 1
-        assert "accepted life plan can actually progress" in (
-            model.last_lifecycle_system or ""
-        )
+        assert "accepted life plan can actually progress" in (model.last_lifecycle_system or "")
         semantic_before_restart = app._ledger.project().semantic_hash  # noqa: SLF001
     finally:
         app.close()
@@ -585,9 +674,13 @@ async def test_life_author_uses_companion_local_time_not_utc_hour(tmp_path: Path
     app = build_sqlite_world_v2_turn_application(
         path=database,
         config=_config(seed_path),
-        identities=_Identities(), router=_Router(), main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=model, now=NOW,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=model,
+        now=NOW,
     )
     try:
         # 01:00 UTC is 09:00 Asia/Shanghai and therefore eligible for 07:00-12:00.
@@ -596,8 +689,10 @@ async def test_life_author_uses_companion_local_time_not_utc_hour(tmp_path: Path
             logical_time_from=NOW,
             logical_time_to=NOW + timedelta(hours=1),
             observed_at=NOW + timedelta(hours=1),
-            trace_id="trace:local-morning", causation_id="scheduler:life-author",
-            correlation_id="correlation:local-morning", reason="production-test",
+            trace_id="trace:local-morning",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:local-morning",
+            reason="production-test",
         )
         assert app._ledger.project().plans[0].activity_kind == "study.reading"  # noqa: SLF001
     finally:
@@ -610,14 +705,21 @@ async def test_life_author_uses_companion_local_time_not_utc_hour(tmp_path: Path
     [(ConnectionError("provider offline"), True), (RuntimeError("programming bug"), False)],
 )
 async def test_life_author_only_fail_closes_explicit_model_provider_failures(
-    tmp_path: Path, failure: Exception, blocked: bool,
+    tmp_path: Path,
+    failure: Exception,
+    blocked: bool,
 ) -> None:
     seed_path = _seed(tmp_path / "world-seed.yaml")
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / f"life-author-failure-{blocked}.sqlite",
-        config=_config(seed_path), identities=_Identities(), router=_Router(),
-        main_model=_MainModel(), quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=_SelectingLifeModel(), now=NOW,
+        config=_config(seed_path),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingLifeModel(),
+        now=NOW,
     )
     ecology = app._life_ecology  # noqa: SLF001 - composition error-boundary assertion
     assert ecology is not None
@@ -627,24 +729,31 @@ async def test_life_author_only_fail_closes_explicit_model_provider_failures(
     wake = "event:trigger:clock:life-author-failure"
     try:
         await app.tick(
-            tick_id="life-author-failure", logical_time_from=NOW,
-            logical_time_to=NOW + timedelta(hours=1), observed_at=NOW + timedelta(hours=1),
-            trace_id="trace:life-author-failure", causation_id="scheduler:life-author",
-            correlation_id="correlation:life-author-failure", reason="production-test",
+            tick_id="life-author-failure",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(hours=1),
+            observed_at=NOW + timedelta(hours=1),
+            trace_id="trace:life-author-failure",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:life-author-failure",
+            reason="production-test",
         )
         author._model = _FailingLifeModel(failure)  # noqa: SLF001
         if blocked:
             result = await author.advance_once(
-                wake_event_ref=wake, trace_id="trace:failure",
+                wake_event_ref=wake,
+                trace_id="trace:failure",
                 correlation_id="correlation:failure",
             )
             assert (result.status, result.reason_code) == (
-                "blocked", "life_author.model_unavailable"
+                "blocked",
+                "life_author.model_unavailable",
             )
         else:
             with pytest.raises(RuntimeError, match="programming bug"):
                 await author.advance_once(
-                    wake_event_ref=wake, trace_id="trace:failure",
+                    wake_event_ref=wake,
+                    trace_id="trace:failure",
                     correlation_id="correlation:failure",
                 )
     finally:
@@ -660,9 +769,15 @@ async def test_production_life_author_bootstraps_reviewed_npc_and_atomically_bin
     model = _SelectingLifeModel()
     config = _config(seed_path)
     app = build_sqlite_world_v2_turn_application(
-        path=database, config=config, identities=_Identities(), router=_Router(),
-        main_model=_MainModel(), quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=model, now=NOW,
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=model,
+        now=NOW,
     )
     semantic_before_restart = ""
     try:
@@ -672,10 +787,14 @@ async def test_production_life_author_bootstraps_reviewed_npc_and_atomically_bin
         ]
 
         await app.tick(
-            tick_id="life-author-social", logical_time_from=NOW,
-            logical_time_to=NOW + timedelta(hours=1), observed_at=NOW + timedelta(hours=1),
-            trace_id="trace:life-author-social", causation_id="scheduler:life-author",
-            correlation_id="correlation:life-author-social", reason="production-test",
+            tick_id="life-author-social",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(hours=1),
+            observed_at=NOW + timedelta(hours=1),
+            trace_id="trace:life-author-social",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:life-author-social",
+            reason="production-test",
         )
         projection = app._ledger.project()  # noqa: SLF001
         plan = projection.plans[0]
@@ -693,11 +812,14 @@ async def test_production_life_author_bootstraps_reviewed_npc_and_atomically_bin
         # The lifecycle catalog must consume this authority rather than report
         # the previously hard-coded location/NPC capability gap.
         await app.tick(
-            tick_id="life-author-social-start", logical_time_from=NOW + timedelta(hours=1),
+            tick_id="life-author-social-start",
+            logical_time_from=NOW + timedelta(hours=1),
             logical_time_to=NOW + timedelta(hours=1, minutes=1),
             observed_at=NOW + timedelta(hours=1, minutes=1),
-            trace_id="trace:life-author-social-start", causation_id="scheduler:life-author",
-            correlation_id="correlation:life-author-social", reason="production-test",
+            trace_id="trace:life-author-social-start",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:life-author-social",
+            reason="production-test",
         )
         assert model.lifecycle_calls == 1
         semantic_before_restart = app._ledger.project().semantic_hash  # noqa: SLF001
@@ -705,9 +827,15 @@ async def test_production_life_author_bootstraps_reviewed_npc_and_atomically_bin
         app.close()
 
     restarted = build_sqlite_world_v2_turn_application(
-        path=database, config=config, identities=_Identities(), router=_Router(),
-        main_model=_MainModel(), quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=_SelectingLifeModel(), now=NOW,
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingLifeModel(),
+        now=NOW,
     )
     try:
         projection = restarted._ledger.project()  # noqa: SLF001
@@ -725,19 +853,28 @@ async def test_production_life_author_does_not_offer_reviewed_npc_outside_availa
     seed_path = _social_seed(tmp_path / "world-seed-unavailable.yaml")
     model = _SelectingLifeModel()
     app = build_sqlite_world_v2_turn_application(
-        path=tmp_path / "life-author-unavailable.sqlite", config=_config(seed_path),
-        identities=_Identities(), router=_Router(), main_model=_MainModel(),
-        quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=model, now=NOW,
+        path=tmp_path / "life-author-unavailable.sqlite",
+        config=_config(seed_path),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=model,
+        now=NOW,
     )
     try:
         # 02:00 UTC is 10:00 Asia/Shanghai: the opening and place are open,
         # but the reviewed NPC availability ended at 09:30.
         await app.tick(
-            tick_id="life-author-unavailable", logical_time_from=NOW,
-            logical_time_to=NOW + timedelta(hours=2), observed_at=NOW + timedelta(hours=2),
-            trace_id="trace:life-author-unavailable", causation_id="scheduler:life-author",
-            correlation_id="correlation:life-author-unavailable", reason="production-test",
+            tick_id="life-author-unavailable",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(hours=2),
+            observed_at=NOW + timedelta(hours=2),
+            trace_id="trace:life-author-unavailable",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:life-author-unavailable",
+            reason="production-test",
         )
         projection = app._ledger.project()  # noqa: SLF001
         assert projection.plans == ()
@@ -761,26 +898,40 @@ async def test_production_life_aftermath_requires_later_wake_and_survives_restar
     outcome_model = _SelectingOutcomeModel()
     config = _config(seed_path)
     app = build_sqlite_world_v2_turn_application(
-        path=database, config=config, identities=_Identities(), router=_Router(),
-        main_model=_MainModel(), quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=model, outcome_draft_model=outcome_model, now=NOW,
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=model,
+        outcome_draft_model=outcome_model,
+        now=NOW,
     )
     semantic = ""
     try:
         await app.tick(
-            tick_id="aftermath-plan", logical_time_from=NOW,
-            logical_time_to=NOW + timedelta(hours=1), observed_at=NOW + timedelta(hours=1),
-            trace_id="trace:aftermath-plan", causation_id="scheduler:life-author",
-            correlation_id="correlation:aftermath", reason="production-test",
+            tick_id="aftermath-plan",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(hours=1),
+            observed_at=NOW + timedelta(hours=1),
+            trace_id="trace:aftermath-plan",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:aftermath",
+            reason="production-test",
         )
         assert app._ledger.project().world_occurrences == ()  # noqa: SLF001
 
         await app.tick(
-            tick_id="aftermath-start", logical_time_from=NOW + timedelta(hours=1),
+            tick_id="aftermath-start",
+            logical_time_from=NOW + timedelta(hours=1),
             logical_time_to=NOW + timedelta(hours=1, minutes=1),
             observed_at=NOW + timedelta(hours=1, minutes=1),
-            trace_id="trace:aftermath-start", causation_id="scheduler:life-author",
-            correlation_id="correlation:aftermath", reason="production-test",
+            trace_id="trace:aftermath-start",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:aftermath",
+            reason="production-test",
         )
         opened = app._ledger.project()  # noqa: SLF001
         assert opened.world_occurrences[0].status == "active"
@@ -789,11 +940,14 @@ async def test_production_life_aftermath_requires_later_wake_and_survives_restar
         # Ordinary completion tracks the accepted 45-minute window, so the
         # settling wake arrives only after that window has closed.
         await app.tick(
-            tick_id="aftermath-settle", logical_time_from=NOW + timedelta(hours=1, minutes=1),
+            tick_id="aftermath-settle",
+            logical_time_from=NOW + timedelta(hours=1, minutes=1),
             logical_time_to=NOW + timedelta(hours=1, minutes=46),
             observed_at=NOW + timedelta(hours=1, minutes=46),
-            trace_id="trace:aftermath-settle", causation_id="scheduler:life-author",
-            correlation_id="correlation:aftermath", reason="production-test",
+            trace_id="trace:aftermath-settle",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:aftermath",
+            reason="production-test",
         )
         projection = app._ledger.project()  # noqa: SLF001
         occurrence = projection.world_occurrences[0]
@@ -806,7 +960,8 @@ async def test_production_life_aftermath_requires_later_wake_and_survives_restar
         assert len(projection.experiences) == 1
         assert len(projection.life_content_descriptors) == 2
         assert {item.content_kind for item in projection.life_content_descriptors} == {
-            "occurrence_result", "experience_summary"
+            "occurrence_result",
+            "experience_summary",
         }
         assert any(
             item.process_kind == "npc_world_appraisal" and item.state == "open"
@@ -822,20 +977,269 @@ async def test_production_life_aftermath_requires_later_wake_and_survives_restar
         assert result_taxon.visual_potential == "social"
         assert all(item.source_event_refs for item in taxonomy)
         events = app._ledger.export_replay_evidence().events  # noqa: SLF001
-        activated = next(item.event for item in events if item.event.event_type == "WorldOccurrenceActivated")
-        settled = next(item.event for item in events if item.event.event_type == "WorldOccurrenceSettled")
+        activated = next(
+            item.event for item in events if item.event.event_type == "WorldOccurrenceActivated"
+        )
+        settled = next(
+            item.event for item in events if item.event.event_type == "WorldOccurrenceSettled"
+        )
         assert activated.logical_time < settled.logical_time
         semantic = projection.semantic_hash
     finally:
         app.close()
 
+    memory_chat = _MemoryChat()
     restarted = build_sqlite_world_v2_turn_application(
-        path=database, config=config, identities=_Identities(), router=_Router(),
-        main_model=_MainModel(), quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(), now=NOW,
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        now=NOW,
+        memory_model=memory_chat,
     )
     try:
         assert restarted._ledger.project().semantic_hash == semantic  # noqa: SLF001
         assert len(restarted._ledger.project().experiences) == 1  # noqa: SLF001
+        assert restarted._ledger.project().memory_candidates == ()  # noqa: SLF001
+        aftermath = restarted._life_ecology._aftermath_followup  # noqa: SLF001
+        lifecycle = aftermath._experience_memory_lifecycle  # noqa: SLF001
+        wake_ref = next(
+            item.event_id
+            for item in reversed(
+                restarted._ledger.project().committed_world_event_refs  # noqa: SLF001
+            )
+            if item.event_type == "ClockAdvanced"
+        )
+        original_accept = lifecycle.accept
+
+        def crash_after_decision(**_kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulated crash after durable Experience-memory decision")
+
+        lifecycle.accept = crash_after_decision
+        with pytest.raises(RuntimeError, match="durable Experience-memory decision"):
+            await aftermath.advance_once(
+                wake_event_ref=wake_ref,
+                trace_id="trace:aftermath-memory-decision-crash",
+                correlation_id="correlation:aftermath",
+            )
+        lifecycle.accept = original_accept
+        assert memory_chat.calls == 1
+        assert restarted._ledger.project().memory_candidates == ()  # noqa: SLF001
+        experience = restarted._ledger.project().experiences[0]  # noqa: SLF001
+        assert restarted._ledger.lookup_event_commit(  # noqa: SLF001
+            experience_memory_decision_event_id(
+                experience_authority_event_ref=(
+                    experience.origin.accepted_event_ref
+                )
+            )
+        ) is not None
     finally:
         restarted.close()
+
+    resumed_memory = _NeverMemoryChat()
+    resumed = build_sqlite_world_v2_turn_application(
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        now=NOW,
+        memory_model=resumed_memory,
+    )
+    try:
+        await resumed.tick(
+            tick_id="aftermath-memory-backfill",
+            logical_time_from=NOW + timedelta(hours=1, minutes=46),
+            logical_time_to=NOW + timedelta(hours=1, minutes=56),
+            observed_at=NOW + timedelta(hours=1, minutes=56),
+            trace_id="trace:aftermath-memory-backfill",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:aftermath",
+            reason="production-test",
+        )
+        assert resumed_memory.calls == 0
+        remembered = resumed._ledger.project().memory_candidates  # noqa: SLF001
+        assert len(remembered) == 1
+        assert remembered[0].values.status == "active"
+        assert {binding.source_kind for binding in remembered[0].values.source_bindings} == {
+            "experience"
+        }
+        memory_health = (await resumed.world_health_diagnostics())["mechanisms"]["memory"]
+        assert memory_health["candidate_status_counts"] == {"active": 1}
+        assert memory_health["candidate_source_counts"] == {"experience": 1}
+        assert memory_health["last_candidate_transition_at"] is not None
+    finally:
+        resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_experience_memory_no_change_is_durable_and_never_reclassified(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "life-aftermath-no-change.sqlite"
+    seed_path = _social_seed(tmp_path / "world-seed-no-change.yaml")
+    config = _config(seed_path)
+    app = build_sqlite_world_v2_turn_application(
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        outcome_draft_model=_SelectingOutcomeModel(),
+        now=NOW,
+    )
+    try:
+        for tick_id, start, end in (
+            ("no-change-plan", NOW, NOW + timedelta(hours=1)),
+            (
+                "no-change-start",
+                NOW + timedelta(hours=1),
+                NOW + timedelta(hours=1, minutes=1),
+            ),
+            (
+                "no-change-settle",
+                NOW + timedelta(hours=1, minutes=1),
+                NOW + timedelta(hours=1, minutes=46),
+            ),
+        ):
+            await app.tick(
+                tick_id=tick_id,
+                logical_time_from=start,
+                logical_time_to=end,
+                observed_at=end,
+                trace_id=f"trace:{tick_id}",
+                causation_id="scheduler:life-author",
+                correlation_id="correlation:no-change",
+                reason="production-test",
+            )
+        assert len(app._ledger.project().experiences) == 1  # noqa: SLF001
+    finally:
+        app.close()
+
+    memory_chat = _MemoryChat(retain=False)
+    restarted = build_sqlite_world_v2_turn_application(
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        now=NOW,
+        memory_model=memory_chat,
+    )
+    try:
+        original_commit = restarted._ledger.commit  # noqa: SLF001
+        injected_conflict = False
+
+        def commit_winner_then_raise(events, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal injected_conflict
+            if (
+                not injected_conflict
+                and len(events) == 1
+                and events[0].event_type
+                == "ExperienceMemoryDecisionRecorded"
+            ):
+                injected_conflict = True
+                original_commit(events, **kwargs)
+                raise IdempotencyConflict(
+                    "simulated concurrent decision winner"
+                )
+            return original_commit(events, **kwargs)
+
+        restarted._ledger.commit = commit_winner_then_raise  # type: ignore[method-assign] # noqa: SLF001
+        aftermath = restarted._life_ecology._aftermath_followup  # noqa: SLF001
+        wake_ref = next(
+            item.event_id
+            for item in reversed(
+                restarted._ledger.project().committed_world_event_refs  # noqa: SLF001
+            )
+            if item.event_type == "ClockAdvanced"
+        )
+        await asyncio.gather(
+            aftermath.advance_once(
+                wake_event_ref=wake_ref,
+                trace_id="trace:no-change-memory:a",
+                correlation_id="correlation:no-change",
+            ),
+            aftermath.advance_once(
+                wake_event_ref=wake_ref,
+                trace_id="trace:no-change-memory:b",
+                correlation_id="correlation:no-change",
+            ),
+        )
+        restarted._ledger.commit = original_commit  # type: ignore[method-assign] # noqa: SLF001
+        await restarted.tick(
+            tick_id="no-change-memory-again",
+            logical_time_from=NOW + timedelta(hours=1, minutes=46),
+            logical_time_to=NOW + timedelta(hours=1, minutes=56),
+            observed_at=NOW + timedelta(hours=1, minutes=56),
+            trace_id="trace:no-change-memory-again",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:no-change",
+            reason="production-test",
+        )
+        assert memory_chat.calls == 1
+        assert injected_conflict
+        assert restarted._ledger.project().memory_candidates == ()  # noqa: SLF001
+        experience = restarted._ledger.project().experiences[0]  # noqa: SLF001
+        decision_event, _ = restarted._ledger.lookup_event_commit(  # noqa: SLF001
+            experience_memory_decision_event_id(
+                experience_authority_event_ref=(
+                    experience.origin.accepted_event_ref
+                )
+            )
+        )
+        assert decision_event.payload()["decision_kind"] == "no_change"
+        memory_health = (await restarted.world_health_diagnostics())[
+            "mechanisms"
+        ]["memory"]
+        assert memory_health["experience_decision_counts"] == {
+            "no_change": 1
+        }
+        before_rebuild = restarted._ledger.project()  # noqa: SLF001
+        rebuilt = restarted._ledger.rebuild()  # noqa: SLF001
+        assert rebuilt.semantic_hash == before_rebuild.semantic_hash
+        assert rebuilt.reducer_bundle_version == "world-v2-reducers.40"
+    finally:
+        restarted.close()
+
+    never = _NeverMemoryChat()
+    resumed = build_sqlite_world_v2_turn_application(
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        now=NOW,
+        memory_model=never,
+    )
+    try:
+        await resumed.tick(
+            tick_id="no-change-after-restart",
+            logical_time_from=NOW + timedelta(hours=1, minutes=56),
+            logical_time_to=NOW + timedelta(hours=2, minutes=6),
+            observed_at=NOW + timedelta(hours=2, minutes=6),
+            trace_id="trace:no-change-after-restart",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:no-change",
+            reason="production-test",
+        )
+        assert never.calls == 0
+        assert resumed._ledger.project().memory_candidates == ()  # noqa: SLF001
+    finally:
+        resumed.close()

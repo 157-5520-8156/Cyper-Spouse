@@ -26,6 +26,7 @@ from .recall_index import (
 from .recent_dialogue import RecentDialogueItem
 from .schema_core import FrozenModel
 from .schemas import (
+    AffectEpisodeProjection,
     AppraisalHypothesis,
     AppraisalProjection,
     ExperienceProjection,
@@ -38,6 +39,14 @@ from .world_life_context import WorldLifeContextItem
 MAX_RECALL_CORPUS_DOCUMENTS = 256
 
 
+class AffectOpeningRecallItem(FrozenModel):
+    """One opening Affect image plus exact authority for its subject scope."""
+
+    episode: AffectEpisodeProjection
+    subject_refs: tuple[str, ...] = Field(min_length=1, max_length=8)
+    subject_authority_refs: tuple[str, ...] = Field(min_length=1, max_length=8)
+
+
 class RecallCorpusSources(FrozenModel):
     """The bounded, typed World views from which a recall sidecar is rebuilt."""
 
@@ -48,11 +57,10 @@ class RecallCorpusSources(FrozenModel):
     recent_experiences: tuple[ExperienceProjection, ...] = ()
     world_life: tuple[WorldLifeContextItem, ...] = ()
     active_memory_candidates: tuple[MemoryRetrievalItem, ...] = ()
+    affect_openings: tuple[AffectOpeningRecallItem, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
     private_impressions: tuple[PrivateImpressionProjection, ...] = ()
-    authority_bindings: tuple[RecallSourceBinding, ...] = Field(
-        default=(), max_length=4_096
-    )
+    authority_bindings: tuple[RecallSourceBinding, ...] = Field(default=(), max_length=4_096)
 
 
 def required_recall_authority_refs(sources: RecallCorpusSources) -> frozenset[str]:
@@ -71,17 +79,17 @@ def required_recall_authority_refs(sources: RecallCorpusSources) -> frozenset[st
         refs.update(ref.ref_id for ref in item.values.anchor_evidence_refs)
     for item in sources.recent_experiences:
         refs.add(item.origin.accepted_event_ref)
-        refs.update(
-            binding.authority_event_ref for binding in item.values.source_bindings
-        )
+        refs.update(binding.authority_event_ref for binding in item.values.source_bindings)
     for item in sources.world_life:
         refs.add(item.source.authority_event_ref)
         if item.content is not None:
             refs.add(item.content.descriptor_event_ref)
     for item in sources.active_memory_candidates:
-        refs.update(
-            excerpt.authority_event_ref for excerpt in item.source_excerpts
-        )
+        refs.update(excerpt.authority_event_ref for excerpt in item.source_excerpts)
+    for item in sources.affect_openings:
+        refs.add(item.episode.origin.accepted_event_ref)
+        refs.update(ref.ref_id for ref in item.episode.evidence_refs)
+        refs.update(item.subject_authority_refs)
     for item in sources.appraisals:
         refs.add(item.origin.accepted_event_ref)
         refs.update(ref.ref_id for ref in item.evidence_refs)
@@ -100,15 +108,11 @@ def select_recall_authority_bindings(
     """Select the source closure without scaling with total ledger history."""
 
     required = required_recall_authority_refs(sources)
-    return _canonical_bindings(
-        tuple(binding for binding in candidates if binding.ref in required)
-    )
+    return _canonical_bindings(tuple(binding for binding in candidates if binding.ref in required))
 
 
 def _document_id(*parts: str) -> str:
-    encoded = json.dumps(
-        parts, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    encoded = json.dumps(parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return f"recall:{hashlib.sha256(encoded.encode()).hexdigest()}"
 
 
@@ -155,9 +159,7 @@ class RecallCorpusCompiler:
     ) -> tuple[RecallDocument, ...]:
         if subject_refs != tuple(sorted(set(subject_refs))) or actor_ref not in subject_refs:
             raise ValueError("recall corpus subjects must be canonical and include its actor")
-        authority = {
-            item.ref: item for item in _canonical_bindings(sources.authority_bindings)
-        }
+        authority = {item.ref: item for item in _canonical_bindings(sources.authority_bindings)}
         documents: list[RecallDocument] = []
 
         for item in sources.recent_dialogue:
@@ -318,9 +320,7 @@ class RecallCorpusCompiler:
                 )
             )
 
-        experiences_by_id = {
-            item.experience_id: item for item in sources.recent_experiences
-        }
+        experiences_by_id = {item.experience_id: item for item in sources.recent_experiences}
         for candidate in sources.active_memory_candidates:
             for excerpt in candidate.source_excerpts:
                 fact = facts_by_id.get(excerpt.source_id)
@@ -355,9 +355,7 @@ class RecallCorpusCompiler:
                 )
                 documents.append(
                     self._document(
-                        memory_kind=(
-                            "semantic" if excerpt.source_kind == "fact" else "episodic"
-                        ),
+                        memory_kind=("semantic" if excerpt.source_kind == "fact" else "episodic"),
                         source_item_ref=excerpt.source_id,
                         source_slice=(
                             "relevant_facts"
@@ -469,28 +467,127 @@ class RecallCorpusCompiler:
                 )
             )
 
-        meanings: dict[
-            str, tuple[AppraisalProjection, AppraisalHypothesis]
-        ] = {}
+        meanings: dict[str, tuple[AppraisalProjection, AppraisalHypothesis]] = {}
         for appraisal in sources.appraisals:
             for hypothesis in appraisal.hypotheses:
-                meanings[
-                    f"appraisal:{appraisal.appraisal_id}:{hypothesis.hypothesis_id}"
-                ] = (appraisal, hypothesis)
-        for item in sources.private_impressions:
-            resolved = tuple(
-                meanings[ref] for ref in item.interpretation_refs if ref in meanings
+                meanings[f"appraisal:{appraisal.appraisal_id}:{hypothesis.hypothesis_id}"] = (
+                    appraisal,
+                    hypothesis,
+                )
+
+        for item in sources.affect_openings:
+            episode = item.episode
+            if not set(item.subject_refs).issubset(subject_refs):
+                continue
+            refs = {
+                episode.origin.accepted_event_ref,
+                *(ref.ref_id for ref in episode.evidence_refs),
+                *item.subject_authority_refs,
+            }
+            if len(refs) > 16:
+                # A partial evidence set would make the emotional association
+                # look better grounded than it is. Oversized episodes simply
+                # remain available in the live Affect projection.
+                continue
+            bindings = self._bindings_for_refs(refs, authority)
+            if bindings is None:
+                continue
+            appraisal_links = tuple(
+                sorted(
+                    {
+                        f"appraisal:{meaning.appraisal_id}:{meaning.hypothesis_id}"
+                        for component in episode.components
+                        for meaning in component.appraisal_refs
+                    }
+                )
+            )[:31]
+            dimensions = " | ".join(
+                f"{component.dimension}={component.intensity_bp}bp"
+                for component in sorted(
+                    episode.components,
+                    key=lambda component: (
+                        component.dimension,
+                        component.component_id,
+                    ),
+                )
             )
+            documents.append(
+                self._document(
+                    memory_kind="reflective",
+                    source_item_ref=f"affect-opening:{episode.episode_id}",
+                    source_slice="recalled_emotional_associations",
+                    bindings=bindings,
+                    text="Emotional episode at opening — " + dimensions,
+                    actor_ref=actor_ref,
+                    subject_refs=_subjects(actor_ref, *item.subject_refs),
+                    link_refs=(
+                        episode.episode_id,
+                        *appraisal_links,
+                    ),
+                    occurred_from=episode.opened_at,
+                    occurred_to=episode.updated_at,
+                    status="historical",
+                    privacy_class="withhold",
+                    authority="defeasible_interpretation",
+                )
+            )
+
+        for item in sources.appraisals:
+            refs = {
+                item.origin.accepted_event_ref,
+                *(ref.ref_id for ref in item.evidence_refs),
+            }
+            if len(refs) > 16:
+                # RecallDocument intentionally has a small complete-source
+                # envelope. Never truncate a legal appraisal's evidence and
+                # accidentally upgrade a partial interpretation.
+                continue
+            bindings = self._bindings_for_refs(refs, authority)
+            if bindings is None:
+                continue
+            text = "Remembered private interpretation — " + " | ".join(
+                " / ".join(
+                    (
+                        hypothesis.meaning,
+                        hypothesis.attribution,
+                        hypothesis.controllability,
+                        hypothesis.severity,
+                    )
+                )
+                for hypothesis in item.hypotheses
+            )
+            documents.append(
+                self._document(
+                    memory_kind="reflective",
+                    source_item_ref=item.appraisal_id,
+                    source_slice="recalled_emotional_associations",
+                    bindings=bindings,
+                    text=text,
+                    actor_ref=actor_ref,
+                    subject_refs=_subjects(actor_ref, item.subject_ref),
+                    link_refs=tuple(
+                        (
+                            item.source_cluster_ref,
+                            *(
+                                f"appraisal:{item.appraisal_id}:{hypothesis.hypothesis_id}"
+                                for hypothesis in item.hypotheses
+                            ),
+                        )
+                    ),
+                    occurred_from=item.accepted_at,
+                    privacy_class="withhold",
+                    authority="defeasible_interpretation",
+                )
+            )
+
+        for item in sources.private_impressions:
+            resolved = tuple(meanings[ref] for ref in item.interpretation_refs if ref in meanings)
             if len(resolved) != len(item.interpretation_refs):
                 continue
             refs = {
                 *item.source_refs,
                 *(appraisal.origin.accepted_event_ref for appraisal, _ in resolved),
-                *(
-                    (item.origin.accepted_event_ref,)
-                    if item.origin is not None
-                    else ()
-                ),
+                *((item.origin.accepted_event_ref,) if item.origin is not None else ()),
             }
             bindings = self._bindings_for_refs(refs, authority)
             if bindings is None:
@@ -600,16 +697,12 @@ class RecallCorpusCompiler:
             source_slice=source_slice,
             source_refs=tuple(sorted({item.ref for item in canonical})),
             source_bindings=canonical,
-            source_world_revision=max(
-                item.source_world_revision for item in canonical
-            ),
+            source_world_revision=max(item.source_world_revision for item in canonical),
             # Recall exposes a source-bound excerpt, not an unbounded payload
             # archive.  The immutable binding still points to the complete
             # authority while this prefix keeps the replay audit compact.
             text=text[:1_024],
-            retrieval_text=(
-                retrieval_text[:4_096] if retrieval_text is not None else None
-            ),
+            retrieval_text=(retrieval_text[:4_096] if retrieval_text is not None else None),
             actor_ref=actor_ref,
             subject_refs=_subjects(*subject_refs),
             link_refs=_subjects(*link_refs),
@@ -624,6 +717,7 @@ class RecallCorpusCompiler:
 
 
 __all__ = [
+    "AffectOpeningRecallItem",
     "RecallCorpusCompiler",
     "RecallCorpusSources",
     "MAX_RECALL_CORPUS_DOCUMENTS",

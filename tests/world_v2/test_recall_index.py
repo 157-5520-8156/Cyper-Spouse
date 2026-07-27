@@ -116,9 +116,7 @@ def _documents() -> tuple[RecallDocument, ...]:
             source_item_ref="fact:oolong",
             source_slice="relevant_facts",
             source_refs=("event:fact:oolong", "event:observation:oolong"),
-            source_bindings=_bindings(
-                "event:fact:oolong", "event:observation:oolong", revision=7
-            ),
+            source_bindings=_bindings("event:fact:oolong", "event:observation:oolong", revision=7),
             source_world_revision=7,
             text="用户最近开始喜欢喝乌龙茶。",
             actor_ref="agent:companion",
@@ -302,8 +300,7 @@ def test_hybrid_recall_fuses_dense_lexical_temporal_and_structured_evidence() ->
     assert result.hits[0].document.source_item_ref == "fact:oolong"
     assert {"lexical", "structured", "temporal"} <= set(result.hits[0].match_channels)
     assert any(
-        hit.document.source_item_ref == "experience:gaiwan"
-        and "dense" in hit.match_channels
+        hit.document.source_item_ref == "experience:gaiwan" and "dense" in hit.match_channels
         for hit in result.hits
     )
     assert all(hit.document.status == "active" for hit in result.hits)
@@ -319,8 +316,7 @@ def test_dense_recall_can_surface_a_source_bound_association_without_word_overla
     assert result.hits[0].document.source_item_ref == "experience:gaiwan"
     assert "dense" in result.hits[0].match_channels
     assert all(
-        hit.document.source_item_ref not in {"fact:other", "fact:old-tea"}
-        for hit in result.hits
+        hit.document.source_item_ref not in {"fact:other", "fact:old-tea"} for hit in result.hits
     )
 
 
@@ -329,16 +325,10 @@ def test_superseded_fact_requires_explicit_historical_recall() -> None:
     index.rebuild(cursor=CURSOR, documents=_documents())
 
     current = index.search(_query(query_text="旧的茶偏好", limit=4))
-    historical = index.search(
-        _query(query_text="旧的茶偏好", include_historical=True, limit=4)
-    )
+    historical = index.search(_query(query_text="旧的茶偏好", include_historical=True, limit=4))
 
-    assert all(
-        hit.document.source_item_ref != "fact:old-tea" for hit in current.hits
-    )
-    old = next(
-        hit for hit in historical.hits if hit.document.source_item_ref == "fact:old-tea"
-    )
+    assert all(hit.document.source_item_ref != "fact:old-tea" for hit in current.hits)
+    old = next(hit for hit in historical.hits if hit.document.source_item_ref == "fact:old-tea")
     assert old.document.status == "superseded"
     assert old.document.valid_to == NOW.replace(day=1)
 
@@ -548,7 +538,7 @@ def test_recall_result_is_bounded_before_durable_audit() -> None:
     assert len(encoded) <= MAX_RECALL_AUDIT_BYTES
 
 
-def test_semantic_embedding_runs_only_after_character_chooses_recall() -> None:
+def test_semantic_embedding_serves_automatic_attention_and_character_pull() -> None:
     semantic = _CountingSemanticFixtureEmbedding()
     primary = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
     primary.rebuild(cursor=CURSOR, documents=_documents())
@@ -566,8 +556,10 @@ def test_semantic_embedding_runs_only_after_character_chooses_recall() -> None:
         accessibility_seed="draw:local-prefetch",
         trigger_ref="trigger:semantic-on-pull",
     )
-    assert semantic.embedded_texts == []
+    assert "乌龙茶" in semantic.embedded_texts
+    assert "她上周买了一个白色盖碗。" in semantic.embedded_texts
 
+    semantic.embedded_texts.clear()
     coordinator.recall(
         request=CharacterRecallRequest(query_text="泡茶工具"),
         accessibility_seed="draw:semantic-pull",

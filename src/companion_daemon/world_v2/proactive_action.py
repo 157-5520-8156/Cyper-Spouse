@@ -13,6 +13,7 @@ import asyncio
 from datetime import datetime, timedelta
 import hashlib
 import json
+import logging
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -44,6 +45,13 @@ from .proposal_envelope import (
     TypedChange,
     validate_proposal_envelope,
 )
+from .recall_index import RecallCursor
+from .recall_runtime import (
+    RecallCoordinator,
+    TrustedRecallTrace,
+    augment_model_content_with_recall,
+    verify_trusted_recall_trace,
+)
 from .schema_core import FrozenModel
 from .schemas import ClaimLease, ProjectionCursor, TriggerProcess, WorldEvent
 from .shared_private_invitation import pending_shared_private_invitation_advisories
@@ -52,6 +60,8 @@ from .social_initiative import (
     SocialInitiativeCompiler,
     technical_failure_point,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 def _canonical(value: object) -> str:
@@ -119,11 +129,7 @@ def _validate_proactive_grounding(*, draft: ProactiveDraft, request: ModelInput)
             if not isinstance(item, dict):
                 continue
             value = item.get("value")
-            speaker = (
-                value.get("speaker")
-                if isinstance(value, dict)
-                else item.get("speaker")
-            )
+            speaker = value.get("speaker") if isinstance(value, dict) else item.get("speaker")
             if speaker not in {"counterpart", "user"}:
                 continue
             for field in ("item_ref", "source_hash", "value_hash"):
@@ -131,12 +137,8 @@ def _validate_proactive_grounding(*, draft: ProactiveDraft, request: ModelInput)
                 if isinstance(token, str):
                     counterpart_refs.add(token)
     allowed = {
-        "current_world": world_claim_source_tokens(
-            context, "current_situation", "world_life"
-        ),
-        "past_world": world_claim_source_tokens(
-            context, "world_life", "recent_experiences"
-        ),
+        "current_world": world_claim_source_tokens(context, "current_situation", "world_life"),
+        "past_world": world_claim_source_tokens(context, "world_life", "recent_experiences"),
         "counterpart_history": counterpart_refs,
         "shared_history": world_claim_source_tokens(
             context, "recent_dialogue", "recent_experiences"
@@ -154,9 +156,7 @@ def _validate_proactive_grounding(*, draft: ProactiveDraft, request: ModelInput)
             and ("你之前" in claim.claim_text or "你上次" in claim.claim_text)
             and not set(claim.source_refs).issubset(counterpart_refs)
         ):
-            raise ValueError(
-                "a companion message cannot prove a counterpart history claim"
-            )
+            raise ValueError("a companion message cannot prove a counterpart history claim")
 
 
 class _ProactiveSourceBindingError(ValueError):
@@ -186,6 +186,23 @@ class ProactiveDraftAdapter:
         )[:256]
         self._temperature = temperature
         self._identity_frame = identity_frame
+        self._recall: RecallCoordinator | None = None
+
+    def install_recall_coordinator(self, coordinator: RecallCoordinator) -> None:
+        """Install the shared source-bound attention module.
+
+        Recall changes only which verified Context material becomes accessible
+        to the character. It cannot choose ``now/later/silent`` or author any
+        prose.
+        """
+
+        if (
+            self._recall is not None
+            and self._recall is not coordinator
+            and not self._recall.is_closed
+        ):
+            raise ValueError("proactive recall coordinator is already installed")
+        self._recall = coordinator
 
     async def propose(self, request: ModelInput) -> ModelOutput:
         return await self._complete(request=request, recovery=False, failure_code=None)
@@ -198,6 +215,56 @@ class ProactiveDraftAdapter:
     async def _complete(
         self, *, request: ModelInput, recovery: bool, failure_code: str | None
     ) -> ModelOutput:
+        prefetch_trace: TrustedRecallTrace | None = None
+        if self._recall is not None and not recovery:
+            cursor = RecallCursor(
+                world_revision=request.evaluated_world_revision,
+                deliberation_revision=request.evaluated_deliberation_revision,
+                ledger_sequence=request.evaluated_ledger_sequence,
+            )
+            if self._recall.is_available(cursor, trigger_ref=request.trigger_ref):
+                try:
+                    self._recall.schedule_prefetch(
+                        query_text=_proactive_memory_cue(request.model_content_json),
+                        accessibility_seed=f"proactive-memory:{request.call_id}",
+                        trigger_ref=request.trigger_ref,
+                        limit=4,
+                    )
+                    prefetch_trace = await self._recall.await_scheduled_prefetch(
+                        expected_cursor=cursor,
+                        trigger_ref=request.trigger_ref,
+                    )
+                except Exception:
+                    _LOG.warning(
+                        "proactive memory attention unavailable trigger=%s",
+                        request.trigger_ref,
+                        exc_info=True,
+                    )
+                if prefetch_trace is None:
+                    self._recall.discard_scheduled_prefetch(
+                        cursor,
+                        trigger_ref=request.trigger_ref,
+                    )
+                else:
+                    try:
+                        request = request.model_copy(
+                            update={
+                                "model_content_json": augment_model_content_with_recall(
+                                    request.model_content_json,
+                                    verify_trusted_recall_trace(
+                                        prefetch_trace
+                                    ),
+                                )
+                            }
+                        )
+                    except ValueError:
+                        _LOG.warning(
+                            "proactive recall could not augment model Context "
+                            "trigger=%s",
+                            request.trigger_ref,
+                            exc_info=True,
+                        )
+                        prefetch_trace = None
         system = (
             "Decide one virtual companion proactive opportunity from the verified situation. Return exactly one "
             "JSON object, never Markdown. timing_choice is now, later, or silent. This is a possibility matrix, "
@@ -240,9 +307,7 @@ class ProactiveDraftAdapter:
         user = _canonical(
             {
                 "request": request.model_dump(mode="json"),
-                "proactive_opportunity": _proactive_source_frame(
-                    request.model_content_json
-                ),
+                "proactive_opportunity": _proactive_source_frame(request.model_content_json),
                 "failure_code": failure_code,
             }
         )
@@ -257,9 +322,7 @@ class ProactiveDraftAdapter:
         else:
             complete_json = getattr(self._model, "complete_json", None)
             raw = await (
-                complete_json(
-                    messages, temperature=0.25 if recovery else self._temperature
-                )
+                complete_json(messages, temperature=0.25 if recovery else self._temperature)
                 if callable(complete_json)
                 else self._model.complete(
                     messages, temperature=0.25 if recovery else self._temperature
@@ -274,9 +337,9 @@ class ProactiveDraftAdapter:
             # layer record recovery_failed so the runtime can back it off and
             # retry the same consideration with a fresh attempt identity.
             raise
-        grounding_outcome: Literal[
-            "not_required", "accepted", "corrected", "rejected"
-        ] = "not_required"
+        grounding_outcome: Literal["not_required", "accepted", "corrected", "rejected"] = (
+            "not_required"
+        )
         grounding_error: ValueError | None = None
         try:
             _validate_proactive_grounding(draft=draft, request=request)
@@ -328,6 +391,7 @@ class ProactiveDraftAdapter:
             input_tokens=usage.input_tokens if usage else None,
             output_tokens=usage.output_tokens if usage else None,
             usage=usage,
+            prefetch_trace=prefetch_trace,
         )
 
     @staticmethod
@@ -357,13 +421,15 @@ class ProactiveDraftAdapter:
 
         def bounded_text(field: str, default: str, limit: int) -> str:
             raw_value = decoded.get(field)
-            return raw_value if isinstance(raw_value, str) and 1 <= len(raw_value) <= limit else default
+            return (
+                raw_value
+                if isinstance(raw_value, str) and 1 <= len(raw_value) <= limit
+                else default
+            )
 
         normalized: dict[str, object] = {
             "timing_choice": choice,
-            "behavior_tendency": bounded_text(
-                "behavior_tendency", "consider_opportunity", 128
-            ),
+            "behavior_tendency": bounded_text("behavior_tendency", "consider_opportunity", 128),
             "stance": bounded_text("stance", "contextual", 128),
             "display_strategy": bounded_text("display_strategy", "restrained", 128),
             "brief_rationale": bounded_text(
@@ -382,8 +448,7 @@ class ProactiveDraftAdapter:
                         **claim,
                         "source_refs": tuple(claim.get("source_refs", ())),
                     }
-                    if isinstance(claim, dict)
-                    and isinstance(claim.get("source_refs", ()), list)
+                    if isinstance(claim, dict) and isinstance(claim.get("source_refs", ()), list)
                     else claim
                     for claim in decoded["world_claims"]
                 )
@@ -440,8 +505,7 @@ class ProactiveDraftAdapter:
             (
                 item
                 for item in request.trigger_evidence
-                if item.ref_id == request.trigger_ref
-                and item.source_world_revision is not None
+                if item.ref_id == request.trigger_ref and item.source_world_revision is not None
             ),
             None,
         )
@@ -632,6 +696,47 @@ def _proactive_source_frame(model_content_json: str) -> dict[str, object] | None
     return frames[0] if len(frames) == 1 else None
 
 
+def _proactive_memory_cue(model_content_json: str) -> str:
+    """Build one non-behavioral semantic cue from the present situation.
+
+    The cue intentionally excludes recalled memories, user facts and dialogue
+    so old material cannot query itself into the result. Current situation,
+    Affect, appraisals, life and the verified opportunity are attention
+    conditions only; the character still decides whether the association
+    matters and what, if anything, to do with it.
+    """
+
+    try:
+        context = json.loads(model_content_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("proactive memory cue requires Context JSON") from exc
+    slices = context.get("slices") if isinstance(context, dict) else None
+    if not isinstance(slices, dict):
+        raise ValueError("proactive memory cue requires Context slices")
+    attention: dict[str, object] = {}
+    for name in (
+        "current_situation",
+        "affect_episodes",
+        "appraisals",
+        "world_life",
+        "open_threads",
+        "advisories",
+    ):
+        lane = slices.get(name)
+        if not isinstance(lane, dict) or lane.get("availability") == "unavailable":
+            continue
+        items = lane.get("items")
+        if isinstance(items, list) and items:
+            attention[name] = items[:4]
+    cue = _canonical(
+        {
+            "logical_time": context.get("logical_time"),
+            "present_attention": attention,
+        }
+    )
+    return cue[:1_024]
+
+
 class ProactiveOpportunity(FrozenModel):
     source_kind: Literal[
         "settled_world_event",
@@ -692,9 +797,7 @@ class ProactiveDeliberationTurn:
             or committed_ref.world_revision != opportunity.source_world_revision
             or stored[1].ledger_sequence > cursor.ledger_sequence
         ):
-            raise _ProactiveSourceBindingError(
-                "proactive source is not exact committed authority"
-            )
+            raise _ProactiveSourceBindingError("proactive source is not exact committed authority")
         projection = await self._project_at(cursor)
         event = stored[0]
         head = None
@@ -854,15 +957,15 @@ class ProactiveDeliberationTurn:
                     "and choose silent when none supports a genuine contact."
                     if opportunity.source_kind == "ambient_presence"
                     else (
-                    (
-                        "A bounded set of committed situation changes is available. "
-                        "It is timing and attention evidence only; derive any motive "
-                        "freely from the verified relationship, affect, current "
-                        "situation, life, memory, threads and commitments. Stimulus refs: "
-                        + _canonical(opportunity.stimulus_event_refs)
-                    )
-                    if opportunity.source_kind == "situation_change"
-                    else "A verified proactive opportunity exists."
+                        (
+                            "A bounded set of committed situation changes is available. "
+                            "It is timing and attention evidence only; derive any motive "
+                            "freely from the verified relationship, affect, current "
+                            "situation, life, memory, threads and commitments. Stimulus refs: "
+                            + _canonical(opportunity.stimulus_event_refs)
+                        )
+                        if opportunity.source_kind == "situation_change"
+                        else "A verified proactive opportunity exists."
                     )
                 )
             )
@@ -1161,9 +1264,7 @@ class ProactiveActionRuntime:
                     None,
                 )
                 if durable_failure is None:
-                    raise RuntimeError(
-                        "proactive deliberation failure lacks durable model audit"
-                    )
+                    raise RuntimeError("proactive deliberation failure lacks durable model audit")
                 await self._complete(
                     process=active,
                     opportunity=opportunity,
@@ -1464,10 +1565,7 @@ class ProactiveActionRuntime:
         opportunity: ProactiveOpportunity,
         consideration_id: str,
     ) -> tuple[int, datetime | None]:  # type: ignore[no-untyped-def]
-        refs = {
-            item.event_id: item
-            for item in projection.committed_world_event_refs
-        }
+        refs = {item.event_id: item for item in projection.committed_world_event_refs}
         failures: list[tuple[int, datetime]] = []
         for retry_ordinal in range(64):
             trigger_id = self._trigger_id(
@@ -1475,19 +1573,13 @@ class ProactiveActionRuntime:
                 retry_ordinal=retry_ordinal,
             )
             process = next(
-                (
-                    item
-                    for item in projection.trigger_processes
-                    if item.trigger_id == trigger_id
-                ),
+                (item for item in projection.trigger_processes if item.trigger_id == trigger_id),
                 None,
             )
             if (
                 process is None
                 or process.state != "terminal"
-                or not str(process.runtime_outcome_ref).startswith(
-                    "proactive:deliberation-failed:"
-                )
+                or not str(process.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
             ):
                 break
             attempt_id = self._model_attempt_id(
@@ -1545,18 +1637,14 @@ class ProactiveActionRuntime:
             for item in projection.trigger_processes
             if item.process_kind == self.PROCESS_KIND
             and item.state == "terminal"
-            and not str(item.runtime_outcome_ref).startswith(
-                "proactive:deliberation-failed:"
-            )
+            and not str(item.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
         }
         failed_source_revisions = {}
         for item in projection.trigger_processes:
             if (
                 item.process_kind != self.PROCESS_KIND
                 or item.state != "terminal"
-                or not str(item.runtime_outcome_ref).startswith(
-                    "proactive:deliberation-failed:"
-                )
+                or not str(item.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
                 or item.source_evidence_ref is None
             ):
                 continue

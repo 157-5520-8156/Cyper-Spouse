@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import inspect
+import logging
 import re
 from typing import Literal, Protocol
 
@@ -29,6 +30,8 @@ from .life_ecology_contract import (
 )
 from .schema_core import FrozenModel
 
+_LOG = logging.getLogger(__name__)
+
 
 LifeEcologyAvailabilityState = Literal[
     "installed_and_active",
@@ -39,8 +42,16 @@ LifeEcologyAvailabilityState = Literal[
     "blocked_by_missing_capability",
 ]
 LifeEcologyRunStatus = Literal[
-    "advanced", "idle", "joined_existing", "deferred", "unavailable", "rejected", "failed_safe",
+    "advanced",
+    "idle",
+    "joined_existing",
+    "deferred",
+    "unavailable",
+    "rejected",
+    "failed_safe",
 ]
+
+
 # A wake remains intentionally narrow.  It is copied from the committed-life
 # vocabulary consumed by EventEcologyMediaCandidateRuntime, not from inbound
 # message or media paths.
@@ -85,9 +96,7 @@ class LifeEcologyTriggerStore(Protocol):
         correlation_id: str,
     ) -> LifeEcologyRunClaim: ...
 
-    async def complete(
-        self, *, key: LifeEcologyRunKey, trigger_id: str, outcome: str
-    ) -> None: ...
+    async def complete(self, *, key: LifeEcologyRunKey, trigger_id: str, outcome: str) -> None: ...
 
 
 class MediaEcologyFollowup(Protocol):
@@ -295,6 +304,10 @@ class LifeEcologyRuntime:
                 if not isinstance(activity_status, str) or not activity_status:
                     raise ValueError("activity lifecycle result has no stable status")
             except Exception:
+                _LOG.exception(
+                    "life ecology activity followup failed wake=%s",
+                    wake_event_ref,
+                )
                 await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
                 return LifeEcologyRunResult(
                     status="failed_safe",
@@ -317,9 +330,14 @@ class LifeEcologyRuntime:
                 if not isinstance(aftermath_status, str) or not aftermath_status:
                     raise ValueError("life aftermath result has no stable status")
             except Exception:
+                _LOG.exception(
+                    "life ecology aftermath followup failed wake=%s",
+                    wake_event_ref,
+                )
                 await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
                 return LifeEcologyRunResult(
-                    status="failed_safe", trigger_id=claim.trigger_id,
+                    status="failed_safe",
+                    trigger_id=claim.trigger_id,
                     reason_code="life_ecology.aftermath_followup_failed",
                     activity_followup_status=activity_status,
                     life_author_followup_status=author_status,
@@ -335,7 +353,8 @@ class LifeEcologyRuntime:
             self._future_life_author_followup is not None
             and author_status != "planned"
             and activity_status != "transitioned"
-            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+            and aftermath_status
+            not in {"occurrence_opened", "settled", "recovered_experience", "recovered_memory"}
         ):
             future_result = await self._future_life_author_followup.advance_once(
                 wake_event_ref=wake_event_ref,
@@ -355,7 +374,8 @@ class LifeEcologyRuntime:
             and author_status != "planned"
             and activity_status != "transitioned"
             and future_author_status != "planned"
-            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+            and aftermath_status
+            not in {"occurrence_opened", "settled", "recovered_experience", "recovered_memory"}
         ):
             try:
                 npc_result = await self._npc_initiative_followup.advance_once(
@@ -387,7 +407,8 @@ class LifeEcologyRuntime:
             and author_status != "planned"
             and activity_status != "transitioned"
             and future_author_status != "planned"
-            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+            and aftermath_status
+            not in {"occurrence_opened", "settled", "recovered_experience", "recovered_memory"}
         ):
             try:
                 aspiration_result = await self._aspiration_followup.advance_once(
@@ -420,7 +441,8 @@ class LifeEcologyRuntime:
             and author_status != "planned"
             and activity_status != "transitioned"
             and future_author_status != "planned"
-            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+            and aftermath_status
+            not in {"occurrence_opened", "settled", "recovered_experience", "recovered_memory"}
         ):
             try:
                 shared_private_result = await self._shared_private_followup.advance_once(
@@ -454,7 +476,8 @@ class LifeEcologyRuntime:
             self._open_world_followup is not None
             and future_author_status != "planned"
             and npc_initiative_status not in {"committed", "recovered"}
-            and aftermath_status not in {"occurrence_opened", "settled", "recovered_experience"}
+            and aftermath_status
+            not in {"occurrence_opened", "settled", "recovered_experience", "recovered_memory"}
         ):
             try:
                 open_world_result = await self._advance_open_world_once(
@@ -582,8 +605,12 @@ class LifeEcologyRuntime:
                 trigger_id=claim.trigger_id,
                 outcome=(
                     f"aftermath_{aftermath_status}"
-                    if aftermath_status in {
-                        "occurrence_opened", "settled", "recovered_experience"
+                    if aftermath_status
+                    in {
+                        "occurrence_opened",
+                        "settled",
+                        "recovered_experience",
+                        "recovered_memory",
                     }
                     else "author_planned"
                     if author_status == "planned"
@@ -595,10 +622,7 @@ class LifeEcologyRuntime:
                     if activity_status == "transitioned"
                     else "open_world_committed"
                     if open_world_status in {"committed", "recovered"}
-                    else (
-                        f"author_{author_status}"
-                        if author_status is not None else "idle"
-                    )
+                    else (f"author_{author_status}" if author_status is not None else "idle")
                 ),
             )
         except Exception:
@@ -620,9 +644,16 @@ class LifeEcologyRuntime:
         return LifeEcologyRunResult(
             status=(
                 "advanced"
-                if author_status == "planned" or future_author_status == "planned"
+                if author_status == "planned"
+                or future_author_status == "planned"
                 or activity_status == "transitioned"
-                or aftermath_status in {"occurrence_opened", "settled", "recovered_experience"}
+                or aftermath_status
+                in {
+                    "occurrence_opened",
+                    "settled",
+                    "recovered_experience",
+                    "recovered_memory",
+                }
                 or npc_initiative_status in {"committed", "recovered"}
                 or open_world_status in {"committed", "recovered"}
                 else "idle"
@@ -765,9 +796,7 @@ class LifeEcologyRuntime:
         return result
 
     async def _complete_failed_safe(self, *, key: LifeEcologyRunKey, trigger_id: str) -> bool:
-        return await self._complete_outcome(
-            key=key, trigger_id=trigger_id, outcome="failed_safe"
-        )
+        return await self._complete_outcome(key=key, trigger_id=trigger_id, outcome="failed_safe")
 
     async def _complete_technical_failure(
         self,
@@ -790,9 +819,7 @@ class LifeEcologyRuntime:
         outcome: str,
     ) -> bool:
         try:
-            await self._trigger_store.complete(
-                key=key, trigger_id=trigger_id, outcome=outcome
-            )
+            await self._trigger_store.complete(key=key, trigger_id=trigger_id, outcome=outcome)
         except Exception:
             # The result remains fail-safe.  A durable store that could not
             # record this state must surface recovery rather than manufacture
@@ -807,9 +834,7 @@ def _technical_failure_code(phase: str, exc: Exception) -> str:
         normalized = re.sub(r"[^a-z0-9._-]+", "_", supplied.lower()).strip("._-")
         if normalized:
             return f"{phase}.{normalized}"[:96]
-    type_name = re.sub(
-        r"(?<!^)(?=[A-Z])", "_", type(exc).__name__
-    ).lower()
+    type_name = re.sub(r"(?<!^)(?=[A-Z])", "_", type(exc).__name__).lower()
     return f"{phase}.{type_name}"[:96]
 
 

@@ -486,14 +486,23 @@ class ChatModelDeliberationAdapter:
                 trigger_ref=request.trigger_ref,
             )
             if prefetch_trace is not None:
-                request = request.model_copy(
-                    update={
-                        "model_content_json": augment_model_content_with_recall(
-                            request.model_content_json,
-                            verify_trusted_recall_trace(prefetch_trace),
-                        )
-                    }
-                )
+                try:
+                    request = request.model_copy(
+                        update={
+                            "model_content_json": augment_model_content_with_recall(
+                                request.model_content_json,
+                                verify_trusted_recall_trace(prefetch_trace),
+                            )
+                        }
+                    )
+                except ValueError:
+                    logger.warning(
+                        "recall prefetch could not augment model Context "
+                        "trigger=%s",
+                        request.trigger_ref,
+                        exc_info=True,
+                    )
+                    prefetch_trace = None
         messages = self._messages(
             request=request,
             quick_recovery=quick_recovery,

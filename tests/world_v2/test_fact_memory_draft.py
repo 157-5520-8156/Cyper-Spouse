@@ -6,6 +6,7 @@ import json
 import pytest
 
 from companion_daemon.world_v2.fact_memory_draft import (
+    ExperienceMemoryDraftAdapter,
     FactMemoryDraftAdapter,
     FactMemoryDraftTechnicalFailure,
     materialize_fact_memory_draft,
@@ -93,6 +94,31 @@ class _Chat:
         assert "乌龙茶" in messages[1]["content"]
         assert temperature == 0.15
         return json.dumps(_retained())
+
+
+class _ExperienceChat:
+    model = "test-experience-memory"
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert "lived Experience from your own life" in messages[0]["content"]
+        assert "verified user Fact" not in messages[0]["content"]
+        payload = json.loads(messages[1]["content"])
+        assert payload == {
+            "source_kind": "companion_lived_experience",
+            "verified_experience_text": "她傍晚淋雨回家，心里还惦记着白天没做完的事。",
+        }
+        assert temperature == 0.15
+        return '{"retain":false}'
+
+
+@pytest.mark.asyncio
+async def test_experience_adapter_leaves_lived_retention_to_the_character() -> None:
+    result = await ExperienceMemoryDraftAdapter(model=_ExperienceChat()).classify(
+        predicate_code="world.experience",
+        source_text="她傍晚淋雨回家，心里还惦记着白天没做完的事。",
+    )
+
+    assert result is None
 
 
 @pytest.mark.asyncio
