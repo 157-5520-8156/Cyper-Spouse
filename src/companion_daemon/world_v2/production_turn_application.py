@@ -250,8 +250,11 @@ from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .plan_disruption_appraisal_trigger_runtime import PlanDisruptionAppraisalTurn
 from .silence_appraisal_trigger_runtime import SilenceAppraisalTurn
 from .platform_action_executor import (
-    PlatformActionExecutor, PlatformTransport, MediaProviderTransport,
-    ProviderMediaActionExecutor, RoutedActionExecutor,
+    PlatformActionExecutor,
+    PlatformTransport,
+    MediaProviderTransport,
+    ProviderMediaActionExecutor,
+    RoutedActionExecutor,
 )
 from .read_only_tool_deliberation import compose_injected_read_only_tool_deliberation
 from .read_only_tool_authorization_resolver import ProjectionReadOnlyToolAuthorizationResolver
@@ -323,7 +326,9 @@ class LifeEcologyComposition:
 
     def __post_init__(self) -> None:
         if (
-            not self.catalog_version or not self.worker_actor or self.lease_seconds <= 0
+            not self.catalog_version
+            or not self.worker_actor
+            or self.lease_seconds <= 0
             or not str(self.seed_catalog_path)
         ):
             raise ValueError("life ecology composition is invalid")
@@ -370,9 +375,12 @@ class MediaContinuationComposition:
 
     def __post_init__(self) -> None:
         if (
-            not self.actor or not self.owner_id
-            or not self.render_account_id or not self.render_window_id
-            or not self.inspection_account_id or not self.inspection_window_id
+            not self.actor
+            or not self.owner_id
+            or not self.render_account_id
+            or not self.render_window_id
+            or not self.inspection_account_id
+            or not self.inspection_window_id
             or self.render_account_id == self.inspection_account_id
             or self.render_amount_limit < 0
             or self.inspection_amount_limit < 0
@@ -431,16 +439,12 @@ class WorldV2TurnApplicationConfig:
     chat_budget_limit: int = 10_000
     reply_budget_amount: int = 10
     reply_recovery_policy: str = "effect_once"
-    interactive_turn_budget_policy: InteractiveTurnBudgetPolicy = (
-        InteractiveTurnBudgetPolicy()
-    )
+    interactive_turn_budget_policy: InteractiveTurnBudgetPolicy = InteractiveTurnBudgetPolicy()
     # Generic/test composition is byte-compatible by default. The production
     # QQ root explicitly selects shadow below; validation may explicitly use on.
     expression_episode_mode: Literal["off", "shadow", "on"] = "off"
     recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
-    expression_action_kinds: frozenset[str] = frozenset(
-        {"reply", "followup", "proactive_message"}
-    )
+    expression_action_kinds: frozenset[str] = frozenset({"reply", "followup", "proactive_message"})
     appraisal_worker_owner: str = "worker:world-v2:appraisal"
     affect_worker_owner: str = "worker:world-v2:affect"
     relationship_worker_owner: str = "worker:world-v2:relationship"
@@ -596,7 +600,10 @@ class WorldV2TurnApplicationConfig:
         if (
             not self.proactive_account_id
             or not self.proactive_window_id
-            or not 0 <= self.proactive_amount_per_action <= self.proactive_budget_limit <= 10_000_000
+            or not 0
+            <= self.proactive_amount_per_action
+            <= self.proactive_budget_limit
+            <= 10_000_000
         ):
             raise ValueError("proactive budget config is invalid")
         if (
@@ -605,7 +612,10 @@ class WorldV2TurnApplicationConfig:
             and self.event_ecology_policy != self.life_ecology.media_policy
         ):
             raise ValueError("life ecology and event ecology policies must agree")
-        if self.silence_appraisal_idle_seconds is not None and self.silence_appraisal_idle_seconds < 0:
+        if (
+            self.silence_appraisal_idle_seconds is not None
+            and self.silence_appraisal_idle_seconds < 0
+        ):
             raise ValueError("silence appraisal idle threshold must not be negative")
 
 
@@ -845,11 +855,15 @@ class WorldV2TurnApplication:
                     if self._ledger.blocks_event_loop
                     else self._ledger.project()
                 )
-                kwargs = dict(events=events, expected_cursor=ProjectionCursor(
-                    world_revision=current.world_revision,
-                    deliberation_revision=current.deliberation_revision,
-                    ledger_sequence=current.ledger_sequence,
-                ), commit_id="reply-later:clock:" + clock.tick_id)
+                kwargs = dict(
+                    events=events,
+                    expected_cursor=ProjectionCursor(
+                        world_revision=current.world_revision,
+                        deliberation_revision=current.deliberation_revision,
+                        ledger_sequence=current.ledger_sequence,
+                    ),
+                    commit_id="reply-later:clock:" + clock.tick_id,
+                )
                 if self._ledger.blocks_event_loop:
                     await asyncio.to_thread(self._ledger.commit_at_cursor, **kwargs)
                 else:
@@ -961,19 +975,25 @@ class WorldV2TurnApplication:
             if self._ledger.blocks_event_loop:
                 await asyncio.to_thread(
                     self._deferred_replies.settle_terminal_action,
-                    action_id=action_id, logical_time=observed_at, created_at=observed_at,
-                    trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id,
+                    action_id=action_id,
+                    logical_time=observed_at,
+                    created_at=observed_at,
+                    trace_id=trace_id,
+                    causation_id=causation_id,
+                    correlation_id=correlation_id,
                 )
             else:
                 self._deferred_replies.settle_terminal_action(
-                    action_id=action_id, logical_time=observed_at, created_at=observed_at,
-                    trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id,
+                    action_id=action_id,
+                    logical_time=observed_at,
+                    created_at=observed_at,
+                    trace_id=trace_id,
+                    causation_id=causation_id,
+                    correlation_id=correlation_id,
                 )
         return outcome
 
-    async def record_outcome_observation(
-        self, observation: OutcomeObservation
-    ) -> RuntimeOutcome:
+    async def record_outcome_observation(self, observation: OutcomeObservation) -> RuntimeOutcome:
         """Record a verified world observation without exposing the ledger."""
 
         return await self._turns.record_outcome_observation(observation)
@@ -1030,8 +1050,14 @@ class WorldV2TurnApplication:
         correlation_id: str,
     ) -> CommitResult:
         """Move/cancel an ActivityPlan without giving a host ledger access."""
-        kwargs = dict(command=command, logical_time=logical_time, created_at=created_at,
-                      trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id)
+        kwargs = dict(
+            command=command,
+            logical_time=logical_time,
+            created_at=created_at,
+            trace_id=trace_id,
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._activity_plans.transition, **kwargs)
         return self._activity_plans.transition(**kwargs)
@@ -1188,9 +1214,15 @@ class WorldV2TurnApplication:
         correlation_id: str,
     ) -> CommitResult:
         """Atomically substitute an unfinished plan; it never asserts completion."""
-        kwargs = dict(command=command, predecessor_plan_id=predecessor_plan_id,
-                      logical_time=logical_time, created_at=created_at, trace_id=trace_id,
-                      causation_id=causation_id, correlation_id=correlation_id)
+        kwargs = dict(
+            command=command,
+            predecessor_plan_id=predecessor_plan_id,
+            logical_time=logical_time,
+            created_at=created_at,
+            trace_id=trace_id,
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._activity_plans.replace, **kwargs)
         return self._activity_plans.replace(**kwargs)
@@ -1207,9 +1239,7 @@ class WorldV2TurnApplication:
         await self._join_deferred_terminal_action(result)
         return result
 
-    async def _join_deferred_terminal_action(
-        self, result: ActionPumpResult | None
-    ) -> None:
+    async def _join_deferred_terminal_action(self, result: ActionPumpResult | None) -> None:
         """Join a pump-written terminal receipt to its reply-later Commitment.
 
         The Action pump owns dispatch and receipt settlement.  This application
@@ -1228,7 +1258,11 @@ class WorldV2TurnApplication:
             (item for item in projection.actions if item.action_id == result.action_id), None
         )
         if action is None or action.state not in {
-            "delivered", "failed", "cancelled", "expired", "unknown"
+            "delivered",
+            "failed",
+            "cancelled",
+            "expired",
+            "unknown",
         }:
             return
         receipt = next(
@@ -1269,12 +1303,18 @@ class WorldV2TurnApplication:
         return await self._media_execution_worker.drain_once(logical_time=logical_time)
 
     async def drain_media_continuation_once(
-        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+        self,
+        *,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
     ) -> str | None:
         if self._media_continuation_worker is None:
             return None
         return self._media_continuation_worker.drain_once(
-            logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
         )
 
     async def drain_media_planning_once(self) -> MediaPlanningRunResult:
@@ -1288,7 +1328,11 @@ class WorldV2TurnApplication:
         return await self._media_planning_worker.drain_once()
 
     async def drain_media_ecology_once(
-        self, *, wake_event_ref: str, logical_time: datetime, trace_id: str,
+        self,
+        *,
+        wake_event_ref: str,
+        logical_time: datetime,
+        trace_id: str,
         correlation_id: str,
     ) -> EcologyDrainResult | None:
         """Freeze source-bound life-media opportunities after a durable wake.
@@ -1315,7 +1359,11 @@ class WorldV2TurnApplication:
         return self._media_ecology.drain_once(**kwargs)
 
     async def drain_character_media_candidates_once(
-        self, *, wake_event_ref: str, logical_time: datetime, trace_id: str,
+        self,
+        *,
+        wake_event_ref: str,
+        logical_time: datetime,
+        trace_id: str,
         correlation_id: str,
     ) -> tuple[str, ...]:
         """Open source-bound character-media candidates after a declaration.
@@ -1339,7 +1387,11 @@ class WorldV2TurnApplication:
         return self._character_media_candidates.open_once(**kwargs)
 
     async def drain_media_selection_once(
-        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+        self,
+        *,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
     ) -> MediaSelectionRunResult | None:
         """Ask the bounded preview selector whether an available candidate matters.
 
@@ -1360,7 +1412,12 @@ class WorldV2TurnApplication:
         )
 
     async def accept_media_selection_once(
-        self, *, proposal_event_ref: str, logical_time: datetime, trace_id: str, correlation_id: str,
+        self,
+        *,
+        proposal_event_ref: str,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
     ) -> CommitResult | None:
         """Accept one pinned ordinary-preview proposal under explicit grant/budget config."""
 
@@ -1380,12 +1437,18 @@ class WorldV2TurnApplication:
         return self._accept_media_selection(**kwargs)
 
     async def _select_media_preview_candidate(
-        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+        self,
+        *,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
     ) -> MediaSelectionRunResult:
         """Adapt the configured selector to the conductor's small Interface."""
 
         result = await self.drain_media_selection_once(
-            logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
         )
         if result is None:
             # The conductor is composed only when a selector exists.  This is
@@ -1395,7 +1458,11 @@ class WorldV2TurnApplication:
         return result
 
     async def _accept_media_preview_selection(
-        self, *, proposal_event_ref: str, logical_time: datetime, trace_id: str,
+        self,
+        *,
+        proposal_event_ref: str,
+        logical_time: datetime,
+        trace_id: str,
         correlation_id: str,
     ) -> MediaPreviewAcceptanceOutcome | None:
         """Translate Acceptance's durable batch into conductor semantics."""
@@ -1421,17 +1488,24 @@ class WorldV2TurnApplication:
         if event_types == ["PhotoCandidateUnrenderable"]:
             disposition = "not_renderable"
         elif event_types == [
-            "AcceptanceRecorded", "MediaOpportunityFrozen", "BudgetReserved", "ActionAuthorized",
+            "AcceptanceRecorded",
+            "MediaOpportunityFrozen",
+            "BudgetReserved",
+            "ActionAuthorized",
         ]:
             disposition = "planning_authorized"
         else:
             raise RuntimeError("media preview Acceptance produced an unknown event batch")
         return MediaPreviewAcceptanceOutcome(
-            disposition=disposition, event_ids=commit.event_ids,
+            disposition=disposition,
+            event_ids=commit.event_ids,
         )
 
     async def drain_media_preview_once(
-        self, *, trace_id: str, correlation_id: str,
+        self,
+        *,
+        trace_id: str,
+        correlation_id: str,
     ) -> MediaPreviewConductorResult:
         """Advance the bounded candidate → preview-plan prefix once.
 
@@ -1442,15 +1516,19 @@ class WorldV2TurnApplication:
 
         if self._media_preview_conductor is None:
             return MediaPreviewConductorResult(
-                status="blocked", reason_code="media_preview.conductor_unavailable",
+                status="blocked",
+                reason_code="media_preview.conductor_unavailable",
             )
         logical_time = await self.current_logical_time()
         if logical_time is None:
             return MediaPreviewConductorResult(
-                status="idle", reason_code="media_preview.logical_time_unavailable",
+                status="idle",
+                reason_code="media_preview.logical_time_unavailable",
             )
         return await self._media_preview_conductor.advance_once(
-            logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
         )
 
     def _accept_media_selection(
@@ -1478,13 +1556,23 @@ class WorldV2TurnApplication:
         )
         return runtime.accept(
             handle=runtime.pin_proposal(cursor=cursor, proposal_event_ref=proposal_event_ref),
-            actor=config.actor, source="world-v2:media-selection-acceptance", logical_time=logical_time,
-            created_at=logical_time, trace_id=trace_id, correlation_id=correlation_id,
-            grant=config.grant, account_id=config.account_id, amount_limit=config.amount_limit,
+            actor=config.actor,
+            source="world-v2:media-selection-acceptance",
+            logical_time=logical_time,
+            created_at=logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+            grant=config.grant,
+            account_id=config.account_id,
+            amount_limit=config.amount_limit,
         )
 
     async def expire_media_candidates_once(
-        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+        self,
+        *,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
     ) -> MediaCandidateMaintenanceResult:
         """Close only due, still-available candidates at the authoritative clock.
 
@@ -1504,7 +1592,11 @@ class WorldV2TurnApplication:
         return self._media_candidate_maintenance.expire_once(**kwargs)
 
     async def advance_life_ecology_once(
-        self, *, wake_event_ref: str, trace_id: str, correlation_id: str,
+        self,
+        *,
+        wake_event_ref: str,
+        trace_id: str,
+        correlation_id: str,
     ) -> LifeEcologyRunResult:
         """Advance the explicit, ledger-backed life ecology after one wake.
 
@@ -1532,33 +1624,66 @@ class WorldV2TurnApplication:
         return self._media_ecology.discover_source_taxonomy()
 
     async def approve_media_automatic_delivery(
-        self, *, approval: MediaAutomaticDeliveryApproval, trace_id: str,
-        correlation_id: str, causation_id: str,
+        self,
+        *,
+        approval: MediaAutomaticDeliveryApproval,
+        trace_id: str,
+        correlation_id: str,
+        causation_id: str,
     ) -> MediaAutomaticDeliveryApproval:
         """Record an explicit short-lived operator exception to preview-only media."""
 
-        kwargs = dict(approval=approval, trace_id=trace_id, correlation_id=correlation_id, causation_id=causation_id)
+        kwargs = dict(
+            approval=approval,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._media_delivery.approve, **kwargs)
         return self._media_delivery.approve(**kwargs)
 
     async def authorize_media_delivery(
-        self, *, approval_id: str, approval_revision: int, actor: str, target: str,
-        account_id: str, amount_limit: int, logical_time: datetime, trace_id: str,
+        self,
+        *,
+        approval_id: str,
+        approval_revision: int,
+        actor: str,
+        target: str,
+        account_id: str,
+        amount_limit: int,
+        logical_time: datetime,
+        trace_id: str,
         correlation_id: str,
     ):
         """Authorize one approved immutable artifact; no preview auto-sends."""
 
-        kwargs = dict(approval_id=approval_id, approval_revision=approval_revision, actor=actor,
-                      target=target, account_id=account_id, amount_limit=amount_limit,
-                      logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id)
+        kwargs = dict(
+            approval_id=approval_id,
+            approval_revision=approval_revision,
+            actor=actor,
+            target=target,
+            account_id=account_id,
+            amount_limit=amount_limit,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._media_delivery.authorize_delivery, **kwargs)
         return self._media_delivery.authorize_delivery(**kwargs)
 
     async def deliver_approved_media_once(
-        self, *, approval_id: str, approval_revision: int, actor: str, target: str,
-        account_id: str, amount_limit: int, logical_time: datetime, trace_id: str,
+        self,
+        *,
+        approval_id: str,
+        approval_revision: int,
+        actor: str,
+        target: str,
+        account_id: str,
+        amount_limit: int,
+        logical_time: datetime,
+        trace_id: str,
         correlation_id: str,
     ) -> ActionPumpResult | None:
         """Authorize one approved artifact, then drain only its Action.
@@ -1709,9 +1834,7 @@ class WorldV2TurnApplication:
                 if (
                     values.status == "open"
                     and values.due_window is not None
-                    and values.due_window.opens_at
-                    <= logical_time
-                    < values.due_window.closes_at
+                    and values.due_window.opens_at <= logical_time < values.due_window.closes_at
                 ):
                     transition = next(
                         (
@@ -1735,9 +1858,11 @@ class WorldV2TurnApplication:
                 ),
                 default=None,
             )
-            contact_on_cooldown = recent_contact is not None and (
-                logical_time - recent_contact
-            ).total_seconds() < policy.contact_cooldown_seconds
+            contact_on_cooldown = (
+                recent_contact is not None
+                and (logical_time - recent_contact).total_seconds()
+                < policy.contact_cooldown_seconds
+            )
             if not contact_on_cooldown:
                 # Response expectations remain advisory model context. V3 only
                 # opens proactive consideration from real situation changes or
@@ -1754,12 +1879,8 @@ class WorldV2TurnApplication:
                         None,
                     )
                     if source_ref is not None:
-                        idle_seconds = (
-                            logical_time - source_ref.logical_time
-                        ).total_seconds()
-                        profile = SocialInitiativeContextPolicy(
-                            policy=policy
-                        ).compile(
+                        idle_seconds = (logical_time - source_ref.logical_time).total_seconds()
+                        profile = SocialInitiativeContextPolicy(policy=policy).compile(
                             projection=projection,
                             logical_time=logical_time,
                         )
@@ -1790,19 +1911,12 @@ class WorldV2TurnApplication:
                                 and draw.sampler_version == "random-authority.2"
                                 and draw.weight_policy_version
                                 == SocialInitiativeContextPolicy.version
-                                and all(
-                                    item.startswith("delay:")
-                                    for item in draw.candidate_refs
-                                )
+                                and all(item.startswith("delay:") for item in draw.candidate_refs)
                             ):
                                 cadence_draw = draw
                                 break
                         delay_seconds = (
-                            int(
-                                cadence_draw.selected_candidate_ref.removeprefix(
-                                    "delay:"
-                                )
-                            )
+                            int(cadence_draw.selected_candidate_ref.removeprefix("delay:"))
                             if cadence_draw is not None
                             else profile.delay_candidates_seconds[0]
                         )
@@ -1826,8 +1940,7 @@ class WorldV2TurnApplication:
                         current_processes = tuple(
                             item
                             for item in proactive_processes
-                            if item.trigger_ref
-                            == "proactive-consideration:" + consideration_id
+                            if item.trigger_ref == "proactive-consideration:" + consideration_id
                         )
                         current = current_processes[-1] if current_processes else None
                         if current is None:
@@ -1852,10 +1965,7 @@ class WorldV2TurnApplication:
                             backoff = ProactiveActionRuntime.FAILURE_BACKOFF_SECONDS[
                                 min(
                                     max(0, failures - 1),
-                                    len(
-                                        ProactiveActionRuntime.FAILURE_BACKOFF_SECONDS
-                                    )
-                                    - 1,
+                                    len(ProactiveActionRuntime.FAILURE_BACKOFF_SECONDS) - 1,
                                 )
                             ]
                             failed_at = (
@@ -1863,25 +1973,19 @@ class WorldV2TurnApplication:
                                 if current.claim_lease is not None
                                 else scheduled_for
                             )
-                            next_consideration_at = failed_at + timedelta(
-                                seconds=backoff
-                            )
+                            next_consideration_at = failed_at + timedelta(seconds=backoff)
                             initiative_state = (
                                 "retry_wait"
                                 if logical_time < next_consideration_at
                                 else "consideration_due"
                             )
-                            spontaneous_pending = (
-                                logical_time >= next_consideration_at
-                            )
+                            spontaneous_pending = logical_time >= next_consideration_at
                         elif current.runtime_outcome_ref == "proactive:silent":
                             initiative_state = "model_silent"
                             next_consideration_at = source_ref.logical_time + timedelta(
                                 seconds=delay_seconds * (epoch + 2)
                             )
-                        elif str(current.runtime_outcome_ref).startswith(
-                            "proactive:authorized:"
-                        ):
+                        elif str(current.runtime_outcome_ref).startswith("proactive:authorized:"):
                             action_id = str(current.runtime_outcome_ref).removeprefix(
                                 "proactive:authorized:"
                             )
@@ -1911,12 +2015,9 @@ class WorldV2TurnApplication:
                 values = commitment.values
                 if (
                     values.status in {"open", "due"}
-                    and values.due_window.opens_at
-                    <= logical_time
-                    < values.due_window.closes_at
+                    and values.due_window.opens_at <= logical_time < values.due_window.closes_at
                     and not any(
-                        action.action_id
-                        == values.fulfillment_contract.expected_action_id
+                        action.action_id == values.fulfillment_contract.expected_action_id
                         for action in projection.actions
                     )
                 ):
@@ -1960,9 +2061,7 @@ class WorldV2TurnApplication:
         elif latest is not None and str(latest.runtime_outcome_ref).startswith(
             "proactive:authorized:"
         ):
-            action_id = str(latest.runtime_outcome_ref).removeprefix(
-                "proactive:authorized:"
-            )
+            action_id = str(latest.runtime_outcome_ref).removeprefix("proactive:authorized:")
             action = next(
                 (item for item in projection.actions if item.action_id == action_id),
                 None,
@@ -1973,8 +2072,7 @@ class WorldV2TurnApplication:
         if (
             latest is not None
             and latest.source_evidence_ref is not None
-            and last_model_decision
-            in {"now", "later", "silent", "grounding_rejected"}
+            and last_model_decision in {"now", "later", "silent", "grounding_rejected"}
         ):
             decision_audit = next(
                 (
@@ -1988,9 +2086,7 @@ class WorldV2TurnApplication:
             )
             if decision_audit is not None:
                 try:
-                    decision = validate_proposal_envelope(
-                        json.loads(decision_audit.proposal_json)
-                    )
+                    decision = validate_proposal_envelope(json.loads(decision_audit.proposal_json))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     decision = None
                 if isinstance(decision, DecisionProposal):
@@ -2006,9 +2102,7 @@ class WorldV2TurnApplication:
         latest_failure_revision, _latest_failed_at = (
             technical_failure_point(projection=projection, process=latest)
             if latest is not None
-            and str(latest.runtime_outcome_ref).startswith(
-                "proactive:deliberation-failed:"
-            )
+            and str(latest.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
             else (None, None)
         )
         latest_failure_superseded = (
@@ -2018,25 +2112,19 @@ class WorldV2TurnApplication:
         if (
             not latest_failure_superseded
             and latest is not None
-            and str(latest.runtime_outcome_ref).startswith(
-                "proactive:deliberation-failed:"
-            )
+            and str(latest.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
         ):
             consecutive_technical_failures = sum(
                 process.trigger_ref == latest.trigger_ref
                 and process.state == "terminal"
-                and str(process.runtime_outcome_ref).startswith(
-                    "proactive:deliberation-failed:"
-                )
+                and str(process.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
                 for process in proactive_processes
             )
         last_failure_code = None
         if (
             latest is not None
             and not latest_failure_superseded
-            and str(latest.runtime_outcome_ref).startswith(
-                "proactive:deliberation-failed:"
-            )
+            and str(latest.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
         ):
             result_ref = str(latest.runtime_outcome_ref).removeprefix(
                 "proactive:deliberation-failed:"
@@ -2072,10 +2160,7 @@ class WorldV2TurnApplication:
             warning_reasons.append("consideration_overdue")
         stimulus_source_count = sum(
             item.event_type in SITUATION_STIMULUS_EVENT_TYPES
-            and (
-                logical_time is None
-                or logical_time - item.logical_time <= timedelta(minutes=10)
-            )
+            and (logical_time is None or logical_time - item.logical_time <= timedelta(minutes=10))
             for item in projection.committed_world_event_refs
         )
         expectation_status_counts = Counter(
@@ -2089,32 +2174,24 @@ class WorldV2TurnApplication:
         pending_expectation_count = sum(
             item.response_expectation is not None
             and item.plan_id not in terminal_expectation_plans
-            and (
-                logical_time is None
-                or logical_time < item.response_expectation.expires_at
-            )
+            and (logical_time is None or logical_time < item.response_expectation.expires_at)
             for item in projection.expression_plan_manifests
         )
         proactive_grounding_counts: Counter[str] = Counter()
         for audit_item in projection.proposal_audits:
-            if (
-                audit_item.proposal_kind != "decision"
-                or not audit_item.proposal_id.startswith("proposal:proactive:")
+            if audit_item.proposal_kind != "decision" or not audit_item.proposal_id.startswith(
+                "proposal:proactive:"
             ):
                 continue
             try:
-                audited_decision = validate_proposal_envelope(
-                    json.loads(audit_item.proposal_json)
-                )
+                audited_decision = validate_proposal_envelope(json.loads(audit_item.proposal_json))
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
             if (
                 isinstance(audited_decision, DecisionProposal)
                 and audited_decision.proactive_grounding_outcome is not None
             ):
-                proactive_grounding_counts[
-                    audited_decision.proactive_grounding_outcome
-                ] += 1
+                proactive_grounding_counts[audited_decision.proactive_grounding_outcome] += 1
 
         # Registration and proposal/audit records prove infrastructure, not
         # that the character has actually lived through anything.
@@ -2134,10 +2211,9 @@ class WorldV2TurnApplication:
         active_plans = tuple(item for item in projection.plans if item.status == "active")
         trigger_counts = Counter(item.process_kind for item in projection.trigger_processes)
         pending_trigger_counts = Counter(
-            item.process_kind
-            for item in projection.trigger_processes
-            if item.state != "terminal"
+            item.process_kind for item in projection.trigger_processes if item.state != "terminal"
         )
+
         def _activity_view(plan) -> dict[str, object]:
             window = plan.scheduled_window
             return {
@@ -2145,12 +2221,8 @@ class WorldV2TurnApplication:
                 "status": plan.status,
                 "location_ref": plan.location_ref,
                 "participant_refs": list(plan.participant_refs),
-                "window_opens_at": (
-                    window.opens_at.isoformat() if window is not None else None
-                ),
-                "window_closes_at": (
-                    window.closes_at.isoformat() if window is not None else None
-                ),
+                "window_opens_at": (window.opens_at.isoformat() if window is not None else None),
+                "window_closes_at": (window.closes_at.isoformat() if window is not None else None),
                 "last_transitioned_at": (
                     plan.last_transitioned_at.isoformat()
                     if plan.last_transitioned_at is not None
@@ -2179,67 +2251,56 @@ class WorldV2TurnApplication:
         # The viewer-facing calendar shows every accepted plan whose window
         # opens within the next seven days (the future author's horizon),
         # not just the single nearest one.
-        calendar_horizon = (
-            logical_time + timedelta(days=7) if logical_time is not None else None
-        )
+        calendar_horizon = logical_time + timedelta(days=7) if logical_time is not None else None
         upcoming_calendar = [
             item
             for item in upcoming_planned
-            if calendar_horizon is None
-            or item.scheduled_window.opens_at <= calendar_horizon
+            if calendar_horizon is None or item.scheduled_window.opens_at <= calendar_horizon
         ]
         # A bounded viewer-facing trace of the lived day: every plan whose
         # window opened in the last 24 hours, terminal or not.  This is what
         # lets the dashboard show "today" honestly instead of only a single
         # latest-completed item.  Selection keeps the newest 16, but the
         # output is chronological so the viewer reads a day, not a stack.
-        recent_day_activities = tuple(reversed(sorted(
-            (
-                item
-                for item in projection.plans
-                if item.scheduled_window is not None
-                and logical_time is not None
-                and timedelta(0)
-                <= (logical_time - item.scheduled_window.opens_at)
-                <= timedelta(hours=24)
-            ),
-            key=lambda item: item.scheduled_window.opens_at,
-            reverse=True,
-        )[:16]))
+        recent_day_activities = tuple(
+            reversed(
+                sorted(
+                    (
+                        item
+                        for item in projection.plans
+                        if item.scheduled_window is not None
+                        and logical_time is not None
+                        and timedelta(0)
+                        <= (logical_time - item.scheduled_window.opens_at)
+                        <= timedelta(hours=24)
+                    ),
+                    key=lambda item: item.scheduled_window.opens_at,
+                    reverse=True,
+                )[:16]
+            )
+        )
         latest_completed = _latest_transitioned("completed")
         mechanisms = {
             # This is deliberately a read-only projection of what reached the
             # ledger.  It distinguishes "the mechanism has no state yet" from
             # "the mechanism has state but its trigger is still pending".
             "current_situation": {
-                "logical_time": (
-                    logical_time.isoformat() if logical_time is not None else None
-                ),
+                "logical_time": (logical_time.isoformat() if logical_time is not None else None),
                 "active_activity_count": len(active_plans),
-                "active_activity_kinds": sorted(
-                    {item.activity_kind for item in active_plans}
-                ),
+                "active_activity_kinds": sorted({item.activity_kind for item in active_plans}),
                 "planned_activity_count": plans_by_status.get("planned", 0),
                 "paused_activity_count": plans_by_status.get("paused", 0),
                 # Viewer-facing factual life state: what she is doing right
                 # now, what is scheduled next, and what she finished last.
                 # These are exact ledger projections, never model guesses.
-                "active_activities": [
-                    _activity_view(item) for item in active_plans
-                ],
+                "active_activities": [_activity_view(item) for item in active_plans],
                 "next_planned_activity": (
                     _activity_view(upcoming_planned[0]) if upcoming_planned else None
                 ),
-                "upcoming_activities": [
-                    _activity_view(item) for item in upcoming_calendar
-                ],
-                "today_activities": [
-                    _activity_view(item) for item in recent_day_activities
-                ],
+                "upcoming_activities": [_activity_view(item) for item in upcoming_calendar],
+                "today_activities": [_activity_view(item) for item in recent_day_activities],
                 "last_completed_activity": (
-                    _activity_view(latest_completed)
-                    if latest_completed is not None
-                    else None
+                    _activity_view(latest_completed) if latest_completed is not None else None
                 ),
             },
             "life_ecology": {
@@ -2260,13 +2321,10 @@ class WorldV2TurnApplication:
                 "appraisal_count": len(projection.appraisals),
             },
             "memory": {
-                "fact_count": sum(
-                    item.values.status == "active" for item in projection.facts
-                ),
+                "fact_count": sum(item.values.status == "active" for item in projection.facts),
                 "candidate_count": len(projection.memory_candidates),
                 "active_candidate_count": sum(
-                    item.values.status == "active"
-                    for item in projection.memory_candidates
+                    item.values.status == "active" for item in projection.memory_candidates
                 ),
             },
             "relationship": {
@@ -2299,9 +2357,7 @@ class WorldV2TurnApplication:
         return {
             "initiative_last_status": last_status,
             "initiative_last_reason": last_reason,
-            "pending_proactive_opportunity_count": len(
-                opportunity_sources - processed_sources
-            )
+            "pending_proactive_opportunity_count": len(opportunity_sources - processed_sources)
             + int(spontaneous_pending),
             "pending_proactive_process_count": sum(
                 item.state != "terminal" for item in proactive_processes
@@ -2313,35 +2369,23 @@ class WorldV2TurnApplication:
             "spontaneous_candidate_due": spontaneous_candidate_due,
             "initiative_state": initiative_state,
             "initiative_last_considered_at": (
-                last_considered_at.isoformat()
-                if last_considered_at is not None
-                else None
+                last_considered_at.isoformat() if last_considered_at is not None else None
             ),
             "initiative_last_model_decision": last_model_decision,
             "initiative_last_decision_reason": last_reason,
             "initiative_last_impulse_summary": last_impulse_summary,
             "initiative_last_grounding_outcome": last_grounding_outcome,
-            "initiative_grounding_corrected_count": proactive_grounding_counts[
-                "corrected"
-            ],
-            "initiative_grounding_rejected_count": proactive_grounding_counts[
-                "rejected"
-            ],
+            "initiative_grounding_corrected_count": proactive_grounding_counts["corrected"],
+            "initiative_grounding_rejected_count": proactive_grounding_counts["rejected"],
             "initiative_stimulus_source_count": stimulus_source_count,
             "initiative_stimulus_merge_window_seconds": 600,
             "initiative_pending_expectation_count": pending_expectation_count,
-            "initiative_expectation_status_counts": dict(
-                expectation_status_counts
-            ),
+            "initiative_expectation_status_counts": dict(expectation_status_counts),
             "initiative_next_consideration_at": (
-                next_consideration_at.isoformat()
-                if next_consideration_at is not None
-                else None
+                next_consideration_at.isoformat() if next_consideration_at is not None else None
             ),
             "initiative_cadence_reason_codes": list(cadence_reason_codes),
-            "initiative_consecutive_technical_failures": (
-                consecutive_technical_failures
-            ),
+            "initiative_consecutive_technical_failures": (consecutive_technical_failures),
             "initiative_retry_ordinal": consecutive_technical_failures,
             "initiative_last_failure_code": last_failure_code,
             "initiative_warning": bool(warning_reasons),
@@ -2351,6 +2395,11 @@ class WorldV2TurnApplication:
             "experience_count": experience_count,
             "starved": not (life_event_count or occurrence_count or experience_count),
             "expression_episode": self._turns.expression_episode_diagnostics(),
+            "recall_semantic": (
+                self._recall_coordinator.semantic_health()
+                if self._recall_coordinator is not None
+                else {"enabled": False}
+            ),
             "mechanisms": mechanisms,
         }
 
@@ -2380,13 +2429,10 @@ class WorldV2TurnApplication:
                 "components": [
                     {
                         "dimension": component.dimension,
-                        "label": MOOD_LABELS.get(
-                            component.dimension, component.dimension
-                        ),
+                        "label": MOOD_LABELS.get(component.dimension, component.dimension),
                         "intensity_bp": component.intensity_bp,
                         "anchor_intensity_bp": component.decay_anchor_intensity_bp,
-                        "decaying": component.intensity_bp
-                        < component.decay_anchor_intensity_bp,
+                        "decaying": component.intensity_bp < component.decay_anchor_intensity_bp,
                     }
                     for component in episode.components
                 ],
@@ -2398,9 +2444,7 @@ class WorldV2TurnApplication:
             )[:8]
         ]
         phase_readings = (
-            change_phase_readings(
-                tuple(projection.affect_episodes), logical_time=logical_time
-            )
+            change_phase_readings(tuple(projection.affect_episodes), logical_time=logical_time)
             if isinstance(logical_time, datetime)
             else ()
         )
@@ -2417,11 +2461,7 @@ class WorldV2TurnApplication:
 
         active_facts = tuple(
             sorted(
-                (
-                    item
-                    for item in projection.facts
-                    if item.values.status == "active"
-                ),
+                (item for item in projection.facts if item.values.status == "active"),
                 key=lambda item: item.updated_at,
                 reverse=True,
             )[:8]
@@ -2456,9 +2496,7 @@ class WorldV2TurnApplication:
             key=lambda item: item.updated_at,
             reverse=True,
         )[:8]:
-            stored = self._life_content_store.read_exact(
-                content_ref=candidate.values.summary_ref
-            )
+            stored = self._life_content_store.read_exact(content_ref=candidate.values.summary_ref)
             salience = candidate.values.salience
             highlights = sorted(
                 (
@@ -2477,20 +2515,21 @@ class WorldV2TurnApplication:
                 key=lambda item: item[1],
                 reverse=True,
             )[:2]
-            memory_items.append({
-                "cue_kind": candidate.values.cue_kind,
-                "status": candidate.values.status,
-                "source_kinds": sorted({
-                    binding.source_kind
-                    for binding in candidate.values.source_bindings
-                }),
-                "summary_excerpt": _clip(stored.text) if stored is not None else None,
-                "salience_highlights": [
-                    {"dimension": name, "bp": value} for name, value in highlights
-                ],
-                "retrieval_strength_bp": candidate.values.retrieval_strength_bp,
-                "updated_at": _iso(candidate.updated_at),
-            })
+            memory_items.append(
+                {
+                    "cue_kind": candidate.values.cue_kind,
+                    "status": candidate.values.status,
+                    "source_kinds": sorted(
+                        {binding.source_kind for binding in candidate.values.source_bindings}
+                    ),
+                    "summary_excerpt": _clip(stored.text) if stored is not None else None,
+                    "salience_highlights": [
+                        {"dimension": name, "bp": value} for name, value in highlights
+                    ],
+                    "retrieval_strength_bp": candidate.values.retrieval_strength_bp,
+                    "updated_at": _iso(candidate.updated_at),
+                }
+            )
 
         hypothesis_meanings = {
             (appraisal.appraisal_id, hypothesis.hypothesis_id): hypothesis.meaning
@@ -2499,11 +2538,7 @@ class WorldV2TurnApplication:
         }
         impressions = []
         for impression in sorted(
-            (
-                item
-                for item in projection.private_impressions
-                if item.status == "active"
-            ),
+            (item for item in projection.private_impressions if item.status == "active"),
             key=lambda item: item.last_supported,
             reverse=True,
         )[:8]:
@@ -2514,13 +2549,70 @@ class WorldV2TurnApplication:
                     meaning = hypothesis_meanings.get((parts[1], parts[2]))
                     if meaning is not None:
                         meanings.append(meaning)
-            impressions.append({
-                "subject_ref": impression.subject_ref,
-                "meanings": meanings,
-                "confidence_bp": impression.confidence_bp,
-                "first_seen": _iso(impression.first_seen),
-                "expiry_condition": impression.expiry_condition,
-            })
+            impressions.append(
+                {
+                    "subject_ref": impression.subject_ref,
+                    "meanings": meanings,
+                    "confidence_bp": impression.confidence_bp,
+                    "first_seen": _iso(impression.first_seen),
+                    "expiry_condition": impression.expiry_condition,
+                }
+            )
+        reflection_processes = [
+            item
+            for item in projection.trigger_processes
+            if item.process_kind == "private_impression_deliberation"
+        ]
+        active_reflection = next(
+            (item for item in reversed(reflection_processes) if item.state != "terminal"),
+            None,
+        )
+        last_reflection_audit = None
+        if active_reflection is not None:
+            last_reflection_audit = next(
+                (
+                    item
+                    for item in reversed(projection.model_result_audits)
+                    if item.trigger_ref == active_reflection.source_evidence_ref
+                ),
+                None,
+            )
+        reflection_failure_code = None
+        if last_reflection_audit is not None:
+            try:
+                reflection_failure_code = json.loads(last_reflection_audit.audit_json).get(
+                    "failure_code"
+                )
+            except (TypeError, json.JSONDecodeError):
+                reflection_failure_code = "audit_unreadable"
+            if (
+                reflection_failure_code is None
+                and active_reflection is not None
+                and last_reflection_audit.evaluated_world_revision
+                < projection.world_revision
+            ):
+                reflection_failure_code = "context_advanced"
+        reflection_status = (
+            "retry_wait"
+            if active_reflection is not None
+            and active_reflection.state == "claimed"
+            and last_reflection_audit is not None
+            else active_reflection.state
+            if active_reflection is not None
+            else "idle"
+        )
+        reflection_health = {
+            "state": reflection_status,
+            "pending_count": sum(item.state != "terminal" for item in reflection_processes),
+            "last_failure_code": reflection_failure_code,
+            "next_retry_at": (
+                _iso(active_reflection.claim_lease.expires_at)
+                if reflection_status == "retry_wait"
+                and active_reflection is not None
+                and active_reflection.claim_lease is not None
+                else None
+            ),
+        }
 
         aspirations = [
             {
@@ -2553,9 +2645,7 @@ class WorldV2TurnApplication:
                 "variables": latest.variables.model_dump(mode="json"),
                 "last_adjusted_at": _iso(latest.last_adjusted_at),
             }
-        npc_names = {
-            f"npc:{npc.npc_id}": npc.npc_id for npc in projection.npcs
-        }
+        npc_names = {f"npc:{npc.npc_id}": npc.npc_id for npc in projection.npcs}
         npc_states = [
             {
                 "npc_ref": reading.npc_ref,
@@ -2580,11 +2670,13 @@ class WorldV2TurnApplication:
         )[:8]:
             values = getattr(experience, "values", None)
             summary_ref = (
-                values.summary_ref if values is not None
+                values.summary_ref
+                if values is not None
                 else getattr(experience, "summary_ref", None)
             )
             occurred_to = (
-                values.occurred_to if values is not None
+                values.occurred_to
+                if values is not None
                 else getattr(experience, "occurred_to", None)
             )
             stored = (
@@ -2592,10 +2684,12 @@ class WorldV2TurnApplication:
                 if summary_ref
                 else None
             )
-            recent_experiences.append({
-                "occurred_to": _iso(occurred_to),
-                "summary_excerpt": _clip(stored.text) if stored is not None else None,
-            })
+            recent_experiences.append(
+                {
+                    "occurred_to": _iso(occurred_to),
+                    "summary_excerpt": _clip(stored.text) if stored is not None else None,
+                }
+            )
         recent_experiences.reverse()
 
         return {
@@ -2603,7 +2697,11 @@ class WorldV2TurnApplication:
             "memory": {"facts": facts, "candidates": memory_items},
             "relationship": {"user_state": user_state, "npc_states": npc_states},
             "life_ecology": {"recent_experiences": recent_experiences},
-            "inner": {"impressions": impressions, "aspirations": aspirations},
+            "inner": {
+                "impressions": impressions,
+                "aspirations": aspirations,
+                "reflection": reflection_health,
+            },
         }
 
     async def maintain_wal_once(self) -> SQLiteWalMaintenanceResult:
@@ -2659,6 +2757,7 @@ def build_sqlite_world_v2_turn_application(
     interaction_bid_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
     private_impression_model: PrivateImpressionChatModel | None = None,
+    private_impression_identity_frame: CompanionIdentityFrame | None = None,
     memory_model: FactMemoryDraftChatModel | None = None,
     activity_lifecycle_model: ActivityLifecycleDraftModel | None = None,
     open_world_event_model: OpenWorldEventModel | None = None,
@@ -2685,13 +2784,17 @@ def build_sqlite_world_v2_turn_application(
     """
 
     if media_planner is not None and legacy_event_media_planner is not None:
-        raise ValueError("inject either a World v2 media planner or legacy event-media planner, not both")
+        raise ValueError(
+            "inject either a World v2 media planner or legacy event-media planner, not both"
+        )
     if config.media_continuation is not None and media_transport is None:
         raise ValueError("media continuation composition requires durable media transport")
     if config.media_auto_delivery is not None and config.media_continuation is None:
         raise ValueError("media auto-delivery requires the render/inspection continuation")
     if outcome_model is not None and outcome_draft_model is not None:
-        raise ValueError("inject either an outcome proposal adapter or an outcome draft model, not both")
+        raise ValueError(
+            "inject either an outcome proposal adapter or an outcome draft model, not both"
+        )
     # Refuse to start when the vertical registry and the scattered process-kind
     # enumerations disagree: a missing reviewer/owner must fail here by name,
     # not surface later as an Opened-only trigger backlog in the ledger.
@@ -2711,7 +2814,14 @@ def build_sqlite_world_v2_turn_application(
         (time.perf_counter() - build_started) * 1000,
     )
     life_content_store = SQLiteImmutableLifeContentStore(path=str(path), world_id=config.world_id)
-    expression_payload_store = SQLiteImmutableExpressionPayloadStore(path=str(path), world_id=config.world_id)
+
+    def read_private_reflection_content(content_ref: str) -> str | None:
+        stored = life_content_store.read_exact(content_ref=content_ref)
+        return stored.text if stored is not None else None
+
+    expression_payload_store = SQLiteImmutableExpressionPayloadStore(
+        path=str(path), world_id=config.world_id
+    )
     media_payload_store = SQLiteImmutableMediaPayloadStore(path=str(path), world_id=config.world_id)
     recall_index = SQLiteRecallIndex(
         path=path,
@@ -2743,12 +2853,12 @@ def build_sqlite_world_v2_turn_application(
         (time.perf_counter() - build_started) * 1000,
     )
     try:
-        occurrence_content = OccurrenceContentCoordinator(
-            ledger=ledger, store=life_content_store
-        )
+        occurrence_content = OccurrenceContentCoordinator(ledger=ledger, store=life_content_store)
         tool_requested = read_only_tool_model is not None or read_only_tool_transport is not None
         if (read_only_tool_model is None) != (read_only_tool_transport is None):
-            raise ValueError("read-only tool model and transport must be explicitly injected together")
+            raise ValueError(
+                "read-only tool model and transport must be explicitly injected together"
+            )
         if tool_requested and config.tool_budget_limit <= 0:
             raise ValueError("injected read-only tool lane needs a positive deployment budget")
         perception_dependencies = (
@@ -2824,9 +2934,7 @@ def build_sqlite_world_v2_turn_application(
                 available_capabilities=SliceBudget(
                     max_items=4, max_fields=48, max_characters=1_200
                 ),
-                action_budget=SliceBudget(
-                    max_items=4, max_fields=40, max_characters=1_200
-                ),
+                action_budget=SliceBudget(max_items=4, max_fields=40, max_characters=1_200),
             ),
             relevance_scope=relevance_scope,
             life_content_store=life_content_store,
@@ -2931,6 +3039,7 @@ def build_sqlite_world_v2_turn_application(
         # that carries proactive/fact/memory cognition, unless the caller
         # injected an explicit reviewer (tests do).
         if expression_reconsideration_reviewer is None and proactive_model is not None:
+
             async def reconsideration_projection(cursor):
                 return (
                     await asyncio.to_thread(ledger.project_at, cursor)
@@ -2938,13 +3047,11 @@ def build_sqlite_world_v2_turn_application(
                     else ledger.project_at(cursor)
                 )
 
-            expression_reconsideration_reviewer = (
-                AuditedReplacementReconsiderationReviewer(
-                    reviewer=ExpressionReconsiderationChatModelAdapter(
-                        model=proactive_model,
-                    ),
-                    project_at=reconsideration_projection,
-                )
+            expression_reconsideration_reviewer = AuditedReplacementReconsiderationReviewer(
+                reviewer=ExpressionReconsiderationChatModelAdapter(
+                    model=proactive_model,
+                ),
+                project_at=reconsideration_projection,
             )
         afterthought_runtime = None
         if config.afterthought_enabled and proactive_model is not None:
@@ -2967,9 +3074,7 @@ def build_sqlite_world_v2_turn_application(
                 owner_id=config.afterthought_worker_owner,
                 target=config.reply_target,
                 companion_actor_ref=config.companion_actor_ref,
-                counterpart_actor_ref=(
-                    config.counterpart_actor_ref or config.reply_target
-                ),
+                counterpart_actor_ref=(config.counterpart_actor_ref or config.reply_target),
                 chronology=LocalChronology(config.local_timezone),
                 identity_frame=proactive_identity_frame,
                 dialogue_compiler=RecentDialogueCompiler(
@@ -3006,9 +3111,7 @@ def build_sqlite_world_v2_turn_application(
                     main_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
                     quick_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
                     expression_episode_mode=(
-                        "shadow"
-                        if config.expression_episode_mode == "shadow"
-                        else "off"
+                        "shadow" if config.expression_episode_mode == "shadow" else "off"
                     ),
                     expression_action_kinds=config.expression_action_kinds,
                     expression_episode_diagnostics=expression_episode_diagnostics,
@@ -3165,9 +3268,10 @@ def build_sqlite_world_v2_turn_application(
             if interaction_bid_acceptance is not None and media_thread_acceptance is not None
             else None
         )
-        immediate_emotion_enabled = isinstance(
-            appraisal_model, AppraisalDraftDeliberationAdapter
-        ) or getattr(appraisal_model, "supports_immediate_emotion", False) is True
+        immediate_emotion_enabled = (
+            isinstance(appraisal_model, AppraisalDraftDeliberationAdapter)
+            or getattr(appraisal_model, "supports_immediate_emotion", False) is True
+        )
         affect_acceptance = (
             AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
             if affect_model is not None or immediate_emotion_enabled
@@ -3321,7 +3425,9 @@ def build_sqlite_world_v2_turn_application(
             else None
         )
         platform_executor = build_platform_action_executor(
-            ledger=ledger, transport=transport, expression_payload_store=expression_payload_store,
+            ledger=ledger,
+            transport=transport,
+            expression_payload_store=expression_payload_store,
             media_payload_store=media_payload_store,
             latency_recorder=latency,
         )
@@ -3342,12 +3448,21 @@ def build_sqlite_world_v2_turn_application(
             if perception_transport is not None
             else None
         )
-        if media_transport is not None or tool_executor is not None or perception_executor is not None:
+        if (
+            media_transport is not None
+            or tool_executor is not None
+            or perception_executor is not None
+        ):
             action_executor = RoutedActionExecutor(
                 platform=platform_executor,
-                media=(ProviderMediaActionExecutor(
-                    payloads=MediaSidecarPayloadReader(store=media_payload_store), transport=media_transport,
-                ) if media_transport is not None else None),
+                media=(
+                    ProviderMediaActionExecutor(
+                        payloads=MediaSidecarPayloadReader(store=media_payload_store),
+                        transport=media_transport,
+                    )
+                    if media_transport is not None
+                    else None
+                ),
                 tool=tool_executor,
                 perception=perception_executor,
             )
@@ -3438,18 +3553,14 @@ def build_sqlite_world_v2_turn_application(
             interaction_bid_turn=interaction_bid_turn,
             interaction_bid_worker=interaction_bid_worker,
             interaction_bid_owner=(
-                config.interaction_bid_worker_owner
-                if interaction_bid_worker is not None
-                else None
+                config.interaction_bid_worker_owner if interaction_bid_worker is not None else None
             ),
             interaction_fact_owner=(
                 config.fact_worker_owner if fact_acceptance is not None else None
             ),
             fact_acceptance=fact_acceptance,
             fact_adapter=(
-                FactObservationProposalAdapter(model=fact_model)
-                if fact_model is not None
-                else None
+                FactObservationProposalAdapter(model=fact_model) if fact_model is not None else None
             ),
             fact_memory_adapter=(
                 FactMemoryDraftAdapter(model=memory_model)
@@ -3471,7 +3582,11 @@ def build_sqlite_world_v2_turn_application(
                 else None
             ),
             private_impression_adapter=(
-                PrivateImpressionDraftAdapter(model=private_impression_model)
+                PrivateImpressionDraftAdapter(
+                    model=private_impression_model,
+                    identity_frame=private_impression_identity_frame,
+                    content_reader=read_private_reflection_content,
+                )
                 if private_impression_model is not None
                 else None
             ),
@@ -3519,14 +3634,20 @@ def build_sqlite_world_v2_turn_application(
             quick_reaction_worker=quick_reaction_worker,
             proactive_action_runtime=proactive_runtime,
             afterthought_author=afterthought_runtime,
-            read_only_tool_owner=(config.tool_worker_owner if tool_trigger_runtime is not None else None),
+            read_only_tool_owner=(
+                config.tool_worker_owner if tool_trigger_runtime is not None else None
+            ),
             read_only_tool_trigger_runtime=tool_trigger_runtime,
             perception_owner=(
                 config.perception_worker_owner if perception_trigger_runtime is not None else None
             ),
             perception_trigger_runtime=perception_trigger_runtime,
-            external_result_owner=(config.tool_worker_owner if tool_trigger_runtime is not None else None),
-            external_result_deliberator=(NoopToolResultDeliberator() if tool_trigger_runtime is not None else None),
+            external_result_owner=(
+                config.tool_worker_owner if tool_trigger_runtime is not None else None
+            ),
+            external_result_deliberator=(
+                NoopToolResultDeliberator() if tool_trigger_runtime is not None else None
+            ),
             perception_result_owner=(
                 config.perception_worker_owner if perception_trigger_runtime is not None else None
             ),
@@ -3553,7 +3674,9 @@ def build_sqlite_world_v2_turn_application(
         media_continuation_worker = (
             MediaContinuationWorker(
                 runtime=MediaContinuationRuntime(
-                    ledger=ledger, execution=media_execution, batch_issuer=issuer,
+                    ledger=ledger,
+                    execution=media_execution,
+                    batch_issuer=issuer,
                 ),
                 ledger=ledger,
                 render_policy=MediaContinuationActionPolicy(
@@ -3593,7 +3716,8 @@ def build_sqlite_world_v2_turn_application(
                 sidecar=media_payload_store,
                 policy=ecology_policy,
                 compiler=MediaEvidenceSnapshotCompiler(
-                    ledger=ledger, visual_fact_sidecar=media_payload_store,
+                    ledger=ledger,
+                    visual_fact_sidecar=media_payload_store,
                 ),
             )
             if ecology_policy is not None
@@ -3615,7 +3739,8 @@ def build_sqlite_world_v2_turn_application(
                 authorizer=MediaOpportunityAuthorizer(
                     ledger=ledger,
                     compiler=MediaEvidenceSnapshotCompiler(
-                        ledger=ledger, visual_fact_sidecar=media_payload_store,
+                        ledger=ledger,
+                        visual_fact_sidecar=media_payload_store,
                     ),
                     catalog_version=ecology_policy.catalog_version,
                 ),
@@ -3685,9 +3810,7 @@ def build_sqlite_world_v2_turn_application(
                 ),
                 outcome_selection_model=outcome_draft_model,
                 memory_adapter=(
-                    FactMemoryDraftAdapter(model=memory_model)
-                    if memory_model is not None
-                    else None
+                    FactMemoryDraftAdapter(model=memory_model) if memory_model is not None else None
                 ),
             )
             if config.life_ecology is not None and life_seed_catalog is not None
@@ -3839,7 +3962,9 @@ def build_sqlite_world_v2_turn_application(
             media_candidate_maintenance_actor=config.media_candidate_maintenance_actor,
             character_media_candidates=CharacterMediaCandidateRuntime(ledger=ledger),
             image_evidence=ImageEvidenceDeclarationRuntime(ledger=ledger),
-            recipient_scoped_image_evidence=RecipientScopedImageEvidenceDeclarationRuntime(ledger=ledger),
+            recipient_scoped_image_evidence=RecipientScopedImageEvidenceDeclarationRuntime(
+                ledger=ledger
+            ),
             appearance_states=AppearanceStateRuntime(ledger=ledger),
             visible_physical_states=VisiblePhysicalStateRuntime(ledger=ledger),
             visual_facts=VisualFactRuntime(ledger=ledger, sidecar=media_payload_store),
@@ -3895,7 +4020,9 @@ def _bdv_pilot_disabled() -> bool:
 
 
 def build_platform_action_executor(
-    *, ledger: SQLiteWorldLedger, transport: PlatformTransport,
+    *,
+    ledger: SQLiteWorldLedger,
+    transport: PlatformTransport,
     expression_payload_store: SQLiteImmutableExpressionPayloadStore | None = None,
     media_payload_store: SQLiteImmutableMediaPayloadStore | None = None,
     latency_recorder: ProductionLatencyRecorder | None = None,
@@ -3907,7 +4034,8 @@ def build_platform_action_executor(
     )
     if media_payload_store is not None:
         payloads = PlatformAndMediaPayloadReader(
-            platform=payloads, media=MediaSidecarPayloadReader(store=media_payload_store),
+            platform=payloads,
+            media=MediaSidecarPayloadReader(store=media_payload_store),
         )
     return PlatformActionExecutor(
         payloads=payloads, transport=transport, latency_recorder=latency_recorder
@@ -3927,8 +4055,12 @@ def _parse_trace_time(value: object) -> datetime | None:
 
 
 def _bootstrap(
-    *, ledger: SQLiteWorldLedger, config: WorldV2TurnApplicationConfig, now: datetime,
-    include_tool: bool = False, include_perception: bool = False,
+    *,
+    ledger: SQLiteWorldLedger,
+    config: WorldV2TurnApplicationConfig,
+    now: datetime,
+    include_tool: bool = False,
+    include_perception: bool = False,
     include_proactive: bool = False,
     life_seed_catalog: ReviewedLifeSeedCatalog | None = None,
 ) -> None:
@@ -3936,12 +4068,22 @@ def _bootstrap(
         raise ValueError("World v2 bootstrap time must be timezone-aware")
     projection = ledger.project()
     accounts = [
-        BudgetAccount(account_id=config.chat_account_id, category="chat",
-                      window_id=config.chat_window_id, limit=config.chat_budget_limit),
+        BudgetAccount(
+            account_id=config.chat_account_id,
+            category="chat",
+            window_id=config.chat_window_id,
+            limit=config.chat_budget_limit,
+        ),
     ]
     if include_tool:
-        accounts.append(BudgetAccount(account_id=config.tool_account_id, category="tool",
-                                      window_id=config.tool_window_id, limit=config.tool_budget_limit))
+        accounts.append(
+            BudgetAccount(
+                account_id=config.tool_account_id,
+                category="tool",
+                window_id=config.tool_window_id,
+                limit=config.tool_budget_limit,
+            )
+        )
     if include_perception:
         accounts.append(
             BudgetAccount(
@@ -3952,47 +4094,62 @@ def _bootstrap(
             )
         )
     if include_proactive:
-        accounts.append(BudgetAccount(
-            account_id=config.proactive_account_id,
-            category="proactive",
-            window_id=config.proactive_window_id,
-            limit=config.proactive_budget_limit,
-        ))
+        accounts.append(
+            BudgetAccount(
+                account_id=config.proactive_account_id,
+                category="proactive",
+                window_id=config.proactive_window_id,
+                limit=config.proactive_budget_limit,
+            )
+        )
     if config.media_selection_acceptance is not None:
         media = config.media_selection_acceptance
-        accounts.append(BudgetAccount(
-            account_id=media.account_id,
-            category="image",
-            window_id=media.account_window_id,
-            limit=media.account_limit,
-        ))
+        accounts.append(
+            BudgetAccount(
+                account_id=media.account_id,
+                category="image",
+                window_id=media.account_window_id,
+                limit=media.account_limit,
+            )
+        )
     if config.media_continuation is not None:
         continuation = config.media_continuation
-        accounts.extend((
-            BudgetAccount(
-                account_id=continuation.render_account_id, category="image",
-                window_id=continuation.render_window_id,
-                limit=continuation.render_account_limit,
-            ),
-            BudgetAccount(
-                account_id=continuation.inspection_account_id, category="image",
-                window_id=continuation.inspection_window_id,
-                limit=continuation.inspection_account_limit,
-            ),
-        ))
+        accounts.extend(
+            (
+                BudgetAccount(
+                    account_id=continuation.render_account_id,
+                    category="image",
+                    window_id=continuation.render_window_id,
+                    limit=continuation.render_account_limit,
+                ),
+                BudgetAccount(
+                    account_id=continuation.inspection_account_id,
+                    category="image",
+                    window_id=continuation.inspection_window_id,
+                    limit=continuation.inspection_account_limit,
+                ),
+            )
+        )
     missing: list[BudgetAccount] = []
     for account in accounts:
         existing = next(
-            (item for item in projection.budget_accounts if item.account_id == account.account_id), None
+            (item for item in projection.budget_accounts if item.account_id == account.account_id),
+            None,
         )
         if existing is None:
             missing.append(account)
-        elif existing.category != account.category or existing.window_id != account.window_id or existing.limit != account.limit:
+        elif (
+            existing.category != account.category
+            or existing.window_id != account.window_id
+            or existing.limit != account.limit
+        ):
             raise ValueError("existing World v2 budget conflicts with composition config")
     existing_npcs = {item.npc_id: item for item in projection.npcs}
-    missing_npcs = [] if life_seed_catalog is None else [
-        item for item in life_seed_catalog.reviewed_npcs if item.npc_id not in existing_npcs
-    ]
+    missing_npcs = (
+        []
+        if life_seed_catalog is None
+        else [item for item in life_seed_catalog.reviewed_npcs if item.npc_id not in existing_npcs]
+    )
     if life_seed_catalog is not None:
         locations = {item.id: item for item in life_seed_catalog.reviewed_locations}
         for item in life_seed_catalog.reviewed_npcs:
@@ -4017,7 +4174,8 @@ def _bootstrap(
     events: list[WorldEvent] = []
     world_started = next(
         (
-            item for item in projection.committed_world_event_refs
+            item
+            for item in projection.committed_world_event_refs
             if item.event_type == "WorldStarted"
         ),
         None,
@@ -4044,8 +4202,12 @@ def _bootstrap(
             immutable_hash=world_started.payload_hash,
         )
     events.extend(
-        _bootstrap_event(config=config, now=now, event_type="BudgetAccountConfigured",
-                         payload={"account": account.model_dump(mode="json")})
+        _bootstrap_event(
+            config=config,
+            now=now,
+            event_type="BudgetAccountConfigured",
+            payload={"account": account.model_dump(mode="json")},
+        )
         for account in missing
     )
     if missing_npcs:
@@ -4091,7 +4253,11 @@ def _bootstrap(
 
 
 def _bootstrap_event(
-    *, config: WorldV2TurnApplicationConfig, now: datetime, event_type: str, payload: dict[str, object]
+    *,
+    config: WorldV2TurnApplicationConfig,
+    now: datetime,
+    event_type: str,
+    payload: dict[str, object],
 ) -> WorldEvent:
     material = json.dumps(
         {"world_id": config.world_id, "event_type": event_type, "payload": payload},

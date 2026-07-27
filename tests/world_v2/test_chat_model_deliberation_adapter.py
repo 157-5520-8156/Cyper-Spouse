@@ -123,6 +123,21 @@ class _BlockingPrefetchEmbedding:
         return self._delegate.embed(texts)
 
 
+class _ObservablePrefetchEmbedding:
+    version = "observable-prefetch-fixture.1"
+    dimensions = FeatureHashRecallEmbedding.dimensions
+
+    def __init__(self) -> None:
+        self.finished = threading.Event()
+        self._delegate = FeatureHashRecallEmbedding()
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        result = self._delegate.embed(texts)
+        if texts == ("窗边听雨",):
+            self.finished.set()
+        return result
+
+
 @pytest.mark.asyncio
 async def test_character_may_pull_one_source_bound_recall_before_deciding() -> None:
     model = _SequenceJsonModel(
@@ -331,6 +346,92 @@ async def test_parallel_prefetch_cannot_delay_a_first_pass_final_answer() -> Non
     assert len(model.calls) == 1
     assert output.prefetch_trace is None
     assert output.recall_trace is None
+
+
+@pytest.mark.asyncio
+async def test_ready_parallel_prefetch_is_visible_in_first_pass_and_audited() -> None:
+    embedding = _ObservablePrefetchEmbedding()
+    cursor = RecallCursor(
+        world_revision=3,
+        deliberation_revision=0,
+        ledger_sequence=0,
+    )
+    document = RecallDocument(
+        document_id="recall:first-pass",
+        memory_kind="episodic",
+        source_item_ref="experience:first-pass",
+        source_slice="recent_experiences",
+        source_refs=("event:first-pass",),
+        source_bindings=(
+            RecallSourceBinding(
+                source_kind="committed_event",
+                authority_type="ExperienceCommitted",
+                ref="event:first-pass",
+                source_world_revision=2,
+                immutable_hash="e" * 64,
+            ),
+        ),
+        source_world_revision=2,
+        text="她之前在窗边听完了那场雨。",
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion",),
+        occurred_from=datetime(2026, 7, 25, 12, tzinfo=UTC),
+        privacy_class="private",
+    )
+    index = InMemoryRecallIndex(embedding=embedding)
+    index.rebuild(cursor=cursor, documents=(document,))
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=datetime(2026, 7, 27, 12, tzinfo=UTC),
+        trigger_ref="trigger:1",
+    )
+    coordinator.schedule_prefetch(
+        query_text="窗边听雨",
+        accessibility_seed="draw:first-pass-prefetch",
+        trigger_ref="trigger:1",
+    )
+    assert await asyncio.to_thread(embedding.finished.wait, 0.5)
+    model = _Model(
+        json.dumps(
+            {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": "刚才那阵雨让我想起一件事。"}],
+                "world_claims": [],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    request = _qq_request().model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "world_revision": 3,
+                    "deliberation_revision": 0,
+                    "ledger_sequence": 0,
+                    "logical_time": "2026-07-27T12:00:00+00:00",
+                    "slices": {},
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+    output = await ChatModelDeliberationAdapter(
+        model=model,
+        recall_coordinator=coordinator,
+    ).propose(request)
+
+    assert len(model.calls) == 1
+    assert output.prefetch_trace is not None
+    assert output.recall_trace is None
+    assert "她之前在窗边听完了那场雨" in model.calls[0][0][1]["content"]
+    trace = verify_trusted_recall_trace(output.prefetch_trace)
+    assert trace.mode == "prefetch"
+    assert trace.trigger_ref == "trigger:1"
+    assert trace.hits[0].document.source_refs == ("event:first-pass",)
 
 
 @pytest.mark.asyncio

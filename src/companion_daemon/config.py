@@ -179,16 +179,20 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_proxy_url: str | None = Field(default=None, alias="OPENAI_PROXY_URL")
-    # Optional semantic lane for the rebuildable World-v2 Recall Index.
-    # Keeping the model unset preserves the zero-network feature-hash default;
-    # enabling it reuses the OpenAI-compatible endpoint/key while retaining
-    # lexical/temporal/structured degradation on provider failure.
-    world_v2_recall_embedding_model: str | None = Field(
-        default=None,
+    # Semantic lane for the rebuildable World-v2 Recall Index.  It activates
+    # when deployment credentials exist, remains explicitly disable-able, and
+    # only runs for a character-chosen deep recall.  Exact/temporal/structured
+    # channels remain the fail-open path on provider failure.
+    world_v2_recall_semantic_enabled: bool = Field(
+        default=True,
+        alias="WORLD_V2_RECALL_SEMANTIC_ENABLED",
+    )
+    world_v2_recall_embedding_model: str = Field(
+        default="text-embedding-3-small",
         alias="WORLD_V2_RECALL_EMBEDDING_MODEL",
     )
     world_v2_recall_embedding_dimensions: int = Field(
-        default=1536,
+        default=512,
         ge=1,
         le=4096,
         alias="WORLD_V2_RECALL_EMBEDDING_DIMENSIONS",
@@ -198,6 +202,31 @@ class Settings(BaseSettings):
         ge=0.1,
         le=10.0,
         alias="WORLD_V2_RECALL_EMBEDDING_TIMEOUT_SECONDS",
+    )
+    world_v2_recall_embedding_daily_token_budget: int = Field(
+        default=250_000,
+        ge=1,
+        alias="WORLD_V2_RECALL_EMBEDDING_DAILY_TOKEN_BUDGET",
+    )
+    world_v2_recall_embedding_monthly_token_budget: int = Field(
+        default=2_000_000,
+        ge=1,
+        alias="WORLD_V2_RECALL_EMBEDDING_MONTHLY_TOKEN_BUDGET",
+    )
+    world_v2_recall_embedding_daily_budget_cny: float = Field(
+        default=0.10,
+        gt=0,
+        alias="WORLD_V2_RECALL_EMBEDDING_DAILY_BUDGET_CNY",
+    )
+    world_v2_recall_embedding_monthly_budget_cny: float = Field(
+        default=1.0,
+        gt=0,
+        alias="WORLD_V2_RECALL_EMBEDDING_MONTHLY_BUDGET_CNY",
+    )
+    world_v2_recall_embedding_usd_per_million_tokens: float = Field(
+        default=0.02,
+        gt=0,
+        alias="WORLD_V2_RECALL_EMBEDDING_USD_PER_MILLION_TOKENS",
     )
     openrouter_api_key: str | None = Field(
         default_factory=lambda: _macos_launchctl_env("OPENROUTER_API_KEY"),

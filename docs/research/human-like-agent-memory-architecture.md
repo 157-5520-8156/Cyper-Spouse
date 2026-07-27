@@ -116,24 +116,34 @@ LongMemEval 正是把 extraction、cross-session reasoning、temporal reasoning�
 
 - `RecallCorpusCompiler` 从精确 cursor 的近期对话、Fact、Experience/Memory、World Life、
   开放 Thread 和 PrivateImpression 编译 episodic / semantic / reflective 文档；每个文档
-  保留完整不可变 source binding。PrivateImpression 继续是可撤销的角色理解，不会因被检索
-  而成为事实 authority。
+  保留完整不可变 source binding。新 PrivateImpression 由同一角色身份模型在游标固定的
+  多层 capsule 上形成：anchor/近期 appraisal、Character Core、关系、Affect、真实经历正文
+  和既有可撤销印象都只是有来源的环境；模型自己选择来源集合、是否保留、理解正文、置信度
+  和生命周期。接受、拒绝、纠正和技术失败均记录独立 Model Result；新写入必须携带该 lineage，
+  历史事件才允许没有它。Reducer `.38` 可从 `.36/.37` 的已验证 head 作加法迁移，历史
+  impression 仍按原 appraisal 引用和原 mutation hash 重放。
 - `SQLiteRecallIndex` 提供 lexical、temporal、现有 World link 及本地 feature-hash dense
   混合排名。索引是可删除 sidecar，只为新增或变化的文档计算本地向量；同内容的新 cursor
   只更新 head。`FeatureHashRecallEmbedding` 明确是零网络、非语义的可靠基线，不能冒充
-  语义模型。部署显式设置 `WORLD_V2_RECALL_EMBEDDING_MODEL` 后，OpenAI-compatible 语义
-  embedding 只在角色已经选择 `recall_request` 后、于事件循环外执行；自动预取和精确当前
-  Context 不等待远端 embedding。语义向量按 provider endpoint、模型版本、维度和文本哈希
+  语义模型。生产环境存在 `OPENAI_API_KEY` 时默认使用 512 维
+  `text-embedding-3-small`；可用 `WORLD_V2_RECALL_SEMANTIC_ENABLED=false` 明确关闭，或用
+  `WORLD_V2_RECALL_EMBEDDING_MODEL` 替换兼容模型。远端 embedding 只在角色已经选择
+  `recall_request` 后、于事件循环外执行；自动预取和精确当前 Context 不等待远端
+  embedding。语义向量按 provider endpoint、模型版本、维度和文本哈希
   写入最多 8192 条且序列化向量总量最多 32 MiB 的 SQLite 可重建缓存；同文档跨 pull、
-  跨重启复用，仅新增文本调用供应商。
-  供应商故障只降级 dense 通道，不阻断其余检索或聊天回复。
-- Context 本身同步携带精确当前的短工作记忆；最多四项的本地预取在线程中与第一轮模型
-  并行准备，不阻塞首轮。角色直接作答时丢弃这些未被模型看见的候选；只有角色选择一次
-  `recall_request` 时，已经完成的预取才与自主 query 的结果共同进入第二轮，候选仍只是
-  有来源的参考而非行为建议。系统不按话题或动机替她决定是否回忆。
+  跨重启复用，仅新增文本调用供应商。调用前由跨进程 SQLite reservation 同时检查日/月 token
+  和人民币预算，调用后用供应商 usage 结算；拒绝、失败、用量和估算成本进入只读健康状态。
+  供应商故障或预算耗尽只降级 dense 通道，不阻断其余检索或聊天回复，实际降级原因同时进入
+  Recall trace，不能再伪装成一次正常的 semantic 命中。
+- Context 本身同步携带精确当前的短工作记忆；最多四项的本地预取在线程中并行准备，不阻塞
+  首轮。若候选在首轮调用开始前已经完成，它以标准 Capsule item 形状进入角色首轮上下文并
+  立即获得审计；满载 slice 会优先保留实际被审计的候选，主模型转交备用模型时也携带同一
+  provenance。若尚未完成，首轮不会等待，它仍可在角色选择 `recall_request` 后与自主
+  query 共同进入第二轮。角色直接作答后才丢弃未完成、从未被她看见的候选。候选始终只是
+  有来源的参考而非行为建议，系统不按话题或动机替她决定如何使用。
 - appraisal + expression 配对认知与普通 expression 两条生产路径均支持同一次角色自主
   recall。最多一个额外模型往返，并复用原 turn 的第二调用预算；没有第三次检索或隐藏重试。
-- 被第二轮模型实际看见的预取和每次角色 pull 都固定完整执行 query（actor、subject、时间、
+- 被首轮或第二轮模型实际看见的预取和每次角色 pull 都固定完整执行 query（actor、subject、时间、
   隐私、过滤条件与可重放 seed）、各通道分数、随机 accessibility offset、结果、
   embedding/index 版本、精确 cursor、文档和 source binding，并进入
   `model-result-audit.4`；未被模型看见的并行预取不伪装成模型证据。冷重放读取已记录
@@ -148,9 +158,9 @@ LongMemEval 正是把 extraction、cross-session reasoning、temporal reasoning�
   Context 继续以空 recall 材料编译。单次结果、单条 trace 和总语料都有独立上限，防止审计
   超过不可变 Model Result 的 32 KB 合同或让一次自主 recall 扫描无界语料。
 
-尚未被代码实现“证明”的部分是效果结论，而不是上述主链：真实语义 embedding 仍为显式
-部署选项，是否值得持续开启，以及 reflection 是否确实改善自然连续性而不造成机械提旧事，
-必须靠后续真实对聊和长期指标决定。微调和 latent/recurrent cache 仍按本文件的采用顺序留在
-实验阶段，不属于本次 Recall Index 的完成条件。
+尚未被代码实现“证明”的部分是效果结论，而不是上述主链：语义 embedding 已在有凭据的
+生产环境默认启用，但是否值得持续开启，以及角色自写 reflection 是否确实改善自然连续性而
+不造成机械提旧事，必须靠后续真实对聊和长期指标决定。微调和 latent/recurrent cache 仍按
+本文件的采用顺序留在实验阶段，不属于本次 Recall Index 的完成条件。
 
 最重要的验收不是“向量检索命中了几条”，而是：角色能否在恰当但不固定的时机自然想起；能否忽略无关记忆；面对更新能否使用新事实；没有证据时能否不编造；打断、重启和供应商切换后是否仍连续；同时保持 source closure、延迟目标和 effect-once。

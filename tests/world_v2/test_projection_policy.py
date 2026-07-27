@@ -804,7 +804,7 @@ def test_projection_hash_binds_reducer_bundle_and_projection_values_are_deeply_f
     )
 
     assert first.projection_hash != changed_bundle.projection_hash
-    assert first.reducer_bundle_version == "world-v2-reducers.36"
+    assert first.reducer_bundle_version == "world-v2-reducers.38"
     assert changed_bundle.reducer_bundle_version == "world-v2-reducers.test-next"
     try:
         first.view.action_state_counts[0].count = 99

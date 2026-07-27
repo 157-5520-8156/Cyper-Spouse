@@ -754,8 +754,10 @@ class SQLiteWorldLedger:
             if row is None or len(row) != 3:
                 raise LedgerIntegrityError("SQLite WAL checkpoint result is unavailable")
             busy, log_frames, checkpointed_frames = (int(item) for item in row)
-            if busy == 0 and checkpointed_frames >= log_frames and wal_bytes_before > (
-                4 * threshold_bytes
+            if (
+                busy == 0
+                and checkpointed_frames >= log_frames
+                and wal_bytes_before > (4 * threshold_bytes)
             ):
                 # Every frame is already backfilled, yet the file itself only
                 # shrinks via TRUNCATE, which needs a reader-free instant.  A
@@ -1139,8 +1141,7 @@ class SQLiteWorldLedger:
             # the cheap row identity that invalidates process-local caches
             # without re-reading (or re-hashing) the multi-megabyte state.
             self._connection.execute(
-                "ALTER TABLE world_v2_heads ADD COLUMN storage_epoch "
-                "INTEGER NOT NULL DEFAULT 0"
+                "ALTER TABLE world_v2_heads ADD COLUMN storage_epoch INTEGER NOT NULL DEFAULT 0"
             )
 
     def _legacy_clock_compatibility_event_ids(self, source_bundle: str) -> frozenset[str]:
@@ -1303,9 +1304,7 @@ class SQLiteWorldLedger:
         self._pending_head_state_ops = ops
         return canonical_state, state_hash
 
-    def _state_bytes_map_for(
-        self, state_hash: str, fragments: dict[str, str]
-    ) -> dict[str, bytes]:
+    def _state_bytes_map_for(self, state_hash: str, fragments: dict[str, str]) -> dict[str, bytes]:
         """Return (building lazily) the UTF-8 chunks of one fragment set."""
 
         cached = self._state_fragment_bytes
@@ -1410,16 +1409,12 @@ class SQLiteWorldLedger:
             value: object = state.logical_time.isoformat() if state.logical_time else None
         elif field_name == "expression_plans":
             value = tuple(
-                _expression_plan_semantic_dump(
-                    item, reducer_bundle_version=REDUCER_BUNDLE_VERSION
-                )
+                _expression_plan_semantic_dump(item, reducer_bundle_version=REDUCER_BUNDLE_VERSION)
                 for item in state.expression_plans
             )
         elif field_name == "expression_beats":
             value = tuple(
-                _expression_beat_semantic_dump(
-                    item, reducer_bundle_version=REDUCER_BUNDLE_VERSION
-                )
+                _expression_beat_semantic_dump(item, reducer_bundle_version=REDUCER_BUNDLE_VERSION)
                 for item in state.expression_beats
             )
         elif field_name == "expression_plan_manifests":
@@ -1428,9 +1423,7 @@ class SQLiteWorldLedger:
                 for item in state.expression_plan_manifests
             )
         else:
-            raise LedgerIntegrityError(
-                f"semantic field {field_name!r} has no incremental rule"
-            )
+            raise LedgerIntegrityError(f"semantic field {field_name!r} has no incremental rule")
         return _canonical_fragment(value).encode("utf-8")
 
     def _warm_encode_caches_locked(self) -> None:
@@ -1657,12 +1650,9 @@ class SQLiteWorldLedger:
         if self._semantic_sharing_verified:
             # Re-anchor the fragment cache on the full computation so one
             # fallback commit does not disable the incremental path forever.
-            payload = state.semantic_payload(
-                world_id=self._world_id, world_revision=world_revision
-            )
+            payload = state.semantic_payload(world_id=self._world_id, world_revision=world_revision)
             fragments = {
-                key: _canonical_fragment(value).encode("utf-8")
-                for key, value in payload.items()
+                key: _canonical_fragment(value).encode("utf-8") for key, value in payload.items()
             }
             digest = hashlib.sha256(self._assemble_semantic_material(fragments)).hexdigest()
             if hmac.compare_digest(digest, projection.semantic_hash):
@@ -1771,9 +1761,7 @@ class SQLiteWorldLedger:
                 if fragment.startswith("[") and fragment != "[]":
                     items = _split_array_fragment_items(fragment)
                     item_fragments[field_name] = items
-                    upserts.extend(
-                        (field_name, index, item) for index, item in enumerate(items)
-                    )
+                    upserts.extend((field_name, index, item) for index, item in enumerate(items))
                 else:
                     item_fragments.pop(field_name, None)
                     upserts.append((field_name, _HEAD_STATE_SCALAR_IDX, fragment))
@@ -2891,6 +2879,8 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.33",
                 "world-v2-reducers.34",
                 "world-v2-reducers.35",
+                "world-v2-reducers.36",
+                "world-v2-reducers.37",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -2899,7 +2889,11 @@ class SQLiteWorldLedger:
             rebuilt: LedgerProjection | None = None
             if installed != REDUCER_BUNDLE_VERSION:
                 legacy_state_json = self._head_state_json_locked(head)
-                if installed == "world-v2-reducers.33":
+                if installed in {
+                    "world-v2-reducers.33",
+                    "world-v2-reducers.36",
+                    "world-v2-reducers.37",
+                }:
                     canonical_legacy_state = json.dumps(
                         json.loads(legacy_state_json),
                         ensure_ascii=False,
@@ -2941,6 +2935,32 @@ class SQLiteWorldLedger:
                         )
                     except Exception as exc:
                         raise LedgerIntegrityError("legacy head semantic hash is invalid") from exc
+                if installed in {
+                    "world-v2-reducers.36",
+                    "world-v2-reducers.37",
+                }:
+                    # .37 added optional non-factual reflection prose and .38
+                    # adds optional reflection/audit lineage to the pending
+                    # proposal projection. The exact legacy state bytes and
+                    # semantic projection were independently hashed
+                    # above, so deterministically decoding that verified head
+                    # is equivalent to replay for this additive upcast.  The
+                    # ordinary cold-history verifier still streams every
+                    # immutable event immediately after migration; this only
+                    # avoids reducing the same 52k-event production ledger
+                    # twice during one startup.
+                    legacy_state = ReducerState.model_validate_json(
+                        legacy_state_json,
+                        context={"source_reducer_bundle": installed},
+                    )
+                    rebuilt = make_projection(
+                        world_id=self._world_id,
+                        world_revision=cursor.world_revision,
+                        deliberation_revision=cursor.deliberation_revision,
+                        ledger_sequence=cursor.ledger_sequence,
+                        state=legacy_state,
+                        reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                    )
                 self._mark_legacy_ownerless_plan_events_locked(installed)
             if rebuilt is None:
                 rebuilt = self._replay_locked(
@@ -3182,6 +3202,8 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.33",
                 "world-v2-reducers.34",
                 "world-v2-reducers.35",
+                "world-v2-reducers.36",
+                "world-v2-reducers.37",
             }:
                 state = ReducerState.model_validate_json(
                     json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
@@ -3609,9 +3631,7 @@ class SQLiteWorldLedger:
             actions=projection.actions,
             pending_actions=projection.pending_actions,
             photo_candidates=projection.photo_candidates,
-            media_declined_candidate_revisions=(
-                projection.media_declined_candidate_revisions
-            ),
+            media_declined_candidate_revisions=(projection.media_declined_candidate_revisions),
             media_opportunities=projection.media_opportunities,
             media_plans=projection.media_plans,
             media_unrenderable_opportunity_ids=projection.media_unrenderable_opportunity_ids,
@@ -3871,17 +3891,20 @@ class SQLiteWorldLedger:
             # of every event row (including multi-KB envelopes), which grew
             # linearly with ledger history on the reply-critical path.
             placeholders = ",".join("?" for _ in events)
-            duplicate = connection.execute(
-                f"""SELECT event_id FROM world_v2_events
+            duplicate = (
+                connection.execute(
+                    f"""SELECT event_id FROM world_v2_events
                     WHERE world_id = ? AND event_id IN ({placeholders})
                     LIMIT 1""",
-                (self._world_id, *event_ids),
-            ).fetchone() or connection.execute(
-                f"""SELECT idempotency_key FROM world_v2_events
+                    (self._world_id, *event_ids),
+                ).fetchone()
+                or connection.execute(
+                    f"""SELECT idempotency_key FROM world_v2_events
                     WHERE world_id = ? AND idempotency_key IN ({placeholders})
                     LIMIT 1""",
-                (self._world_id, *idempotency_keys),
-            ).fetchone()
+                    (self._world_id, *idempotency_keys),
+                ).fetchone()
+            )
             if duplicate is not None:
                 raise IdempotencyConflict("event identity already exists under another commit")
 
@@ -4060,8 +4083,7 @@ class SQLiteWorldLedger:
             else:
                 for field_name in state_ops.field_deletes:
                     connection.execute(
-                        "DELETE FROM world_v2_head_state_items "
-                        "WHERE world_id = ? AND field = ?",
+                        "DELETE FROM world_v2_head_state_items WHERE world_id = ? AND field = ?",
                         (self._world_id, field_name),
                     )
                 for field_name, from_index in state_ops.tail_deletes:
@@ -4141,9 +4163,7 @@ class SQLiteWorldLedger:
                     (
                         int(head["storage_epoch"])
                         if head_is_split
-                        else hashlib.sha256(
-                            str(head["state_json"]).encode("utf-8")
-                        ).digest()
+                        else hashlib.sha256(str(head["state_json"]).encode("utf-8")).digest()
                     ),
                 )
             ):

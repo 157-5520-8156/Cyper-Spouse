@@ -1,16 +1,17 @@
 """Source-bound authority events for a character's private impressions.
 
 An impression is deliberately an *internal, revisable hypothesis*, not a fact
-about the user.  Its readable content is a set of accepted appraisal-hypothesis
-references; free-form model prose is never persisted on this authority path.
+about the user.  Its model-authored reading remains closed over exact accepted
+appraisal sources and never becomes World fact authority.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_core import to_jsonable_python
@@ -31,6 +32,120 @@ _ALLOWED_EVIDENCE_TYPES = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class PrivateImpressionReflectionBinding:
+    source_ref: str
+    source_kind: str
+    authority_event_ref: str
+
+
+def offered_private_impression_reflection_bindings(
+    projection: object,
+    *,
+    appraisal: object,
+) -> tuple[PrivateImpressionReflectionBinding, ...]:
+    """Derive the exact bounded source manifest shown to reflection."""
+
+    sources: list[PrivateImpressionReflectionBinding] = []
+
+    def add(source_ref: str, source_kind: str, authority_event_ref: str) -> None:
+        if not authority_event_ref or any(item.source_ref == source_ref for item in sources):
+            return
+        sources.append(
+            PrivateImpressionReflectionBinding(
+                source_ref=source_ref,
+                source_kind=source_kind,
+                authority_event_ref=authority_event_ref,
+            )
+        )
+
+    subject_ref = getattr(appraisal, "subject_ref")
+    related_appraisals = [
+        item
+        for item in getattr(projection, "appraisals")
+        if item.status == "active" and item.subject_ref == subject_ref
+    ]
+    ordered_appraisals = [
+        appraisal,
+        *(
+            item
+            for item in reversed(related_appraisals)
+            if item.appraisal_id != getattr(appraisal, "appraisal_id")
+        ),
+    ][:8]
+    for item in ordered_appraisals:
+        for hypothesis in item.hypotheses:
+            add(
+                f"appraisal:{item.appraisal_id}:{hypothesis.hypothesis_id}",
+                "appraisal",
+                item.origin.accepted_event_ref,
+            )
+
+    core = getattr(projection, "character_core")
+    if core is not None and core.origin is not None:
+        add(
+            f"character-core:{core.core_id}:{core.entity_revision}",
+            "character_core",
+            core.origin.accepted_event_ref,
+        )
+
+    for relationship in reversed(getattr(projection, "relationship_states")):
+        if relationship.subject_ref != subject_ref or relationship.origin is None:
+            continue
+        add(
+            f"relationship:{relationship.relationship_id}:{relationship.entity_revision}",
+            "relationship",
+            relationship.origin.accepted_event_ref,
+        )
+        break
+
+    appraisal_ids = {item.appraisal_id for item in related_appraisals}
+    affects = [
+        item
+        for item in getattr(projection, "affect_episodes")
+        if item.status == "active"
+        and any(
+            ref.appraisal_id in appraisal_ids
+            for component in item.components
+            for ref in component.appraisal_refs
+        )
+    ][-4:]
+    for episode in reversed(affects):
+        add(
+            f"affect:{episode.episode_id}:{episode.entity_revision}",
+            "affect",
+            episode.origin.accepted_event_ref,
+        )
+
+    experiences = [
+        item
+        for item in getattr(projection, "experiences")
+        if getattr(item, "status", None) == "committed"
+        and subject_ref in item.values.participant_refs
+    ][-4:]
+    for experience in reversed(experiences):
+        add(
+            f"experience:{experience.experience_id}",
+            "experience",
+            experience.origin.accepted_event_ref,
+        )
+
+    impressions = [
+        item
+        for item in getattr(projection, "private_impressions")
+        if item.status == "active"
+        and item.subject_ref == subject_ref
+        and item.origin is not None
+    ][-6:]
+    for impression in reversed(impressions):
+        add(
+            f"private-impression:{impression.impression_id}",
+            "existing_impression",
+            impression.origin.accepted_event_ref,
+        )
+    return tuple(sources)
+
+
 class PrivateImpressionAuthorizedPayload(FrozenModel):
     change_id: str = Field(min_length=1)
     transition_id: str = Field(min_length=1)
@@ -42,6 +157,16 @@ class PrivateImpressionAuthorizedPayload(FrozenModel):
     proposal_id: str = Field(min_length=1)
     evaluated_world_revision: int = Field(ge=0)
     accepted_change_hash: str = Field(min_length=64, max_length=64)
+    # Absent only on immutable legacy events. New commits are rejected by the
+    # commit-batch boundary unless this complete role-reflection lineage is
+    # present.
+    reflection_contract: Literal["private-impression-draft.3"] | None = None
+    reflection_source_refs: tuple[str, ...] = ()
+    source_model_result: str | None = Field(default=None, min_length=1, max_length=256)
+    source_capsule_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
     @model_validator(mode="after")
     def evidence_and_policy_are_narrow(self) -> PrivateImpressionAuthorizedPayload:
@@ -59,6 +184,16 @@ class PrivateImpressionAuthorizedPayload(FrozenModel):
             {(item.appraisal_id, item.hypothesis_id) for item in self.appraisal_refs}
         ):
             raise ValueError("private impression appraisal refs must be unique")
+        reflection_lineage = (
+            self.reflection_contract,
+            self.reflection_source_refs,
+            self.source_model_result,
+            self.source_capsule_id,
+        )
+        if any(reflection_lineage) and not all(reflection_lineage):
+            raise ValueError("private impression reflection lineage is incomplete")
+        if self.reflection_source_refs != tuple(dict.fromkeys(self.reflection_source_refs)):
+            raise ValueError("private impression reflection source refs must be unique")
         return self
 
 
@@ -88,6 +223,8 @@ class PrivateImpressionAcceptedPayload(PrivateImpressionAuthorizedPayload):
             raise ValueError("private impression interpretations must be appraisal references")
         if self.impression.first_seen != self.impression.last_supported:
             raise ValueError("new private impression must have one authoritative support time")
+        if self.reflection_contract is not None and self.impression.reflection_summary is None:
+            raise ValueError("role-reflected private impression requires authored prose")
         if self.accepted_change_hash != private_impression_mutation_hash(self):
             raise ValueError("accepted change hash does not match private impression transition")
         return self
@@ -101,12 +238,71 @@ PRIVATE_IMPRESSION_PAYLOAD_MODELS = {
 def private_impression_mutation_hash(
     payload: PrivateImpressionAuthorizedPayload | Mapping[str, Any],
 ) -> str:
-    material = (
-        payload.model_dump(mode="json")
-        if isinstance(payload, PrivateImpressionAuthorizedPayload)
-        else to_jsonable_python(dict(payload))
-    )
+    material = private_impression_payload_material(payload)
     for field in ("acceptance_id", "proposal_id", "accepted_change_hash"):
         material.pop(field, None)
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def private_impression_reflection_digest(
+    payload: PrivateImpressionAcceptedPayload | Mapping[str, Any],
+) -> str:
+    """Bind the exact role-authored reflection carried by a typed mutation."""
+
+    value = (
+        payload
+        if isinstance(payload, PrivateImpressionAcceptedPayload)
+        else PrivateImpressionAcceptedPayload.model_validate(payload)
+    )
+    return private_impression_reflection_value_digest(
+        source_refs=value.reflection_source_refs,
+        reflection_summary=value.impression.reflection_summary,
+        confidence_bp=value.impression.confidence_bp,
+        expiry_condition=value.impression.expiry_condition,
+    )
+
+
+def private_impression_reflection_value_digest(
+    *,
+    source_refs: tuple[str, ...],
+    reflection_summary: str | None,
+    confidence_bp: int,
+    expiry_condition: str,
+) -> str:
+    material = {
+        "retain": True,
+        "source_refs": list(source_refs),
+        "reflection_summary": reflection_summary,
+        "confidence": confidence_bp,
+        "expiry_condition": expiry_condition,
+    }
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def private_impression_payload_material(
+    payload: PrivateImpressionAuthorizedPayload | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Preserve pre-reflection event bytes while validating them with the new schema."""
+
+    if not isinstance(payload, PrivateImpressionAuthorizedPayload):
+        return to_jsonable_python(dict(payload))
+    material = payload.model_dump(mode="json")
+    if isinstance(payload, PrivateImpressionAcceptedPayload):
+        impression = material.get("impression")
+        if (
+            isinstance(impression, dict)
+            and payload.impression.reflection_summary is None
+            and "reflection_summary" not in payload.impression.model_fields_set
+        ):
+            impression.pop("reflection_summary", None)
+    for field in (
+        "reflection_contract",
+        "reflection_source_refs",
+        "source_model_result",
+        "source_capsule_id",
+    ):
+        if field not in payload.model_fields_set:
+            material.pop(field, None)
+    return material

@@ -65,7 +65,15 @@ def _context_items_for_chat(name: str, items: list[object], limit: int) -> list[
     """Keep the newest dialogue and highest-ranked items without guessing values."""
 
     if name != "recent_dialogue":
-        return items[:limit]
+        injected = [
+            item for item in items if isinstance(item, dict) and item.get("recall_injected") is True
+        ]
+        if not injected:
+            return items[:limit]
+        retained = injected[:limit]
+        retained_ids = {id(item) for item in retained}
+        retained.extend(item for item in items if id(item) not in retained_ids)
+        return retained[:limit]
     keyed: list[tuple[tuple[str, int, str], object]] = []
     for index, item in enumerate(items):
         if not isinstance(item, dict):
@@ -141,6 +149,8 @@ def compact_model_facing_context(raw: str) -> str:
                 privacy = item.get("privacy_class")
                 if isinstance(privacy, str):
                     material["privacy_class"] = privacy
+                if item.get("recall_injected") is True:
+                    material["recall_injected"] = True
                 compact_items.append(material)
         compact_slices[name] = {
             "availability": "available",
@@ -322,9 +332,7 @@ def mechanism_consumption_summary(raw: str) -> dict[str, object]:
         if not isinstance(lane, dict) or lane.get("availability") != "available":
             summary_slices[name] = {
                 "availability": (
-                    lane.get("availability")
-                    if isinstance(lane, dict)
-                    else "unavailable"
+                    lane.get("availability") if isinstance(lane, dict) else "unavailable"
                 ),
                 "item_count": 0,
                 "source_ref_count": 0,

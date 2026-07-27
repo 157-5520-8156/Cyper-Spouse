@@ -56,6 +56,7 @@ from .recall_runtime import (
     TrustedRecallTrace,
     augment_model_content_with_recall,
     model_content_allows_recall,
+    perform_character_recall,
     perform_character_recall_with_prefetch,
     recall_followup_evidence_json,
     verify_trusted_recall_trace,
@@ -304,6 +305,32 @@ class ChatModelDeliberationAdapter:
         failure_code: str | None,
         provisional: bool = False,
     ) -> ModelOutput:
+        expected_cursor = RecallCursor(
+            world_revision=request.evaluated_world_revision,
+            deliberation_revision=request.evaluated_deliberation_revision,
+            ledger_sequence=request.evaluated_ledger_sequence,
+        )
+        recall_trace: TrustedRecallTrace | None = None
+        prefetch_trace: TrustedRecallTrace | None = None
+        if (
+            self._recall_available(request)
+            and self._recall is not None
+            and not quick_recovery
+            and not provisional
+        ):
+            prefetch_trace = self._recall.take_ready_scheduled_prefetch(
+                expected_cursor=expected_cursor,
+                trigger_ref=request.trigger_ref,
+            )
+            if prefetch_trace is not None:
+                request = request.model_copy(
+                    update={
+                        "model_content_json": augment_model_content_with_recall(
+                            request.model_content_json,
+                            verify_trusted_recall_trace(prefetch_trace),
+                        )
+                    }
+                )
         messages = self._messages(
             request=request,
             quick_recovery=quick_recovery,
@@ -327,13 +354,6 @@ class ChatModelDeliberationAdapter:
                 if callable(complete_json)
                 else self._model.complete(messages, temperature=temperature)
             )
-        recall_trace: TrustedRecallTrace | None = None
-        prefetch_trace: TrustedRecallTrace | None = None
-        expected_cursor = RecallCursor(
-            world_revision=request.evaluated_world_revision,
-            deliberation_revision=request.evaluated_deliberation_revision,
-            ledger_sequence=request.evaluated_ledger_sequence,
-        )
         recall_allowed = model_content_allows_recall(request.model_content_json)
         if not recall_allowed and _parse_character_recall_request(raw) is not None:
             raise ValueError("character recall budget is already consumed")
@@ -357,14 +377,28 @@ class ChatModelDeliberationAdapter:
                 raise TimeoutError("character recall completion budget exhausted")
             if not claim_secondary_provider_slot("recall"):
                 raise TimeoutError("character recall secondary provider slot is unavailable")
-            prefetch_trace, recall_trace = await perform_character_recall_with_prefetch(
-                self._recall,
-                request=recall_request,
-                accessibility_seed=f"character-recall:{request.call_id}:{_digest(recall_request.model_dump(mode='json'))}",
-                expected_cursor=expected_cursor,
-                trigger_ref=request.trigger_ref,
-                timeout_seconds=recall_timeout,
+            accessibility_seed = (
+                f"character-recall:{request.call_id}:"
+                f"{_digest(recall_request.model_dump(mode='json'))}"
             )
+            if prefetch_trace is None:
+                prefetch_trace, recall_trace = await perform_character_recall_with_prefetch(
+                    self._recall,
+                    request=recall_request,
+                    accessibility_seed=accessibility_seed,
+                    expected_cursor=expected_cursor,
+                    trigger_ref=request.trigger_ref,
+                    timeout_seconds=recall_timeout,
+                )
+            else:
+                recall_trace = await perform_character_recall(
+                    self._recall,
+                    request=recall_request,
+                    accessibility_seed=accessibility_seed,
+                    expected_cursor=expected_cursor,
+                    trigger_ref=request.trigger_ref,
+                    timeout_seconds=recall_timeout,
+                )
             audit_trace = verify_trusted_recall_trace(recall_trace)
             prefetch_audit = (
                 verify_trusted_recall_trace(prefetch_trace)

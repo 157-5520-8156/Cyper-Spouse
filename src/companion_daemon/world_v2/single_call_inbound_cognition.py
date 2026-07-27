@@ -62,6 +62,7 @@ from .recall_runtime import (
     augment_model_content_with_recall,
     mark_recall_budget_consumed,
     model_content_allows_recall,
+    perform_character_recall,
     perform_character_recall_with_prefetch,
     recall_followup_evidence_json,
     verify_trusted_recall_trace,
@@ -144,12 +145,8 @@ def _salvage_expression_without_invalid_world_claims(
     """
 
     if not (
-        violation.startswith(
-            "world claim cites authority outside its semantic source lane:"
-        )
-        or violation.startswith(
-            "source-bound world claim declaration missing required scope(s):"
-        )
+        violation.startswith("world claim cites authority outside its semantic source lane:")
+        or violation.startswith("source-bound world claim declaration missing required scope(s):")
     ):
         return None
     claims = value.get("world_claims")
@@ -338,9 +335,7 @@ class _FailedExpressionDetail:
 
     __slots__ = ("messages", "raw", "violation")
 
-    def __init__(
-        self, *, messages: list[dict[str, str]], raw: str, violation: str
-    ) -> None:
+    def __init__(self, *, messages: list[dict[str, str]], raw: str, violation: str) -> None:
         self.messages = messages
         self.raw = raw
         self.violation = violation
@@ -444,9 +439,7 @@ class SingleCallAppraisalAdapter:
         if (
             self._owner._recovery_model is not None
             and key not in self._owner._recovery_attempted
-            and not _provider_already_used_fallback(
-                self._owner._selected_provider(request)
-            )
+            and not _provider_already_used_fallback(self._owner._selected_provider(request))
         ):
             return await self._owner._retry_with_recovery_provider(request)
         return ModelOutput(
@@ -469,9 +462,7 @@ class SingleCallExpressionAdapter:
     async def propose_provisional(self, request: ModelInput) -> ModelOutput:
         """Use the selected real provider for one strict provisional beat."""
 
-        return await self._owner._selected_expression(request).propose_provisional(
-            request
-        )
+        return await self._owner._selected_expression(request).propose_provisional(request)
 
     def episode_provisional_already_evaluated(self, request: ModelInput) -> bool:
         return _cache_key(request) in self._owner._episode_provisional_started
@@ -525,9 +516,7 @@ class SingleCallExpressionAdapter:
         if pending is None:
             if key in self._owner._failed_combined:
                 self._owner._failed_combined.discard(key)
-                repaired = await self._owner._retry_failed_expression_before_failsafe(
-                    request, key
-                )
+                repaired = await self._owner._retry_failed_expression_before_failsafe(request, key)
                 if repaired is not None:
                     return repaired
                 raise ValueError("paired_expression_requires_model_recovery")
@@ -537,14 +526,14 @@ class SingleCallExpressionAdapter:
                 raise
             except Exception:
                 recovery = self._owner._recovery_expression
-                if recovery is None or _provider_already_used_fallback(
-                    self._owner._selected_provider(request)
-                ) or has_provider_slot_coordinator():
+                if (
+                    recovery is None
+                    or _provider_already_used_fallback(self._owner._selected_provider(request))
+                    or has_provider_slot_coordinator()
+                ):
                     raise
                 self._owner._recovery_attempted.add(key)
-                recovery_timeout = fit_secondary_call_timeout(
-                    _RECOVERY_MODEL_TIMEOUT_SECONDS
-                )
+                recovery_timeout = fit_secondary_call_timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS)
                 if recovery_timeout is None:
                     raise
                 async with asyncio.timeout(recovery_timeout):
@@ -583,16 +572,14 @@ class SingleCallExpressionAdapter:
                 )
         if carried_prefetch_trace is not None or carried_recall_trace is not None:
             model_content_json = mark_recall_budget_consumed(model_content_json)
-        expression_request = request.model_copy(
-            update={"model_content_json": model_content_json}
-        )
+        expression_request = request.model_copy(update={"model_content_json": model_content_json})
         if pending.route_tier != request.route.tier:
             # The post-acceptance capsule may legitimately route differently.
             # Ask the newly selected role model to decide again from that
             # capsule; local code must not invent a substitute expression.
-            delegated = await self._owner._selected_expression(
+            delegated = await self._owner._selected_expression(expression_request).propose(
                 expression_request
-            ).propose(expression_request)
+            )
             return _preserve_carried_recall_provenance(
                 delegated,
                 recall_trace=carried_recall_trace,
@@ -615,9 +602,7 @@ class SingleCallExpressionAdapter:
                 raise
             self._owner._recovery_attempted.add(_cache_key(request))
             try:
-                recovery_timeout = fit_secondary_call_timeout(
-                    _RECOVERY_MODEL_TIMEOUT_SECONDS
-                )
+                recovery_timeout = fit_secondary_call_timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS)
                 if recovery_timeout is None:
                     raise TimeoutError("recovery budget exhausted")
                 async with asyncio.timeout(recovery_timeout):
@@ -656,19 +641,13 @@ class SingleCallExpressionAdapter:
         # adapter's quick-recovery prompt, so the backup receives the same
         # bounded world/emotion/relationship context without adding a second
         # provider lane.
-        recovery = (
-            self._owner._recovery_expression
-            or self._owner._selected_expression(request)
-        )
-        if (
-            key not in self._owner._recovery_attempted
-            and not _provider_already_used_fallback(self._owner._selected_provider(request))
+        recovery = self._owner._recovery_expression or self._owner._selected_expression(request)
+        if key not in self._owner._recovery_attempted and not _provider_already_used_fallback(
+            self._owner._selected_provider(request)
         ):
             self._owner._recovery_attempted.add(key)
             try:
-                recovery_timeout = fit_secondary_call_timeout(
-                    _RECOVERY_MODEL_TIMEOUT_SECONDS
-                )
+                recovery_timeout = fit_secondary_call_timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS)
                 if recovery_timeout is None:
                     raise TimeoutError("ordinary recovery budget exhausted")
                 async with asyncio.timeout(recovery_timeout):
@@ -702,12 +681,9 @@ class SingleCallExpressionAdapter:
                 )
             else:
                 record_failsafe()
-                return output.model_copy(
-                    update={"model_version": _CONTEXTUAL_FAILSAFE_VERSION}
-                )
+                return output.model_copy(update={"model_version": _CONTEXTUAL_FAILSAFE_VERSION})
         raise RuntimeError(
-            "model-owned expression unavailable after configured recovery "
-            f"({failure_code[:64]})"
+            f"model-owned expression unavailable after configured recovery ({failure_code[:64]})"
         )
 
 
@@ -806,30 +782,21 @@ class SingleCallInboundCognition:
             else None
         )
         if contextual_failsafe_enabled and (
-            contextual_failsafe_model is None
-            or contextual_failsafe_reviewer_model is None
+            contextual_failsafe_model is None or contextual_failsafe_reviewer_model is None
         ):
-            raise ValueError(
-                "contextual failsafe requires separate generation and reviewer models"
-            )
+            raise ValueError("contextual failsafe requires separate generation and reviewer models")
         if (
             contextual_failsafe_enabled
             and contextual_failsafe_model is contextual_failsafe_reviewer_model
         ):
-            raise ValueError(
-                "contextual failsafe generation and reviewer must be independent"
-            )
+            raise ValueError("contextual failsafe generation and reviewer must be independent")
         if contextual_failsafe_enabled:
-            generator_identity = str(
-                getattr(contextual_failsafe_model, "model", "")
-            ).strip()
+            generator_identity = str(getattr(contextual_failsafe_model, "model", "")).strip()
             reviewer_identity = str(
                 getattr(contextual_failsafe_reviewer_model, "model", "")
             ).strip()
             if generator_identity and generator_identity == reviewer_identity:
-                raise ValueError(
-                    "contextual failsafe reviewer must use a distinct model identity"
-                )
+                raise ValueError("contextual failsafe reviewer must use a distinct model identity")
         self._contextual_failsafe_expression = (
             ChatModelDeliberationAdapter(
                 model=contextual_failsafe_model,
@@ -878,9 +845,9 @@ class SingleCallInboundCognition:
             tuple[tuple[str, str, str], str], _PendingExpression
         ] = OrderedDict()
         self._failed_combined = _BoundedKeySet(_MAX_PENDING_DRAFTS)
-        self._failed_details: OrderedDict[
-            tuple[str, str, str], _FailedExpressionDetail
-        ] = OrderedDict()
+        self._failed_details: OrderedDict[tuple[str, str, str], _FailedExpressionDetail] = (
+            OrderedDict()
+        )
         self._recovery_attempted = _BoundedKeySet(_MAX_PENDING_DRAFTS)
         self._precomputed_advisory: set[tuple[str, str, str]] = set()
         self._episode_provisional_started = _BoundedKeySet(_MAX_PENDING_DRAFTS)
@@ -977,9 +944,7 @@ class SingleCallInboundCognition:
             return self._thinking_id[:256]
         return self._flash_id
 
-    def _model_id_for_provider(
-        self, request: ModelInput, provider: ChatCompletionModel
-    ) -> str:
+    def _model_id_for_provider(self, request: ModelInput, provider: ChatCompletionModel) -> str:
         inferred = str(getattr(provider, "model", "")).strip()
         return (inferred or self._model_id_for(request))[:256]
 
@@ -1110,7 +1075,12 @@ class SingleCallInboundCognition:
             ),
         )
 
-    async def _retry_with_recovery_provider(self, request: ModelInput) -> ModelOutput:
+    async def _retry_with_recovery_provider(
+        self,
+        request: ModelInput,
+        *,
+        prefetch_trace: TrustedRecallTrace | None = None,
+    ) -> ModelOutput:
         """Run exactly one bounded structural recovery against the backup model."""
 
         if self._recovery_model is None:
@@ -1122,9 +1092,7 @@ class SingleCallInboundCognition:
         self._failed_details.pop(key, None)
         self._recovery_attempted.add(key)
         try:
-            recovery_timeout = fit_secondary_call_timeout(
-                _RECOVERY_MODEL_TIMEOUT_SECONDS
-            )
+            recovery_timeout = fit_secondary_call_timeout(_RECOVERY_MODEL_TIMEOUT_SECONDS)
             if recovery_timeout is None:
                 raise TimeoutError("paired cognition backup budget exhausted")
             async with asyncio.timeout(recovery_timeout):
@@ -1132,6 +1100,7 @@ class SingleCallInboundCognition:
                     request,
                     provider_override=self._recovery_model,
                     allow_recovery=False,
+                    carried_prefetch_trace=prefetch_trace,
                 )
         except asyncio.CancelledError:
             raise
@@ -1149,6 +1118,7 @@ class SingleCallInboundCognition:
         *,
         provider_override: ChatCompletionModel | None = None,
         allow_recovery: bool = True,
+        carried_prefetch_trace: TrustedRecallTrace | None = None,
     ) -> ModelOutput:
         trigger = request.trigger_message
         if trigger is None:
@@ -1174,6 +1144,36 @@ class SingleCallInboundCognition:
                 logger.warning("local appraisal output rejected; using the main appraisal provider")
 
         expression_adapter = self._selected_expression(request)
+        expected_cursor = RecallCursor(
+            world_revision=request.evaluated_world_revision,
+            deliberation_revision=request.evaluated_deliberation_revision,
+            ledger_sequence=request.evaluated_ledger_sequence,
+        )
+        recall_trace: TrustedRecallTrace | None = None
+        prefetch_trace = carried_prefetch_trace
+        if prefetch_trace is not None:
+            request = request.model_copy(
+                update={
+                    "model_content_json": augment_model_content_with_recall(
+                        request.model_content_json,
+                        verify_trusted_recall_trace(prefetch_trace),
+                    )
+                }
+            )
+        elif self._recall_available(request) and self._recall is not None:
+            prefetch_trace = self._recall.take_ready_scheduled_prefetch(
+                expected_cursor=expected_cursor,
+                trigger_ref=request.trigger_ref,
+            )
+            if prefetch_trace is not None:
+                request = request.model_copy(
+                    update={
+                        "model_content_json": augment_model_content_with_recall(
+                            request.model_content_json,
+                            verify_trusted_recall_trace(prefetch_trace),
+                        )
+                    }
+                )
         provider_request = request.model_copy(
             update={
                 "model_content_json": compact_chat_model_facing_context(request.model_content_json)
@@ -1246,18 +1246,14 @@ class SingleCallInboundCognition:
                 and not _provider_already_used_fallback(provider)
                 and not has_provider_slot_coordinator()
             ):
-                return await self._retry_with_recovery_provider(request)
+                return await self._retry_with_recovery_provider(
+                    request,
+                    prefetch_trace=prefetch_trace,
+                )
             self._failed_combined.add(_cache_key(request))
             raise
-        recall_trace: TrustedRecallTrace | None = None
-        prefetch_trace: TrustedRecallTrace | None = None
         expression_request = request
         repair_messages = messages
-        expected_cursor = RecallCursor(
-            world_revision=request.evaluated_world_revision,
-            deliberation_revision=request.evaluated_deliberation_revision,
-            ledger_sequence=request.evaluated_ledger_sequence,
-        )
         recall_allowed = model_content_allows_recall(request.model_content_json)
         if not recall_allowed and _parse_character_recall_request(raw) is not None:
             raise ValueError("paired character recall budget is already consumed")
@@ -1279,22 +1275,30 @@ class SingleCallInboundCognition:
                 raise TimeoutError("paired character recall budget exhausted")
             if not claim_secondary_provider_slot("recall"):
                 raise TimeoutError("paired character recall slot is unavailable")
-            prefetch_trace, recall_trace = await perform_character_recall_with_prefetch(
-                self._recall,
-                request=recall_request,
-                accessibility_seed=(
-                    f"paired-character-recall:{request.call_id}:"
-                    + _cache_key(request)[1]
-                ),
-                expected_cursor=expected_cursor,
-                trigger_ref=request.trigger_ref,
-                timeout_seconds=recall_timeout,
+            accessibility_seed = (
+                f"paired-character-recall:{request.call_id}:" + _cache_key(request)[1]
             )
+            if prefetch_trace is None:
+                prefetch_trace, recall_trace = await perform_character_recall_with_prefetch(
+                    self._recall,
+                    request=recall_request,
+                    accessibility_seed=accessibility_seed,
+                    expected_cursor=expected_cursor,
+                    trigger_ref=request.trigger_ref,
+                    timeout_seconds=recall_timeout,
+                )
+            else:
+                recall_trace = await perform_character_recall(
+                    self._recall,
+                    request=recall_request,
+                    accessibility_seed=accessibility_seed,
+                    expected_cursor=expected_cursor,
+                    trigger_ref=request.trigger_ref,
+                    timeout_seconds=recall_timeout,
+                )
             audit_trace = verify_trusted_recall_trace(recall_trace)
             prefetch_audit = (
-                verify_trusted_recall_trace(prefetch_trace)
-                if prefetch_trace is not None
-                else None
+                verify_trusted_recall_trace(prefetch_trace) if prefetch_trace is not None else None
             )
             model_content_json = request.model_content_json
             if prefetch_audit is not None:
@@ -1334,29 +1338,21 @@ class SingleCallInboundCognition:
                 raise TimeoutError("paired character recall follow-up budget exhausted")
             async with asyncio.timeout(recall_timeout):
                 if callable(metered):
-                    result = await metered(
-                        followup, temperature=self._temperature
-                    )
+                    result = await metered(followup, temperature=self._temperature)
                     if (
                         not isinstance(result, tuple)
                         or len(result) != 2
                         or not isinstance(result[0], str)
                     ):
-                        raise ValueError(
-                            "metered paired recall result must be (text, usage)"
-                        )
+                        raise ValueError("metered paired recall result must be (text, usage)")
                     raw, usage_raw = result
                     second_usage = ModelUsageProvenance.model_validate(usage_raw)
                 else:
                     complete_json = getattr(provider, "complete_json", None)
                     raw = await (
-                        complete_json(
-                            followup, temperature=self._temperature
-                        )
+                        complete_json(followup, temperature=self._temperature)
                         if callable(complete_json)
-                        else provider.complete(
-                            followup, temperature=self._temperature
-                        )
+                        else provider.complete(followup, temperature=self._temperature)
                     )
             usage = _combine_usage(usage, second_usage, request.call_id)
         try:
@@ -1368,7 +1364,10 @@ class SingleCallInboundCognition:
                 and not _provider_already_used_fallback(provider)
                 and not has_provider_slot_coordinator()
             ):
-                return await self._retry_with_recovery_provider(request)
+                return await self._retry_with_recovery_provider(
+                    request,
+                    prefetch_trace=prefetch_trace,
+                )
             self._failed_combined.add(_cache_key(request))
             self._remember_failed_expression(
                 _cache_key(request), messages=messages, raw=raw, violation=str(exc)
@@ -1448,9 +1447,7 @@ class SingleCallInboundCognition:
             if salvaged is not None:
                 expression_raw = salvaged
                 expression_valid = True
-                logger.warning(
-                    "unsupported world-claim clause removed without losing the reply"
-                )
+                logger.warning("unsupported world-claim clause removed without losing the reply")
                 record_claim_repair()
         corrective_spent = False
         if (
@@ -1470,8 +1467,7 @@ class SingleCallInboundCognition:
             repair_timeout = fit_secondary_call_timeout(_CLAIM_REPAIR_TIMEOUT_SECONDS)
             if repair_timeout is None:
                 logger.warning(
-                    "paired corrective retry deferred: attempt budget exhausted "
-                    "violation=%s",
+                    "paired corrective retry deferred: attempt budget exhausted violation=%s",
                     violation[:200],
                 )
             else:
@@ -1501,7 +1497,10 @@ class SingleCallInboundCognition:
             and not _provider_already_used_fallback(provider)
             and not has_provider_slot_coordinator()
         ):
-            return await self._retry_with_recovery_provider(request)
+            return await self._retry_with_recovery_provider(
+                request,
+                prefetch_trace=prefetch_trace,
+            )
         if expression_valid:
             pending_expression = _PendingExpression(
                 raw=expression_raw,
@@ -1559,6 +1558,7 @@ class SingleCallInboundCognition:
         )
         while len(self._failed_details) > _MAX_PENDING_DRAFTS:
             self._failed_details.popitem(last=False)
+
 
 def _normalize_visible_expression(
     value: dict[str, Any],

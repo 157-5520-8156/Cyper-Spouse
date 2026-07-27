@@ -353,6 +353,8 @@ from .proposal_audit_schemas import (
     ProposalAuditProjection,
     ProposalRecordedV2Payload,
     RecordedModelResultAudit,
+    canonical_json,
+    sha256,
     validate_recorded_attempt_lineage,
 )
 from .relationship_events import (
@@ -370,6 +372,9 @@ from .relationship_reducers import (
 from .private_impression_events import (
     PrivateImpressionAcceptedPayload,
     PrivateImpressionAuthorizedPayload,
+    offered_private_impression_reflection_bindings,
+    private_impression_payload_material,
+    private_impression_reflection_digest,
 )
 from .private_impression_reducers import accept_private_impression
 from .thread_events import (
@@ -491,7 +496,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.36"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.38"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}" for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 )
@@ -775,9 +780,7 @@ class ReducerState(FrozenModel):
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
     expression_plan_manifests: tuple[ExpressionPlanManifestRef, ...] = ()
-    response_expectation_assessments: tuple[
-        ResponseExpectationAssessmentProjection, ...
-    ] = ()
+    response_expectation_assessments: tuple[ResponseExpectationAssessmentProjection, ...] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
     expression_payload_descriptors: tuple[ExpressionPayloadDescriptorProjection, ...] = ()
     life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()
@@ -853,12 +856,17 @@ class ReducerState(FrozenModel):
         if len(self.relationship_states) > 1:
             raise ValueError("world v2.1 permits one primary relationship state")
         for subject_ref in {item.subject_ref for item in self.appearance_states}:
-            history = tuple(item for item in self.appearance_states if item.subject_ref == subject_ref)
+            history = tuple(
+                item for item in self.appearance_states if item.subject_ref == subject_ref
+            )
             if tuple(item.entity_revision for item in history) != tuple(range(1, len(history) + 1)):
                 raise ValueError("appearance state revisions must be contiguous")
             if len({item.appearance_state_id for item in history}) != 1:
                 raise ValueError("appearance state subject must have one authority identity")
-            if any(current.valid_from <= previous.valid_from for previous, current in zip(history, history[1:])):
+            if any(
+                current.valid_from <= previous.valid_from
+                for previous, current in zip(history, history[1:])
+            ):
                 raise ValueError("appearance state versions must move logical time forward")
             if any(
                 previous.valid_until is None or previous.valid_until > current.valid_from
@@ -873,9 +881,15 @@ class ReducerState(FrozenModel):
                 raise ValueError("visible physical state revisions must be contiguous")
             if len({item.physical_state_id for item in history}) != 1:
                 raise ValueError("visible physical state subject must have one authority identity")
-            if any(current.valid_from <= previous.valid_from for previous, current in zip(history, history[1:])):
+            if any(
+                current.valid_from <= previous.valid_from
+                for previous, current in zip(history, history[1:])
+            ):
                 raise ValueError("visible physical state versions must move logical time forward")
-            if any(previous.valid_until > current.valid_from for previous, current in zip(history, history[1:])):
+            if any(
+                previous.valid_until > current.valid_from
+                for previous, current in zip(history, history[1:])
+            ):
                 raise ValueError("visible physical state histories must not overlap")
         authority_ids = tuple(item.authority_id for item in self.actor_authorities)
         if len(authority_ids) != len(set(authority_ids)):
@@ -1312,9 +1326,10 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.33",
             "world-v2-reducers.34",
             "world-v2-reducers.35",
+            "world-v2-reducers.36",
+            "world-v2-reducers.37",
         }:
-            # .33 adds only conditional compact ecology scheduler state; .34
-            # folds terminal ecology ids out of head state. Their older
+            # .33-.36 only add current-generation conditional fields. Their
             # semantic field feature set is otherwise the current one.
             reducer_bundle_version = REDUCER_BUNDLE_VERSION
         payload = {
@@ -1384,7 +1399,11 @@ class ReducerState(FrozenModel):
             ),
             "logical_time": self.logical_time.isoformat() if self.logical_time else None,
             **(
-                {"appearance_states": tuple(item.model_dump(mode="json") for item in self.appearance_states)}
+                {
+                    "appearance_states": tuple(
+                        item.model_dump(mode="json") for item in self.appearance_states
+                    )
+                }
                 if self.appearance_states
                 else {}
             ),
@@ -1429,6 +1448,8 @@ class ReducerState(FrozenModel):
                             if declared_reducer_bundle_version
                             not in {
                                 "world-v2-reducers.35",
+                                "world-v2-reducers.36",
+                                "world-v2-reducers.37",
                                 REDUCER_BUNDLE_VERSION,
                             }
                             else None
@@ -1442,11 +1463,7 @@ class ReducerState(FrozenModel):
             # Conditional like appearance_states: worlds without aspirations
             # keep byte-identical semantic hashes across this bundle change.
             **(
-                {
-                    "aspirations": tuple(
-                        item.model_dump(mode="json") for item in self.aspirations
-                    )
-                }
+                {"aspirations": tuple(item.model_dump(mode="json") for item in self.aspirations)}
                 if self.aspirations
                 else {}
             ),
@@ -1539,6 +1556,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.33",
             "world-v2-reducers.34",
             "world-v2-reducers.35",
+            "world-v2-reducers.36",
+            "world-v2-reducers.37",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["provider_media_grants"] = tuple(
@@ -1556,11 +1575,12 @@ class ReducerState(FrozenModel):
             payload["media_unrenderable_opportunity_ids"] = self.media_unrenderable_opportunity_ids
             if declared_reducer_bundle_version in {
                 "world-v2-reducers.35",
+                "world-v2-reducers.36",
+                "world-v2-reducers.37",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_declined_candidate_revisions"] = tuple(
-                    item.model_dump(mode="json")
-                    for item in self.media_declined_candidate_revisions
+                    item.model_dump(mode="json") for item in self.media_declined_candidate_revisions
                 )
         if declared_reducer_bundle_version in {
             "world-v2-reducers.27",
@@ -1571,6 +1591,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.33",
             "world-v2-reducers.34",
             "world-v2-reducers.35",
+            "world-v2-reducers.36",
+            "world-v2-reducers.37",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_artifacts"] = tuple(
@@ -1584,6 +1606,8 @@ class ReducerState(FrozenModel):
                     "world-v2-reducers.33",
                     "world-v2-reducers.34",
                     "world-v2-reducers.35",
+                    "world-v2-reducers.36",
+                    "world-v2-reducers.37",
                     REDUCER_BUNDLE_VERSION,
                 }
                 else item.model_dump(mode="json", exclude={"repairable", "repair_scope"})
@@ -1599,6 +1623,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.33",
             "world-v2-reducers.34",
             "world-v2-reducers.35",
+            "world-v2-reducers.36",
+            "world-v2-reducers.37",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_delivery_approvals"] = tuple(
@@ -1615,6 +1641,8 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.33",
                 "world-v2-reducers.34",
                 "world-v2-reducers.35",
+                "world-v2-reducers.36",
+                "world-v2-reducers.37",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_thread_proposals"] = tuple(
@@ -1793,16 +1821,21 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.33",
                 "world-v2-reducers.34",
                 "world-v2-reducers.35",
+                "world-v2-reducers.36",
+                "world-v2-reducers.37",
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["expression_plan_manifests"] = tuple(
                     _expression_plan_manifest_semantic_dump(item)
                     for item in self.expression_plan_manifests
                 )
-            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            if declared_reducer_bundle_version in {
+                "world-v2-reducers.36",
+                "world-v2-reducers.37",
+                REDUCER_BUNDLE_VERSION,
+            }:
                 payload["response_expectation_assessments"] = tuple(
-                    item.model_dump(mode="json")
-                    for item in self.response_expectation_assessments
+                    item.model_dump(mode="json") for item in self.response_expectation_assessments
                 )
             payload["stored_message_payloads"] = tuple(
                 item.model_dump(mode="json") for item in self.stored_message_payloads
@@ -2402,8 +2435,7 @@ def _advisory_acceptance_rejected(state: ReducerState, event: WorldEvent) -> Red
         "failure_fingerprint",
     }
     if set(payload) != required or any(
-        not isinstance(payload[name], str) or not payload[name]
-        for name in required
+        not isinstance(payload[name], str) or not payload[name] for name in required
     ):
         raise ValueError("advisory acceptance rejection audit is invalid")
     return state
@@ -2470,10 +2502,14 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
         evaluated = raw.get("evaluated_world_revision")
         if isinstance(evaluated, int) and evaluated != len(state.committed_world_event_refs):
             raise ValueError("proposal must evaluate the current world revision")
-        revision = ProposalRevisionRef(
-            proposal_id=proposal_id,
-            evaluated_world_revision=evaluated,
-        ) if isinstance(evaluated, int) else None
+        revision = (
+            ProposalRevisionRef(
+                proposal_id=proposal_id,
+                evaluated_world_revision=evaluated,
+            )
+            if isinstance(evaluated, int)
+            else None
+        )
         if raw.get("proposal_kind") == "continuation":
             proposal = ContinuationProposal.model_validate_json(event.payload_json)
             source = proposal.evidence_refs[0]
@@ -2482,7 +2518,9 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
                 evaluated_world_revision=proposal.evaluated_world_revision,
                 proposal_event_ref=event.event_id,
                 proposal_event_payload_hash=event.payload_hash,
-                proposed_change_hash=proposal.proposed_changes[0].payload.payload_hash.removeprefix("sha256:"),
+                proposed_change_hash=proposal.proposed_changes[0].payload.payload_hash.removeprefix(
+                    "sha256:"
+                ),
                 trigger_ref=proposal.trigger_ref,
                 source_evidence_ref=source.ref_id,
                 source_evidence_payload_hash=source.immutable_hash.removeprefix("sha256:"),
@@ -2723,7 +2761,9 @@ def _private_impression_proposal_recorded(
     *,
     proposal: PrivateImpressionProposalProjection | None = None,
 ) -> ReducerState:
-    proposal = proposal or PrivateImpressionProposalProjection.model_validate_json(event.payload_json)
+    proposal = proposal or PrivateImpressionProposalProjection.model_validate_json(
+        event.payload_json
+    )
     if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
         raise ValueError("private impression proposal must evaluate the current world revision")
     if proposal.proposal_id in state.private_impression_proposal_ids:
@@ -2741,8 +2781,80 @@ def _private_impression_proposal_recorded(
         or payload.evidence_refs != proposal.evidence_refs
         or payload.appraisal_refs != proposal.appraisal_refs
         or payload.policy_refs != proposal.policy_refs
+        or payload.reflection_contract != proposal.reflection_contract
+        or payload.reflection_source_refs != proposal.reflection_source_refs
+        or payload.source_model_result != proposal.source_model_result
+        or payload.source_capsule_id != proposal.source_capsule_id
     ):
         raise ValueError("persisted private impression proposal body does not match its index")
+    if proposal.reflection_contract is not None:
+        audit = next(
+            (
+                item
+                for item in state.model_result_audits
+                if item.model_result_ref == proposal.source_model_result
+            ),
+            None,
+        )
+        recorded = (
+            RecordedModelResultAudit.model_validate_json(audit.audit_json)
+            if audit is not None
+            else None
+        )
+        reflection_digest = private_impression_reflection_digest(payload)
+        expected_decision_proposal_id = (
+            "proposal:private-reflection-decision:"
+            + sha256(
+                canonical_json(
+                    {
+                        "capsule_id": proposal.source_capsule_id,
+                        "reflection_digest": reflection_digest,
+                    }
+                )
+            )
+        )
+        decision_audit = next(
+            (
+                item
+                for item in state.proposal_audits
+                if item.model_result_ref == proposal.source_model_result
+                and item.capsule_id == proposal.source_capsule_id
+                and item.proposal_id == expected_decision_proposal_id
+            ),
+            None,
+        )
+        decision = (
+            validate_proposal_envelope(json.loads(decision_audit.proposal_json))
+            if decision_audit is not None
+            else None
+        )
+        if (
+            audit is None
+            or audit.capsule_id != proposal.source_capsule_id
+            or audit.evaluated_world_revision != proposal.evaluated_world_revision
+            or audit.attempt_index != audit.attempt_count - 1
+            or recorded is None
+            or recorded.status
+            not in {
+                "proposal_validated",
+                "main_invalid_recovered",
+            }
+            or decision_audit is None
+            or decision_audit.proposal_hash != audit.proposal_hash
+            or decision_audit.evaluated_world_revision
+            != proposal.evaluated_world_revision
+            or not isinstance(decision, DecisionProposal)
+            or decision.brief_rationale
+            != f"private-reflection-draft:{reflection_digest}"
+        ):
+            raise ValueError(
+                "private impression proposal lacks its final role-model reflection audit"
+            )
+        _validate_private_impression_reflection_sources(
+            state,
+            payload=payload,
+            audit=audit,
+        )
     _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
     _validate_private_impression_source_events(state, payload)
     # Dry-run the pure reducer at the pinned revision.  This prevents an LLM
@@ -2771,6 +2883,76 @@ def _private_impression_proposal_recorded(
             ),
         }
     )
+
+
+def _validate_private_impression_reflection_sources(
+    state: ReducerState,
+    *,
+    payload: PrivateImpressionAcceptedPayload,
+    audit: ModelResultAuditProjection,
+) -> None:
+    """Close selected capsule refs over their exact domain authorities."""
+
+    anchor = next(
+        (
+            item
+            for item in state.appraisals
+            if item.origin is not None
+            and item.origin.accepted_event_ref == audit.trigger_ref
+        ),
+        None,
+    )
+    if anchor is None or payload.impression.subject_ref != anchor.subject_ref:
+        raise ValueError("private impression reflection changed its anchor subject")
+    offered = offered_private_impression_reflection_bindings(
+        state,
+        appraisal=anchor,
+    )
+    source_authority = {
+        item.source_ref: item.authority_event_ref for item in offered
+    }
+    appraisal_sources: dict[str, tuple[str, str, str]] = {}
+    for item in state.appraisals:
+        for hypothesis in item.hypotheses:
+            source_ref = f"appraisal:{item.appraisal_id}:{hypothesis.hypothesis_id}"
+            if source_ref in source_authority:
+                appraisal_sources[source_ref] = (
+                    item.appraisal_id,
+                    hypothesis.hypothesis_id,
+                    item.subject_ref,
+                )
+
+    selected_event_refs: list[str] = []
+    selected_appraisal_refs: list[tuple[str, str]] = []
+    selected_anchor = False
+    for source_ref in payload.reflection_source_refs:
+        event_ref = source_authority.get(source_ref)
+        if event_ref is None:
+            raise ValueError("private impression reflection selected an unknown capsule source")
+        if event_ref not in selected_event_refs:
+            selected_event_refs.append(event_ref)
+        appraisal_source = appraisal_sources.get(source_ref)
+        if appraisal_source is not None:
+            appraisal_id, hypothesis_id, subject_ref = appraisal_source
+            if subject_ref != anchor.subject_ref:
+                raise ValueError("private impression reflection crossed appraisal subjects")
+            selected_appraisal_refs.append((appraisal_id, hypothesis_id))
+            selected_anchor = selected_anchor or appraisal_id == anchor.appraisal_id
+    expected_appraisal_refs = [
+        (item.appraisal_id, item.hypothesis_id) for item in payload.appraisal_refs
+    ]
+    if not selected_anchor or selected_appraisal_refs != expected_appraisal_refs:
+        raise ValueError(
+            "private impression reflection appraisal refs do not match selected sources"
+        )
+    if (
+        tuple(selected_event_refs) != payload.impression.source_refs
+        or tuple(selected_event_refs)
+        != tuple(item.ref_id for item in payload.evidence_refs)
+    ):
+        raise ValueError(
+            "private impression reflection evidence does not match selected sources"
+        )
 
 
 def _commitment_proposal_recorded(
@@ -3456,8 +3638,10 @@ def _validate_compiled_relationship_proposal_source(
         for item in generic.proposed_changes
         if item.kind == "relationship_signal" and item.change_id == source.change_id
     )
-    if len(changes) != 1 or changes[0].transition != "suggest" or (
-        changes[0].payload.payload_hash != source.change_payload_hash
+    if (
+        len(changes) != 1
+        or changes[0].transition != "suggest"
+        or (changes[0].payload.payload_hash != source.change_payload_hash)
     ):
         raise ValueError("compiled relationship proposal source change does not resolve")
 
@@ -3493,8 +3677,11 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
     if raw.get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION:
         manifest = SocialDeferredAcceptanceManifest.model_validate_json(event.payload_json)
         source = next(
-            (item for item in state.message_observations
-             if item.observation_id == manifest.source_observation_id),
+            (
+                item
+                for item in state.message_observations
+                if item.observation_id == manifest.source_observation_id
+            ),
             None,
         )
         audit = next(
@@ -3503,7 +3690,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         )
         source_event = next(
             (
-                item for item in state.committed_world_event_refs
+                item
+                for item in state.committed_world_event_refs
                 if audit is not None and item.event_id == audit.trigger_ref
             ),
             None,
@@ -3543,10 +3731,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
     if raw.get("manifest_version") == MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION:
         manifest = MediaContinuationAcceptanceManifest.model_validate(raw, strict=True)
         proposal = next(
-            (
-                item for item in state.proposal_revisions
-                if item.proposal_id == manifest.proposal_id
-            ),
+            (item for item in state.proposal_revisions if item.proposal_id == manifest.proposal_id),
             None,
         )
         trigger = next(
@@ -3555,7 +3740,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         )
         source = next(
             (
-                item for item in state.committed_world_event_refs
+                item
+                for item in state.committed_world_event_refs
                 if item.event_id == manifest.source_evidence_ref
             ),
             None,
@@ -3584,11 +3770,12 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
             or source.payload_hash != manifest.source_evidence_payload_hash
             or any(item.proposal_id == manifest.proposal_id for item in state.acceptance_decisions)
             or any(
-                item.acceptance_id == manifest.acceptance_id
-                for item in state.acceptance_decisions
+                item.acceptance_id == manifest.acceptance_id for item in state.acceptance_decisions
             )
         ):
-            raise ValueError("media continuation Acceptance is not bound to exact proposal authority")
+            raise ValueError(
+                "media continuation Acceptance is not bound to exact proposal authority"
+            )
         decision = AcceptanceDecisionRef(
             proposal_id=manifest.proposal_id,
             evaluated_world_revision=manifest.evaluated_world_revision,
@@ -3671,9 +3858,14 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         and thread_proposal.transition_kind == "open"
         and current_world_revision == evaluated_world_revision + 7
         and len(state.committed_world_event_refs) >= 7
-        and tuple(item.event_type for item in state.committed_world_event_refs[-7:]) == (
-            "AcceptanceRecorded", "PrivateCommitmentOpened", "MessagePayloadStored",
-            "ExpressionPlanAccepted", "ExpressionBeatAuthorized", "BudgetReserved",
+        and tuple(item.event_type for item in state.committed_world_event_refs[-7:])
+        == (
+            "AcceptanceRecorded",
+            "PrivateCommitmentOpened",
+            "MessagePayloadStored",
+            "ExpressionPlanAccepted",
+            "ExpressionBeatAuthorized",
+            "BudgetReserved",
             "ActionAuthorized",
         )
         and state.commitments
@@ -4059,7 +4251,9 @@ def _expression_plan_manifest_recorded(
 ) -> ReducerState:
     """Index a normal multi-beat ExpressionPlan before any effects exist."""
 
-    manifest = manifest_override or ExpressionPlanAcceptanceManifest.model_validate_json(event.payload_json)
+    manifest = manifest_override or ExpressionPlanAcceptanceManifest.model_validate_json(
+        event.payload_json
+    )
     current_world_revision = len(state.committed_world_event_refs)
     if manifest.evaluated_world_revision != current_world_revision:
         raise ValueError("expression plan manifest must evaluate the current world")
@@ -4228,7 +4422,9 @@ def _expression_plan_manifest_recorded(
                     social_source_observation_event_hash=(
                         social_manifest.source_observation_event_hash if social_manifest else None
                     ),
-                    social_commitment_id=(social_manifest.commitment_id if social_manifest else None),
+                    social_commitment_id=(
+                        social_manifest.commitment_id if social_manifest else None
+                    ),
                     social_commitment_payload_hash=(
                         social_manifest.commitment_payload_hash if social_manifest else None
                     ),
@@ -4424,7 +4620,10 @@ def _relationship_adjustment_acceptance_manifest_recorded(
     ):
         raise ValueError("relationship adjustment manifest does not bind persisted proposal")
     proposed = json.loads(proposal.proposed_mutation.payload_json)
-    if canonical_relationship_adjustment_acceptance_value_hash(proposed) != manifest.mutation_payload_hash:
+    if (
+        canonical_relationship_adjustment_acceptance_value_hash(proposed)
+        != manifest.mutation_payload_hash
+    ):
         raise ValueError("relationship adjustment manifest mutation hash is invalid")
     return state.model_copy(
         update={
@@ -4566,12 +4765,12 @@ def _activity_lifecycle_acceptance_manifest_recorded(
         None,
     )
     if (
-            manifest.evaluated_world_revision != current_world_revision
-            or event.causation_id != manifest.proposal_event_ref
-            or revision is None
-            or revision.evaluated_world_revision != manifest.evaluated_world_revision
-            or revision.proposal_event_ref != manifest.proposal_event_ref
-            or revision.proposal_event_payload_hash != manifest.proposal_event_payload_hash
+        manifest.evaluated_world_revision != current_world_revision
+        or event.causation_id != manifest.proposal_event_ref
+        or revision is None
+        or revision.evaluated_world_revision != manifest.evaluated_world_revision
+        or revision.proposal_event_ref != manifest.proposal_event_ref
+        or revision.proposal_event_payload_hash != manifest.proposal_event_payload_hash
         or any(
             item.acceptance_id == manifest.acceptance_id or item.proposal_id == manifest.proposal_id
             for item in state.acceptance_decisions
@@ -4828,12 +5027,14 @@ def _message_payload_stored(state: ReducerState, event: WorldEvent) -> ReducerSt
         else:
             previous_type = (
                 state.committed_world_event_refs[-1].event_type
-                if state.committed_world_event_refs else None
+                if state.committed_world_event_refs
+                else None
             )
             if previous_type == "PrivateCommitmentOpened":
                 commitment = next(
                     (
-                        item for item in state.commitments
+                        item
+                        for item in state.commitments
                         if item.values.fulfillment_contract.expected_action_id
                         in {beat.action.action_id for beat in generic.beats}
                     ),
@@ -5323,11 +5524,19 @@ def _expression_plan_terminated(state: ReducerState, event: WorldEvent) -> Reduc
 
     payload = ExpressionPlanTerminatedPayload.model_validate_json(event.payload_json)
     plan_index = next(
-        (index for index, item in enumerate(state.expression_plans) if item.plan_id == payload.plan_id),
+        (
+            index
+            for index, item in enumerate(state.expression_plans)
+            if item.plan_id == payload.plan_id
+        ),
         None,
     )
     source = next(
-        (item for item in state.committed_world_event_refs if item.event_id == payload.source_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.source_event_ref
+        ),
         None,
     )
     terminal_beat = next(
@@ -5335,7 +5544,10 @@ def _expression_plan_terminated(state: ReducerState, event: WorldEvent) -> Reduc
         None,
     )
     receipt = (
-        next((item for item in state.execution_receipts if item.receipt_id == payload.receipt_id), None)
+        next(
+            (item for item in state.execution_receipts if item.receipt_id == payload.receipt_id),
+            None,
+        )
         if payload.receipt_id is not None
         else None
     )
@@ -5422,11 +5634,19 @@ def _expression_beat_terminated(state: ReducerState, event: WorldEvent) -> Reduc
 
     payload = ExpressionBeatTerminatedPayload.model_validate_json(event.payload_json)
     source = next(
-        (item for item in state.committed_world_event_refs if item.event_id == payload.source_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.source_event_ref
+        ),
         None,
     )
     beat_index = next(
-        (index for index, item in enumerate(state.expression_beats) if item.beat_id == payload.beat_id),
+        (
+            index
+            for index, item in enumerate(state.expression_beats)
+            if item.beat_id == payload.beat_id
+        ),
         None,
     )
     action = next((item for item in state.actions if item.action_id == payload.action_id), None)
@@ -5606,9 +5826,7 @@ def _response_expectation_assessed(
     event: WorldEvent,
 ) -> ReducerState:
     payload = ResponseExpectationAssessedPayload.model_validate_json(event.payload_json)
-    committed_by_id = {
-        item.event_id: item for item in state.committed_world_event_refs
-    }
+    committed_by_id = {item.event_id: item for item in state.committed_world_event_refs}
     acceptance = committed_by_id.get(payload.source_acceptance_event_ref)
     if acceptance is None:
         raise ValueError(
@@ -5655,9 +5873,7 @@ def _response_expectation_assessed(
             "response expectation assessment must bind the declared inbound observation"
         )
     if payload.assessed_at != event.logical_time:
-        raise ValueError(
-            "response expectation assessment time must match its committed event"
-        )
+        raise ValueError("response expectation assessment time must match its committed event")
     if event.causation_id != payload.inbound_observation_event_ref:
         raise ValueError(
             "response expectation assessment causation must be its inbound observation"
@@ -5978,15 +6194,17 @@ def _photo_candidate_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
     if not set(candidate.source_event_refs) <= set(committed):
         raise ValueError("photo candidate must be bound only to prior committed world events")
     if candidate.source_events and any(
-        committed.get(source.event_ref) != source.payload_hash
-        for source in candidate.source_events
+        committed.get(source.event_ref) != source.payload_hash for source in candidate.source_events
     ):
         raise ValueError("P1 photo candidate source hashes do not bind committed world events")
     if candidate.opened_at is not None and candidate.opened_at != event.logical_time:
         raise ValueError("P1 photo candidate opening time must be authoritative")
     if candidate.opened_at is not None:
         candidate = candidate.model_copy(
-            update={"opened_event_ref": event.event_id, "opened_event_payload_hash": event.payload_hash}
+            update={
+                "opened_event_ref": event.event_id,
+                "opened_event_payload_hash": event.payload_hash,
+            }
         )
     return state.model_copy(update={"photo_candidates": (*state.photo_candidates, candidate)})
 
@@ -6070,7 +6288,11 @@ def _image_evidence_declared(state: ReducerState, event: WorldEvent) -> ReducerS
 
     payload = ImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
     source = next(
-        (item for item in state.committed_world_event_refs if item.event_id == payload.source_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.source_event_ref
+        ),
         None,
     )
     if (
@@ -6091,7 +6313,11 @@ def _visual_fact_recorded(state: ReducerState, event: WorldEvent) -> ReducerStat
 
     payload = VisualFactRecordedPayload.model_validate_json(event.payload_json)
     source = next(
-        (item for item in state.committed_world_event_refs if item.event_id == payload.source_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.source_event_ref
+        ),
         None,
     )
     if (
@@ -6114,7 +6340,11 @@ def _recipient_scoped_image_evidence_declared(
 
     payload = RecipientScopedImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
     source = next(
-        (item for item in state.committed_world_event_refs if item.event_id == payload.source_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.source_event_ref
+        ),
         None,
     )
     if (
@@ -6137,10 +6367,16 @@ def _appearance_state_recorded(state: ReducerState, event: WorldEvent) -> Reduce
     payload = AppearanceStateRecordedPayload.model_validate_json(event.payload_json)
     appearance = payload.state
     source = next(
-        (item for item in state.committed_world_event_refs if item.event_id == appearance.source_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == appearance.source_event_ref
+        ),
         None,
     )
-    history = tuple(item for item in state.appearance_states if item.subject_ref == appearance.subject_ref)
+    history = tuple(
+        item for item in state.appearance_states if item.subject_ref == appearance.subject_ref
+    )
     if (
         state.logical_time is None
         or event.logical_time != state.logical_time
@@ -6157,8 +6393,13 @@ def _appearance_state_recorded(state: ReducerState, event: WorldEvent) -> Reduce
     ):
         raise ValueError("appearance state source is not current")
     updated_history = history
-    if history and (history[-1].valid_until is None or history[-1].valid_until > appearance.valid_from):
-        updated_history = (*history[:-1], history[-1].model_copy(update={"valid_until": appearance.valid_from}))
+    if history and (
+        history[-1].valid_until is None or history[-1].valid_until > appearance.valid_from
+    ):
+        updated_history = (
+            *history[:-1],
+            history[-1].model_copy(update={"valid_until": appearance.valid_from}),
+        )
     updated_by_subject = {item.entity_revision: item for item in updated_history}
     next_states = tuple(
         updated_by_subject.get(item.entity_revision, item)
@@ -6175,7 +6416,11 @@ def _visible_physical_state_recorded(state: ReducerState, event: WorldEvent) -> 
     payload = VisiblePhysicalStateRecordedPayload.model_validate_json(event.payload_json)
     physical = payload.state
     source = next(
-        (item for item in state.committed_world_event_refs if item.event_id == physical.source_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == physical.source_event_ref
+        ),
         None,
     )
     history = tuple(
@@ -6198,7 +6443,10 @@ def _visible_physical_state_recorded(state: ReducerState, event: WorldEvent) -> 
         raise ValueError("visible physical state source is not current")
     updated_history = history
     if history and history[-1].valid_until > physical.valid_from:
-        updated_history = (*history[:-1], history[-1].model_copy(update={"valid_until": physical.valid_from}))
+        updated_history = (
+            *history[:-1],
+            history[-1].model_copy(update={"valid_until": physical.valid_from}),
+        )
     updated_by_subject = {item.entity_revision: item for item in updated_history}
     next_states = tuple(
         updated_by_subject.get(item.entity_revision, item)
@@ -6224,13 +6472,15 @@ def _life_author_decision_recorded(state: ReducerState, event: WorldEvent) -> Re
     wake = authority.get(payload.wake_event_ref)
     draw = authority.get(payload.draw_event_ref)
     if (
-        wake is None or wake.event_type != "ClockAdvanced"
+        wake is None
+        or wake.event_type != "ClockAdvanced"
         or wake.payload_hash != payload.wake_event_payload_hash
         or wake.world_revision != payload.wake_world_revision
     ):
         raise ValueError("life author decision wake does not resolve exact clock authority")
     if (
-        draw is None or draw.event_type != "RandomDrawRecorded"
+        draw is None
+        or draw.event_type != "RandomDrawRecorded"
         or draw.payload_hash != payload.draw_event_payload_hash
         or draw.world_revision != payload.draw_world_revision
         or event.causation_id != draw.event_id
@@ -6239,14 +6489,13 @@ def _life_author_decision_recorded(state: ReducerState, event: WorldEvent) -> Re
     return state
 
 
-def _life_availability_snapshot_recorded(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
+def _life_availability_snapshot_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = LifeAvailabilitySnapshotRecordedPayload.model_validate_json(event.payload_json)
     wake = next(
         (
-            item for item in state.committed_world_event_refs
+            item
+            for item in state.committed_world_event_refs
             if item.event_id == payload.wake_event_ref and item.event_type == "ClockAdvanced"
         ),
         None,
@@ -6258,9 +6507,7 @@ def _life_availability_snapshot_recorded(
         or wake.logical_time != logical_time
     ):
         raise ValueError("life availability snapshot requires the exact current ClockAdvanced wake")
-    active_npcs = {
-        f"npc:{item.npc_id}": item for item in state.npcs if item.status == "active"
-    }
+    active_npcs = {f"npc:{item.npc_id}": item for item in state.npcs if item.status == "active"}
     if any(item not in active_npcs for item in payload.participant_refs):
         raise ValueError("life availability snapshot references an unregistered or retired NPC")
     if payload.location_ref is not None and any(
@@ -6271,9 +6518,7 @@ def _life_availability_snapshot_recorded(
     return state
 
 
-def _media_selection_attempt_recorded(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
+def _media_selection_attempt_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     if state.logical_time is None or event.logical_time != state.logical_time:
         raise ValueError("media selection decline requires authoritative logical time")
     payload = MediaSelectionAttemptRecordedPayload.model_validate_json(event.payload_json)
@@ -6289,9 +6534,9 @@ def _media_selection_attempt_recorded(
     recorded = {(item.candidate_id, item.entity_revision) for item in payload.candidates}
     draw_source = next(
         (
-            item for item in state.committed_world_event_refs
-            if item.event_id == event.causation_id
-            and item.event_type == "RandomDrawRecorded"
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == event.causation_id and item.event_type == "RandomDrawRecorded"
         ),
         None,
     )
@@ -6299,7 +6544,8 @@ def _media_selection_attempt_recorded(
         not recorded
         or not recorded.issubset(current)
         or draw_source is None
-        or payload.attempt_id != media_selection_attempt_id(
+        or payload.attempt_id
+        != media_selection_attempt_id(
             world_id=event.world_id,
             logical_time=event.logical_time,
             candidates=payload.candidates,
@@ -6316,9 +6562,7 @@ def _media_selection_attempt_recorded(
         declined[(item.candidate_id, item.entity_revision)] = item
     return state.model_copy(
         update={
-            "media_declined_candidate_revisions": tuple(
-                declined[key] for key in sorted(declined)
-            )
+            "media_declined_candidate_revisions": tuple(declined[key] for key in sorted(declined))
         }
     )
 
@@ -6377,7 +6621,11 @@ def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -
 
 
 def _advance_media_candidate(
-    candidates: tuple[PhotoCandidate, ...], *, candidate_id: str, expected_status: str, next_status: str
+    candidates: tuple[PhotoCandidate, ...],
+    *,
+    candidate_id: str,
+    expected_status: str,
+    next_status: str,
 ) -> tuple[PhotoCandidate, ...]:
     """Advance one candidate aggregate without inferring an alternate picture.
 
@@ -6386,7 +6634,9 @@ def _advance_media_candidate(
     candidate is never reopened by a retry in another media lane.
     """
 
-    index = next((i for i, item in enumerate(candidates) if item.candidate_id == candidate_id), None)
+    index = next(
+        (i for i, item in enumerate(candidates) if item.candidate_id == candidate_id), None
+    )
     if index is None:
         # Pre-P1 snapshots persisted opportunities without a lifecycle
         # aggregate.  They remain readable for migration/replay, but no live
@@ -6458,9 +6708,8 @@ def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> Reducer
     if (
         candidate.family != opportunity.family
         or candidate.privacy_ceiling != opportunity.privacy_ceiling
-        or candidate.source_event_refs != (
-            opportunity.candidate_source_event_refs or opportunity.source_event_refs
-        )
+        or candidate.source_event_refs
+        != (opportunity.candidate_source_event_refs or opportunity.source_event_refs)
         or candidate.status != "available"
         or (candidate.expires_at is not None and event.logical_time >= candidate.expires_at)
         or (
@@ -6474,13 +6723,11 @@ def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> Reducer
         committed_hashes = {
             item.event_id: item.payload_hash for item in state.committed_world_event_refs
         }
-        if (
-            tuple(item.event_ref for item in opportunity.snapshot_source_events)
-            != opportunity.source_event_refs
-            or any(
-                committed_hashes.get(item.event_ref) != item.payload_hash
-                for item in opportunity.snapshot_source_events
-            )
+        if tuple(
+            item.event_ref for item in opportunity.snapshot_source_events
+        ) != opportunity.source_event_refs or any(
+            committed_hashes.get(item.event_ref) != item.payload_hash
+            for item in opportunity.snapshot_source_events
         ):
             raise ValueError("media opportunity snapshot lineage is not committed")
     return state.model_copy(
@@ -6582,7 +6829,7 @@ def _media_not_renderable_recorded(state: ReducerState, event: WorldEvent) -> Re
             "media_unrenderable_opportunity_ids": (
                 *state.media_unrenderable_opportunity_ids,
                 opportunity.opportunity_id,
-            )
+            ),
         }
     )
 
@@ -6627,7 +6874,8 @@ def _media_render_artifact_recorded(state: ReducerState, event: WorldEvent) -> R
                 "media repair artifact requires the first repairable inspection failure"
             )
     opportunity = next(
-        (item for item in state.media_opportunities if item.opportunity_id == plan.opportunity_id), None
+        (item for item in state.media_opportunities if item.opportunity_id == plan.opportunity_id),
+        None,
     )
     if opportunity is None:
         raise ValueError("media render artifact plan lacks its frozen opportunity")
@@ -6921,7 +7169,8 @@ def _media_delivery_shared(state: ReducerState, event: WorldEvent) -> ReducerSta
             "MediaDeliveryShared requires one delivered approved media-delivery Action"
         )
     opportunity = next(
-        (item for item in state.media_opportunities if item.opportunity_id == plan.opportunity_id), None
+        (item for item in state.media_opportunities if item.opportunity_id == plan.opportunity_id),
+        None,
     )
     if opportunity is None:
         raise ValueError("media delivery plan lacks its frozen opportunity")
@@ -7414,7 +7663,11 @@ def _execution_receipt_recorded(state: ReducerState, event: WorldEvent) -> Reduc
 def _tool_request_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
     request = ToolRequestAcceptedPayload.model_validate_json(event.payload_json).request
     source = next(
-        (item for item in state.committed_world_event_refs if item.event_id == request.source_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == request.source_event_ref
+        ),
         None,
     )
     if (
@@ -7437,11 +7690,18 @@ def _tool_result_accepted(state: ReducerState, event: WorldEvent) -> ReducerStat
         None,
     )
     receipt_event = next(
-        (item for item in state.committed_world_event_refs if item.event_id == result.receipt_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == result.receipt_event_ref
+        ),
         None,
     )
     action = next((item for item in state.actions if item.action_id == result.action_id), None)
-    receipt = next((item for item in state.execution_receipts if item.result_id == result.external_result_id), None)
+    receipt = next(
+        (item for item in state.execution_receipts if item.result_id == result.external_result_id),
+        None,
+    )
     if (
         request is None
         or request.action_id != result.action_id
@@ -7465,9 +7725,17 @@ def _tool_result_accepted(state: ReducerState, event: WorldEvent) -> ReducerStat
 
 def _perception_request_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
     request = PerceptionRequestAcceptedPayload.model_validate_json(event.payload_json).request
-    source = next((item for item in state.committed_world_event_refs if item.event_id == request.source_event_ref), None)
+    source = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == request.source_event_ref
+        ),
+        None,
+    )
     if (
-        source is None or source.world_revision != request.source_world_revision
+        source is None
+        or source.world_revision != request.source_world_revision
         or source.payload_hash != request.source_payload_hash
         or any(item.request_id == request.request_id for item in state.perception_requests)
         or any(item.action_id == request.action_id for item in state.perception_requests)
@@ -7478,18 +7746,40 @@ def _perception_request_accepted(state: ReducerState, event: WorldEvent) -> Redu
 
 def _perception_result_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
     result = PerceptionResultAcceptedPayload.model_validate_json(event.payload_json).result
-    request = next((item for item in state.perception_requests if item.request_id == result.request_id), None)
-    receipt_event = next((item for item in state.committed_world_event_refs if item.event_id == result.receipt_event_ref), None)
+    request = next(
+        (item for item in state.perception_requests if item.request_id == result.request_id), None
+    )
+    receipt_event = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == result.receipt_event_ref
+        ),
+        None,
+    )
     action = next((item for item in state.actions if item.action_id == result.action_id), None)
-    receipt = next((item for item in state.execution_receipts if item.result_id == result.external_result_id), None)
+    receipt = next(
+        (item for item in state.execution_receipts if item.result_id == result.external_result_id),
+        None,
+    )
     if (
-        request is None or request.action_id != result.action_id or request.analysis_kind != result.analysis_kind
-        or request.content_privacy_class != result.content_privacy_class or action is None
-        or action.kind != result.analysis_kind or action.layer != "perception_tool" or action.state != "delivered"
-        or receipt is None or receipt.action_id != result.action_id or receipt.result_ref != result.result_ref
-        or receipt.result_hash != result.result_hash or receipt_event is None
-        or receipt_event.event_type != "ExecutionReceiptRecorded" or receipt_event.payload_hash != result.receipt_event_payload_hash
-        or result.accepted_event_ref != event.event_id or any(item.result_id == result.result_id for item in state.perception_results)
+        request is None
+        or request.action_id != result.action_id
+        or request.analysis_kind != result.analysis_kind
+        or request.content_privacy_class != result.content_privacy_class
+        or action is None
+        or action.kind != result.analysis_kind
+        or action.layer != "perception_tool"
+        or action.state != "delivered"
+        or receipt is None
+        or receipt.action_id != result.action_id
+        or receipt.result_ref != result.result_ref
+        or receipt.result_hash != result.result_hash
+        or receipt_event is None
+        or receipt_event.event_type != "ExecutionReceiptRecorded"
+        or receipt_event.payload_hash != result.receipt_event_payload_hash
+        or result.accepted_event_ref != event.event_id
+        or any(item.result_id == result.result_id for item in state.perception_results)
     ):
         raise ValueError("perception result is not bound to its delivered Action receipt")
     return state.model_copy(update={"perception_results": (*state.perception_results, result)})
@@ -7610,9 +7900,8 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
         if not isinstance(outcome_ref, str) or not outcome_ref:
             raise ValueError("life ecology completion requires a runtime outcome")
         prior = state.life_ecology_schedule
-        is_technical_failure = (
-            outcome_ref == "life-ecology:failed_safe"
-            or outcome_ref.startswith("life-ecology:technical_failure.")
+        is_technical_failure = outcome_ref == "life-ecology:failed_safe" or outcome_ref.startswith(
+            "life-ecology:technical_failure."
         )
         failures = (
             (prior.consecutive_failures if prior is not None else 0) + 1
@@ -7788,7 +8077,8 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
     if process.process_kind == "social_action_deliberation":
         source = next(
             (
-                item for item in state.committed_world_event_refs
+                item
+                for item in state.committed_world_event_refs
                 if item.event_id == process.source_evidence_ref
             ),
             None,
@@ -8055,7 +8345,9 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or source.event_type != expected_source_types.get(process.trigger_id)
             or process.trigger_ref != process.trigger_id
         ):
-            raise ValueError("media continuation trigger is not bound to exact settled media evidence")
+            raise ValueError(
+                "media continuation trigger is not bound to exact settled media evidence"
+            )
     if process.process_kind == "media_repair":
         if process.source_evidence_ref is None or not process.source_evidence_ref.startswith(
             "inspection:"
@@ -8428,9 +8720,7 @@ def _aspiration_faded(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = _validated_life_payload(state, event, AspirationFadedPayload)
     return state.model_copy(
         update={
-            "aspirations": fade_aspiration(
-                state.aspirations, payload, logical_time=logical_time
-            )
+            "aspirations": fade_aspiration(state.aspirations, payload, logical_time=logical_time)
         }
     )
 
@@ -8514,7 +8804,10 @@ def _validate_activity_lifecycle_effect(
     if not state.committed_world_event_refs:
         raise ValueError("activity lifecycle effect requires adjacent acceptance")
     acceptance_ref = state.committed_world_event_refs[-1]
-    if acceptance_ref.event_type != "AcceptanceRecorded" or event.causation_id != acceptance_ref.event_id:
+    if (
+        acceptance_ref.event_type != "AcceptanceRecorded"
+        or event.causation_id != acceptance_ref.event_id
+    ):
         raise ValueError("activity lifecycle effect requires adjacent acceptance")
     # The acceptance handler has already parsed, self-hash-verified, and
     # retained a generic decision reference.  Rehydrate the immutable event
@@ -8566,7 +8859,11 @@ def _activity_lifecycle_proposal_recorded(
     if payload.policy_digest != ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_DIGEST:
         raise ValueError("activity lifecycle proposal policy is not installed")
     wake = next(
-        (item for item in state.committed_world_event_refs if item.event_id == payload.wake_event_ref),
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.wake_event_ref
+        ),
         None,
     )
     trigger = next(
@@ -8632,7 +8929,8 @@ def _activity_lifecycle_proposal_recorded(
     else:
         observation = next(
             (
-                item for item in state.message_observations
+                item
+                for item in state.message_observations
                 if item.observation_id == resolved.cause_observation_id
             ),
             None,
@@ -9369,7 +9667,10 @@ def _relationship_signal_accepted(state: ReducerState, event: WorldEvent) -> Red
 def _private_impression_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = PrivateImpressionAcceptedPayload.model_validate_json(event.payload_json)
-    if payload.impression.origin is None or payload.impression.origin.accepted_event_ref != event.event_id:
+    if (
+        payload.impression.origin is None
+        or payload.impression.origin.accepted_event_ref != event.event_id
+    ):
         raise ValueError("private impression origin does not identify its mutation event")
     _validate_evidence_authority(state, payload.evidence_refs, require_all=True)
     _validate_private_impression_source_events(state, payload)
@@ -10034,16 +10335,14 @@ def _require_authorized_commitment(
             or state.committed_world_event_refs[-1].event_id
             != social_expression.acceptance_event_ref
             or payload.operation != "open"
-            or social_expression.social_commitment_id
-            != payload.commitment_after.commitment_id
+            or social_expression.social_commitment_id != payload.commitment_after.commitment_id
             or social_expression.social_source_observation_id
             != payload.commitment_after.values.subject_ref
             or social_expression.social_commitment_payload_hash
             != canonical_expression_plan_value_hash(payload.model_dump(mode="json"))
             or payload.evaluated_world_revision != social_expression.evaluated_world_revision
-            or after.values.subject_ref not in {
-                item.observation_id for item in state.message_observations
-            }
+            or after.values.subject_ref
+            not in {item.observation_id for item in state.message_observations}
             or after.values.content_ref != beat.payload_ref
             or after.values.content_hash != beat.payload_hash.removeprefix("sha256:")
             or after.values.fulfillment_contract.expected_action_id != beat.action.action_id
@@ -10325,7 +10624,8 @@ def _require_authorized_private_impression(
         or proposal.evidence_refs != payload.evidence_refs
         or proposal.appraisal_refs != payload.appraisal_refs
         or proposal.policy_refs != payload.policy_refs
-        or json.loads(proposal.proposed_mutation.payload_json) != payload.model_dump(mode="json")
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != private_impression_payload_material(payload)
     ):
         raise ValueError("accepted private impression does not match its proposal")
     return proposal
@@ -10514,8 +10814,12 @@ _EVENTS = {
         ),
         EventDefinition("ToolRequestAccepted", RevisionClass.WORLD, _tool_request_accepted),
         EventDefinition("ToolResultAccepted", RevisionClass.WORLD, _tool_result_accepted),
-        EventDefinition("PerceptionRequestAccepted", RevisionClass.WORLD, _perception_request_accepted),
-        EventDefinition("PerceptionResultAccepted", RevisionClass.WORLD, _perception_result_accepted),
+        EventDefinition(
+            "PerceptionRequestAccepted", RevisionClass.WORLD, _perception_request_accepted
+        ),
+        EventDefinition(
+            "PerceptionResultAccepted", RevisionClass.WORLD, _perception_result_accepted
+        ),
         EventDefinition("BudgetSettled", RevisionClass.WORLD, _budget_settlement_recorded),
         EventDefinition("BudgetReleased", RevisionClass.WORLD, _budget_settlement_recorded),
         EventDefinition("BudgetAdjusted", RevisionClass.WORLD, _budget_settlement_recorded),
@@ -10599,9 +10903,7 @@ _EVENTS = {
         EventDefinition("AspirationPlanted", RevisionClass.WORLD, _aspiration_planted),
         EventDefinition("AspirationReinforced", RevisionClass.WORLD, _aspiration_reinforced),
         EventDefinition("AspirationFaded", RevisionClass.WORLD, _aspiration_faded),
-        EventDefinition(
-            "AspirationCrystallized", RevisionClass.WORLD, _aspiration_crystallized
-        ),
+        EventDefinition("AspirationCrystallized", RevisionClass.WORLD, _aspiration_crystallized),
         EventDefinition("ActivityPlanned", RevisionClass.WORLD, _activity_planned),
         EventDefinition(
             "ActivityStarted",
@@ -10802,9 +11104,7 @@ def reduce_event(
     event_contract(event.event_type).validate_payload(event.payload())
     definition = event_definition(event.event_type)
     if event.event_type == "ObservationRecorded" and allow_legacy_clock_drift:
-        reduced = _observation_recorded(
-            state, event, allow_legacy_clock_drift=True
-        )
+        reduced = _observation_recorded(state, event, allow_legacy_clock_drift=True)
     elif event.event_type == "ActivityPlanned" and allow_legacy_plan_owner:
         reduced = _activity_planned(
             state, event, allow_legacy_missing_owner=allow_legacy_plan_owner
@@ -10821,10 +11121,7 @@ def reduce_event(
         and allow_legacy_plan_owner
     ):
         reduced = definition.reducer(state, event, allow_legacy_unowned_transition=True)
-    elif (
-        event.event_type == "ActivityLifecycleProposalRecorded"
-        and allow_legacy_activity_opening
-    ):
+    elif event.event_type == "ActivityLifecycleProposalRecorded" and allow_legacy_activity_opening:
         reduced = _activity_lifecycle_proposal_recorded(
             state,
             event,

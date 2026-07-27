@@ -133,6 +133,27 @@ from .typed_proposal_families import (
 )
 
 
+def _reject_new_private_impression_without_role_reflection(
+    events: Sequence[WorldEvent],
+) -> None:
+    """Keep legacy decode compatibility out of the current write authority."""
+
+    for event in events:
+        if event.event_type != "PrivateImpressionAccepted":
+            continue
+        payload = event.payload()
+        impression = payload.get("impression")
+        if (
+            payload.get("reflection_contract") != "private-impression-draft.3"
+            or not payload.get("reflection_source_refs")
+            or not payload.get("source_model_result")
+            or not payload.get("source_capsule_id")
+            or not isinstance(impression, dict)
+            or not impression.get("reflection_summary")
+        ):
+            raise ValueError("private_impression.new_write_requires_role_reflection")
+
+
 def validate_commit_batch(
     events: Sequence[WorldEvent],
     *,
@@ -158,6 +179,7 @@ def validate_commit_batch(
         reject_media_thread_acceptance_manifest_without_recorder(events)
         reject_expression_plan_manifest_without_recorder(events)
         reject_social_deferred_manifest_without_recorder(events)
+    _reject_new_private_impression_without_role_reflection(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
@@ -322,10 +344,10 @@ def validate_commit_batch(
     for acceptance_index, acceptance in acceptances:
         if acceptance.get("manifest_version") in {
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
-                ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-                *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
-                MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
-            }:
+            ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+            *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+            MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+        }:
             # Dedicated source-bound lane is validated above; it is not a
             # member of the generic typed Thread mutation family.
             continue
@@ -592,9 +614,9 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
             RELATIONSHIP_ACCEPTANCE_MANIFEST_VERSION,
             RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-                *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
-                MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
-                OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+            *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+            MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
+            OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
@@ -935,7 +957,8 @@ def _validate_authorized_social_deferred_manifest_batch(
     events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
 ) -> None:
     manifests = [
-        event for event in events
+        event
+        for event in events
         if event.event_type == "AcceptanceRecorded"
         and event.payload().get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
     ]
@@ -944,9 +967,15 @@ def _validate_authorized_social_deferred_manifest_batch(
     if not authorized:
         raise ValueError("social_deferred.recorder_capability_required")
     if len(manifests) != 1 or tuple(item.event_type for item in events) != (
-        "AcceptanceRecorded", "PrivateCommitmentOpened", "MessagePayloadStored",
-        "ExpressionPlanAccepted", "ExpressionBeatAuthorized", "BudgetReserved", "ActionAuthorized",
-        "AcceptanceRecorded", "ThreadOpened",
+        "AcceptanceRecorded",
+        "PrivateCommitmentOpened",
+        "MessagePayloadStored",
+        "ExpressionPlanAccepted",
+        "ExpressionBeatAuthorized",
+        "BudgetReserved",
+        "ActionAuthorized",
+        "AcceptanceRecorded",
+        "ThreadOpened",
     ):
         raise ValueError("social_deferred.accepted_batch_shape_is_not_exact")
     manifest = SocialDeferredAcceptanceManifest.model_validate_json(manifests[0].payload_json)
@@ -1458,7 +1487,9 @@ def _validate_authorized_relationship_adjustment_acceptance_manifest_batch(
         )
         payload = RelationshipSlowVariableAdjustedPayload.model_validate_json(mutation.payload_json)
     except Exception as exc:
-        raise ValueError("relationship_adjustment_acceptance.accepted_batch_payload_is_invalid") from exc
+        raise ValueError(
+            "relationship_adjustment_acceptance.accepted_batch_payload_is_invalid"
+        ) from exc
     if (
         manifest.evaluated_world_revision != expected_world_revision
         or tuple(event.event_type for event in events)
@@ -1497,7 +1528,9 @@ def _validate_authorized_relationship_adjustment_acceptance_manifest_batch(
             event_type=item.event_type, world_id=item.world_id, payload=item.payload()
         )
         if expected is None or item.idempotency_key != expected:
-            raise ValueError("relationship_adjustment_acceptance.event_identity_is_not_deterministic")
+            raise ValueError(
+                "relationship_adjustment_acceptance.event_identity_is_not_deterministic"
+            )
 
 
 def reject_relationship_adjustment_acceptance_manifest_without_recorder(
@@ -1551,9 +1584,7 @@ def _validate_authorized_activity_lifecycle_acceptance_manifest_batch(
         raise ValueError("activity_lifecycle_acceptance.accepted_batch_must_be_exact")
     acceptance, effect = events
     try:
-        manifest = ActivityLifecycleAcceptanceManifest.model_validate_json(
-            acceptance.payload_json
-        )
+        manifest = ActivityLifecycleAcceptanceManifest.model_validate_json(acceptance.payload_json)
         payload = ActivityTransitionPayload.model_validate_json(effect.payload_json)
     except Exception as exc:
         raise ValueError("activity_lifecycle_acceptance.accepted_batch_payload_is_invalid") from exc
@@ -1600,8 +1631,7 @@ def reject_media_selection_acceptance_manifest_without_recorder(
 ) -> None:
     if any(
         event.event_type == "AcceptanceRecorded"
-        and event.payload().get("manifest_version")
-        in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
+        and event.payload().get("manifest_version") in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
         for event in events
     ):
         raise ValueError("media_selection_acceptance.recorder_capability_required")
@@ -1623,7 +1653,8 @@ def _validate_authorized_media_continuation_acceptance_batch(
     events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
 ) -> None:
     matches = [
-        event for event in events
+        event
+        for event in events
         if event.event_type == "AcceptanceRecorded"
         and event.payload().get("manifest_version")
         == MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION
@@ -1632,9 +1663,17 @@ def _validate_authorized_media_continuation_acceptance_batch(
         return
     if not authorized:
         raise ValueError("media_continuation_acceptance.recorder_capability_required")
-    if len(matches) != 1 or len(events) != 5 or tuple(event.event_type for event in events) != (
-        "AcceptanceRecorded", "TriggerProcessClaimed", "BudgetReserved",
-        "ActionAuthorized", "TriggerProcessCompleted",
+    if (
+        len(matches) != 1
+        or len(events) != 5
+        or tuple(event.event_type for event in events)
+        != (
+            "AcceptanceRecorded",
+            "TriggerProcessClaimed",
+            "BudgetReserved",
+            "ActionAuthorized",
+            "TriggerProcessCompleted",
+        )
     ):
         raise ValueError("media_continuation_acceptance.accepted_batch_must_be_exact")
     acceptance, claim_event, reservation_event, action_event, completion_event = events
@@ -1700,8 +1739,13 @@ def _validate_authorized_media_continuation_acceptance_batch(
         getattr(event, field) != getattr(acceptance, field)
         for event in events[1:]
         for field in (
-            "world_id", "logical_time", "created_at", "actor", "source",
-            "trace_id", "correlation_id",
+            "world_id",
+            "logical_time",
+            "created_at",
+            "actor",
+            "source",
+            "trace_id",
+            "correlation_id",
         )
     ):
         raise ValueError("media_continuation_acceptance.envelope_metadata_mismatch")
@@ -1731,8 +1775,7 @@ def _validate_authorized_media_selection_acceptance_manifest_batch(
         event
         for event in events
         if event.event_type == "AcceptanceRecorded"
-        and event.payload().get("manifest_version")
-        in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
+        and event.payload().get("manifest_version") in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
     ]
     if not manifests:
         return
@@ -1746,7 +1789,9 @@ def _validate_authorized_media_selection_acceptance_manifest_batch(
         opportunity = MediaOpportunityFrozenPayload.model_validate_json(
             opportunity_event.payload_json
         ).opportunity
-        reservation = BudgetReservation.model_validate(reservation_event.payload().get("reservation"))
+        reservation = BudgetReservation.model_validate(
+            reservation_event.payload().get("reservation")
+        )
         # Event payloads have crossed the JSON envelope by this point.  Parse
         # them in JSON mode so RFC 3339 timestamps and JSON arrays rehydrate
         # to the strict Action value rather than being rejected as Python

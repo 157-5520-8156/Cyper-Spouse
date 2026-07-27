@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import json
+import threading
 
 import pytest
 
@@ -19,6 +20,17 @@ from companion_daemon.world_v2.immediate_emotion_gate import (
 )
 from companion_daemon.world_v2.single_call_inbound_cognition import (
     SingleCallInboundCognition,
+)
+from companion_daemon.world_v2.recall_index import (
+    FeatureHashRecallEmbedding,
+    InMemoryRecallIndex,
+    RecallCursor,
+    RecallDocument,
+    RecallSourceBinding,
+)
+from companion_daemon.world_v2.recall_runtime import (
+    RecallCoordinator,
+    verify_trusted_recall_trace,
 )
 from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     ChatModelDeliberationAdapter,
@@ -43,9 +55,7 @@ class _CombinedProvider:
     def __init__(self) -> None:
         self.calls: list[list[dict[str, str]]] = []
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -58,9 +68,7 @@ class _CombinedProvider:
                     "stance": "hurt_but_self_possessed",
                     "display_strategy": "restrained_boundary",
                     "confidence": 8500,
-                    "meanings": [
-                        {"meaning": "boundary_violation", "confidence": 8500}
-                    ],
+                    "meanings": [{"meaning": "boundary_violation", "confidence": 8500}],
                     "attribution": "user",
                     "severity": 7600,
                     "components": [{"dimension": "hurt", "intensity_bp": 6200}],
@@ -81,14 +89,24 @@ class _CombinedProvider:
         )
 
 
+class _ReadyPairedPrefetchEmbedding:
+    version = "ready-paired-prefetch-fixture.1"
+    dimensions = FeatureHashRecallEmbedding.dimensions
+
+    def __init__(self) -> None:
+        self.finished = threading.Event()
+        self._delegate = FeatureHashRecallEmbedding()
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        result = self._delegate.embed(texts)
+        if texts == ("机器人",):
+            self.finished.set()
+        return result
+
+
 class _EpisodeCombinedProvider(_CombinedProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
-        if any(
-            "provisional first beat" in message["content"]
-            for message in messages
-        ):
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
+        if any("provisional first beat" in message["content"] for message in messages):
             del temperature
             self.calls.append(messages)
             return json.dumps(
@@ -111,15 +129,10 @@ class _AppendEpisodeProvider:
         self.calls: list[list[dict[str, str]]] = []
         self.disposition = disposition
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
-        provisional = any(
-            "provisional first beat" in item["content"]
-            for item in messages
-        )
+        provisional = any("provisional first beat" in item["content"] for item in messages)
         if not provisional:
             await asyncio.sleep(0.05)
         return json.dumps(
@@ -136,20 +149,14 @@ class _AppendEpisodeProvider:
                 "stance": "attentive",
                 "brief_rationale": "Each beat has independent semantic value.",
                 "world_claims": [],
-                **(
-                    {"episode_disposition": self.disposition}
-                    if not provisional
-                    else {}
-                ),
+                **({"episode_disposition": self.disposition} if not provisional else {}),
             },
             ensure_ascii=False,
         )
 
 
 class _InvalidAppraisalValidExpressionProvider(_CombinedProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -178,9 +185,7 @@ class _InvalidAppraisalValidExpressionProvider(_CombinedProvider):
 
 
 class _OrdinaryCombinedProvider(_CombinedProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -207,9 +212,7 @@ class _OrdinaryCombinedProvider(_CombinedProvider):
 
 
 class _RecallThenCombinedProvider(_CombinedProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         if len(self.calls) == 1:
@@ -267,17 +270,13 @@ class _TimedCombinedProvider(_OrdinaryCombinedProvider):
         super().__init__()
         self.clock = clock
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         self.clock.advance_ms(5_000)
         return await super().complete(messages, temperature=temperature)
 
 
 class _LooseTextCombinedProvider(_CombinedProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -301,9 +300,7 @@ class _LooseTextCombinedProvider(_CombinedProvider):
 
 
 class _LooseMultiMessageCombinedProvider(_CombinedProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -333,9 +330,7 @@ class _LooseExpressionShapeProvider(_CombinedProvider):
         super().__init__()
         self._expression = expression
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -355,9 +350,7 @@ class _LooseExpressionShapeProvider(_CombinedProvider):
 
 
 class _UnsupportedAutobiographyProvider(_LooseTextCombinedProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -377,9 +370,7 @@ class _UnsupportedAutobiographyProvider(_LooseTextCombinedProvider):
 
 
 class _TimeoutAfterCombinedProvider(_UnsupportedAutobiographyProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         if not self.calls:
             return await super().complete(messages, temperature=temperature)
         del temperature
@@ -390,9 +381,7 @@ class _TimeoutAfterCombinedProvider(_UnsupportedAutobiographyProvider):
 class _UnsupportedGreetingClaimProvider(_CombinedProvider):
     """Reproduce the production greeting whose invented prefix poisoned the reply."""
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         if len(self.calls) > 1:
@@ -440,9 +429,7 @@ class _AlwaysFailProvider:
     def __init__(self) -> None:
         self.calls: list[list[dict[str, str]]] = []
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         raise RuntimeError("provider unavailable")
@@ -466,9 +453,7 @@ class _QuickExpressionProvider:
     def __init__(self) -> None:
         self.calls: list[list[dict[str, str]]] = []
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -488,9 +473,7 @@ class _SeparateAppraisalProvider:
     def __init__(self) -> None:
         self.calls: list[list[dict[str, str]]] = []
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return json.dumps(
@@ -509,9 +492,7 @@ class _SeparateAppraisalProvider:
 
 
 class _GroundedQuickRecoveryProvider(_CombinedProvider):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         if len(self.calls) == 1:
@@ -587,9 +568,7 @@ async def test_invalid_world_claim_prefix_does_not_erase_a_valid_greeting() -> N
     base = _request(revision=3, call="call:unsupported-greeting")
     request = base.model_copy(
         update={
-            "trigger_message": base.trigger_message.model_copy(
-                update={"text": "午安捏"}
-            ),
+            "trigger_message": base.trigger_message.model_copy(update={"text": "午安捏"}),
             "model_content_json": json.dumps(
                 {
                     "world_revision": 3,
@@ -603,9 +582,7 @@ async def test_invalid_world_claim_prefix_does_not_erase_a_valid_greeting() -> N
                                     "value": {
                                         "activity_slices": [
                                             {
-                                                "activity_kind": (
-                                                    "social.literature_club_meetup"
-                                                ),
+                                                "activity_kind": ("social.literature_club_meetup"),
                                                 "status": "planned",
                                             }
                                         ]
@@ -624,9 +601,7 @@ async def test_invalid_world_claim_prefix_does_not_erase_a_valid_greeting() -> N
     expression = await cognition.expression.propose(
         request.model_copy(update={"call_id": "call:unsupported-greeting-expression"})
     )
-    proposal = DecisionProposal.model_validate_json(
-        json.dumps(expression.raw_proposal)
-    )
+    proposal = DecisionProposal.model_validate_json(json.dumps(expression.raw_proposal))
     visible = [
         change.payload.value()["beat_drafts"][0]["inline_text"]
         for change in proposal.proposed_changes
@@ -744,15 +719,24 @@ async def test_timeout_recovery_uses_one_contextual_backup_before_local_silence(
                     "slices": {
                         "current_situation": {
                             "availability": "available",
-                            "items":[{"source_ref": "situation:desk", "value": {"activity": "整理桌面"}}],
+                            "items": [
+                                {"source_ref": "situation:desk", "value": {"activity": "整理桌面"}}
+                            ],
                         },
                         "relationship_slice": {
                             "availability": "available",
-                            "items":[{"source_ref": "relationship:primary", "value": {"stage": "new_acquaintance"}}],
+                            "items": [
+                                {
+                                    "source_ref": "relationship:primary",
+                                    "value": {"stage": "new_acquaintance"},
+                                }
+                            ],
                         },
                         "affect_episodes": {
                             "availability": "available",
-                            "items":[{"source_ref": "affect:recent-hurt", "value": {"dimension": "hurt"}}],
+                            "items": [
+                                {"source_ref": "affect:recent-hurt", "value": {"dimension": "hurt"}}
+                            ],
                         },
                     }
                 },
@@ -796,7 +780,9 @@ async def test_one_provider_round_trip_yields_two_independently_bound_proposals(
     expression = DecisionProposal.model_validate_json(json.dumps(expression_output.raw_proposal))
     assert len(provider.calls) == 1
     assert appraisal.proposal_id != expression.proposal_id
-    assert appraisal.evidence_refs[0].ref_id == expression.evidence_refs[0].ref_id == "observation:1"
+    assert (
+        appraisal.evidence_refs[0].ref_id == expression.evidence_refs[0].ref_id == "observation:1"
+    )
     assert appraisal.proposed_changes[0].kind == "appraisal_transition"
     assert appraisal.proposed_changes[1].kind == "affect_transition"
     assert expression.evaluated_world_revision == 5
@@ -804,6 +790,181 @@ async def test_one_provider_round_trip_yields_two_independently_bound_proposals(
     assert expression.action_intents[0].kind == "reply"
     assert "appraisal_draft" in provider.calls[0][0]["content"]
     assert "expression_draft" in provider.calls[0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_paired_first_pass_sees_ready_prefetch_without_an_extra_model_call() -> None:
+    provider = _CombinedProvider()
+    cognition = SingleCallInboundCognition(flash_model=provider)
+    embedding = _ReadyPairedPrefetchEmbedding()
+    cursor = RecallCursor(world_revision=3, deliberation_revision=0, ledger_sequence=0)
+    index = InMemoryRecallIndex(embedding=embedding)
+    index.rebuild(
+        cursor=cursor,
+        documents=(
+            RecallDocument(
+                document_id="recall:paired:first-pass",
+                memory_kind="reflective",
+                source_item_ref="impression:paired:first-pass",
+                source_slice="private_impressions",
+                source_refs=("event:impression:paired:first-pass",),
+                source_bindings=(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type="PrivateImpressionAccepted",
+                        ref="event:impression:paired:first-pass",
+                        source_world_revision=2,
+                        immutable_hash="f" * 64,
+                    ),
+                ),
+                source_world_revision=2,
+                text="我不想因为一句关于机器人的气话就替对方定性。",
+                actor_ref="agent:companion",
+                subject_refs=("user:primary",),
+                occurred_from=NOW,
+                privacy_class="withhold",
+                authority="defeasible_interpretation",
+            ),
+        ),
+    )
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=NOW,
+        trigger_ref="event:observation:1",
+    )
+    coordinator.schedule_prefetch(
+        query_text="机器人",
+        accessibility_seed="draw:paired:first-pass",
+        trigger_ref="event:observation:1",
+    )
+    assert await asyncio.to_thread(embedding.finished.wait, 0.5)
+    cognition.expression.install_recall_coordinator(coordinator)
+    base = _request(revision=3, call="call:paired-ready-prefetch")
+    request = base.model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "world_revision": 3,
+                    "deliberation_revision": 0,
+                    "ledger_sequence": 0,
+                    "logical_time": NOW.isoformat(),
+                    "slices": {
+                        # A production Capsule commonly fills this lane before
+                        # the parallel attention candidate arrives.  The
+                        # candidate actually audited as model-visible must
+                        # survive the bounded chat compaction.
+                        "private_impressions": {
+                            "availability": "available",
+                            "source_refs": ["event:old:1", "event:old:2"],
+                            "items": [
+                                {
+                                    "item_ref": "impression:old:1",
+                                    "privacy_class": "withhold",
+                                    "value": {"reflection_summary": "旧印象一"},
+                                },
+                                {
+                                    "item_ref": "impression:old:2",
+                                    "privacy_class": "withhold",
+                                    "value": {"reflection_summary": "旧印象二"},
+                                },
+                            ],
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+
+    output = await cognition.appraisal.propose(request)
+
+    assert len(provider.calls) == 1
+    assert "我不想因为一句关于机器人的气话就替对方定性" in provider.calls[0][1]["content"]
+    assert output.prefetch_trace is not None
+    assert verify_trusted_recall_trace(output.prefetch_trace).mode == "prefetch"
+
+
+@pytest.mark.asyncio
+async def test_paired_backup_preserves_ready_prefetch_provenance() -> None:
+    primary = _AlwaysFailProvider()
+    backup = _CombinedProvider()
+    cognition = SingleCallInboundCognition(
+        flash_model=primary,
+        recovery_model=backup,
+    )
+    embedding = _ReadyPairedPrefetchEmbedding()
+    cursor = RecallCursor(world_revision=3, deliberation_revision=0, ledger_sequence=0)
+    index = InMemoryRecallIndex(embedding=embedding)
+    index.rebuild(
+        cursor=cursor,
+        documents=(
+            RecallDocument(
+                document_id="recall:paired:backup",
+                memory_kind="reflective",
+                source_item_ref="impression:paired:backup",
+                source_slice="private_impressions",
+                source_refs=("event:impression:paired:backup",),
+                source_bindings=(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type="PrivateImpressionAccepted",
+                        ref="event:impression:paired:backup",
+                        source_world_revision=2,
+                        immutable_hash="e" * 64,
+                    ),
+                ),
+                source_world_revision=2,
+                text="关于机器人的这段回忆必须和备用模型的结果一起留下来源。",
+                actor_ref="agent:companion",
+                subject_refs=("user:primary",),
+                occurred_from=NOW,
+                privacy_class="withhold",
+                authority="defeasible_interpretation",
+            ),
+        ),
+    )
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=NOW,
+        trigger_ref="event:observation:1",
+    )
+    coordinator.schedule_prefetch(
+        query_text="机器人",
+        accessibility_seed="draw:paired:backup",
+        trigger_ref="event:observation:1",
+    )
+    assert await asyncio.to_thread(embedding.finished.wait, 0.5)
+    cognition.expression.install_recall_coordinator(coordinator)
+    base = _request(revision=3, call="call:paired-prefetch-backup")
+    request = base.model_copy(
+        update={
+            "model_content_json": json.dumps(
+                {
+                    "world_revision": 3,
+                    "deliberation_revision": 0,
+                    "ledger_sequence": 0,
+                    "logical_time": NOW.isoformat(),
+                    "slices": {},
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+
+    output = await cognition.appraisal.propose(request)
+
+    assert len(primary.calls) == 1
+    assert len(backup.calls) == 1
+    assert "关于机器人的这段回忆必须和备用模型的结果一起留下来源" in (backup.calls[0][1]["content"])
+    assert output.prefetch_trace is not None
+    trace = verify_trusted_recall_trace(output.prefetch_trace)
+    assert trace.hits[0].document.source_item_ref == "impression:paired:backup"
 
 
 @pytest.mark.asyncio
@@ -946,7 +1107,9 @@ async def test_paired_cognition_honors_character_recall_and_replays_trace(
     assert recall_audits
     assert all('"query_text":"之前关于机器人的谈话"' in item.audit_json for item in recall_audits)
     assert all('"mode":"prefetch"' in item.audit_json for item in recall_audits)
-    assert all('"accessibility_seed":"recall-prefetch:' in item.audit_json for item in recall_audits)
+    assert all(
+        '"accessibility_seed":"recall-prefetch:' in item.audit_json for item in recall_audits
+    )
 
 
 @pytest.mark.asyncio
@@ -1055,16 +1218,13 @@ async def test_episode_restart_after_audit_authorizes_without_model_recall(
     assert len(projection.expression_plan_manifests) == 1
     assert len(projection.actions) == 2
     episode = next(
-        item for item in projection.trigger_processes
-        if item.process_kind == "expression_episode"
+        item for item in projection.trigger_processes if item.process_kind == "expression_episode"
     )
     assert episode.state == "terminal"
 
 
 @pytest.mark.asyncio
-async def test_episode_restart_before_author_resumes_claimed_trigger(
-    tmp_path, monkeypatch
-) -> None:
+async def test_episode_restart_before_author_resumes_claimed_trigger(tmp_path, monkeypatch) -> None:
     provider = _EpisodeCombinedProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     app = build_sqlite_world_v2_turn_application(
@@ -1105,9 +1265,7 @@ async def test_episode_restart_before_author_resumes_claimed_trigger(
         assert provider.calls == []
         claimed = app.export_replay_evidence().projection
         episode = next(
-            item
-            for item in claimed.trigger_processes
-            if item.process_kind == "expression_episode"
+            item for item in claimed.trigger_processes if item.process_kind == "expression_episode"
         )
         assert episode.state == "claimed"
 
@@ -1119,9 +1277,7 @@ async def test_episode_restart_before_author_resumes_claimed_trigger(
     assert outcome.status == "observed_only"
     assert len(provider.calls) <= 3
     episode = next(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "expression_episode"
+        item for item in projection.trigger_processes if item.process_kind == "expression_episode"
     )
     assert episode.state == "terminal"
 
@@ -1166,9 +1322,7 @@ async def test_on_episode_appends_only_after_provisional_receipt(tmp_path) -> No
     assert "delivered" in states
     assert "authorized" in states
     episode = next(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "expression_episode"
+        item for item in projection.trigger_processes if item.process_kind == "expression_episode"
     )
     assert episode.state == "terminal"
     assert episode.runtime_outcome_ref is not None
@@ -1219,9 +1373,7 @@ async def test_on_episode_cancels_undispatched_provisional_atomically(
     } == {"released"}
     assert {item.state for item in projection.expression_plans} == {"terminated"}
     episode = next(
-        item
-        for item in projection.trigger_processes
-        if item.process_kind == "expression_episode"
+        item for item in projection.trigger_processes if item.process_kind == "expression_episode"
     )
     assert episode.state == "terminal"
     assert disposition in (episode.runtime_outcome_ref or "")
@@ -1463,9 +1615,7 @@ async def test_loose_combined_messages_preserve_two_visible_beats_without_retry(
     provider = _LooseMultiMessageCombinedProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
 
-    await cognition.appraisal.propose(
-        _request(revision=3, call="call:loose-messages-appraisal")
-    )
+    await cognition.appraisal.propose(_request(revision=3, call="call:loose-messages-appraisal"))
     output = await cognition.expression.propose(
         _request(revision=5, call="call:loose-messages-expression")
     )
@@ -1502,9 +1652,7 @@ async def test_common_explicit_text_arrays_preserve_all_visible_beats(
     )
     cognition = SingleCallInboundCognition(flash_model=provider)
 
-    await cognition.appraisal.propose(
-        _request(revision=3, call="call:text-array-appraisal")
-    )
+    await cognition.appraisal.propose(_request(revision=3, call="call:text-array-appraisal"))
     output = await cognition.expression.propose(
         _request(revision=5, call="call:text-array-expression")
     )
@@ -1551,16 +1699,23 @@ async def test_loose_unsupported_autobiography_never_reaches_an_action(tmp_path)
     transport = _DeliveredTransport()
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "single-call-unsupported-autobiography.sqlite",
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=cognition.expression, quick_recovery=cognition.expression,
-        appraisal_model=cognition.appraisal, transport=transport, now=NOW,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=transport,
+        now=NOW,
     )
     try:
         outcome = await app.respond(
             InboundTurn(
-                platform="test", platform_user_id="user.1",
+                platform="test",
+                platform_user_id="user.1",
                 platform_message_id="message:unsupported-autobiography",
-                text="你刚才在做什么？", observed_at=NOW,
+                text="你刚才在做什么？",
+                observed_at=NOW,
                 trace_id="trace:unsupported-autobiography",
             )
         )
@@ -1599,16 +1754,23 @@ async def test_model_expression_is_not_replaced_by_a_local_role_template(
     )
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "single-call-role-boundary-failsafe.sqlite",
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=cognition.expression, quick_recovery=cognition.expression,
-        appraisal_model=cognition.appraisal, transport=transport, now=NOW,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=transport,
+        now=NOW,
     )
     try:
         outcome = await app.respond(
             InboundTurn(
-                platform="test", platform_user_id="user.1",
+                platform="test",
+                platform_user_id="user.1",
                 platform_message_id="message:role-boundary-failsafe",
-                text="你是我的助手吗？", observed_at=NOW,
+                text="你是我的助手吗？",
+                observed_at=NOW,
                 trace_id="trace:role-boundary-failsafe",
             )
         )
@@ -1639,17 +1801,24 @@ async def test_model_owned_world_answer_is_not_rewritten_by_a_keyword_gate(
     cognition = SingleCallInboundCognition(flash_model=provider)
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "single-call-world-probe-timeout.sqlite",
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=cognition.expression, quick_recovery=cognition.expression,
-        appraisal_model=cognition.appraisal, transport=transport, now=NOW,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=transport,
+        now=NOW,
     )
     try:
         outcome = await app.respond(
             InboundTurn(
-                platform="test", platform_user_id="user.1",
+                platform="test",
+                platform_user_id="user.1",
                 platform_message_id="message:world-probe-timeout",
                 text="不是角色设定里的爱好，我问的是今天真的发生了什么。",
-                observed_at=NOW, trace_id="trace:world-probe-timeout",
+                observed_at=NOW,
+                trace_id="trace:world-probe-timeout",
             )
         )
         delivery = await app.drain_actions_once()
@@ -1681,31 +1850,40 @@ async def test_grounded_context_recovery_is_still_owned_by_a_role_model() -> Non
         recovery_model=recovery,
     )
     base = _request(revision=3, call="call:grounded-appraisal")
-    trigger = base.trigger_message.model_copy(update={
-        "text": "你还记得我喜欢什么吗？",
-    })
-    context = json.dumps({
-        "slices": {
-            "relevant_facts": {
-                "availability": "available",
-                "items": [
-                    {
-                        "item_ref": "fact:user:oolong",
-                        "value": {"subject_ref": "user:primary", "value": "喜欢乌龙茶"},
-                    }
-                ],
-            }
+    trigger = base.trigger_message.model_copy(
+        update={
+            "text": "你还记得我喜欢什么吗？",
         }
-    }, ensure_ascii=False)
-    appraisal_request = base.model_copy(update={
-        "trigger_message": trigger,
-        "model_content_json": context,
-    })
+    )
+    context = json.dumps(
+        {
+            "slices": {
+                "relevant_facts": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "fact:user:oolong",
+                            "value": {"subject_ref": "user:primary", "value": "喜欢乌龙茶"},
+                        }
+                    ],
+                }
+            }
+        },
+        ensure_ascii=False,
+    )
+    appraisal_request = base.model_copy(
+        update={
+            "trigger_message": trigger,
+            "model_content_json": context,
+        }
+    )
     await cognition.appraisal.propose(appraisal_request)
-    expression_request = appraisal_request.model_copy(update={
-        "call_id": "call:grounded-expression",
-        "evaluated_world_revision": 5,
-    })
+    expression_request = appraisal_request.model_copy(
+        update={
+            "call_id": "call:grounded-expression",
+            "evaluated_world_revision": 5,
+        }
+    )
     output = await cognition.expression.propose(expression_request)
     proposal = MinimalProposal.model_validate_json(json.dumps(output.raw_proposal))
     assert proposal.response_text == "我接到了，刚才只是慢了一拍。"
@@ -1718,22 +1896,24 @@ async def test_grounded_context_recovery_is_still_owned_by_a_role_model() -> Non
 async def test_ordinary_fact_context_does_not_trigger_local_character_prose() -> None:
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
-    request = _request(revision=3, call="call:ordinary-recovery") .model_copy(update={
-        "trigger_message": _request(revision=3, call="call:ordinary-trigger").trigger_message.model_copy(
-            update={"text": "我只是分享一下今天的事。"}
-        ),
-        "model_content_json": json.dumps(
-            {
-                "slices": {
-                    "relevant_facts": {
-                        "availability": "available",
-                        "items": [{"item_ref": "fact:user:oolong", "value": "喜欢乌龙茶"}],
+    request = _request(revision=3, call="call:ordinary-recovery").model_copy(
+        update={
+            "trigger_message": _request(
+                revision=3, call="call:ordinary-trigger"
+            ).trigger_message.model_copy(update={"text": "我只是分享一下今天的事。"}),
+            "model_content_json": json.dumps(
+                {
+                    "slices": {
+                        "relevant_facts": {
+                            "availability": "available",
+                            "items": [{"item_ref": "fact:user:oolong", "value": "喜欢乌龙茶"}],
+                        }
                     }
-                }
-            },
-            ensure_ascii=False,
-        ),
-    })
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
 
     with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
         await cognition.expression.recover(request, "main_timeout")
@@ -1754,9 +1934,11 @@ async def test_generic_local_expression_failure_does_not_author_character_prose(
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     base = _request(revision=3, call="call:generic-silent")
-    trigger = base.trigger_message.model_copy(update={
-        "text": text,
-    })
+    trigger = base.trigger_message.model_copy(
+        update={
+            "text": text,
+        }
+    )
     request = base.model_copy(update={"trigger_message": trigger})
 
     with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
@@ -1777,9 +1959,7 @@ async def test_first_greeting_provider_failure_does_not_invent_a_local_greeting(
     base = _request(revision=3, call="call:first-greeting-failsafe")
     request = base.model_copy(
         update={
-            "trigger_message": base.trigger_message.model_copy(
-                update={"text": "你好，第一次见。"}
-            )
+            "trigger_message": base.trigger_message.model_copy(update={"text": "你好，第一次见。"})
         }
     )
 
@@ -1788,8 +1968,7 @@ async def test_first_greeting_provider_failure_does_not_invent_a_local_greeting(
 
 
 @pytest.mark.asyncio
-async def test_user_fact_provider_failure_does_not_invent_a_local_acknowledgement(
-) -> None:
+async def test_user_fact_provider_failure_does_not_invent_a_local_acknowledgement() -> None:
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     base = _request(revision=3, call="call:user-fact-failsafe")
@@ -1869,11 +2048,13 @@ async def test_colloquial_current_activity_probe_does_not_get_local_prose() -> N
     provider = _GroundedQuickRecoveryProvider()
     cognition = SingleCallInboundCognition(flash_model=provider)
     base = _request(revision=3, call="call:colloquial-world-probe")
-    request = base.model_copy(update={
-        "trigger_message": base.trigger_message.model_copy(
-            update={"text": "所以你现在在干啥呀"}
-        )
-    })
+    request = base.model_copy(
+        update={
+            "trigger_message": base.trigger_message.model_copy(
+                update={"text": "所以你现在在干啥呀"}
+            )
+        }
+    )
 
     with pytest.raises(RuntimeError, match="model-owned expression unavailable"):
         await cognition.expression.recover(request, "main_invalid_output")
@@ -1886,16 +2067,23 @@ async def test_colloquial_world_probe_provider_failure_records_no_fake_reply(tmp
     transport = _DeliveredTransport()
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "single-call-generic-silent.sqlite",
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=cognition.expression, quick_recovery=cognition.expression,
-        appraisal_model=cognition.appraisal, transport=transport, now=NOW,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=transport,
+        now=NOW,
     )
     try:
         outcome = await app.respond(
             InboundTurn(
-                platform="test", platform_user_id="user.1",
+                platform="test",
+                platform_user_id="user.1",
                 platform_message_id="message:generic-silent",
-                text="所以你现在在干啥呀", observed_at=NOW,
+                text="所以你现在在干啥呀",
+                observed_at=NOW,
                 trace_id="trace:generic-silent",
             )
         )
@@ -1917,16 +2105,23 @@ async def test_double_provider_failure_records_recovery_failure_without_fake_ack
     transport = _DeliveredTransport()
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "single-call-double-provider-failure.sqlite",
-        config=_config(), identities=_Identities(), router=_Router(),
-        main_model=cognition.expression, quick_recovery=cognition.expression,
-        appraisal_model=cognition.appraisal, transport=transport, now=NOW,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=cognition.appraisal,
+        transport=transport,
+        now=NOW,
     )
     try:
         outcome = await app.respond(
             InboundTurn(
-                platform="test", platform_user_id="user.1",
+                platform="test",
+                platform_user_id="user.1",
                 platform_message_id="message:double-provider-failure",
-                text="我只是分享一下今天遇到的一件小事。", observed_at=NOW,
+                text="我只是分享一下今天遇到的一件小事。",
+                observed_at=NOW,
                 trace_id="trace:double-provider-failure",
             )
         )
@@ -1957,18 +2152,14 @@ class _GateVerdictModel:
         self.raw = raw
         self.calls: list[list[dict[str, str]]] = []
 
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
         self.calls.append(messages)
         return self.raw
 
 
 class _HangingGateModel(_GateVerdictModel):
-    async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.8
-    ) -> str:
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         self.calls.append(messages)
         await asyncio.sleep(5.0)
         return self.raw
@@ -2013,9 +2204,7 @@ async def test_semantic_emotion_gate_timeout_falls_back_to_keyword_verdict() -> 
     model = _HangingGateModel('{"immediate": true}')
     gate = SemanticImmediateEmotionGate(model=model, timeout_seconds=0.05)
 
-    selected = await resolve_immediate_emotion_gate(
-        keyword_hit=False, text="哦。", gate=gate
-    )
+    selected = await resolve_immediate_emotion_gate(keyword_hit=False, text="哦。", gate=gate)
 
     # A slow local model must never block or flip the gate: the keyword miss
     # remains the decision and the reply path continues immediately.
@@ -2028,9 +2217,7 @@ async def test_semantic_emotion_gate_garbage_output_falls_back_to_keyword_verdic
     model = _GateVerdictModel("嗯……这条消息看起来有点冷淡，也可能只是忙。")
     gate = SemanticImmediateEmotionGate(model=model)
 
-    selected = await resolve_immediate_emotion_gate(
-        keyword_hit=False, text="哦。", gate=gate
-    )
+    selected = await resolve_immediate_emotion_gate(keyword_hit=False, text="哦。", gate=gate)
 
     assert selected is False
     assert len(model.calls) == 1
@@ -2061,12 +2248,11 @@ async def test_keyword_hit_selects_same_turn_emotion_without_a_model_call() -> N
 
 @pytest.mark.asyncio
 async def test_gate_without_semantic_model_keeps_pure_keyword_behavior() -> None:
-    assert await resolve_immediate_emotion_gate(
-        keyword_hit=False, text="哦。", gate=None
-    ) is False
-    assert await resolve_immediate_emotion_gate(
-        keyword_hit=True, text="你让我很失望。", gate=None
-    ) is True
+    assert await resolve_immediate_emotion_gate(keyword_hit=False, text="哦。", gate=None) is False
+    assert (
+        await resolve_immediate_emotion_gate(keyword_hit=True, text="你让我很失望。", gate=None)
+        is True
+    )
 
 
 def test_cognition_exposes_gate_only_when_a_local_appraiser_exists() -> None:
@@ -2076,7 +2262,5 @@ def test_cognition_exposes_gate_only_when_a_local_appraiser_exists() -> None:
     )
     without_local = SingleCallInboundCognition(flash_model=_OrdinaryCombinedProvider())
 
-    assert isinstance(
-        with_local.appraisal.immediate_emotion_gate, SemanticImmediateEmotionGate
-    )
+    assert isinstance(with_local.appraisal.immediate_emotion_gate, SemanticImmediateEmotionGate)
     assert without_local.appraisal.immediate_emotion_gate is None

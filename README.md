@@ -157,6 +157,17 @@ Current multimodal status:
 Cost control and visual identity notes:
 
 - Budget settings live in `.env` as `MONTHLY_BUDGET_CNY`, `DAILY_BUDGET_CNY`, `SOFT_DAILY_BUDGET_CNY`, and monthly multimodal limits.
+- With `OPENAI_API_KEY`, character-chosen deep recall uses cached
+  `text-embedding-3-small` semantic vectors by default. Set
+  `WORLD_V2_RECALL_SEMANTIC_ENABLED=false` to force exact/local recall only;
+  `WORLD_V2_RECALL_EMBEDDING_MODEL` and
+  `WORLD_V2_RECALL_EMBEDDING_DIMENSIONS` select another compatible embedding.
+  Provider calls are additionally bounded by
+  `WORLD_V2_RECALL_EMBEDDING_DAILY_TOKEN_BUDGET`,
+  `WORLD_V2_RECALL_EMBEDDING_MONTHLY_TOKEN_BUDGET`,
+  `WORLD_V2_RECALL_EMBEDDING_DAILY_BUDGET_CNY`, and
+  `WORLD_V2_RECALL_EMBEDDING_MONTHLY_BUDGET_CNY`; usage and degraded recall
+  status are exposed read-only in health output.
 - See `docs/cost-control.md` for the current spending policy.
 - See `configs/visual_identity.yaml` and `docs/visual-identity.md` for the selfie/virtual-life image consistency plan.
 - See `docs/state-machine.md` for the interaction event and emotional state loop.

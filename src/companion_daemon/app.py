@@ -645,6 +645,10 @@ async def world_v2_life_state() -> dict[str, object]:
         "world_activity": scheduler.get("world_activity", {}),
         "mechanisms": scheduler.get("mechanisms", {}),
         "initiative": scheduler.get("initiative", {}),
+        "recall_semantic": scheduler.get(
+            "recall_semantic",
+            {"enabled": False},
+        ),
     }
 
 

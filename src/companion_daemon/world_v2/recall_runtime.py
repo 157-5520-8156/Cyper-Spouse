@@ -165,13 +165,9 @@ class RecallCoordinator:
         self._semantic_embedding = semantic_embedding
         self._closed = False
         self._context_key: _RecallContextKey | None = None
-        self._contexts: OrderedDict[
-            _RecallContextKey, _PinnedRecallContext
-        ] = OrderedDict()
+        self._contexts: OrderedDict[_RecallContextKey, _PinnedRecallContext] = OrderedDict()
         self._prefetch_slots = threading.BoundedSemaphore(value=4)
-        self._prefetch_futures: OrderedDict[
-            _RecallPrefetchKey, _PrefetchJob
-        ] = OrderedDict()
+        self._prefetch_futures: OrderedDict[_RecallPrefetchKey, _PrefetchJob] = OrderedDict()
 
     @classmethod
     def from_built_index(
@@ -212,6 +208,17 @@ class RecallCoordinator:
     @property
     def is_closed(self) -> bool:
         return self._closed
+
+    def semantic_health(self) -> dict[str, object]:
+        if self._semantic_embedding is None:
+            return {"enabled": False}
+        snapshot = getattr(self._semantic_embedding, "health_snapshot", None)
+        if callable(snapshot):
+            return dict(snapshot())
+        return {
+            "enabled": True,
+            "embedding_version": self._semantic_embedding.version,
+        }
 
     def is_available(
         self,
@@ -389,6 +396,35 @@ class RecallCoordinator:
             return None
         return trace
 
+    def take_ready_scheduled_prefetch(
+        self,
+        *,
+        expected_cursor: RecallCursor,
+        trigger_ref: str,
+    ) -> TrustedRecallTrace | None:
+        """Take an already-finished candidate set without waiting at all.
+
+        This is the automatic half of dual-channel recall.  A candidate set
+        that lost the race with the first model call remains available for the
+        optional character pull, while a completed set can be placed in the
+        first call and audited as material the character actually saw.
+        """
+
+        key = (expected_cursor, trigger_ref)
+        job = self._prefetch_futures.get(key)
+        if job is None or not job.future.done():
+            return None
+        self._prefetch_futures.pop(key, None)
+        try:
+            trace = job.future.result()
+            audit = verify_trusted_recall_trace(trace)
+        except Exception:
+            job.cancel()
+            return None
+        if audit.trigger_ref != trigger_ref or audit.evaluated_cursor != expected_cursor:
+            return None
+        return trace
+
     def discard_scheduled_prefetch(
         self,
         cursor: RecallCursor,
@@ -450,6 +486,8 @@ class RecallCoordinator:
             result_hash=result.result_hash,
             index_version=result.index_version,
             embedding_version=result.embedding_version,
+            embedding_status=result.embedding_status,
+            embedding_failure_code=result.embedding_failure_code,
             index_cursor=result.index_cursor,
             evaluated_cursor=evaluated_cursor,
             hits=tuple(
@@ -487,9 +525,7 @@ class RecallCoordinator:
             raise ValueError("paired recall target belongs to another trigger")
         source_cursor = audit.index_cursor
         if target.paired_predecessor_cursor != source_cursor:
-            raise ValueError(
-                "paired recall source is not the target Context's exact predecessor"
-            )
+            raise ValueError("paired recall source is not the target Context's exact predecessor")
         carried = audit.model_copy(
             update={
                 "evaluated_cursor": evaluated_cursor,
@@ -571,20 +607,20 @@ class RecallCoordinator:
         semantic: bool,
     ) -> RecallResult:
         query = RecallQuery(
-                query_text=request.query_text,
-                cursor=context.snapshot.cursor,
-                actor_ref=context.actor_ref,
-                subject_refs=context.subject_refs,
-                viewer_privacy_ceiling="withhold",
-                at=context.logical_time,
-                occurred_from=request.occurred_from,
-                occurred_to=request.occurred_to,
-                link_refs=request.link_refs,
-                memory_kinds=request.memory_kinds,
-                include_historical=request.include_historical,
-                limit=request.limit,
-                accessibility_seed=accessibility_seed,
-            )
+            query_text=request.query_text,
+            cursor=context.snapshot.cursor,
+            actor_ref=context.actor_ref,
+            subject_refs=context.subject_refs,
+            viewer_privacy_ceiling="withhold",
+            at=context.logical_time,
+            occurred_from=request.occurred_from,
+            occurred_to=request.occurred_to,
+            link_refs=request.link_refs,
+            memory_kinds=request.memory_kinds,
+            include_historical=request.include_historical,
+            limit=request.limit,
+            accessibility_seed=accessibility_seed,
+        )
         if not semantic or self._semantic_embedding is None:
             return context.snapshot.search(query)
         semantic = InMemoryRecallIndex(embedding=self._semantic_embedding)
@@ -704,13 +740,9 @@ def recall_followup_evidence_json(
     return _canonical_json(
         {
             "parallel_attention_prefetch": (
-                json.loads(recall_evidence_json(prefetch))
-                if prefetch is not None
-                else None
+                json.loads(recall_evidence_json(prefetch)) if prefetch is not None else None
             ),
-            "character_chosen_recall": json.loads(
-                recall_evidence_json(character_pull)
-            ),
+            "character_chosen_recall": json.loads(recall_evidence_json(character_pull)),
         }
     )
 
@@ -739,33 +771,46 @@ def augment_model_content_with_recall(
         items = lane.get("items")
         if not isinstance(items, list):
             items = []
+        items = [
+            item
+            for item in items
+            if not isinstance(item, dict) or item.get("item_ref") != document.source_item_ref
+        ]
         items.append(
             {
                 "item_ref": document.source_item_ref,
-                "memory_kind": document.memory_kind,
-                "authority": document.authority,
-                "text": document.text,
+                "privacy_class": document.privacy_class,
+                # This is a provider-view selection marker, not World
+                # authority.  compact_chat_model_facing_context uses it to
+                # keep an audited ready-prefetch item when the source slice
+                # was already at its ordinary item limit, then strips it from
+                # the final semantic item.
+                "recall_injected": True,
+                "value": {
+                    "memory_kind": document.memory_kind,
+                    "authority": document.authority,
+                    "text": document.text,
+                    "source_refs": document.source_refs,
+                    "occurred_from": document.occurred_from.isoformat(),
+                    "occurred_to": (
+                        document.occurred_to.isoformat()
+                        if document.occurred_to is not None
+                        else None
+                    ),
+                    "valid_from": (
+                        document.valid_from.isoformat() if document.valid_from is not None else None
+                    ),
+                    "valid_to": (
+                        document.valid_to.isoformat() if document.valid_to is not None else None
+                    ),
+                    "status": document.status,
+                },
+                # Full model_content_json remains the acceptance authority.
+                # These bindings are removed only from the compact provider
+                # view, never from source-closure validation.
                 "source_bindings": tuple(
-                    binding.model_dump(mode="json")
-                    for binding in document.source_bindings
+                    binding.model_dump(mode="json") for binding in document.source_bindings
                 ),
-                "occurred_from": document.occurred_from.isoformat(),
-                "occurred_to": (
-                    document.occurred_to.isoformat()
-                    if document.occurred_to is not None
-                    else None
-                ),
-                "valid_from": (
-                    document.valid_from.isoformat()
-                    if document.valid_from is not None
-                    else None
-                ),
-                "valid_to": (
-                    document.valid_to.isoformat()
-                    if document.valid_to is not None
-                    else None
-                ),
-                "status": document.status,
             }
         )
         lane["items"] = items
@@ -788,10 +833,7 @@ def model_content_allows_recall(model_content_json: str) -> bool:
     if not isinstance(value, dict):
         return False
     control = value.get("recall_control")
-    return not (
-        isinstance(control, dict)
-        and control.get("remaining_character_pulls") == 0
-    )
+    return not (isinstance(control, dict) and control.get("remaining_character_pulls") == 0)
 
 
 __all__ = [

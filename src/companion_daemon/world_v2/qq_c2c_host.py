@@ -416,9 +416,7 @@ class QQC2CHost:
                     # A newer bubble landed during this hold, so the volley is
                     # still going: let the newest bubble's shape and the
                     # just-measured cadence decide how much longer to wait.
-                    quiet_gap = self._quiet_gap_seconds(
-                        self._last_content_text, burst=True
-                    )
+                    quiet_gap = self._quiet_gap_seconds(self._last_content_text, burst=True)
                 # A provider "peer is typing" pulse counts as not-quiet: she
                 # can see the person still composing, so she keeps waiting
                 # (within the same absolute cap) instead of answering half a
@@ -531,9 +529,7 @@ class QQC2CHost:
         metadata.setdefault("processing_started_at", metadata.get("window_closed_at"))
         processing_started_at = _parse_metadata_time(metadata.get("processing_started_at"))
         turn_budget = (
-            self._interactive_turn_budget_policy.start(
-                processing_started_at=processing_started_at
-            )
+            self._interactive_turn_budget_policy.start(processing_started_at=processing_started_at)
             if self._interactive_turn_budget_policy is not None
             else None
         )
@@ -553,15 +549,12 @@ class QQC2CHost:
         )
         if action_id is not None:
             dispatch_seconds = (
-                turn_budget.remaining(include_reserve=True)
-                if turn_budget is not None
-                else None
+                turn_budget.remaining(include_reserve=True) if turn_budget is not None else None
             )
             if (
                 dispatch_seconds is not None
                 and turn_budget is not None
-                and dispatch_seconds
-                < turn_budget.acceptance_dispatch_reserve_seconds
+                and dispatch_seconds < turn_budget.acceptance_dispatch_reserve_seconds
             ):
                 # Cognition may consume the absolute turn deadline, but an
                 # already-authorized visible reply must still get one bounded
@@ -808,9 +801,7 @@ class QQC2CHost:
         # background work above was in flight.
         async with self._lock:
             logical_from = await self._host.current_logical_time()
-            due_projection_reader = getattr(
-                self._host, "action_due_projection", None
-            )
+            due_projection_reader = getattr(self._host, "action_due_projection", None)
             nearest_action_due = (
                 ActionDueWake.nearest_due(await due_projection_reader())
                 if callable(due_projection_reader)
@@ -986,9 +977,7 @@ def build_qq_c2c_host(
         raise ValueError("QQ C2C v2 requires one configured private recipient")
     expression_capabilities = qq_expression_capabilities(
         settings.qq_adapter,
-        recorded_cadence_mode=getattr(
-            settings, "world_v2_recorded_cadence_mode", "off"
-        ),
+        recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
     )
     interactive_turn_budget_policy = InteractiveTurnBudgetPolicy()
     semantic_chat = build_semantic_chat_composition(
@@ -1030,9 +1019,7 @@ def build_qq_c2c_host(
             perception_budget_limit=perception_budget_limit,
             interactive_turn_budget_policy=interactive_turn_budget_policy,
             expression_episode_mode=settings.world_v2_expression_episode_mode,
-            recorded_cadence_mode=getattr(
-                settings, "world_v2_recorded_cadence_mode", "off"
-            ),
+            recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
         ),
         identities=QQC2CIdentityResolver(
             recipient_id=recipient_id, canonical_user_id=settings.primary_user_id
@@ -1057,6 +1044,7 @@ def build_qq_c2c_host(
         # Private impressions consolidate accepted appraisals on the same
         # background channel; they never touch the interactive reply path.
         private_impression_model=background_model,
+        private_impression_identity_frame=semantic_chat.identity_frame,
         proactive_model=background_model,
         proactive_identity_frame=semantic_chat.identity_frame,
         memory_model=background_model,
@@ -1094,9 +1082,7 @@ def build_qq_c2c_host(
         ingress_store=SQLiteQQIngressStore(Path(settings.database_path)),
         typing_signal=typing_signal,
         interactive_turn_budget_policy=interactive_turn_budget_policy,
-        recorded_cadence_mode=getattr(
-            settings, "world_v2_recorded_cadence_mode", "off"
-        ),
+        recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
         idle_heartbeat_seconds=settings.qq_c2c_idle_heartbeat_seconds,
     )
 

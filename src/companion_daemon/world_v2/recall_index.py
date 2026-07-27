@@ -131,9 +131,7 @@ class RecallDocument(FrozenModel):
             raise ValueError("recall source bindings must be canonical and unique")
         if self.source_refs != tuple(sorted({item.ref for item in bindings})):
             raise ValueError("recall source refs must exactly match source bindings")
-        if self.source_world_revision != max(
-            item.source_world_revision for item in bindings
-        ):
+        if self.source_world_revision != max(item.source_world_revision for item in bindings):
             raise ValueError("recall source revision must match its authority closure")
         times = (
             self.occurred_from,
@@ -142,8 +140,7 @@ class RecallDocument(FrozenModel):
             self.valid_to,
         )
         if any(
-            value is not None
-            and (value.tzinfo is None or value.utcoffset() is None)
+            value is not None and (value.tzinfo is None or value.utcoffset() is None)
             for value in times
         ):
             raise ValueError("recall document times must be timezone-aware")
@@ -155,11 +152,7 @@ class RecallDocument(FrozenModel):
             and self.valid_to <= self.valid_from
         ):
             raise ValueError("recall validity interval is reversed")
-        if (
-            self.memory_kind == "reflective"
-        ) != (
-            self.authority == "defeasible_interpretation"
-        ):
+        if (self.memory_kind == "reflective") != (self.authority == "defeasible_interpretation"):
             raise ValueError("reflective recall must remain non-factual authority")
         return self
 
@@ -188,9 +181,7 @@ class RecallQuery(FrozenModel):
         if self.memory_kinds != tuple(sorted(set(self.memory_kinds))):
             raise ValueError("recall query kinds must be sorted and unique")
         for value in (self.at, self.occurred_from, self.occurred_to):
-            if value is not None and (
-                value.tzinfo is None or value.utcoffset() is None
-            ):
+            if value is not None and (value.tzinfo is None or value.utcoffset() is None):
                 raise ValueError("recall query times must be timezone-aware")
         if (
             self.occurred_from is not None
@@ -203,9 +194,9 @@ class RecallQuery(FrozenModel):
 
 class RecallHit(FrozenModel):
     document: RecallDocument
-    match_channels: tuple[
-        Literal["lexical", "dense", "temporal", "structured"], ...
-    ] = Field(min_length=1)
+    match_channels: tuple[Literal["lexical", "dense", "temporal", "structured"], ...] = Field(
+        min_length=1
+    )
     score_bp: int = Field(ge=0, le=10_000)
     lexical_score_bp: int = Field(ge=0, le=10_000)
     dense_score_bp: int = Field(ge=0, le=10_000)
@@ -219,6 +210,12 @@ class RecallResult(FrozenModel):
     result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     index_version: str = Field(min_length=1, max_length=256)
     embedding_version: str = Field(min_length=1, max_length=256)
+    embedding_status: Literal["unknown", "used", "degraded"] = "unknown"
+    embedding_failure_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+    )
     index_cursor: RecallCursor
     query: RecallQuery
     hits: tuple[RecallHit, ...]
@@ -258,9 +255,7 @@ class FeatureHashRecallEmbedding:
         for text in texts:
             values = [0.0] * self.dimensions
             for feature in _lexical_features(text):
-                digest = hashlib.blake2b(
-                    feature.encode("utf-8"), digest_size=16
-                ).digest()
+                digest = hashlib.blake2b(feature.encode("utf-8"), digest_size=16).digest()
                 bucket = int.from_bytes(digest[:8], "big") % self.dimensions
                 sign = 1.0 if digest[8] & 1 else -1.0
                 values[bucket] += sign
@@ -286,9 +281,8 @@ class _RecallIndexCore:
         if not embedding.version or not 1 <= embedding.dimensions <= 4_096:
             raise ValueError("recall embedding identity or dimensions are invalid")
         self._embedding = embedding
-        self._index_version = (
-            f"{RECALL_INDEX_POLICY_VERSION}+embedding:{embedding.version}"
-        )
+        self._index_version = f"{RECALL_INDEX_POLICY_VERSION}+embedding:{embedding.version}"
+        self._last_rebuild_embedding_failure: str | None = None
 
     def _materialize(
         self,
@@ -303,10 +297,11 @@ class _RecallIndexCore:
             raise ValueError("recall document is newer than the index cursor")
         try:
             vectors = self._embedding.embed(tuple(item.text for item in ordered))
-        except RecallEmbeddingUnavailable:
-            vectors = tuple(
-                (0.0,) * self._embedding.dimensions for _ in ordered
-            )
+        except RecallEmbeddingUnavailable as exc:
+            vectors = tuple((0.0,) * self._embedding.dimensions for _ in ordered)
+            self._last_rebuild_embedding_failure = str(exc)[:128] or "embedding_unavailable"
+        else:
+            self._last_rebuild_embedding_failure = None
         if len(vectors) != len(ordered):
             raise ValueError("recall embedding count does not match documents")
         normalized = tuple(self._normalize_vector(value) for value in vectors)
@@ -321,10 +316,12 @@ class _RecallIndexCore:
     ) -> RecallResult:
         if query.cursor != cursor:
             raise ValueError("recall query cursor does not match the sidecar cursor")
+        embedding_failure = self._last_rebuild_embedding_failure
         try:
             query_vector_values = self._embedding.embed((query.query_text,))
-        except RecallEmbeddingUnavailable:
+        except RecallEmbeddingUnavailable as exc:
             query_vector_values = ((0.0,) * self._embedding.dimensions,)
+            embedding_failure = str(exc)[:128] or "embedding_unavailable"
         if len(query_vector_values) != 1:
             raise ValueError("recall query embedding count is invalid")
         query_vector = self._normalize_vector(query_vector_values[0])
@@ -387,11 +384,14 @@ class _RecallIndexCore:
             if len(selected) >= query.limit:
                 break
             candidate = (*selected, hit)
-            if len(
-                _canonical_json(
-                    [item.model_dump(mode="json") for item in candidate]
-                ).encode("utf-8")
-            ) > RECALL_RESULT_MAX_BYTES:
+            if (
+                len(
+                    _canonical_json([item.model_dump(mode="json") for item in candidate]).encode(
+                        "utf-8"
+                    )
+                )
+                > RECALL_RESULT_MAX_BYTES
+            ):
                 continue
             selected.append(hit)
         hits = tuple(selected)
@@ -409,6 +409,8 @@ class _RecallIndexCore:
             result_hash=result_hash,
             index_version=self._index_version,
             embedding_version=self._embedding.version,
+            embedding_status=("degraded" if embedding_failure is not None else "used"),
+            embedding_failure_code=embedding_failure,
             index_cursor=cursor,
             query=query,
             hits=hits,
@@ -430,9 +432,7 @@ class _RecallIndexCore:
             return False
         if not set(document.subject_refs) & set(query.subject_refs):
             return False
-        if _PRIVACY_RANK[document.privacy_class] > _PRIVACY_RANK[
-            query.viewer_privacy_ceiling
-        ]:
+        if _PRIVACY_RANK[document.privacy_class] > _PRIVACY_RANK[query.viewer_privacy_ceiling]:
             return False
         if query.memory_kinds and document.memory_kind not in query.memory_kinds:
             return False
@@ -670,13 +670,17 @@ class SQLiteRecallIndex(_RecallIndexCore):
             cursor.deliberation_revision,
             cursor.ledger_sequence,
         )
-        if head is not None and (
-            int(head[0]),
-            int(head[1]),
-            int(head[2]),
-        ) == exact_cursor and str(head[3]) == self._index_version and str(
-            head[4]
-        ) == set_hash:
+        if (
+            head is not None
+            and (
+                int(head[0]),
+                int(head[1]),
+                int(head[2]),
+            )
+            == exact_cursor
+            and str(head[3]) == self._index_version
+            and str(head[4]) == set_hash
+        ):
             return RecallRebuildReport(
                 mode="noop",
                 document_count=len(rows),
@@ -687,14 +691,10 @@ class SQLiteRecallIndex(_RecallIndexCore):
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 documents_changed = (
-                    head is None
-                    or str(head[3]) != self._index_version
-                    or str(head[4]) != set_hash
+                    head is None or str(head[3]) != self._index_version or str(head[4]) != set_hash
                 )
                 if documents_changed:
-                    retained_ids = tuple(
-                        document.document_id for document, _ in rows
-                    )
+                    retained_ids = tuple(document.document_id for document, _ in rows)
                     if retained_ids:
                         placeholders = ",".join("?" for _ in retained_ids)
                         self._connection.execute(
@@ -774,9 +774,7 @@ class SQLiteRecallIndex(_RecallIndexCore):
         return RecallRebuildReport(
             mode=(
                 "documents_changed"
-                if head is None
-                or str(head[3]) != self._index_version
-                or str(head[4]) != set_hash
+                if head is None or str(head[3]) != self._index_version or str(head[4]) != set_hash
                 else "cursor_only"
             ),
             document_count=len(rows),
@@ -840,8 +838,7 @@ def _flush_run(
     if kind == "cjk":
         for width in (2, 3):
             features.update(
-                value[offset : offset + width]
-                for offset in range(max(0, len(value) - width + 1))
+                value[offset : offset + width] for offset in range(max(0, len(value) - width + 1))
             )
     elif len(value) >= 3:
         features.add(value)

@@ -171,6 +171,7 @@ def _sources() -> RecallCorpusSources:
         subject_ref="user:primary",
         interpretation_refs=("appraisal:appraisal:care:hypothesis:care",),
         source_refs=("event:observation:1",),
+        reflection_summary="我觉得他的关心是认真的，但这仍只是我现在的理解。",
         confidence_bp=6_900,
         first_seen=NOW - timedelta(days=1),
         last_supported=NOW - timedelta(days=1),
@@ -250,8 +251,7 @@ def test_private_reflection_is_resolved_from_appraisal_and_never_fact_authority(
 
     assert reflection.memory_kind == "reflective"
     assert reflection.authority == "defeasible_interpretation"
-    assert "care" in reflection.text
-    assert "user" in reflection.text
+    assert reflection.text == "我觉得他的关心是认真的，但这仍只是我现在的理解。"
     assert reflection.source_refs == (
         "event:appraisal:1",
         "event:impression:1",

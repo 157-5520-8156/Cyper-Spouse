@@ -69,9 +69,7 @@ class CharacterRecallRequest(FrozenModel):
 
 class RecallAuditHit(FrozenModel):
     document: RecallDocument
-    match_channels: tuple[
-        Literal["lexical", "dense", "temporal", "structured"], ...
-    ]
+    match_channels: tuple[Literal["lexical", "dense", "temporal", "structured"], ...]
     score_bp: int = Field(ge=0, le=10_000)
     lexical_score_bp: int = Field(ge=0, le=10_000)
     dense_score_bp: int = Field(ge=0, le=10_000)
@@ -90,6 +88,16 @@ class RecallAuditTrace(FrozenModel):
     result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     index_version: str = Field(min_length=1, max_length=256)
     embedding_version: str = Field(min_length=1, max_length=256)
+    embedding_status: Literal["unknown", "used", "degraded"] = Field(
+        default="unknown",
+        exclude_if=lambda value: value == "unknown",
+    )
+    embedding_failure_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        exclude_if=lambda value: value is None,
+    )
     index_cursor: RecallCursor
     evaluated_cursor: RecallCursor | None = None
     reuse_contract: Literal[
@@ -136,6 +144,8 @@ class RecallAuditTrace(FrozenModel):
                 raise ValueError("paired recall transition proof is absent or invalid")
         if self.query.cursor != self.index_cursor:
             raise ValueError("recall query and result cursors differ")
+        if (self.embedding_status == "degraded") != (self.embedding_failure_code is not None):
+            raise ValueError("recall embedding degradation metadata is incomplete")
         if (
             self.request.query_text != self.query.query_text
             or self.request.occurred_from != self.query.occurred_from

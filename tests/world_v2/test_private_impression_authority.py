@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -11,6 +12,11 @@ from companion_daemon.world_v2.ledger_context_resolver import (
     context_capsule_compiler_from_ledger,
 )
 from companion_daemon.world_v2.private_impression_events import private_impression_mutation_hash
+from companion_daemon.world_v2.private_impression_producer import (
+    PrivateImpressionDraftAdapter,
+    PrivateImpressionTriggerOpener,
+    PrivateImpressionTriggerRuntime,
+)
 from companion_daemon.world_v2.schemas import (
     AppraisalMeaningRef,
     PrivateImpressionOrigin,
@@ -130,18 +136,39 @@ def _ledger_with_active_appraisal():
 
 def test_private_impression_is_appraisal_bound_and_visible_only_to_internal_context() -> None:
     ledger = _ledger_with_active_appraisal()
-    payload = _private_payload(ledger)
-    commit(ledger, [_proposal_event(payload)])
-    commit(
-        ledger,
-        [
-            _acceptance_event(payload),
-            event("private-impression-accepted", "PrivateImpressionAccepted", payload),
-        ],
-    )
+
+    class Model:
+        model = "test-role-reflection"
+
+        async def complete(self, messages, *, temperature=0.1):  # type: ignore[no-untyped-def]
+            del messages, temperature
+            return json.dumps(
+                {
+                    "retain": True,
+                    "source_refs": ["appraisal:appraisal:interaction:1:meaning:disappointment"],
+                    "reflection_summary": "我暂时觉得这更像是失望，但仍可能有别的解释。",
+                    "confidence": 6500,
+                    "expiry_condition": "until_appraisal_contradicted",
+                },
+                ensure_ascii=False,
+            )
+
+    async def produce() -> None:
+        await PrivateImpressionTriggerOpener(
+            ledger=ledger,
+            owner_id="worker:test:private-impression",
+        ).open_once()
+        result = await PrivateImpressionTriggerRuntime(
+            ledger=ledger,
+            adapter=PrivateImpressionDraftAdapter(model=Model()),
+            owner_id="worker:test:private-impression",
+        ).drain_one()
+        assert result.work_status == "accepted"
+
+    asyncio.run(produce())
 
     projection = ledger.project()
-    assert projection.private_impressions[0].impression_id == "impression:response-frustration"
+    assert projection.private_impressions[0].reflection_summary is not None
     assert projection.private_impression_proposals == ()
 
     compiler = context_capsule_compiler_from_ledger(
@@ -156,11 +183,11 @@ def test_private_impression_is_appraisal_bound_and_visible_only_to_internal_cont
         )
     )
     assert capsule.private_impressions.availability == "available"
-    assert capsule.private_impressions.items[0].item_ref == "impression:response-frustration"
+    assert capsule.private_impressions.items[0].item_ref.startswith("impression:")
     assert capsule.private_impressions.items[0].privacy_class == "withhold"
 
 
-def test_private_impression_cannot_persist_free_text_or_bypass_acceptance() -> None:
+def test_private_impression_cannot_replace_source_refs_or_bypass_acceptance() -> None:
     ledger = _ledger_with_active_appraisal()
     payload = _private_payload(ledger)
     payload["impression"] = dict(payload["impression"])
@@ -171,7 +198,7 @@ def test_private_impression_cannot_persist_free_text_or_bypass_acceptance() -> N
         commit(ledger, [_proposal_event(payload)])
 
     valid = _private_payload(ledger)
-    with pytest.raises(ValueError, match="AcceptanceRecorded"):
+    with pytest.raises(ValueError, match="new_write_requires_role_reflection"):
         commit(
             ledger,
             [event("private-impression-without-proposal", "PrivateImpressionAccepted", valid)],

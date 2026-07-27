@@ -120,12 +120,20 @@ class ScenarioVerificationError(AssertionError):
 # proof.  This intentionally changes audit identities while every fixed
 # scenario predicate remains the executable gate; it is not evidence that
 # long-term conversational naturalness has already been established.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.16"
+# ``.18`` adds source-complete private reflection lineage and explicit
+# semantic-embedding degradation/cost state without changing scenario
+# behavior.
+# ``.17`` completes the dual-channel contract: a local prefetch that wins the
+# non-blocking race is actually visible in the first cognition pass, uses the
+# same Capsule item shape as other source-bound material, and is audited.
+# Role-authored private reflection and the credential-gated semantic default
+# also change model/capsule identities without changing scenario predicates.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.18"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "d15d59259226563b313a77e735d8c29245aedbcfe0ca8a53137cb926c28b2b84"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "0e21334e16508b74c467837c4f4b2aeb976a097fcb07da32bb6322fd87978ccd"
 
 
 class _FixedScenarioRouter:

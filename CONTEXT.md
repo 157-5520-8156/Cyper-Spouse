@@ -265,7 +265,7 @@ _Avoid_: Unlogged model answer, replay-time inference
 
 ## Private Impression
 
-The companion's fallible, source-bound interpretation of a user, relationship, or event. It carries confidence, possible counter-evidence, and an expiry or settlement condition, and is never a User Fact.
+The companion's fallible, source-bound interpretation of a user, relationship, or event. The character authors its tentative `reflection_summary`; deterministic authority binds that reading to accepted appraisal sources, confidence, possible counter-evidence, and an expiry or settlement condition. It is never a User Fact, and legacy impressions without authored prose continue to resolve through their exact appraisal references.
 _Avoid_: Hidden fact, inferred user fact
 
 ## Private Commitment

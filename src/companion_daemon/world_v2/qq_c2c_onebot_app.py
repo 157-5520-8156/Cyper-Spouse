@@ -177,6 +177,10 @@ class QQC2CSchedulerDiagnostics:
             # companion.  These values are read-only projection counts; they
             # do not claim that a model used a slice merely because it exists.
             "mechanisms": world.get("mechanisms", {}),
+            "recall_semantic": world.get(
+                "recall_semantic",
+                {"enabled": False},
+            ),
         }
 
 

@@ -362,7 +362,7 @@ class RecallCorpusCompiler:
             bindings = self._bindings_for_refs(refs, authority)
             if bindings is None:
                 continue
-            text = "\n".join(
+            text = item.reflection_summary or "\n".join(
                 " ".join(
                     (
                         hypothesis.meaning,

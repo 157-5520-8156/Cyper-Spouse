@@ -1253,6 +1253,11 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
         "experience_count": 0,
         "starved": True,
     }
+    assert isinstance(scheduler["recall_semantic"]["enabled"], bool)
+    if scheduler["recall_semantic"]["enabled"]:
+        assert scheduler["recall_semantic"]["embedding_version"].startswith(
+            "openai-compatible:"
+        )
 
 
 @pytest.mark.asyncio
@@ -1278,6 +1283,20 @@ async def test_qq_c2c_scheduler_diagnostics_record_real_pass_progress() -> None:
         assert snapshot["failures"] == 0
         assert snapshot["last_success_at"] is not None
         assert snapshot["last_duration_ms"] is not None
+        assert diagnostics.snapshot(
+            now=datetime.now(UTC),
+            world={
+                "recall_semantic": {
+                    "enabled": True,
+                    "embedding_status": "degraded",
+                    "embedding_failure_code": "budget_exhausted",
+                }
+            },
+        )["recall_semantic"] == {
+            "enabled": True,
+            "embedding_status": "degraded",
+            "embedding_failure_code": "budget_exhausted",
+        }
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

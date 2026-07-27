@@ -1117,9 +1117,9 @@ class ResponseExpectationAuthority(FrozenModel):
     importance_bp: int = Field(ge=0, le=10_000)
     not_before: datetime
     expires_at: datetime
-    delivery_requirement: Literal[
-        "provider_accepted_or_delivered", "confirmed_delivered"
-    ] = "provider_accepted_or_delivered"
+    delivery_requirement: Literal["provider_accepted_or_delivered", "confirmed_delivered"] = (
+        "provider_accepted_or_delivered"
+    )
 
     @model_validator(mode="after")
     def window_is_bounded(self) -> "ResponseExpectationAuthority":
@@ -1173,9 +1173,7 @@ class ExpressionPlanManifestRef(FrozenModel):
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
     social_commitment_id: str | None = None
-    social_commitment_payload_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    social_commitment_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def social_authority_is_complete_or_absent(self) -> "ExpressionPlanManifestRef":
@@ -1186,7 +1184,9 @@ class ExpressionPlanManifestRef(FrozenModel):
             self.social_commitment_id,
             self.social_commitment_payload_hash,
         )
-        if any(item is not None for item in values) and not all(item is not None for item in values):
+        if any(item is not None for item in values) and not all(
+            item is not None for item in values
+        ):
             raise ValueError("social expression authority coordinates are partial")
         return self
 
@@ -1338,9 +1338,7 @@ class ProposalRevisionRef(FrozenModel):
     proposal_id: str = Field(min_length=1)
     evaluated_world_revision: int = Field(ge=0)
     proposal_event_ref: str | None = Field(default=None, min_length=1)
-    proposal_event_payload_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    proposal_event_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     proposed_change_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     # P1 media selection persists this alongside the generic proposal audit
     # coordinates, so Acceptance can replay-check the exact selected shape.
@@ -1352,17 +1350,13 @@ class ProposalRevisionRef(FrozenModel):
     expected_candidate_revision: int | None = Field(default=None, ge=1)
     trigger_ref: str | None = Field(default=None, min_length=1, max_length=512)
     source_evidence_ref: str | None = Field(default=None, min_length=1, max_length=512)
-    source_evidence_payload_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    source_evidence_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     continuation_step: Literal["plan_to_render", "render_to_inspect"] | None = None
     accepted_change_id: str | None = Field(default=None, min_length=1, max_length=256)
     continuation_action_kind: Literal["media_render", "media_inspection"] | None = None
     continuation_intent_ref: str | None = Field(default=None, min_length=1, max_length=512)
     continuation_payload_ref: str | None = Field(default=None, min_length=1, max_length=512)
-    continuation_payload_hash: str | None = Field(
-        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    continuation_payload_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def persisted_event_coordinates_are_complete(self) -> "ProposalRevisionRef":
@@ -3377,6 +3371,9 @@ class PrivateImpressionProjection(FrozenModel):
     subject_ref: str = Field(min_length=1)
     interpretation_refs: tuple[str, ...] = Field(min_length=1)
     source_refs: tuple[str, ...] = Field(min_length=1)
+    # Model-authored, source-bound self-understanding.  Historical impressions
+    # predate this field and retain the referenced appraisal wording.
+    reflection_summary: str | None = Field(default=None, min_length=1, max_length=1_200)
     confidence_bp: int = Field(ge=0, le=10_000)
     first_seen: datetime
     last_supported: datetime
@@ -3429,12 +3426,27 @@ class PrivateImpressionProposalProjection(FrozenModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     appraisal_refs: tuple[AppraisalMeaningRef, ...] = Field(min_length=1)
     policy_refs: tuple[str, ...] = Field(min_length=1)
+    reflection_contract: Literal["private-impression-draft.3"] | None = None
+    reflection_source_refs: tuple[str, ...] = ()
+    source_model_result: str | None = Field(default=None, min_length=1, max_length=256)
+    source_capsule_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     proposed_mutation: PrivateImpressionProposedMutation
 
     @model_validator(mode="after")
     def transition_matches_only_installed_open(self) -> PrivateImpressionProposalProjection:
         if self.proposed_mutation.event_type != "PrivateImpressionAccepted":
             raise ValueError("private impression proposal transition does not match event")
+        lineage = (
+            self.reflection_contract,
+            self.reflection_source_refs,
+            self.source_model_result,
+            self.source_capsule_id,
+        )
+        if any(lineage) and not all(lineage):
+            raise ValueError("private impression proposal reflection lineage is incomplete")
         return self
 
 
@@ -3550,9 +3562,7 @@ class RelationshipSignalProjection(FrozenModel):
     # The model's bounded candidate is retained as an auditable *input* for
     # the later slow-variable compiler.  It is not a relationship mutation;
     # the compiler/reducer may clip it, decline it, or leave it unconsumed.
-    suggested_deltas: RelationshipVariableDeltas = Field(
-        default_factory=RelationshipVariableDeltas
-    )
+    suggested_deltas: RelationshipVariableDeltas = Field(default_factory=RelationshipVariableDeltas)
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     origin: RelationshipSignalOrigin
     accepted_at: datetime
@@ -4572,7 +4582,14 @@ class ConsentGrantValues(FrozenModel):
         ...,
     ] = Field(min_length=1)
     data_scope_refs: tuple[
-        Literal["data:message_content", "data:user_profile", "data:attachment", "data:location", "data:image_content", "data:audio_content"],
+        Literal[
+            "data:message_content",
+            "data:user_profile",
+            "data:attachment",
+            "data:location",
+            "data:image_content",
+            "data:audio_content",
+        ],
         ...,
     ] = ()
     channel_scope_refs: tuple[Literal["channel:qq", "channel:wechat", "channel:http"], ...] = ()
@@ -4612,7 +4629,14 @@ class NamedPolicyRef(FrozenModel):
 class PrivacyPolicyValues(FrozenModel):
     subject_ref: str = Field(min_length=1)
     data_class_refs: tuple[
-        Literal["data:message_content", "data:user_profile", "data:attachment", "data:location", "data:image_content", "data:audio_content"],
+        Literal[
+            "data:message_content",
+            "data:user_profile",
+            "data:attachment",
+            "data:location",
+            "data:image_content",
+            "data:audio_content",
+        ],
         ...,
     ] = ()
     viewer_rule_refs: tuple[
@@ -4852,7 +4876,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.36"
+    reducer_bundle_version: str = "world-v2-reducers.38"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4977,9 +5001,7 @@ class LedgerProjection(FrozenModel):
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
     expression_plan_manifests: tuple[ExpressionPlanManifestRef, ...] = ()
-    response_expectation_assessments: tuple[
-        ResponseExpectationAssessmentProjection, ...
-    ] = ()
+    response_expectation_assessments: tuple[ResponseExpectationAssessmentProjection, ...] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
     expression_payload_descriptors: tuple[ExpressionPayloadDescriptorProjection, ...] = ()
     life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()

@@ -67,6 +67,16 @@ class RecordedModelResultAudit(FrozenModel):
     route: RecordedModelRoute
     model_id: str | None = Field(default=None, max_length=256)
     model_version: str | None = Field(default=None, max_length=256)
+    attempted_model_id: str | None = Field(
+        default=None,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
+    attempted_model_version: str | None = Field(
+        default=None,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
     request_hash: str = Field(pattern=_HASH)
     response_hash: str | None = Field(default=None, pattern=_HASH)
     status: Literal[
@@ -130,6 +140,8 @@ class RecordedModelResultAudit(FrozenModel):
                 raise ValueError("model usage tokens do not match audit tokens")
             if self.route.tier == "flash" and self.usage.thinking_tokens:
                 raise ValueError("flash audit cannot report thinking tokens")
+        if (self.attempted_model_id is None) != (self.attempted_model_version is None):
+            raise ValueError("attempted model audit identity is partial")
         required = {
             "main_timeout": {"main_timeout", "primary_timeout", "corrective_timeout"},
             "main_invalid": {
@@ -274,8 +286,12 @@ def validate_recorded_attempt_lineage(
         raise ValueError("model attempts require distinct call identities")
     if len(audits) == 1:
         if proposal_hash is None:
-            if audits[0].outcome != "budget_exhausted":
-                raise ValueError("single failed attempt must exhaust the shared budget")
+            if audits[0].outcome not in {
+                "timeout",
+                "exception",
+                "budget_exhausted",
+            }:
+                raise ValueError("single failed attempt lacks a terminal outcome")
         elif audits[0].status != "proposal_validated":
             raise ValueError("single successful attempt must validate a proposal")
     else:

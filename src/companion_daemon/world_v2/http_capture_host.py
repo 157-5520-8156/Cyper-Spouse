@@ -171,7 +171,10 @@ class HttpCaptureTransport:
         # did not originate from an inbound turn would strand a successfully
         # authorized initiative in a terminal capability failure.  Reactions
         # and media remain explicit unsupported capabilities.
-        if request.kind not in {"reply", "followup", "proactive_message"} or request.content_type != "text/plain":
+        if (
+            request.kind not in {"reply", "followup", "proactive_message"}
+            or request.content_type != "text/plain"
+        ):
             identity = hashlib.sha256(request.fingerprint.encode("utf-8")).hexdigest()
             return PlatformDispatchReceipt(
                 provider_receipt_id=f"receipt:http-capture:unsupported:{identity}",
@@ -179,7 +182,8 @@ class HttpCaptureTransport:
                 status="failed",
                 error_class="http_capture_capability_unavailable",
                 received_at=datetime.now(UTC),
-                raw_payload_hash="sha256:" + hashlib.sha256(request.body.encode("utf-8")).hexdigest(),
+                raw_payload_hash="sha256:"
+                + hashlib.sha256(request.body.encode("utf-8")).hexdigest(),
                 idempotency_key=request.idempotency_key,
                 request_fingerprint=request.fingerprint,
             )
@@ -630,9 +634,7 @@ def build_http_v2_capture_host(
             media_selection_acceptance=(
                 media_preview.acceptance if media_preview is not None else None
             ),
-            media_continuation=(
-                media_preview.continuation if media_preview is not None else None
-            ),
+            media_continuation=(media_preview.continuation if media_preview is not None else None),
             perception_budget_limit=perception_budget_limit,
         ),
         identities=HttpCaptureIdentityResolver(primary_user_id=primary_user_id),
@@ -640,6 +642,7 @@ def build_http_v2_capture_host(
         main_model=semantic_chat.main_model,
         quick_recovery=semantic_chat.main_model,
         semantic_recall_embedding=configured_recall_embedding(settings),
+        private_impression_identity_frame=semantic_chat.identity_frame,
         transport=transport,
         media_transport=media_transport,
         media_planner=(media_preview.planner if media_preview is not None else None),
@@ -681,7 +684,7 @@ def build_http_v2_capture_host(
     return HttpV2CaptureHost(
         host=WorldV2PlatformHost(
             application=application,
-                dashboard_capture=DashboardProjectionAdapter(
+            dashboard_capture=DashboardProjectionAdapter(
                 source=application,
                 # These are renderer route names, not world facts.  Only
                 # public labels represented by the shipped room are mapped;
@@ -695,21 +698,21 @@ def build_http_v2_capture_host(
                         "focused_work": "study",
                         "relax": "relax",
                     },
-                    ),
                 ),
-                dashboard_public_capture=DashboardPublicProjectionAdapter(
-                    source=application,
-                    routes=DashboardPublicRouteCatalog(
-                        room_routes=DashboardRoomRouteCatalog(
-                            location_routes={
-                                "location:studio": "zhizhi-home-legacy",
-                                "location:apartment": "zhizhi-home-legacy",
-                            },
-                            activity_routes={"focused_work": "study", "relax": "relax"},
-                        ),
-                        activity_labels={"focused_work": "在看资料", "relax": "放松一下"},
+            ),
+            dashboard_public_capture=DashboardPublicProjectionAdapter(
+                source=application,
+                routes=DashboardPublicRouteCatalog(
+                    room_routes=DashboardRoomRouteCatalog(
+                        location_routes={
+                            "location:studio": "zhizhi-home-legacy",
+                            "location:apartment": "zhizhi-home-legacy",
+                        },
+                        activity_routes={"focused_work": "study", "relax": "relax"},
                     ),
+                    activity_labels={"focused_work": "在看资料", "relax": "放松一下"},
                 ),
+            ),
         ),
         transport=transport,
         primary_user_id=primary_user_id,

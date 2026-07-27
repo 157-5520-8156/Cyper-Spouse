@@ -456,6 +456,16 @@ class WorldRuntime:
             raise ValueError("private impression owner must not be empty")
         self._private_impression_owner = private_impression_owner
         self._private_impression_adapter = private_impression_adapter
+        self._private_impression_runtime = (
+            PrivateImpressionTriggerRuntime(
+                ledger=self._ledger,
+                adapter=private_impression_adapter,
+                owner_id=private_impression_owner,
+            )
+            if private_impression_adapter is not None
+            and private_impression_owner is not None
+            else None
+        )
         if affect_deliberation_owner is not None and not affect_deliberation_owner:
             raise ValueError("affect deliberation owner must not be empty")
         self._affect_deliberation_owner = affect_deliberation_owner
@@ -842,11 +852,8 @@ class WorldRuntime:
                     # read and its commit; the next pass re-derives the same
                     # deterministic opportunity.
                     pass
-                impression = await PrivateImpressionTriggerRuntime(
-                    ledger=self._ledger,
-                    adapter=self._private_impression_adapter,
-                    owner_id=self._private_impression_owner,
-                ).drain_one()
+                assert self._private_impression_runtime is not None
+                impression = await self._private_impression_runtime.drain_one()
                 if impression.status not in {"idle", "owned_elsewhere"}:
                     return impression
             if self._memory_withdrawal_review is not None:
