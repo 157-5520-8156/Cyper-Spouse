@@ -8,6 +8,8 @@ import pytest
 from companion_daemon.world_v2.recall_audit import (
     CharacterRecallRequest,
     MAX_RECALL_AUDIT_BYTES,
+    RecallAuditHit,
+    RecallAuditTrace,
 )
 from companion_daemon.world_v2.recall_corpus import RecallCorpusSources
 from companion_daemon.world_v2.recall_index import (
@@ -18,6 +20,8 @@ from companion_daemon.world_v2.recall_index import (
     RecallQuery,
     RecallSourceBinding,
     SQLiteRecallIndex,
+    recall_query_hash,
+    recall_result_hash,
 )
 from companion_daemon.world_v2.recall_runtime import (
     RecallCoordinator,
@@ -222,6 +226,63 @@ def _query(**updates: object) -> RecallQuery:
     }
     values.update(updates)
     return RecallQuery(**values)
+
+
+def test_absent_retrieval_text_preserves_legacy_document_encoding() -> None:
+    document = _documents()[0]
+
+    encoded = document.model_dump(mode="json")
+
+    assert "retrieval_text" not in encoded
+
+
+def test_legacy_recall_trace_hash_survives_optional_retrieval_metadata() -> None:
+    document = _documents()[0]
+    query = _query()
+    query_hash = recall_query_hash(index_version="recall-index:legacy", query=query)
+    legacy_hit = {
+        "document": document.model_dump(mode="json"),
+        "match_channels": ["lexical"],
+        "score_bp": 3_000,
+        "lexical_score_bp": 3_000,
+        "dense_score_bp": 0,
+        "temporal_score_bp": 0,
+        "structured_score_bp": 0,
+        "accessibility_offset_bp": 0,
+    }
+    assert "retrieval_text" not in legacy_hit["document"]
+
+    trace = RecallAuditTrace.model_validate_json(
+        json.dumps(
+            {
+                "trigger_ref": "trigger:legacy",
+                "request": CharacterRecallRequest(
+                    query_text=query.query_text,
+                    occurred_from=query.occurred_from,
+                    occurred_to=query.occurred_to,
+                    link_refs=query.link_refs,
+                    memory_kinds=query.memory_kinds,
+                    include_historical=query.include_historical,
+                    limit=query.limit,
+                ).model_dump(mode="json"),
+                "query": query.model_dump(mode="json"),
+                "query_hash": query_hash,
+                "result_hash": recall_result_hash(
+                    query_hash=query_hash,
+                    cursor=CURSOR,
+                    hit_values=[legacy_hit],
+                ),
+                "index_version": "recall-index:legacy",
+                "embedding_version": "embedding:legacy",
+                "index_cursor": CURSOR.model_dump(mode="json"),
+                "hits": [legacy_hit],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert isinstance(trace.hits[0], RecallAuditHit)
+    assert trace.hits[0].document.retrieval_text is None
 
 
 def test_hybrid_recall_fuses_dense_lexical_temporal_and_structured_evidence() -> None:

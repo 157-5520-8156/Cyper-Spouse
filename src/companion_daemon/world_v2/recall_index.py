@@ -90,7 +90,15 @@ class RecallDocument(FrozenModel):
     # Optional ontology/search metadata.  ``text`` stays the exact
     # source-bound excerpt; this field only improves accessibility for
     # indirect cues and carries no additional factual authority.
-    retrieval_text: str | None = Field(default=None, min_length=1, max_length=4_096)
+    retrieval_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4_096,
+        # This metadata did not exist in historical durable recall traces.
+        # Keep an absent legacy field canonically identical to an explicit
+        # default so replay does not change the immutable result hash.
+        exclude_if=lambda value: value is None,
+    )
     actor_ref: str = Field(min_length=1, max_length=256)
     subject_refs: tuple[str, ...] = Field(min_length=1, max_length=8)
     link_refs: tuple[str, ...] = Field(default=(), max_length=32)
