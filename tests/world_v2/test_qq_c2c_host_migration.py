@@ -1361,6 +1361,10 @@ async def test_qq_health_reports_a_due_model_consideration_without_mutating_a_dr
     assert diagnostics["pending_proactive_process_count"] == 0
     assert diagnostics["initiative_state"] == "consideration_due"
     assert diagnostics["initiative_next_consideration_at"] is not None
+    assert (
+        diagnostics["recall_semantic"]["turn_summary"]["character_outcome"]
+        == "action_authorized"
+    )
 
 
 @pytest.mark.asyncio

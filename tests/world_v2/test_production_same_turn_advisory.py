@@ -83,6 +83,14 @@ class _AdvisoryModel:
         return json.dumps({"classifications": material}, ensure_ascii=False)
 
 
+class _ImmediateEmotionGateModel:
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.0
+    ) -> str:
+        del messages, temperature
+        return '{"immediate": true}'
+
+
 class _QQDelivery:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
@@ -124,10 +132,14 @@ async def test_current_disappointment_and_thread_advice_reach_reply_model_withou
         ]
     )
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "same-turn-advisory.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "same-turn-advisory.sqlite",
+            LOCAL_APPRAISAL_ENABLED=False,
+        ),
         bootstrap_at=NOW,
         model=reply,
         advisory_model=advisory,
+        immediate_emotion_gate_model=_ImmediateEmotionGateModel(),
     )
     try:
         result = await host.respond(
@@ -167,11 +179,15 @@ async def test_high_severity_same_turn_advice_can_select_thinking_while_ordinary
         ]
     )
     host = build_http_v2_capture_host(
-        settings=Settings(database_path=tmp_path / "thinking-route.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "thinking-route.sqlite",
+            LOCAL_APPRAISAL_ENABLED=False,
+        ),
         bootstrap_at=NOW,
         model=flash,
         thinking_model=thinking,
         advisory_model=advisory,
+        immediate_emotion_gate_model=_ImmediateEmotionGateModel(),
     )
     try:
         result = await host.respond(
@@ -237,11 +253,15 @@ async def test_qq_production_composition_uses_the_same_same_turn_semantic_module
     )
     delivery = _QQDelivery()
     host = build_qq_c2c_host(
-        settings=Settings(database_path=tmp_path / "qq-advisory.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "qq-advisory.sqlite",
+            LOCAL_APPRAISAL_ENABLED=False,
+        ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=reply,
         advisory_model=advisory,
+        immediate_emotion_gate_model=_ImmediateEmotionGateModel(),
         delivery=delivery,
     )
     try:

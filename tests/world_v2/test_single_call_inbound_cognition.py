@@ -1279,7 +1279,7 @@ async def test_paired_backup_preserves_ready_prefetch_provenance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_opt_in_separate_local_appraiser_keeps_expression_on_main_model() -> None:
+async def test_local_appraiser_handles_high_signal_text_without_a_keyword_route_override() -> None:
     appraiser = _SeparateAppraisalProvider()
     expression_provider = _QuickExpressionProvider()
     cognition = SingleCallInboundCognition(
@@ -1287,9 +1287,16 @@ async def test_opt_in_separate_local_appraiser_keeps_expression_on_main_model() 
         appraisal_model=appraiser,
     )
 
-    appraisal_output = await cognition.appraisal.propose(
-        _request(revision=3, call="call:local-appraisal")
+    appraisal_request = _request(revision=3, call="call:local-appraisal")
+    assert appraisal_request.trigger_message is not None
+    appraisal_request = appraisal_request.model_copy(
+        update={
+            "trigger_message": appraisal_request.trigger_message.model_copy(
+                update={"text": "我真的很失望，你刚才完全没认真听。"}
+            )
+        }
     )
+    appraisal_output = await cognition.appraisal.propose(appraisal_request)
     expression_output = await cognition.expression.propose(
         _request(revision=4, call="call:local-expression")
     )
@@ -2574,7 +2581,6 @@ async def test_semantic_emotion_gate_detects_unlabeled_withdrawal() -> None:
     gate = SemanticImmediateEmotionGate(model=model)
 
     selected = await resolve_immediate_emotion_gate(
-        keyword_hit=False,
         text="哦。",
         gate=gate,
         recent_companion_texts=("今天路过那家店还想起你了", "晚上想一起看那部片吗"),
@@ -2593,7 +2599,7 @@ async def test_semantic_emotion_gate_lets_ordinary_sharing_stay_on_fast_lane() -
     gate = SemanticImmediateEmotionGate(model=model)
 
     selected = await resolve_immediate_emotion_gate(
-        keyword_hit=False, text="今天午饭吃了咖喱，好吃！", gate=gate
+        text="今天午饭吃了咖喱，好吃！", gate=gate
     )
 
     assert selected is False
@@ -2601,24 +2607,24 @@ async def test_semantic_emotion_gate_lets_ordinary_sharing_stay_on_fast_lane() -
 
 
 @pytest.mark.asyncio
-async def test_semantic_emotion_gate_timeout_falls_back_to_keyword_verdict() -> None:
+async def test_semantic_emotion_gate_timeout_defers_to_durable_background_appraisal() -> None:
     model = _HangingGateModel('{"immediate": true}')
     gate = SemanticImmediateEmotionGate(model=model, timeout_seconds=0.05)
 
-    selected = await resolve_immediate_emotion_gate(keyword_hit=False, text="哦。", gate=gate)
+    selected = await resolve_immediate_emotion_gate(text="哦。", gate=gate)
 
-    # A slow local model must never block or flip the gate: the keyword miss
-    # remains the decision and the reply path continues immediately.
+    # A slow optional classifier does not author an emotional interpretation
+    # and does not make the visible reply wait for another provider path.
     assert selected is False
     assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_semantic_emotion_gate_garbage_output_falls_back_to_keyword_verdict() -> None:
+async def test_semantic_emotion_gate_garbage_output_defers_without_a_local_verdict() -> None:
     model = _GateVerdictModel("嗯……这条消息看起来有点冷淡，也可能只是忙。")
     gate = SemanticImmediateEmotionGate(model=model)
 
-    selected = await resolve_immediate_emotion_gate(keyword_hit=False, text="哦。", gate=gate)
+    selected = await resolve_immediate_emotion_gate(text="哦。", gate=gate)
 
     assert selected is False
     assert len(model.calls) == 1
@@ -2633,27 +2639,23 @@ async def test_semantic_emotion_gate_non_boolean_verdict_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_keyword_hit_selects_same_turn_emotion_without_a_model_call() -> None:
+async def test_high_signal_words_do_not_bypass_the_semantic_scheduling_model() -> None:
     model = _GateVerdictModel('{"immediate": false}')
     gate = SemanticImmediateEmotionGate(model=model)
 
     selected = await resolve_immediate_emotion_gate(
-        keyword_hit=True, text="你让我很失望。", gate=gate
+        text="你让我很失望。", gate=gate
     )
 
-    # Keyword hits are free and authoritative; spending the model call here
-    # would only add latency to the highest-signal turns.
-    assert selected is True
-    assert not model.calls
+    assert selected is False
+    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_gate_without_semantic_model_keeps_pure_keyword_behavior() -> None:
-    assert await resolve_immediate_emotion_gate(keyword_hit=False, text="哦。", gate=None) is False
-    assert (
-        await resolve_immediate_emotion_gate(keyword_hit=True, text="你让我很失望。", gate=None)
-        is True
-    )
+async def test_gate_without_semantic_model_never_guesses_from_text() -> None:
+    assert await resolve_immediate_emotion_gate(text="哦。", gate=None) is False
+    assert await resolve_immediate_emotion_gate(text="你让我很失望。", gate=None) is False
+    assert await resolve_immediate_emotion_gate(text=None, gate=None) is False
 
 
 def test_cognition_exposes_gate_only_when_a_local_appraiser_exists() -> None:
@@ -2665,3 +2667,14 @@ def test_cognition_exposes_gate_only_when_a_local_appraiser_exists() -> None:
 
     assert isinstance(with_local.appraisal.immediate_emotion_gate, SemanticImmediateEmotionGate)
     assert without_local.appraisal.immediate_emotion_gate is None
+
+
+def test_cognition_accepts_a_gate_model_without_granting_it_appraisal_authority() -> None:
+    gate_model = _GateVerdictModel('{"immediate": true}')
+    cognition = SingleCallInboundCognition(
+        flash_model=_OrdinaryCombinedProvider(),
+        immediate_emotion_gate_model=gate_model,
+    )
+
+    assert isinstance(cognition.appraisal.immediate_emotion_gate, SemanticImmediateEmotionGate)
+    assert cognition._separate_appraisal is None  # noqa: SLF001

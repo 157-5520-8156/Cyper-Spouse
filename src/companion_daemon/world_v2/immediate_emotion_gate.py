@@ -1,4 +1,4 @@
-"""Semantic same-turn emotion scheduling gate with a hard latency budget.
+"""Model-owned same-turn emotion scheduling gate with a hard latency budget.
 
 This gate answers exactly one scheduling question: is this inbound message
 emotionally material enough to pay for the synchronous inner-appraisal lane
@@ -7,22 +7,12 @@ itself — the appraisal model still owns meaning, intensity, attribution,
 suppression and persistence.
 
 The durable ``interaction_appraisal`` trigger is opened unconditionally at
-ingress (see ``WorldRuntime.ingest``), independent of this gate.  A gate
-failure therefore only affects *when* the appraisal runs (same turn vs. the
-background trigger drain), never *whether* it runs.  That is what makes the
-fail-open-to-keywords policy below safe.
-
-Decision order (lowest average latency first):
-
-1. Keyword cue table hit -> immediately ``True`` with zero model calls.
-2. Keyword miss -> ask the local small model (Qwen-class checkpoint on the
-   OpenAI-compatible loopback endpoint) with a strict ``asyncio.timeout``.
-3. Model timeout / transport failure / invalid output -> fall back to the
-   keyword verdict, which at this point is ``False``.
-
-Worst-case added latency on the reply-critical path is therefore bounded by
-``timeout_seconds`` (default 2.5s) and only paid for keyword-miss turns; a
-keyword hit and a disabled gate both add ~0.
+ingress (see ``WorldRuntime.ingest``), independent of this gate. A well-formed
+``true`` may spend the synchronous Appraisal path. Missing, slow, invalid, or
+explicitly absent gate output leaves that work to the durable background lane:
+an optional local classifier must never become a new reason for the visible
+reply to fail. No keyword table may authoritatively bypass this semantic
+scheduling decision.
 """
 
 from __future__ import annotations
@@ -68,7 +58,7 @@ class SemanticImmediateEmotionGate:
 
     ``assess`` returns ``True``/``False`` only for a well-formed model verdict
     and ``None`` for every failure mode (timeout, transport error, garbage
-    output).  Mapping ``None`` back to the keyword verdict belongs to the
+    output). Mapping ``None`` to the durable background path belongs to the
     caller via ``resolve_immediate_emotion_gate`` so failure semantics stay in
     one auditable place.
     """
@@ -153,22 +143,21 @@ def _parse_verdict(raw: object) -> bool | None:
 
 async def resolve_immediate_emotion_gate(
     *,
-    keyword_hit: bool,
     text: str | None,
     gate: SemanticImmediateEmotionGate | None,
     recent_companion_texts: Sequence[str] = (),
 ) -> bool:
-    """Combine the keyword table and the semantic gate into one decision.
+    """Return only a well-formed semantic scheduling verdict.
 
-    A keyword hit is authoritative and free: it never spends a model call.
-    Only a keyword miss consults the semantic gate, and every gate failure
-    falls back to the keyword verdict (``False`` here), so the worst case is
-    exactly the pre-semantic behavior plus the gate's bounded timeout.
+    Missing, slow, or invalid local output defers to the durable background
+    Appraisal lane. This does not assert that the message is emotionally
+    immaterial; it keeps an optional latency optimization outside the visible
+    reply's availability boundary.
     """
 
-    if keyword_hit:
-        return True
-    if gate is None or not isinstance(text, str) or not text.strip():
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if gate is None:
         return False
     verdict = await gate.assess(
         text=text, recent_companion_texts=recent_companion_texts

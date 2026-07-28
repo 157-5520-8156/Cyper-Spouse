@@ -270,6 +270,58 @@ def test_recall_sidecar_failure_does_not_abort_context_compilation() -> None:
     assert recall.discarded
 
 
+def test_context_compilation_schedules_a_bounded_state_aware_recall_request() -> None:
+    class _CapturingRecall:
+        def __init__(self) -> None:
+            self.scheduled: list[dict[str, object]] = []
+
+        def refresh(self, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def schedule_prefetch(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.scheduled.append(kwargs)
+
+        def discard(self, *_args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    world_id = "world:context-bounded-attention"
+    ledger = WorldLedger.in_memory(world_id=world_id)
+    long_message = "上午那件事后来怎么样了？" + "补充背景" * 400
+    ledger.commit(
+        [
+            _event(world_id),
+            _message_observation(
+                world_id,
+                1,
+                long_message,
+                received_at=NOW,
+            ),
+        ],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    projection = ledger.project()
+    recall = _CapturingRecall()
+
+    capsule = context_capsule_compiler_from_ledger(
+        ledger=ledger,
+        recall_coordinator=recall,  # type: ignore[arg-type]
+    ).compile(
+        query_from_projection(
+            projection,
+            actor_ref="actor:companion",
+            trigger_ref="event:message:1",
+        )
+    )
+
+    assert capsule.world_revision == projection.world_revision
+    assert len(recall.scheduled) == 1
+    scheduled = recall.scheduled[0]
+    assert len(str(scheduled["query_text"])) <= 1_024
+    assert str(scheduled["lexical_text"]).startswith("上午那件事后来怎么样了？")
+    assert len(str(scheduled["lexical_text"])) <= 1_024
+
+
 def test_default_scope_includes_only_the_committed_incoming_actor() -> None:
     world_id = "world:context-interlocutor"
     ledger = WorldLedger.in_memory(world_id=world_id)

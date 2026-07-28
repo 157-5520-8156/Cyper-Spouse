@@ -4,6 +4,7 @@ import json
 
 from companion_daemon.world_v2.model_facing_context import (
     compact_chat_model_facing_context,
+    compact_model_facing_context,
     compact_recovery_model_facing_context,
     mechanism_consumption_summary,
 )
@@ -134,6 +135,232 @@ def test_chat_view_keeps_semantics_but_omits_authority_and_accounting_noise() ->
     assert recovery["slices"]["relevant_facts"]["items"][0]["source_ref"] == "fact:user:name"
     assert recovery["slices"]["recent_dialogue"]["items"][-1]["value"]["text"] == "message 11"
     assert len(json.dumps(recovery, ensure_ascii=False)) < len(raw)
+
+
+def test_chat_view_derives_a_source_bound_current_self_state_without_flattening_affect() -> None:
+    raw = json.dumps(
+        {
+            "world_id": "world:self-state",
+            "actor_ref": "agent:companion",
+            "trigger_ref": "event:current",
+            "world_revision": 15,
+            "logical_time": "2026-07-28T08:00:00+08:00",
+            "slices": {
+                "character_core": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "character-core:1",
+                            "value": {"values": {"slow_evolving": {"axes": []}}},
+                        }
+                    ],
+                },
+                "current_situation": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "situation:current",
+                            "value": {
+                                "time_segment": "morning",
+                                "activity_slices": [{"activity_kind": "study.reading"}],
+                                "attention_slice": {"availability": "available"},
+                            },
+                        }
+                    ],
+                },
+                "relationship_slice": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "relationship:user",
+                            "value": {
+                                "subject_ref": "user:primary",
+                                "stage": "close_friend",
+                                "temperature": "strained",
+                                "variables": {"trust_bp": 7800, "closeness_bp": 8500},
+                            },
+                        }
+                    ],
+                },
+                "appraisals": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "appraisal:current",
+                            "value": {
+                                "subject_ref": "user:primary",
+                                "source_cluster_ref": "cluster:repair",
+                                "confidence_bp": 8600,
+                                "expires_at": "2026-07-29T08:00:00+08:00",
+                                "hypotheses": [
+                                    {
+                                        "meaning": "dismissal",
+                                        "attribution": "user",
+                                        "severity": "moderate",
+                                        "weight_bp": 10000,
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                "affect_episodes": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "affect:mixed",
+                            "value": {
+                                "opened_at": "2026-07-28T07:30:00+08:00",
+                                "updated_at": "2026-07-28T07:50:00+08:00",
+                                "components": [
+                                    {
+                                        "dimension": "hurt",
+                                        "source_cluster_ref": "cluster:repair",
+                                        "appraisal_refs": [
+                                            {
+                                                "appraisal_id": "appraisal:current",
+                                                "hypothesis_id": "hypothesis:dismissal",
+                                            }
+                                        ],
+                                        "intensity_bp": 6200,
+                                        "residue_bp": 1800,
+                                    },
+                                    {
+                                        "dimension": "warmth",
+                                        "source_cluster_ref": "cluster:warmth",
+                                        "appraisal_refs": [
+                                            {
+                                                "appraisal_id": "appraisal:warmth",
+                                                "hypothesis_id": "hypothesis:warmth",
+                                            }
+                                        ],
+                                        "intensity_bp": 4300,
+                                        "residue_bp": 1200,
+                                    },
+                                ],
+                            },
+                        }
+                    ],
+                },
+                "open_threads": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "thread:repair",
+                            "value": {
+                                "kind": "repair_open",
+                                "importance_bp": 9000,
+                                "status": "open",
+                            },
+                        }
+                    ],
+                },
+                "advisories": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "advisory:attention",
+                            "value": {
+                                "kind": "attention_candidate",
+                                "candidate_refs": ["thread:repair"],
+                                "candidates": [
+                                    {
+                                        "candidate_ref": "thread:repair",
+                                        "value": "continue_if_she_wants",
+                                        "weight_bp": 7200,
+                                        "confidence_bp": 8100,
+                                    }
+                                ],
+                            },
+                        },
+                        {
+                            "item_ref": "advisory:interruption",
+                            "value": {
+                                "kind": "interruption.cost",
+                                "candidate_refs": ["cost:low"],
+                                "candidates": [
+                                    {
+                                        "candidate_ref": "cost:low",
+                                        "value": "low",
+                                        "weight_bp": 8400,
+                                        "confidence_bp": 7900,
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+            },
+        }
+    )
+
+    general = json.loads(compact_model_facing_context(raw))
+    assert general["current_self_state"]["affect"][0]["source_ref"] == "affect:mixed"
+
+    compact = json.loads(compact_chat_model_facing_context(raw))
+    current = compact["current_self_state"]
+
+    assert current["contract"] == "current-self-state.1"
+    assert current["authority"] == "derived_from_verified_context"
+    assert current["logical_time"] == "2026-07-28T08:00:00+08:00"
+    assert current["relationship"][0]["source_ref"] == "relationship:user"
+    assert current["appraisals"][0]["source_ref"] == "appraisal:current"
+    assert current["appraisals"][0]["source_cluster_ref"] == "cluster:repair"
+    assert current["affect"][0]["source_ref"] == "affect:mixed"
+    assert [item["dimension"] for item in current["affect"][0]["components"]] == [
+        "hurt",
+        "warmth",
+    ]
+    assert current["affect"][0]["components"][0]["source_cluster_ref"] == "cluster:repair"
+    assert current["affect"][0]["components"][0]["appraisal_refs"][0][
+        "appraisal_id"
+    ] == "appraisal:current"
+    assert current["unresolved"][0]["source_ref"] == "thread:repair"
+    assert current["advisories"][0]["source_ref"] == "advisory:attention"
+    assert current["advisories"][0]["candidates"][0]["value"] == "continue_if_she_wants"
+    assert current["interruption"][0]["source_ref"] == "advisory:interruption"
+    assert current["interruption"][0]["candidates"][0]["value"] == "low"
+
+    recovery = json.loads(compact_recovery_model_facing_context(raw))
+    assert "advisories" not in recovery["current_self_state"]
+
+
+def test_current_self_state_omits_entries_without_a_capsule_source_token() -> None:
+    raw = json.dumps(
+        {
+            "logical_time": "2026-07-28T08:00:00+08:00",
+            "slices": {
+                "relationship_slice": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "value": {
+                                "subject_ref": "user:primary",
+                                "stage": "friend",
+                            }
+                        }
+                    ],
+                },
+                "affect_episodes": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "value": {
+                                "components": [
+                                    {"dimension": "warmth", "intensity_bp": 5000}
+                                ]
+                            }
+                        }
+                    ],
+                },
+            },
+        }
+    )
+
+    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+
+    assert "relationship" not in current
+    assert "affect" not in current
 
 
 def test_recalled_dialogue_supplements_without_evicting_latest_working_turns() -> None:

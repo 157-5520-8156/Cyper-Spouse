@@ -14,6 +14,7 @@ import logging
 import secrets
 import threading
 import time
+from typing import Literal
 
 from pydantic import Field
 
@@ -97,6 +98,10 @@ class _PrefetchHealth:
     epoch: int
     status: str
     failure_code: str | None
+    hit_count: int = 0
+    match_channels: tuple[str, ...] = ()
+    fallback_channels: tuple[str, ...] = ()
+    embedding_status: str = "unknown"
 
 
 def _trace_seal(audit: RecallAuditTrace) -> str:
@@ -253,6 +258,19 @@ class RecallCoordinator:
         prefetch = {
             "last_prefetch_status": health.status,
             "last_prefetch_failure_code": health.failure_code,
+            "last_prefetch_hit_count": health.hit_count,
+            "last_prefetch_match_channels": list(health.match_channels),
+            "last_prefetch_embedding_status": health.embedding_status,
+            "turn_summary": {
+                "hot_context": "ready" if self._context_key is not None else "unavailable",
+                "recall": health.status,
+                "fallback_channels": list(health.fallback_channels),
+                "hits": health.hit_count,
+                # The recall module has no authority over the later character
+                # deliberation or Action commit. Keep that outcome explicitly
+                # outside this sub-projection instead of guessing from recall.
+                "character_outcome": "reported_by_turn_application",
+            },
         }
         if self._semantic_embedding is None:
             return {"enabled": False, **prefetch}
@@ -344,6 +362,11 @@ class RecallCoordinator:
         self,
         *,
         query_text: str,
+        lexical_text: str | None = None,
+        occurred_from: datetime | None = None,
+        occurred_to: datetime | None = None,
+        link_refs: tuple[str, ...] = (),
+        memory_kinds: tuple[Literal["episodic", "semantic", "reflective"], ...] = (),
         accessibility_seed: str,
         trigger_ref: str,
         limit: int = 4,
@@ -355,7 +378,15 @@ class RecallCoordinator:
         context = self._context_for(cursor, trigger_ref=trigger_ref)
         if context is None:
             raise ValueError("prefetch trigger does not match the pinned Context")
-        request = CharacterRecallRequest(query_text=query_text, limit=min(limit, 6))
+        request = CharacterRecallRequest(
+            query_text=query_text,
+            lexical_text=lexical_text,
+            occurred_from=occurred_from,
+            occurred_to=occurred_to,
+            link_refs=link_refs,
+            memory_kinds=memory_kinds,
+            limit=min(limit, 6),
+        )
         result = self._search(
             context=context,
             request=request,
@@ -375,6 +406,11 @@ class RecallCoordinator:
         self,
         *,
         query_text: str,
+        lexical_text: str | None = None,
+        occurred_from: datetime | None = None,
+        occurred_to: datetime | None = None,
+        link_refs: tuple[str, ...] = (),
+        memory_kinds: tuple[Literal["episodic", "semantic", "reflective"], ...] = (),
         accessibility_seed: str,
         trigger_ref: str,
         limit: int = 4,
@@ -392,7 +428,15 @@ class RecallCoordinator:
         if context is None:
             raise ValueError("prefetch trigger does not match the pinned Context")
         prefetch_key = (cursor, trigger_ref)
-        request = CharacterRecallRequest(query_text=query_text, limit=min(limit, 6))
+        request = CharacterRecallRequest(
+            query_text=query_text,
+            lexical_text=lexical_text,
+            occurred_from=occurred_from,
+            occurred_to=occurred_to,
+            link_refs=link_refs,
+            memory_kinds=memory_kinds,
+            limit=min(limit, 6),
+        )
         local_fallback = self._issue_trace(
             mode="prefetch",
             trigger_ref=trigger_ref,
@@ -427,6 +471,7 @@ class RecallCoordinator:
                 epoch=self._prefetch_epoch,
                 status="degraded",
                 failure_code="prefetch_capacity",
+                trace=local_fallback,
             )
             while len(self._prefetch_futures) > _MAX_PINNED_RECALL_CONTEXTS:
                 evicted_key, evicted = self._prefetch_futures.popitem(last=False)
@@ -448,6 +493,7 @@ class RecallCoordinator:
                 "trigger_ref": trigger_ref,
                 "evaluated_cursor": cursor,
                 "epoch": epoch,
+                "local_fallback": local_fallback,
             },
             name="world-v2-recall-prefetch",
             daemon=True,
@@ -802,6 +848,7 @@ class RecallCoordinator:
         trigger_ref: str,
         evaluated_cursor: RecallCursor,
         epoch: int,
+        local_fallback: TrustedRecallTrace,
     ) -> None:
         try:
             if not future.set_running_or_notify_cancel():
@@ -821,6 +868,7 @@ class RecallCoordinator:
                 epoch=epoch,
                 status=("degraded" if trace.audit.embedding_status == "degraded" else "ready"),
                 failure_code=trace.audit.embedding_failure_code,
+                trace=trace,
             )
             if not future.done() and not cancelled.is_set():
                 future.set_result(trace)
@@ -830,6 +878,7 @@ class RecallCoordinator:
                     epoch=epoch,
                     status="technical_failure",
                     failure_code=type(exc).__name__[:128],
+                    trace=local_fallback,
                 )
             if not future.done() and not cancelled.is_set():
                 future.set_exception(exc)
@@ -851,6 +900,7 @@ class RecallCoordinator:
         epoch: int,
         status: str,
         failure_code: str | None,
+        trace: TrustedRecallTrace | None = None,
     ) -> None:
         with self._prefetch_health_lock:
             if epoch < self._prefetch_health.epoch:
@@ -859,6 +909,44 @@ class RecallCoordinator:
                 epoch=epoch,
                 status=status,
                 failure_code=failure_code,
+                hit_count=(len(trace.audit.hits) if trace is not None else 0),
+                match_channels=(
+                    tuple(
+                        sorted(
+                            {
+                                channel
+                                for hit in trace.audit.hits
+                                for channel in hit.match_channels
+                            }
+                        )
+                    )
+                    if trace is not None
+                    else ()
+                ),
+                embedding_status=(
+                    trace.audit.embedding_status if trace is not None else "unknown"
+                ),
+                fallback_channels=(
+                    tuple(
+                        (
+                            "lexical",
+                            *(
+                                ("structured",)
+                                if trace.audit.request.link_refs
+                                else ()
+                            ),
+                            *(
+                                ("temporal",)
+                                if trace.audit.request.occurred_from is not None
+                                or trace.audit.request.occurred_to is not None
+                                else ()
+                            ),
+                        )
+                    )
+                    if trace is not None
+                    and status in {"degraded", "technical_failure"}
+                    else ()
+                ),
             )
 
     def _search(
@@ -871,6 +959,7 @@ class RecallCoordinator:
     ) -> RecallResult:
         query = RecallQuery(
             query_text=request.query_text,
+            lexical_text=request.lexical_text,
             cursor=context.snapshot.cursor,
             actor_ref=context.actor_ref,
             subject_refs=context.subject_refs,

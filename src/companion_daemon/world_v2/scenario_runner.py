@@ -157,12 +157,12 @@ class ScenarioVerificationError(AssertionError):
 # ExperienceMemoryDecisionRecorded audit. The event is deliberation-only and
 # changes no fixed scenario predicate, but the installed reducer identity is
 # intentionally part of every scenario manifest.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.25"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.27"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "de0e7a73cd06816c5417bd2fb68b39a5ad553be5f80257c39d8b4c1b67be2c94"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "a50a18f831be323a92466276013f6937de025804e3f97a045932b746dc3c4f8e"
 
 
 class _FixedScenarioRouter:

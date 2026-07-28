@@ -725,9 +725,12 @@ class WorldV2TurnApplication:
         self._social_initiative_policy = social_initiative_policy
         self._recall_index = recall_index
         self._recall_coordinator = recall_coordinator
+        self._last_character_outcome: str | None = None
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
-        return await self._turns.respond(inbound)
+        outcome = await self._turns.respond(inbound)
+        self._last_character_outcome = outcome.status
+        return outcome
 
     async def inbound(
         self,
@@ -2399,6 +2402,17 @@ class WorldV2TurnApplication:
         mechanisms["relationship"].update(details["relationship"])
         mechanisms["life_ecology"].update(details["life_ecology"])
         mechanisms["inner"] = details["inner"]
+        recall_semantic = (
+            self._recall_coordinator.semantic_health()
+            if self._recall_coordinator is not None
+            else {"enabled": False}
+        )
+        turn_summary = recall_semantic.get("turn_summary")
+        if isinstance(turn_summary, dict):
+            recall_semantic["turn_summary"] = {
+                **turn_summary,
+                "character_outcome": self._last_character_outcome or "unavailable",
+            }
         return {
             "initiative_last_status": last_status,
             "initiative_last_reason": last_reason,
@@ -2440,11 +2454,7 @@ class WorldV2TurnApplication:
             "experience_count": experience_count,
             "starved": not (life_event_count or occurrence_count or experience_count),
             "expression_episode": self._turns.expression_episode_diagnostics(),
-            "recall_semantic": (
-                self._recall_coordinator.semantic_health()
-                if self._recall_coordinator is not None
-                else {"enabled": False}
-            ),
+            "recall_semantic": recall_semantic,
             "mechanisms": mechanisms,
         }
 

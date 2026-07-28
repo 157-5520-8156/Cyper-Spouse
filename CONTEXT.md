@@ -150,6 +150,19 @@ The companion's stable identity, values, preferences, boundaries, and experience
 
 A deterministic summary of Character Core, current goals, relationship, and committed continuity. It is a read model, not a free-form write authority.
 
+## Current Self State
+
+A compact, source-bound model view derived from the verified Context Capsule
+for one Pinned Turn. It keeps Character Core, current Situation, active
+Appraisals, concurrent Affect components, relationship state, unresolved
+Threads, and non-authoritative Inner Advisories legible together. It is not a
+second truth store, does not flatten mixed feelings into one mood label, and
+keeps each emotional component bound to its accepted Appraisal cause. Local
+semantic advisories may contribute readable weighted candidates only after
+source binding; raw model drafts and operational scheduling verdicts never
+enter this state.
+_Avoid_: Current personality rewrite, emotion-to-expression rule
+
 ## User Request
 
 The user's expressed preference for how the companion should speak or act. It is an input to deliberation, not an invariant the companion must obey.

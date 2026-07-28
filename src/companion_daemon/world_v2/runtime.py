@@ -157,58 +157,6 @@ from .schemas import (
 
 _LOG = logging.getLogger(__name__)
 
-# This is a scheduling gate, not an emotion classifier.  It only decides
-# whether the expensive, synchronous inner-appraisal lane is worth paying for
-# before the visible reply.  The appraisal LLM still owns meaning, intensity,
-# attribution, suppression and persistence.  Ordinary sharing continues on
-# the fast expression lane while its already-open appraisal trigger is drained
-# in the background; material relational signals take the full same-turn path.
-_IMMEDIATE_EMOTION_CUES = (
-    "失望",
-    "敷衍",
-    "不高兴",
-    "生气",
-    "愤怒",
-    "难过",
-    "伤心",
-    "委屈",
-    "冒犯",
-    "讨厌",
-    "不想聊",
-    "不想理",
-    "别理我",
-    "滚",
-    "骗子",
-    "背叛",
-    # Relational withdrawal and boundary language often carries more signal
-    # than an explicit emotion label.  Keep these as scheduling cues only;
-    # the appraisal model still decides whether the user is disappointed,
-    # hurt, uncomfortable, joking, or simply changing topic.
-    "算了",
-    "没认真听",
-    "当我没说",
-    "不舒服",
-    "没事",
-    # Dehumanization, repair negotiation, and explicit relationship framing
-    # are high-signal even when the user never names an emotion directly.
-    "程序",
-    "复读",
-    "只会",
-    "原谅",
-    "信任",
-    "对不起",
-    "抱歉",
-    "谢谢你",
-    "喜欢你",
-    "想你",
-    "想念",
-    "在乎",
-    "你还记得",
-    "你是不是",
-    "为什么不回",
-    "怎么不回",
-)
-
 
 def _user_perceived_ms(observation: Observation) -> str | None:
     """Wall-clock elapsed since the user's first fragment arrived, if known.
@@ -228,23 +176,6 @@ def _user_perceived_ms(observation: Observation) -> str | None:
     if opened.tzinfo is None or opened.utcoffset() is None:
         return None
     return f"{(datetime.now(UTC) - opened).total_seconds() * 1000:.1f}"
-
-
-def _requires_immediate_emotion(observation: Observation) -> bool:
-    """Conservatively select high-signal turns for same-turn emotion work."""
-
-    text = observation.text
-    if not isinstance(text, str) or not text.strip():
-        # An attachment is evidence that perception may be useful, not an
-        # emotional signal by itself.  Waiting for the same-turn appraisal
-        # lane here made a pure sticker/image message block visible reply
-        # generation while the model tried to interpret an image it could not
-        # yet see.  The attachment still opens durable perception and
-        # interaction-appraisal triggers; those workers can consume the
-        # completed visual result on the next bounded background pass.
-        return False
-    normalized = "".join(text.lower().split())
-    return any(cue in normalized for cue in _IMMEDIATE_EMOTION_CUES)
 
 
 def _matches_outcome_observation_command(
@@ -1961,13 +1892,11 @@ class WorldRuntime:
             # when it does, the same audited result supplies both Appraisal and
             # Affect.  Only after that durable pass do we compile the visible
             # expression against the new cursor.
-            # Scheduling decision order: keyword cue table first (free), then
-            # the bounded semantic gate on a keyword miss, then fall back to
-            # the keyword verdict on any gate failure.  The durable
-            # interaction-appraisal trigger was already opened unconditionally
-            # in the ingress batch above, so this gate only chooses same-turn
-            # versus background timing and its worst-case cost is the gate's
-            # own timeout (2.5s), paid only on keyword-miss turns.  Her own
+            # The bounded local model alone decides whether Appraisal needs to
+            # complete before this reply. The durable interaction-appraisal
+            # trigger was already opened unconditionally in the ingress batch,
+            # so a timeout or invalid verdict only defers work to background;
+            # deterministic keyword tables never interpret the message. Her own
             # recent texts would sharpen the contrast for cold-withdrawal
             # detection, but reading expression payloads back from the sidecar
             # store here would add I/O to the reply-critical path, so the gate
@@ -1975,7 +1904,6 @@ class WorldRuntime:
             immediate_emotion_selected = self._immediate_emotion_worker is not None and (
                 not self._immediate_emotion_signal_gate
                 or await resolve_immediate_emotion_gate(
-                    keyword_hit=_requires_immediate_emotion(observation),
                     text=observation.text,
                     gate=self._immediate_emotion_semantic_gate,
                 )

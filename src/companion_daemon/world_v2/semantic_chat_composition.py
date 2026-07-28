@@ -66,6 +66,7 @@ def build_semantic_chat_composition(
     flash_model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
+    immediate_emotion_gate_model: ChatCompletionModel | None = None,
     source_closure_model: ChatCompletionModel | None = None,
     contextual_failsafe_model: ChatCompletionModel | None = None,
     contextual_failsafe_reviewer_model: ChatCompletionModel | None = None,
@@ -226,6 +227,9 @@ def build_semantic_chat_composition(
         flash_model=flash_model,
         thinking_model=thinking_model,
         appraisal_model=local_appraisal_model,
+        immediate_emotion_gate_model=(
+            immediate_emotion_gate_model or local_appraisal_model
+        ),
         # The built-in production route always installs semantic truth
         # closure.  Tests and embedding callers that inject their own author
         # model must also inject a reviewer explicitly; silently repurposing

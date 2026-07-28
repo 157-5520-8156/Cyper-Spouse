@@ -95,6 +95,15 @@ class _RetrievalTextFixtureEmbedding:
         return tuple(vectors[text] for text in texts)
 
 
+class _UniformEmbedding:
+    version = "uniform-diversity-fixture.1"
+    dimensions = 2
+    dense_match_threshold_bp = 4_200
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple((1.0, 0.0) for _text in texts)
+
+
 def _bindings(*refs: str, revision: int) -> tuple[RecallSourceBinding, ...]:
     return tuple(
         RecallSourceBinding(
@@ -305,6 +314,53 @@ def test_hybrid_recall_fuses_dense_lexical_temporal_and_structured_evidence() ->
     )
     assert all(hit.document.status == "active" for hit in result.hits)
     assert result.query_hash and result.result_hash
+
+
+def test_hybrid_recall_keeps_exact_lexical_cue_separate_from_dense_attention() -> None:
+    index = InMemoryRecallIndex(embedding=_SemanticFixtureEmbedding())
+    index.rebuild(cursor=CURSOR, documents=_documents())
+
+    result = index.search(
+        _query(
+            query_text="雨夜回家时觉得很放松。",
+            lexical_text="乌龙茶",
+            limit=2,
+        )
+    )
+
+    assert result.hits[0].document.source_item_ref == "fact:oolong"
+    assert "lexical" in result.hits[0].match_channels
+
+
+def test_small_recall_set_preserves_memory_kind_and_subject_diversity() -> None:
+    semantic = _documents()[0]
+    episodic = _documents()[1]
+    reflective = _documents()[3]
+    duplicate_semantic = semantic.model_copy(
+        update={
+            "document_id": "recall:fact:duplicate",
+            "source_item_ref": "fact:duplicate",
+            "source_refs": ("event:fact:duplicate",),
+            "source_bindings": _bindings("event:fact:duplicate", revision=7),
+        }
+    )
+    index = InMemoryRecallIndex(embedding=_UniformEmbedding())
+    index.rebuild(
+        cursor=CURSOR,
+        documents=(semantic, duplicate_semantic, episodic, reflective),
+    )
+
+    result = index.search(_query(query_text="共同线索", limit=3))
+
+    assert {hit.document.memory_kind for hit in result.hits} == {
+        "episodic",
+        "reflective",
+        "semantic",
+    }
+    assert {subject for hit in result.hits for subject in hit.document.subject_refs} == {
+        "agent:companion",
+        "user:primary",
+    }
 
 
 def test_dense_recall_can_surface_a_source_bound_association_without_word_overlap() -> None:

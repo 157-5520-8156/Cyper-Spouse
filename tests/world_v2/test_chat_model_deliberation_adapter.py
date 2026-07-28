@@ -832,7 +832,16 @@ async def test_prefetch_capacity_saturation_keeps_source_bound_local_fallback() 
     audit = verify_trusted_recall_trace(fallback)
     assert audit.hits[0].document.source_item_ref == "fact:capacity-fallback"
     assert audit.embedding_status != "ready"
-    assert coordinator.semantic_health()["last_prefetch_failure_code"] == "prefetch_capacity"
+    health = coordinator.semantic_health()
+    assert health["last_prefetch_failure_code"] == "prefetch_capacity"
+    assert health["turn_summary"]["hot_context"] == "ready"
+    assert health["turn_summary"]["recall"] == "degraded"
+    assert health["turn_summary"]["hits"] == 1
+    assert health["turn_summary"]["fallback_channels"] == ["lexical"]
+    assert (
+        health["turn_summary"]["character_outcome"]
+        == "reported_by_turn_application"
+    )
 
     embedding.release.set()
     coordinator.close()
@@ -897,7 +906,10 @@ async def test_automatic_prefetch_uses_the_configured_semantic_lane() -> None:
     assert audit.hits[0].document.source_item_ref == "fact:malformed"
     assert audit.embedding_status == "degraded"
     assert semantic.calls > 0
-    assert coordinator.semantic_health()["last_prefetch_status"] == "degraded"
+    health = coordinator.semantic_health()
+    assert health["last_prefetch_status"] == "degraded"
+    assert health["last_prefetch_hit_count"] == 1
+    assert "lexical" in health["last_prefetch_match_channels"]
 
 
 def test_character_recall_uses_older_pinned_context_after_newer_refresh() -> None:
@@ -2007,6 +2019,10 @@ async def test_significant_source_bound_negative_affect_gets_expression_decision
     supplied = json.loads(model.calls[0][0][1]["content"])
     assert "affect_expression_matrix" not in supplied
     assert "affect_episodes" in supplied["request"]["model_content_json"]
+    provider_context = json.loads(supplied["request"]["model_content_json"])
+    assert provider_context["current_self_state"]["affect"][0]["source_ref"] == (
+        "affect:source-bound-hurt"
+    )
 
 
 @pytest.mark.asyncio

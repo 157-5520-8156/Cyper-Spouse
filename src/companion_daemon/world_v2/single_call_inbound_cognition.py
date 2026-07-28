@@ -81,48 +81,6 @@ _CONTEXTUAL_FAILSAFE_VERSION = "contextual-failure-recovery.1"
 # genuine reply a few seconds late reads far more human than an instant
 # canned acknowledgement, but the wait stays bounded.
 _CLAIM_REPAIR_TIMEOUT_SECONDS = 8.0
-_REMOTE_APPRAISAL_CUES = (
-    "失望",
-    "敷衍",
-    "不高兴",
-    "生气",
-    "愤怒",
-    "难过",
-    "伤心",
-    "委屈",
-    "冒犯",
-    "讨厌",
-    "不想聊",
-    "不想理",
-    "别理我",
-    "滚",
-    "骗子",
-    "背叛",
-    "算了",
-    "没认真听",
-    "当我没说",
-    "不舒服",
-    "程序",
-    "复读",
-    "只会",
-    "原谅",
-    "信任",
-    "对不起",
-    "抱歉",
-    "喜欢你",
-    "想你",
-    "在乎",
-    "你还记得",
-    "你是不是",
-    "为什么不回",
-    "怎么不回",
-    "不找我",
-    "不理我",
-    "忽略我",
-    "冷落我",
-    "一直不",
-    "怎么都",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -187,13 +145,6 @@ def _provider_already_used_fallback(provider: object) -> bool:
         and not isinstance(used_at, bool)
         and monotonic() - float(used_at) <= _RECENT_FALLBACK_WINDOW_SECONDS
     )
-
-
-def _requires_remote_appraisal(text: str | None) -> bool:
-    if not isinstance(text, str) or not text.strip():
-        return False
-    normalized = "".join(text.lower().split())
-    return any(cue in normalized for cue in _REMOTE_APPRAISAL_CUES)
 
 
 class _PendingExpression:
@@ -634,6 +585,7 @@ class SingleCallInboundCognition:
         flash_model: ChatCompletionModel,
         thinking_model: ChatCompletionModel | None = None,
         appraisal_model: ChatCompletionModel | None = None,
+        immediate_emotion_gate_model: ChatCompletionModel | None = None,
         source_closure_model: ChatCompletionModel | None = None,
         recovery_model: ChatCompletionModel | None = None,
         contextual_failsafe_model: ChatCompletionModel | None = None,
@@ -766,15 +718,17 @@ class SingleCallInboundCognition:
             if appraisal_model is not None
             else None
         )
-        # The same local small model that drafts the fast appraisal also
-        # answers the same-turn scheduling question ("does this message need
-        # emotion work before the reply?").  It is a scheduling gate only:
-        # the durable interaction-appraisal trigger stays unconditionally
-        # open at ingress, so gate failures merely defer emotion work to the
-        # background drain instead of losing it.
+        # Production normally reuses the local appraisal checkpoint for this
+        # same-turn scheduling question. A separate injection seam keeps the
+        # scheduling contract independently testable without granting that
+        # model Appraisal authority. The durable interaction-appraisal trigger
+        # stays open at ingress, so gate failures merely defer emotion work to
+        # the background drain instead of losing it.
         self.immediate_emotion_gate = (
-            SemanticImmediateEmotionGate(model=appraisal_model)
-            if appraisal_model is not None
+            SemanticImmediateEmotionGate(
+                model=immediate_emotion_gate_model or appraisal_model
+            )
+            if immediate_emotion_gate_model is not None or appraisal_model is not None
             else None
         )
         self._pending: OrderedDict[tuple[str, str, str], _PendingExpression] = OrderedDict()
@@ -1081,7 +1035,6 @@ class SingleCallInboundCognition:
         if (
             provider_override is None
             and self._separate_appraisal is not None
-            and not _requires_remote_appraisal(trigger.text)
         ):
             try:
                 return await self._separate_appraisal.propose(request)

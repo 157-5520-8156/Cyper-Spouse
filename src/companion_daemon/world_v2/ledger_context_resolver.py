@@ -80,6 +80,7 @@ from .recall_corpus import (
     required_recall_authority_refs,
     select_recall_authority_bindings,
 )
+from .recall_attention import build_automatic_recall_request
 from .recall_index import RecallCursor, RecallSourceBinding
 from .recall_runtime import RecallCoordinator
 from .schema_core import PrivacyClass
@@ -119,53 +120,6 @@ _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
 
 _LOG = logging.getLogger(__name__)
-
-
-def _recall_attention_cue(
-    *,
-    observation_text: str,
-    affect_episodes: tuple[BaseModel, ...] | None,
-    situation: BaseModel,
-) -> str:
-    """Combine the new observation with source-bound present attention.
-
-    This does not infer a motive or require the character to use a memory.  It
-    gives the semantic accessibility lane the same kind of state-dependent
-    cue people have: what was said, how the character currently feels, and
-    what she is doing can each make an old association easier to notice.
-    """
-
-    present_affect: list[dict[str, object]] = []
-    for episode in affect_episodes or ():
-        components = getattr(episode, "components", ())
-        for component in components:
-            present_affect.append(
-                {
-                    "dimension": component.dimension,
-                    "source_cluster_ref": component.source_cluster_ref,
-                }
-            )
-    situation_value = situation.model_dump(mode="json")
-    present_situation = {
-        key: situation_value[key]
-        for key in (
-            "time_segment",
-            "activity_slices",
-            "attention_slice",
-            "social_environment",
-        )
-        if key in situation_value
-    }
-    return json.dumps(
-        {
-            "new_observation": observation_text,
-            "present_affect": present_affect[:8],
-            "present_situation": present_situation,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )[:2_048]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1229,6 +1183,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             for item in projection.appraisals
             if item.status == "active" and item.subject_ref in subject_refs
         )
+        scoped_relationships = tuple(
+            item
+            for item in projection.relationship_states
+            if item.subject_ref in subject_refs and item.origin is not None
+        )
         # Current Affect stays in working Context. Historical affective
         # accessibility is rebuilt from the appraisal acceptances that carry
         # their own exact event/evidence closure; AffectEpisodeProjection does
@@ -1442,17 +1401,50 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     None,
                 )
                 if trigger_dialogue is not None:
-                    self._recall.schedule_prefetch(
-                        query_text=_recall_attention_cue(
-                            observation_text=trigger_dialogue.text,
-                            affect_episodes=scoped_affect,
-                            situation=situation,
+                    attention_request = build_automatic_recall_request(
+                        observation_text=trigger_dialogue.text,
+                        affect_values=tuple(
+                            item.model_dump(mode="json") for item in scoped_affect or ()
                         ),
+                        appraisal_values=tuple(
+                            item.model_dump(mode="json") for item in scoped_appraisals
+                        ),
+                        relationship_values=tuple(
+                            item.model_dump(mode="json") for item in scoped_relationships
+                        ),
+                        situation_value=situation.model_dump(mode="json"),
+                        open_thread_values=tuple(
+                            item.values.model_dump(mode="json")
+                            for item in open_threads_for_continuity
+                        ),
+                        link_refs=(
+                            *(
+                                str(getattr(item, "source_cluster_ref"))
+                                for item in scoped_appraisals
+                                if getattr(item, "source_cluster_ref", None)
+                            ),
+                            *(
+                                str(getattr(component, "source_cluster_ref"))
+                                for item in scoped_affect or ()
+                                for component in getattr(item, "components", ())
+                                if getattr(component, "source_cluster_ref", None)
+                            ),
+                            *(item.thread_id for item in open_threads_for_continuity),
+                        ),
+                        limit=4,
+                    )
+                    self._recall.schedule_prefetch(
+                        query_text=attention_request.query_text,
+                        lexical_text=attention_request.lexical_text,
+                        occurred_from=attention_request.occurred_from,
+                        occurred_to=attention_request.occurred_to,
+                        link_refs=attention_request.link_refs,
+                        memory_kinds=attention_request.memory_kinds,
                         accessibility_seed=(
                             f"recall-prefetch:{query.trigger_ref}:{query.ledger_sequence}"
                         ),
                         trigger_ref=query.trigger_ref,
-                        limit=4,
+                        limit=attention_request.limit,
                     )
             except Exception as exc:
                 self._recall.discard(
@@ -1466,11 +1458,6 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     type(exc).__name__,
                     exc,
                 )
-        scoped_relationships = tuple(
-            item
-            for item in projection.relationship_states
-            if item.subject_ref in subject_refs and item.origin is not None
-        )
         budget_authority_refs = self._budget_authority_refs(projection)
         budget_ms = (time.perf_counter() - domain_phase_started) * 1000
         after_domains = time.perf_counter()

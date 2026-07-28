@@ -23,8 +23,9 @@ from .schema_core import FrozenModel, PrivacyClass
 from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
 
 
-RECALL_INDEX_POLICY_VERSION = "world-v2-recall-index.hybrid.1"
+RECALL_INDEX_POLICY_VERSION = "world-v2-recall-index.hybrid.2"
 RECALL_RESULT_MAX_BYTES = 6_000
+MAX_RECALL_QUERY_CHARACTERS = 1_024
 _PRIVACY_RANK: dict[PrivacyClass, int] = {
     "public": 0,
     "shareable": 1,
@@ -171,7 +172,17 @@ class RecallDocument(FrozenModel):
 
 
 class RecallQuery(FrozenModel):
-    query_text: str = Field(min_length=1, max_length=1_024)
+    # ``query_text`` is the compact semantic attention cue used by the dense
+    # lane. ``lexical_text`` optionally retains the exact inbound wording for
+    # lexical matching; historical traces omit it and therefore keep the
+    # legacy one-text behaviour and hash.
+    query_text: str = Field(min_length=1, max_length=MAX_RECALL_QUERY_CHARACTERS)
+    lexical_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RECALL_QUERY_CHARACTERS,
+        exclude_if=lambda value: value is None,
+    )
     cursor: RecallCursor
     actor_ref: str = Field(min_length=1, max_length=256)
     subject_refs: tuple[str, ...] = Field(min_length=1, max_length=8)
@@ -344,7 +355,7 @@ class _RecallIndexCore:
         if len(query_vector_values) != 1:
             raise ValueError("recall query embedding count is invalid")
         query_vector = self._normalize_vector(query_vector_values[0])
-        query_features = _lexical_features(query.query_text)
+        query_features = _lexical_features(query.lexical_text or query.query_text)
         ranked: list[tuple[int, str, RecallHit]] = []
         for document, vector in rows:
             if not self._eligible(document, query):
@@ -406,9 +417,10 @@ class _RecallIndexCore:
             ranked.append((score, document.document_id, hit))
         ranked.sort(key=lambda item: (-item[0], item[1]))
         selected: list[RecallHit] = []
-        for _, _, hit in ranked:
+
+        def add_if_within_budget(hit: RecallHit) -> bool:
             if len(selected) >= query.limit:
-                break
+                return False
             candidate = (*selected, hit)
             if (
                 len(
@@ -418,8 +430,41 @@ class _RecallIndexCore:
                 )
                 > RECALL_RESULT_MAX_BYTES
             ):
-                continue
+                return False
             selected.append(hit)
+            return True
+
+        # Accessibility should not collapse a small result set into several
+        # near-duplicate facts merely because they share the strongest token.
+        # First retain the best hit, then prefer candidates that add a memory
+        # kind, source lane, or self/counterpart subject. This is deterministic
+        # evidence diversity, not a preference about what the character should
+        # say or which memory she must use.
+        seen_kinds: set[str] = set()
+        seen_slices: set[str] = set()
+        seen_subjects: set[str] = set()
+        for _, _, hit in ranked:
+            document = hit.document
+            adds_axis = (
+                not selected
+                or document.memory_kind not in seen_kinds
+                or document.source_slice not in seen_slices
+                or bool(set(document.subject_refs) - seen_subjects)
+            )
+            if not adds_axis:
+                continue
+            if add_if_within_budget(hit):
+                seen_kinds.add(document.memory_kind)
+                seen_slices.add(document.source_slice)
+                seen_subjects.update(document.subject_refs)
+        selected_ids = {item.document.document_id for item in selected}
+        for _, _, hit in ranked:
+            if len(selected) >= query.limit:
+                break
+            if hit.document.document_id in selected_ids:
+                continue
+            if add_if_within_budget(hit):
+                selected_ids.add(hit.document.document_id)
         hits = tuple(selected)
         query_hash = recall_query_hash(
             index_version=self._index_version,

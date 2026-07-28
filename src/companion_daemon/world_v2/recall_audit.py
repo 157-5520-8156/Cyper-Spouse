@@ -10,6 +10,7 @@ from typing import Literal, Self
 from pydantic import Field, model_validator
 
 from .recall_index import (
+    MAX_RECALL_QUERY_CHARACTERS,
     RecallCursor,
     RecallDocument,
     RecallQuery,
@@ -44,7 +45,13 @@ def paired_recall_transition_hash(
 
 
 class CharacterRecallRequest(FrozenModel):
-    query_text: str = Field(min_length=1, max_length=1_024)
+    query_text: str = Field(min_length=1, max_length=MAX_RECALL_QUERY_CHARACTERS)
+    lexical_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RECALL_QUERY_CHARACTERS,
+        exclude_if=lambda value: value is None,
+    )
     occurred_from: datetime | None = None
     occurred_to: datetime | None = None
     link_refs: tuple[str, ...] = Field(default=(), max_length=16)
@@ -148,6 +155,7 @@ class RecallAuditTrace(FrozenModel):
             raise ValueError("recall embedding degradation metadata is incomplete")
         if (
             self.request.query_text != self.query.query_text
+            or self.request.lexical_text != self.query.lexical_text
             or self.request.occurred_from != self.query.occurred_from
             or self.request.occurred_to != self.query.occurred_to
             or self.request.link_refs != self.query.link_refs

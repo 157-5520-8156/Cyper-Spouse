@@ -39,6 +39,12 @@ class _Delivery:
         return {"status": "ok", "data": {"message_id": f"journey-typing-{len(self.non_text)}"}}
 
 
+class _ImmediateEmotionGateModel:
+    async def complete(self, messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+        del messages, temperature
+        return '{"immediate": true}'
+
+
 class _JourneyRecallEmbedding:
     """Semantic fixture for the cross-session paraphrase in T27."""
 
@@ -349,6 +355,7 @@ async def test_same_turn_affect_is_accepted_before_emotional_journey_replies(
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
         advisory_model=_JourneyBackgroundModel(),
+        immediate_emotion_gate_model=_ImmediateEmotionGateModel(),
         delivery=delivery,
     )
     try:

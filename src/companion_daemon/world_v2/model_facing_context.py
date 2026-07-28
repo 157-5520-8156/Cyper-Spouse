@@ -170,6 +170,10 @@ def compact_model_facing_context(raw: str) -> str:
             "items": compact_items,
         }
     compact["slices"] = compact_slices
+    compact["current_self_state"] = _build_current_self_state(
+        slices=compact_slices,
+        logical_time=compact.get("logical_time"),
+    )
     relationship = context.get("relationship_evaluation")
     if isinstance(relationship, dict):
         compact["relationship_evaluation"] = {
@@ -208,6 +212,228 @@ def _semantic_value(value: object) -> object:
             continue
         result[key] = _semantic_value(item)
     return result
+
+
+def _slice_items(slices: dict[str, object], name: str) -> list[dict[str, object]]:
+    lane = slices.get(name)
+    if not isinstance(lane, dict) or lane.get("availability") != "available":
+        return []
+    items = lane.get("items")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _state_entry(
+    item: dict[str, object],
+    *,
+    fields: tuple[str, ...] | None = None,
+) -> dict[str, object] | None:
+    source_ref = item.get("source_ref")
+    if not isinstance(source_ref, str) or not source_ref:
+        return None
+    value = item.get("value")
+    if not isinstance(value, dict):
+        return None
+    semantic = (
+        {key: value[key] for key in fields if key in value}
+        if fields is not None
+        else value
+    )
+    if not semantic:
+        return None
+    result: dict[str, object] = dict(semantic)
+    result["source_ref"] = source_ref
+    return result
+
+
+def _affect_state_entry(item: dict[str, object]) -> dict[str, object] | None:
+    source_ref = item.get("source_ref")
+    if not isinstance(source_ref, str) or not source_ref:
+        return None
+    value = item.get("value")
+    if not isinstance(value, dict):
+        return None
+    components: list[dict[str, object]] = []
+    raw_components = value.get("components")
+    if isinstance(raw_components, list):
+        for component in raw_components:
+            if not isinstance(component, dict) or not isinstance(
+                component.get("dimension"), str
+            ):
+                continue
+            material = {
+                key: component[key]
+                for key in (
+                    "dimension",
+                    "source_cluster_ref",
+                    "appraisal_refs",
+                    "intensity_bp",
+                    "residue_bp",
+                    "opened_at",
+                    "last_stimulus_at",
+                    "last_updated_at",
+                    "decay_not_before",
+                )
+                if key in component
+            }
+            components.append(material)
+    if not components:
+        return None
+    result: dict[str, object] = {
+        "components": components,
+        **{
+            key: value[key]
+            for key in ("opened_at", "updated_at")
+            if key in value
+        },
+    }
+    result["source_ref"] = source_ref
+    return result
+
+
+def _core_state_entry(item: dict[str, object]) -> dict[str, object] | None:
+    source_ref = item.get("source_ref")
+    if not isinstance(source_ref, str) or not source_ref:
+        return None
+    value = item.get("value")
+    values = value.get("values") if isinstance(value, dict) else None
+    if not isinstance(values, dict):
+        return None
+    slow = values.get("slow_evolving")
+    if not isinstance(slow, dict):
+        return None
+    return {"slow_evolving": slow, "source_ref": source_ref}
+
+
+def _build_current_self_state(
+    *,
+    slices: dict[str, object],
+    logical_time: object,
+) -> dict[str, object]:
+    """Derive one compact working-self view from already verified slices.
+
+    It deliberately preserves concurrent Affect components and Appraisal
+    alternatives.  This is a salience/view layer only: source refs continue to
+    point at the authoritative Capsule items and no derived prose is created.
+    """
+
+    state: dict[str, object] = {
+        "contract": "current-self-state.1",
+        "authority": "derived_from_verified_context",
+    }
+    if isinstance(logical_time, str):
+        state["logical_time"] = logical_time
+    stable_self = [
+        entry
+        for item in _slice_items(slices, "character_core")
+        for entry in (_core_state_entry(item),)
+        if entry is not None
+    ]
+    if stable_self:
+        state["stable_self"] = stable_self
+    lane_contracts = (
+        (
+            "situation",
+            "current_situation",
+            (
+                "logical_time",
+                "time_segment",
+                "activity_slices",
+                "goal_slices",
+                "resource_pressure",
+                "attention_slice",
+                "social_environment",
+                "plan_relation",
+                "commitment_slices",
+            ),
+        ),
+        (
+            "relationship",
+            "relationship_slice",
+            (
+                "subject_ref",
+                "stage",
+                "variables",
+                "temperature",
+                "hysteresis",
+                "commitment_refs",
+                "last_adjusted_at",
+            ),
+        ),
+        (
+            "appraisals",
+            "appraisals",
+            (
+                "subject_ref",
+                "source_cluster_ref",
+                "hypotheses",
+                "evidence_refs",
+                "confidence_bp",
+                "accepted_at",
+                "expires_at",
+            ),
+        ),
+        (
+            "unresolved",
+            "open_threads",
+            (
+                "kind",
+                "subject_ref",
+                "importance_bp",
+                "due_window",
+                "window_closes_at",
+                "expected_response_ref",
+                "status",
+            ),
+        ),
+        (
+            "advisories",
+            "advisories",
+            (
+                "kind",
+                "candidate_refs",
+                "candidates",
+                "confidence_bp",
+                "expiry",
+                "producer_version",
+            ),
+        ),
+    )
+    for output_name, slice_name, fields in lane_contracts:
+        entries = [
+            entry
+            for item in _slice_items(slices, slice_name)
+            for entry in (_state_entry(item, fields=fields),)
+            if entry is not None
+        ]
+        if entries:
+            state[output_name] = entries
+    advisories = state.get("advisories")
+    if isinstance(advisories, list):
+        interruption = [
+            item
+            for item in advisories
+            if isinstance(item, dict)
+            and isinstance(item.get("kind"), str)
+            and item["kind"].startswith("interruption.")
+        ]
+        if interruption:
+            state["interruption"] = interruption
+            remaining = [item for item in advisories if item not in interruption]
+            if remaining:
+                state["advisories"] = remaining
+            else:
+                state.pop("advisories", None)
+    affect = [
+        entry
+        for item in _slice_items(slices, "affect_episodes")
+        for entry in (_affect_state_entry(item),)
+        if entry is not None
+    ]
+    if affect:
+        state["affect"] = affect
+    return state
 
 
 def compact_chat_model_facing_context(raw: str) -> str:
@@ -255,6 +481,10 @@ def compact_chat_model_facing_context(raw: str) -> str:
         if semantic_items:
             slices[name] = {"availability": "available", "items": semantic_items}
     context["slices"] = slices
+    context["current_self_state"] = _build_current_self_state(
+        slices=slices,
+        logical_time=context.get("logical_time"),
+    )
     return json.dumps(
         context,
         ensure_ascii=False,
@@ -293,6 +523,10 @@ def compact_recovery_model_facing_context(raw: str) -> str:
                 "items": _context_items_for_chat(name, items, limit),
             }
     context["slices"] = retained
+    context["current_self_state"] = _build_current_self_state(
+        slices=retained,
+        logical_time=context.get("logical_time"),
+    )
     return json.dumps(
         context,
         ensure_ascii=False,
