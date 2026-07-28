@@ -1051,10 +1051,6 @@ class Deliberation:
                 or provisional_provider_available(model_input)
             )
             and not (
-                callable(source_closure_enabled)
-                and source_closure_enabled()
-            )
-            and not (
                 callable(already_evaluated)
                 and already_evaluated(model_input)
             )

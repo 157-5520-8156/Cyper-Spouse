@@ -151,6 +151,33 @@ class _AppendEpisodeProvider:
         )
 
 
+class _GatedAppendEpisodeProvider(_AppendEpisodeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.full_started = asyncio.Event()
+        self.release_full = asyncio.Event()
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        provisional = any("provisional first beat" in item["content"] for item in messages)
+        if not provisional:
+            self.full_started.set()
+            await self.release_full.wait()
+        return await super().complete(messages, temperature=temperature)
+
+
+class _NotifyingDeliveredTransport(_DeliveredTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent = asyncio.Event()
+
+    async def send(self, request):  # type: ignore[no-untyped-def]
+        receipt = await super().send(request)
+        self.sent.set()
+        return receipt
+
+
 class _InvalidAppraisalValidExpressionProvider(_CombinedProvider):
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
@@ -270,6 +297,28 @@ class _SourceClosureReviewer:
                     if unsupported
                     else "The corrected question has no factual premise."
                 ),
+            },
+            ensure_ascii=False,
+        )
+
+
+class _AlwaysSupportedSourceClosureReviewer:
+    model = "source-closure-supported"
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        return json.dumps(
+            {
+                "decision": "supported",
+                "unsupported_claim_indexes": [],
+                "undeclared_fact_fragments": [],
+                "brief_reason": "The visible beat makes no unsupported factual claim.",
             },
             ensure_ascii=False,
         )
@@ -1742,8 +1791,64 @@ async def test_on_episode_appends_only_after_provisional_receipt(tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_on_episode_dispatches_first_semantic_beat_before_full_tail(tmp_path) -> None:
+    provider = _GatedAppendEpisodeProvider()
+    recovery = _GatedAppendEpisodeProvider()
+    reviewer = _AlwaysSupportedSourceClosureReviewer()
+    cognition = SingleCallInboundCognition(
+        flash_model=provider,
+        recovery_model=recovery,
+        source_closure_model=reviewer,
+    )
+    transport = _NotifyingDeliveredTransport()
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "single-call-episode-first-beat.sqlite",
+        config=replace(_config(), expression_episode_mode="on"),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=cognition.expression,
+        quick_recovery=cognition.expression,
+        appraisal_model=None,
+        transport=transport,
+        now=NOW,
+    )
+    respond_task = asyncio.create_task(
+        app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:episode-first-beat",
+                text="今天脑子里有很多事。",
+                observed_at=NOW,
+                trace_id="trace:episode-first-beat",
+            )
+        )
+    )
+    drain_task: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(provider.full_started.wait(), timeout=1.0)
+        outcome = await asyncio.wait_for(asyncio.shield(respond_task), timeout=0.1)
+        assert outcome.status == "action_authorized"
+
+        drain_task = asyncio.create_task(app.drain_actions_once())
+        await asyncio.wait_for(transport.sent.wait(), timeout=0.1)
+        assert transport.bodies == ["我先接住你这句话。"]
+        assert not provider.release_full.is_set()
+        assert reviewer.calls
+    finally:
+        provider.release_full.set()
+        recovery.release_full.set()
+        await asyncio.gather(
+            respond_task,
+            *(task for task in (drain_task,) if task is not None),
+            return_exceptions=True,
+        )
+        app.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("disposition", ["cancel_pending", "supersede_pending"])
-async def test_on_episode_cancels_undispatched_provisional_atomically(
+async def test_on_episode_legacy_tail_cancellation_cannot_retract_first_visible_beat(
     tmp_path, disposition
 ) -> None:
     provider = _AppendEpisodeProvider(disposition)
@@ -1774,26 +1879,28 @@ async def test_on_episode_cancels_undispatched_provisional_atomically(
                 trace_id=f"trace:episode-{disposition}",
             )
         )
+        delivery = await app.drain_actions_once()
         projection = app.export_replay_evidence().projection
     finally:
         app.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "action_authorized"
+    assert delivery is not None and delivery.status == "settled"
     assert len(provider.calls) == 1
     assert len(recovery.calls) == 1
     assert projection.actions
-    assert {item.state for item in projection.actions} == {"cancelled"}
+    assert {item.state for item in projection.actions} == {"delivered"}
     assert {
         item.state
         for item in projection.budget_reservations
         if item.action_id in {action.action_id for action in projection.actions}
-    } == {"released"}
-    assert {item.state for item in projection.expression_plans} == {"terminated"}
+    } == {"settled"}
+    assert {item.state for item in projection.expression_plans} == {"completed"}
     episode = next(
         item for item in projection.trigger_processes if item.process_kind == "expression_episode"
     )
     assert episode.state == "terminal"
-    assert disposition in (episode.runtime_outcome_ref or "")
+    assert ":complete_without_more:" in (episode.runtime_outcome_ref or "")
 
 
 @pytest.mark.asyncio

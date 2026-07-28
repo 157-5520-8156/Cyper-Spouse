@@ -18,7 +18,6 @@ from .outcome_observation_runtime import build_outcome_observation_event
 from .pinned_turn import PinnedTurnCompiler
 from .expression_episode_lifecycle import (
     expression_episode_claim_event,
-    expression_episode_cancel_events,
     expression_episode_complete_event,
     expression_episode_open_event,
     expression_episode_trigger_id,
@@ -1239,6 +1238,14 @@ class WorldRuntime:
                         ),
                         None,
                     )
+            # In active staged delivery, the provisional proposal is a fully
+            # validated semantic beat rather than mutable token text. By the
+            # time the full tail settles, dispatch may already have crossed
+            # the provider boundary. Historical/near-miss model outputs that
+            # still request cancellation can stop additional expression, but
+            # cannot rewrite or retract the first externally visible effect.
+            if disposition in {"cancel_pending", "supersede_pending"}:
+                disposition = "complete_without_more"
             if (
                 disposition == "append"
                 and tail_audit is not None
@@ -1293,51 +1300,6 @@ class WorldRuntime:
             process=process,
             outcome_ref=f"expression-episode:{disposition}:{result.status}",
         )
-
-    async def _resolve_expression_episode_before_dispatch(
-        self,
-        *,
-        observation: Observation,
-        observation_event: WorldEvent,
-        process: TriggerProcess | None,
-    ) -> str | None:
-        if (
-            process is None
-            or self._pinned_turn is None
-            or self._pinned_turn.expression_episode_mode != "on"
-        ):
-            return None
-        tail = await self._pinned_turn.await_expression_episode_tail(
-            observation_event.event_id
-        )
-        if tail is None:
-            return None
-        disposition = tail.disposition
-        if disposition == "append":
-            return disposition
-        if disposition in {"cancel_pending", "supersede_pending"}:
-            projection = await self._project_for_write()
-            events = expression_episode_cancel_events(
-                world_id=self._world_id,
-                projection=projection,
-                process=process,
-                observation=observation,
-                observation_event_ref=observation_event.event_id,
-                superseded=disposition == "supersede_pending",
-            )
-            if events:
-                await self._commit(
-                    list(events),
-                    world_revision=projection.world_revision,
-                    deliberation_revision=projection.deliberation_revision,
-                    commit_id=f"commit:{process.trigger_id}:{disposition}",
-                )
-        await self._complete_expression_episode(
-            observation=observation,
-            process=process,
-            outcome_ref=f"expression-episode:{disposition}",
-        )
-        return disposition
 
     async def accept_appraisal_proposal(self, proposal_id: str) -> RuntimeOutcome:
         """Atomically consume one already-persisted appraisal proposal.
@@ -2287,21 +2249,6 @@ class WorldRuntime:
                                     authorized_action_ids = tuple(
                                         item.action.action_id for item in material.beats
                                     )
-        pre_dispatch_disposition = None
-        if reply_authorized:
-            pre_dispatch_disposition = (
-                await self._resolve_expression_episode_before_dispatch(
-                    observation=observation,
-                    observation_event=event,
-                    process=episode_process,
-                )
-            )
-            if pre_dispatch_disposition in {
-                "cancel_pending",
-                "supersede_pending",
-            }:
-                reply_authorized = False
-                authorized_action_ids = ()
         if reply_authorized:
             status = "action_authorized"
         elif reply_terminal_errors:
