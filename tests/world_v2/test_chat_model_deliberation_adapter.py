@@ -64,6 +64,10 @@ class _Model:
         self.calls.append((messages, temperature))
         return self._reply
 
+    @property
+    def last_system_prompt(self) -> str:
+        return self.calls[-1][0][0]["content"]
+
 
 class _MeteredModel(_Model):
     async def complete_with_usage(
@@ -1017,7 +1021,7 @@ async def test_prompt_models_a_mutually_established_future_continuation_as_optio
 
     output = await adapter.propose(request)
 
-    system = model.calls[0][0][0]["content"]
+    system = model.last_system_prompt
     assert "genuinely expect a reply" in system
     assert "对方忙完后回来继续聊天" in json.dumps(output.raw_proposal, ensure_ascii=False)
 
@@ -1405,12 +1409,26 @@ async def test_identity_frame_carries_personality_boundaries_and_world_claim_dis
 
     await adapter.propose(_request())
 
-    system = model.calls[0][0][0]["content"]
+    system = model.last_system_prompt
     assert all(
         value in system
         for value in ("沈知栀", "慢热", "真诚比漂亮话重要", "不编造真实线下行动证据")
     )
     assert "copy exact matching source_refs" in system
+
+
+@pytest.mark.asyncio
+async def test_source_contract_states_truth_boundary_without_suggesting_a_social_move() -> None:
+    model = _Model('{"proposal_id":"proposal:source-boundary"}')
+    adapter = ChatModelDeliberationAdapter(model=model)
+
+    await adapter.propose(_request())
+
+    system = model.last_system_prompt
+    assert "copy exact matching source_refs" in system
+    assert "unsupported factual clauses make the draft invalid" in system
+    assert "ask an open question" not in system
+    assert "questions, and freely chosen" not in system
 
 
 @pytest.mark.asyncio

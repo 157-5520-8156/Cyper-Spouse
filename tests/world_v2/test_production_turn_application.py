@@ -201,6 +201,27 @@ class _NeverProactiveModel:
         raise AssertionError("a materialized deferred Thread must not authorize a duplicate send")
 
 
+class _AfterthoughtSeekingBackgroundModel:
+    """Would always append a tail if the retired production lane called it."""
+
+    model = "test-afterthought-seeking-background"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        self.calls += 1
+        return json.dumps(
+            {
+                "afterthought": True,
+                "impulse_summary": "又想到一个问题",
+                "text": "那你平时还会做什么？",
+            },
+            ensure_ascii=False,
+        )
+
+
 class _TimingDraftChatModel:
     model = "test-flash-timing"
 
@@ -540,6 +561,65 @@ def _config() -> WorldV2TurnApplicationConfig:
         reply_target="user:user.1",
         action_pump_owner="pump:production-turn-application",
     )
+
+
+@pytest.mark.asyncio
+async def test_production_reply_does_not_open_the_retired_afterthought_side_lane(
+    tmp_path: Path,
+) -> None:
+    """A settled reply leaves later expression to existing character-owned lanes."""
+
+    background = _AfterthoughtSeekingBackgroundModel()
+    adapter = ChatModelDeliberationAdapter(model=_TimingDraftChatModel("now"))
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "retired-afterthought-side-lane.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=adapter,
+        quick_recovery=adapter,
+        proactive_model=background,
+        transport=_DeliveredTransport(received_at=NOW),
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="retired-afterthought-side-lane",
+                text="我先吃饭去了。",
+                observed_at=NOW,
+                trace_id="trace:retired-afterthought-side-lane",
+            )
+        )
+        assert outcome.status == "action_authorized"
+        settled = await app.drain_actions_once()
+        assert settled is not None and settled.status == "settled"
+
+        projection = app._ledger.project()  # noqa: SLF001 - public composition evidence
+        await app.tick(
+            tick_id="retired-afterthought-side-lane:due",
+            logical_time_from=projection.logical_time or NOW,
+            logical_time_to=NOW + timedelta(minutes=3),
+            observed_at=NOW + timedelta(minutes=3),
+            trace_id="trace:retired-afterthought-side-lane:due",
+            causation_id="scheduler:test",
+            correlation_id="conversation:test:c2c:user.1",
+            reason="test_afterthought_retirement",
+        )
+        for _ in range(3):
+            await app.drain_background_once()
+        projection = app._ledger.project()  # noqa: SLF001
+    finally:
+        app.close()
+
+    assert background.calls == 0
+    assert not any(
+        item.process_kind == "afterthought_author"
+        for item in projection.trigger_processes
+    )
+    assert not any(item.kind == "followup" for item in projection.actions)
 
 
 def test_media_continuation_composition_bootstraps_separate_accounts_and_restarts(

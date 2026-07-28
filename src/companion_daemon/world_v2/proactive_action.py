@@ -298,8 +298,12 @@ class ProactiveDraftAdapter:
         if self._identity_frame is not None:
             system += (
                 " Stable companion identity: "
-                + _canonical(self._identity_frame.model_dump(mode="json"))
-                + ". Speak as companion_name to counterpart_name within relationship_frame and personality_frame. "
+                + _canonical(
+                    self._identity_frame.model_dump(mode="json", exclude_none=True)
+                )
+                + ". Speak as companion_name to counterpart_name. Treat the current relationship projection "
+                "in the supplied situation as authoritative for present relational state; the identity frame "
+                "only supplies stable identity and personality. "
                 "This is a companion relationship, not an assistant relationship; never adopt an assistant persona."
             )
         if recovery:

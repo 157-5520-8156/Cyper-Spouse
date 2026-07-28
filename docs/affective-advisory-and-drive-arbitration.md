@@ -44,12 +44,12 @@ v1 已完成以下闭环：
   不入账；
 - selected affordance 会调制表达编排：修复/靠近类倾向保留短多段，收住/边界/撤回类倾向
   合并成单段，避免“受伤却轻快连发”；
-- selected affordance 会调制可取消 afterthought 的机会：修复/在意/延迟余波提高概率，
-  收住/边界/带过降低或清空概率；它只改变机会，不固定内容；
+- 独立的可取消 afterthought 机会已经退役；同轮多段由普通 `ExpressionPlan` 决定，
+  跨时刻表达复用事件驱动主动联系，并读取同一情绪与当前人格状态；
 - QQ runtime observation 记录 `message_kinds`、`segment_count`、`multi_segment`、情绪 reading kind、
   候选/选中 affordance kind、用户情绪/私密印象是否入账，用于后续体验统计；
 - `summarize_qq_turn_experience()` 可直接汇总 redacted QQ/NapCat JSONL：单气泡普通回复率、多段率、
-  afterthought 率、selected affordance 分布、情绪 reading 计数、用户情绪/私密印象入账率；该汇总
+  历史 afterthought 率、selected affordance 分布、情绪 reading 计数、用户情绪/私密印象入账率；该汇总
   不读取消息文本、用户标识、evidence span、私密印象内容或平台回执。
 
 v1 仍不改变 `world_affect.py` 的确定性情绪物理；它只提供心理场与表达候选，真正的情绪、

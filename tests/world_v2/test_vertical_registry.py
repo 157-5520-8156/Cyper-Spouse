@@ -46,7 +46,7 @@ def test_every_process_kind_has_exactly_one_owner_row() -> None:
 
 def test_drift_detection_names_the_file_that_must_change(monkeypatch) -> None:
     trimmed = tuple(
-        row for row in VERTICAL_REGISTRY if row.lane_id != "afterthought"
+        row for row in VERTICAL_REGISTRY if row.lane_id != "afterthought_replay"
     )
     monkeypatch.setattr(vertical_registry, "VERTICAL_REGISTRY", trimmed)
     with pytest.raises(VerticalRegistryError) as caught:
@@ -133,9 +133,19 @@ def test_framework_editions_do_not_import_the_frozen_twins() -> None:
     frozen = {
         "companion_daemon.world_v2.quick_reaction",
     }
-    for module in ("quick_reaction_vertical.py", "afterthought_author_vertical.py"):
+    for module in ("quick_reaction_vertical.py",):
         overlap = _imported_modules(WORLD_V2 / module) & frozen
         assert not overlap, f"{module} imports the frozen twin(s): {sorted(overlap)}"
+
+
+def test_retired_afterthought_process_kind_is_replay_only() -> None:
+    row = next(item for item in VERTICAL_REGISTRY if item.lane_id == "afterthought_replay")
+
+    assert row.process_kinds == ("afterthought_author",)
+    assert row.shape == "infrastructure"
+    assert row.runtime_drain_markers == ()
+    assert row.composition_markers == ()
+    assert not (WORLD_V2 / "afterthought_author_vertical.py").exists()
 
 
 def test_pilot_rollback_switch_reads_the_environment(monkeypatch) -> None:

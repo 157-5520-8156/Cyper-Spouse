@@ -70,7 +70,7 @@
 - 认真道歉与敷衍道歉由 `repair_curve` 统一判定质量并改状态；`relationship_events` 不再对同一语义重复叠加。认真修复仍写入 `key_relationship_event` 并进入 prompt，但只走一条修复曲线；见 `tests/test_repair_curve.py`。
 - 主动消息没被回应时会产生等待心理：短时间期待，久一点收住，再久会把期待压下去。同一阶段不会每次调度重复叠加。
 - 如果她主动问了一个问题但没得到回答，会进入专门的困惑闭环：短时间困惑自己是不是问得突然，久一点会收住；用户回来但绕开问题时，她会察觉到，不会立刻连环追问。
-- 如果一轮对话像是还没完全收住，并且最后一条是她发的，短时间后可以触发 `open_thread_afterthought`，补一个自己的想法或轻微发散，而不是继续追问。
+- 旧的固定 `open_thread_afterthought` 旁路已退役。同一轮要不要分成多条、有没有补充由角色模型在普通 `ExpressionPlan` 内决定；真正稍后才产生的表达，复用事件驱动主动联系、记忆、情绪与当前人格状态，不另造固定追问通道。
 - 最近几轮语气会形成 `tone_inertia`：刚刚冷淡过不会突然热情，刚刚柔和过也不会一下变客服。除文本启发外，每次投递确认时分类的 `last_outgoing_tone` 会被下一轮读回，即使心情已恢复也不会瞬间变调。
 - `inner_subtext` 会记录“不说出口”的心理：想被哄但嘴硬、想分享但怕打扰、有点在意但不明说、开心但装平常。
 - 长期性格漂移会读取情绪 affinity：长期被稳定尊重会更放松；长期紧张会更敏感。复合分数达到约 4.0（温暖）或 1.4（戒备）时每次互动微调 `security`/`curiosity`/`boundary_level`；见 `tests/test_personality_drift.py`。
@@ -124,7 +124,7 @@
 - 生活节律：`afternoon_slump`, `pre_dawn`, `commute_ping`, `post_work`, `sunday_evening`, `post_midnight_impulse`, `monday_reboot`, `friday_feeling`, `sunday_scaries`, `midweek_check`
 - 情绪驱动：`repair_attempt`, `curiosity_ping`, `anxiety_reassurance`, `celebration_nudge`, `sharing_impulse`, `nostalgia_wave`, `longing_ping`, `playful_tease`, `jealousy_nudge`, `boredom_break`, `overwhelm_check`, `gratitude_burst`, `suppressed_thought`
 - 随机生活感：`thinking_of_you`, `random_thought`, `dream_mention`, `song_stuck`, `overthinking_spiral`, `craving_share`, `inside_joke_callback`, `quiet_productive`
-- 对话后续：`double_text`, `open_thread_afterthought`, `seen_no_reply_soft`, `followup_callback`, `memory_nudge`
+- 对话后续：同轮由普通 `ExpressionPlan` 表达；跨时刻由事件驱动主动联系承接
 
 为了避免“同一种感觉连发”，trigger 会被归入语义类别并单独冷却：
 

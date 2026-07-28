@@ -99,7 +99,6 @@ from .interaction_bid_trigger_runtime import (
 )
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
-from .afterthought_author_vertical import AfterthoughtVerticalRuntime
 from .bounded_decision_vertical import AnchoredRunResult, InlineOnceRunResult
 from .expression_reconsideration import expression_reconsideration_events_for_observation
 from .expression_reconsideration_runtime import (
@@ -257,7 +256,6 @@ class WorldRuntime:
         social_action_worker: SocialActionWorker | None = None,
         quick_reaction_worker: QuickReactionWorker | QuickReactionVerticalWorker | None = None,
         proactive_action_runtime: ProactiveActionRuntime | None = None,
-        afterthought_author: AfterthoughtVerticalRuntime | None = None,
         memory_withdrawal_review: MemoryWithdrawalReviewRuntime | None = None,
         external_result_owner: str | None = None,
         external_result_deliberator: ToolResultDeliberator | None = None,
@@ -458,9 +456,6 @@ class WorldRuntime:
         ):
             raise ValueError("proactive action runtime must own this exact ledger")
         self._proactive_action_runtime = proactive_action_runtime
-        if afterthought_author is not None and afterthought_author.ledger is not self._ledger:
-            raise ValueError("afterthought author must own this exact ledger")
-        self._afterthought_author = afterthought_author
         if (
             memory_withdrawal_review is not None
             and memory_withdrawal_review.ledger is not self._ledger
@@ -592,14 +587,6 @@ class WorldRuntime:
                 ).drain_one()
                 if reconsideration.status != "idle":
                     return reconsideration
-            # The afterthought window opens seconds after her reply settles,
-            # so its bounded consideration must not queue behind the larger
-            # appraisal/fact backlog.  Outside its short receipt horizon the
-            # check is a cheap projection read and costs no authority.
-            if self._afterthought_author is not None:
-                afterthought = await self._afterthought_author.drain_one()
-                if afterthought.status != "idle":
-                    return afterthought
             # Initiative is time-sensitive: an eligible silence or explicit
             # response gap should not sit behind an arbitrarily large backlog
             # of per-observation semantic jobs.  The compiler only exposes an

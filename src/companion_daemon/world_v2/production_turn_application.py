@@ -230,7 +230,6 @@ from .quick_reaction import QuickReactionWorker
 from .quick_reaction_vertical import QuickReactionVerticalWorker
 from .chat_model_deliberation_adapter import ChatCompletionModel, CompanionIdentityFrame
 from .bounded_decision_vertical import AnchoredRunResult
-from .afterthought_author_vertical import AfterthoughtVerticalRuntime
 from .vertical_registry import assert_bounded_vertical_coverage
 from .proactive_action import (
     ProactiveActionRuntime,
@@ -238,7 +237,6 @@ from .proactive_action import (
     ProactiveDraftAdapter,
 )
 from .proposal_envelope import DecisionProposal, validate_proposal_envelope
-from .recent_dialogue import RecentDialogueCompiler
 from .social_initiative import (
     SITUATION_STIMULUS_EVENT_TYPES,
     SocialInitiativeCompiler,
@@ -489,13 +487,6 @@ class WorldV2TurnApplicationConfig:
     proactive_amount_per_action: int = 10
     proactive_worker_owner: str = "worker:world-v2:proactive"
     social_initiative_policy: SocialInitiativePolicy = SocialInitiativePolicy()
-    # Afterthought lane (v1 "事后补充话" port): after her reply settles with
-    # the provider, one recorded low-mass draw plus one bounded background
-    # confirmation may schedule a single short ``followup`` tail
-    # (quick_continue 12-30s / topic_drift 75-180s).  It shares the proactive
-    # budget/grammar and this switch is the operational kill toggle.
-    afterthought_enabled: bool = True
-    afterthought_worker_owner: str = "worker:world-v2:afterthought"
     # Production platform hosts may gate the expensive same-turn emotion lane
     # to high-signal relational turns; fixtures keep the historical eager
     # behavior unless they opt in.
@@ -576,7 +567,6 @@ class WorldV2TurnApplicationConfig:
             "tool_worker_owner",
             "perception_worker_owner",
             "proactive_worker_owner",
-            "afterthought_worker_owner",
         ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
@@ -3116,35 +3106,6 @@ def build_sqlite_world_v2_turn_application(
                 ),
                 project_at=reconsideration_projection,
             )
-        afterthought_runtime = None
-        if config.afterthought_enabled and proactive_model is not None:
-            # The afterthought lane rides the same background model and the
-            # proactive budget/grammar: its one optional tail is a ``followup``
-            # Action whose due window the generic pump owns.
-            #
-            afterthought_runtime = AfterthoughtVerticalRuntime(
-                ledger=ledger,
-                model=proactive_model,
-                policy=ExpressionPlanBudgetPolicy(
-                    account_id=config.proactive_account_id,
-                    amount_limit_per_action=config.proactive_amount_per_action,
-                    actor=config.companion_actor_ref,
-                    allowed_targets=(config.reply_target,),
-                    recovery_policy=config.reply_recovery_policy,
-                    category="proactive",
-                ),
-                batch_issuer=issuer,
-                owner_id=config.afterthought_worker_owner,
-                target=config.reply_target,
-                companion_actor_ref=config.companion_actor_ref,
-                counterpart_actor_ref=(config.counterpart_actor_ref or config.reply_target),
-                chronology=LocalChronology(config.local_timezone),
-                identity_frame=proactive_identity_frame,
-                dialogue_compiler=RecentDialogueCompiler(
-                    ledger=ledger,
-                    expression_payload_store=expression_payload_store,
-                ),
-            )
         appraisal_acceptance = (
             AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
             if appraisal_model is not None
@@ -3545,7 +3506,7 @@ def build_sqlite_world_v2_turn_application(
         # client); tests may inject a fixture model directly.
         if quick_reaction_model is None:
             quick_reaction_model = getattr(appraisal_model, "local_appraisal_model", None)
-        # BoundedDecisionVertical pilot switch (see the afterthought site).
+        # BoundedDecisionVertical pilot switch for the quick-reaction lane.
         quick_reaction_class = (
             QuickReactionWorker if _bdv_pilot_disabled() else QuickReactionVerticalWorker
         )
@@ -3696,7 +3657,6 @@ def build_sqlite_world_v2_turn_application(
             social_action_worker=social_action_worker,
             quick_reaction_worker=quick_reaction_worker,
             proactive_action_runtime=proactive_runtime,
-            afterthought_author=afterthought_runtime,
             read_only_tool_owner=(
                 config.tool_worker_owner if tool_trigger_runtime is not None else None
             ),
@@ -4068,12 +4028,11 @@ def build_sqlite_world_v2_turn_application(
 
 
 def _bdv_pilot_disabled() -> bool:
-    """Environment-level hot rollback for the BoundedDecisionVertical pilots.
+    """Environment-level hot rollback for the quick-reaction pilot.
 
-    ``WORLD_V2_BDV_PILOT_DISABLED=1`` routes quick-reaction and afterthought
-    through the frozen hand-written implementations.  Identity strings are
-    proven byte-equal between both editions, so flipping this switch never
-    forks ledger history.
+    ``WORLD_V2_BDV_PILOT_DISABLED=1`` routes quick reaction through the frozen
+    hand-written implementation.  Its identity strings are proven byte-equal
+    between both editions, so flipping this switch never forks ledger history.
     """
 
     return os.environ.get("WORLD_V2_BDV_PILOT_DISABLED", "").strip().lower() in {

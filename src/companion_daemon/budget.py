@@ -211,7 +211,6 @@ ESTIMATES = {
     # Compatibility default for callers that have not yet built a render plan.
     "image_generation": image_render_estimate(reference_count=2),
     "memory_maintenance": UsageEstimate("memory_maintenance", 0.02),
-    "afterthought": UsageEstimate("afterthought", 0.01),
     "proactive_decision": UsageEstimate("proactive_decision", 0.01),
     "life_event": UsageEstimate("life_event", 0.02),
 }

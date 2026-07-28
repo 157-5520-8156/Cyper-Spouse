@@ -312,21 +312,21 @@ mechanisms:
 
   - id: afterthought-followup-lane
     phase: 5
-    status: closed
-    runtime_activation: default
-    limitations: [requires-an-injected-background-model, user-answer-rebinds-the-opportunity-to-the-new-turn]
-    sources: [reply-execution-receipt, recorded-consideration-time, bounded-role-model]
+    status: deferred
+    runtime_activation: not-wired
+    limitations: [historical-events-replay-only, new-expression-uses-expression-plan-and-event-driven-initiative]
+    sources: [immutable-historical-world-events]
     events: [ExecutionReceiptRecorded, RandomDrawRecorded, ProposalRecorded, ExpressionPlanAccepted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [expression-plans, actions]
-    decision_consumers: [AfterthoughtVerticalRuntime, ActionPump, ExpressionReconsiderationRuntime]
+    decision_consumers: [WorldReducerReplay]
     actions: [followup]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [http-v2, qq-c2c-v2]
+    adapters: []
     tests:
-      - tests/world_v2/test_afterthought_author_vertical.py::test_random_authority_selects_only_consideration_time
-      - tests/world_v2/test_afterthought_author_vertical.py::test_role_model_owns_impulse_and_text
-      - tests/world_v2/test_afterthought_author_vertical.py::test_role_model_may_decline_without_local_hold
+      - tests/world_v2/test_vertical_registry.py::test_retired_afterthought_process_kind_is_replay_only
+      - tests/world_v2/test_retired_afterthought_replay.py::test_historical_afterthought_trigger_events_still_replay_to_terminal
+      - tests/world_v2/test_production_turn_application.py::test_production_reply_does_not_open_the_retired_afterthought_side_lane
 
   - id: action-budget-receipt-recovery
     phase: 5

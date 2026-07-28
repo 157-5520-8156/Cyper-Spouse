@@ -99,23 +99,18 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
         ),
     ),
     VerticalRegistration(
-        lane_id="afterthought",
-        summary="One optional recorded tail after her settled reply",
-        shape="anchored_trigger",
-        hand_rolled=False,
-        module="afterthought_author_vertical.py",
+        lane_id="afterthought_replay",
+        summary="Historical afterthought trigger retained only for ledger replay",
+        shape="infrastructure",
+        hand_rolled=True,
+        module="reducers.py",
         process_kinds=("afterthought_author",),
-        grammar_lanes=("proactive",),
         may_carry_source_evidence=("afterthought_author",),
-        runtime_drain_markers=("self._afterthought_author.drain_one",),
-        composition_markers=(
-            "AfterthoughtVerticalRuntime",
-            "afterthought_runtime = AfterthoughtVerticalRuntime(",
+        drain_site="retired; no production drain site",
+        notes=(
+            "New production replies use ExpressionPlan/ExpressionEpisode and "
+            "event-driven initiative; immutable historical triggers still replay.",
         ),
-        drain_site="WorldRuntime.drain_background_once (early, short horizon)",
-        spec_module="companion_daemon.world_v2.afterthought_author_vertical",
-        spec_builder="AfterthoughtVerticalRuntime",
-        notes=("Model-led afterthought consideration with replayable timing only.",),
     ),
     VerticalRegistration(
         lane_id="expression_episode",

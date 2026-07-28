@@ -15,8 +15,6 @@ ModelCallPurpose = Literal[
     "reply_fallback_audit",
     "proactive",
     "proactive_audit",
-    "afterthought",
-    "afterthought_audit",
 ]
 ModelComplexity = Literal[
     "routine",
@@ -56,8 +54,6 @@ _TURN_MODEL_CALL_PURPOSES = frozenset(
         "reply_fallback_audit",
         "proactive",
         "proactive_audit",
-        "afterthought",
-        "afterthought_audit",
     }
 )
 

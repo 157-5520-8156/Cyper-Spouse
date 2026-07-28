@@ -223,7 +223,7 @@ Implemented:
 - EchoText-inspired proactive trigger timeline chooses concrete outreach reasons such as hanging question, late night, repair attempt, longing, random thought, inside joke, or soft follow-up.
 - Trigger history, semantic category cooldowns, daily-stable jitter, and a max-unanswered-proactive guard reduce repetitive or needy proactive messages.
 - Recent emotion impact can create a `mood_follow_up` proactive candidate when the state shift is strong enough.
-- A short `open_thread_afterthought` trigger handles the “this turn has not fully ended” case: if she sent the last message 9-90 minutes ago and the mood is safe, she may add one small thought without re-asking the user.
+- The former fixed post-reply `open_thread_afterthought` lane is retired. Same-turn continuation is part of the role model's ordinary `ExpressionPlan`, while a genuinely later impulse must arise through the existing event-driven initiative, memory, affect, and current-self context. Historical events remain replayable.
 - EchoText-inspired memory highlight detection extracts life facts, favorites, hobbies, important people, recent events, and shared moments.
 - Context orchestration now builds a per-turn context package before model calls: current user
   intent, reply focus, forbidden stale-topic mistakes, relevant long-term memories, current life

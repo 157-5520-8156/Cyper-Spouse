@@ -5,6 +5,10 @@
 范围：实时对话、内心活动、表达、多段 Action、选择性记忆与世界闭环
 不在范围：重写 WorldKernel、删除 NPC/时间/关系/Affect、取消事实与 Action 权威
 
+> 2026-07-28 更新：本文较早章节中的独立 afterthought 模型、Guard、触发机会与
+> followup Action 是历史实现记录，现已退役。当前同轮续话属于普通 `ExpressionPlan`；
+> 跨时刻表达复用事件驱动主动联系。旧事件只保留重放兼容。
+
 ## 1. 背景与判断
 
 项目建设 World、Affect、Relationship、Appraisal、Drive、Stance、Display Strategy、
@@ -650,7 +654,7 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 | Phase 0 | 已有 bare/full 基线工具；2026-07-13 的真实模型基线（每 variant 24 个 hot）full hot P50=2.449s、P95=3.297s，延迟门槛通过。随后抽样复测未复现“共同迟到”的结果假设 hard issue。QQ 基线从首条进入合并队列计时，并按 cold/warm/hot 分组。设置 `QQ_TURN_OBSERVATION_PATH` 后，official QQ/NapCat 会追加私有 JSONL 回合证据（时间、cadence、Action/segment、回执状态与可用 recovery 结果），不写消息、用户标识、回执原文或凭据 | 真实 QQ/NapCat 网络端到端样本、人工盲评；真实模型质量仍需多次稳定复验，不能由一次通过或启发式诊断替代 |
 | Phase 1 | QQ/NapCat 文本、simulator 与 HTTP Capture transport 都经过 `CompanionTurn.respond`；平台、tool、media 与 timeout 可经 `settle` 幂等结算；后台媒体、以及 World-mode 的重启后定时补发也通过同一 Turn seam | 非 World 的遗留兼容路径仍需逐步淘汰或改为同一 seam |
 | Phase 2–5 | 有界 TurnFrame、Advisory、单一 hard guard、PrivateImpression/Commitment 与 Expression Beat 已在主路径使用 | 长对话校准与各字段的体验效度尚未由外部用户数据证明 |
-| Phase 6 | 多段文本 receipt、用户插话取消、QQ 图片/贴纸/反应、NapCat 图片、后台图片、正常及重启后的 afterthought 的真实回执语义已覆盖；无 durable receipt 记为 `unknown`，NapCat 的成功/明确失败/无回执/异常矩阵已回归 | 仍需真实 NapCat/QQ 网络回执样本，并逐步淘汰非 World 遗留兼容路径 |
+| Phase 6 | 多段文本 receipt、用户插话取消、QQ 图片/贴纸/反应、NapCat 图片和后台图片的真实回执语义已覆盖；旧 afterthought 事件仍可冷重放，但独立生产 lane 已退役；无 durable receipt 记为 `unknown`，NapCat 的成功/明确失败/无回执/异常矩阵已回归 | 仍需真实 NapCat/QQ 网络回执样本，并逐步淘汰非 World 遗留兼容路径 |
 | 模型与成本 | Flash 默认；强模型/thinking 路由会在能力缺失时显式降级；V4 Flash/Pro 都有版本化价格；每次 provider usage 持久化实际 `thinking_enabled` / `reasoning_effort`，并按 route 聚合进入 turn 与 bare/full 基线证据 | 未知新模型价格需持续更新；真实模型质量与不同路由的长期效果仍需重复实测 |
 
 当前原则：不得为通过旧的“拒绝回复”测试而恢复软机制硬拦截；若旧测试要求低置信情绪、疲惫或普通边界压力直接静默，应改写为验证自然收住、边界表达或延后 Action，而非把它们重新变成表达审批器。
@@ -683,13 +687,12 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
   `last_expression_affordance` 形成节奏连续性 advisory，避免刚修复后突然热情、突然追问或清零。
 - selected affordance 已影响多段 Action choreography：靠近/修复类保留短多段，收住/边界/撤回类
   合并成单段；QQ observation 追加 `segment_count` 与 `multi_segment` 供后续体验统计。
-- redacted QQ/NapCat JSONL 可用 `summarize_qq_turn_experience()` 汇总多段率、afterthought 率、
+- redacted QQ/NapCat JSONL 可用 `summarize_qq_turn_experience()` 汇总多段率、历史 afterthought 率、
   单气泡普通回复率、selected
   affordance 分布、top selected affordance 占比、固定模式诊断、情绪 reading 计数、用户情绪/
   私密印象入账率、情绪纠正信号率；汇总不读取消息文本、用户标识或平台回执。
-- selected affordance 已影响可取消 afterthought 的机会：修复/在意/延迟余波提高概率，收住/边界/
-  带过降低或清空概率；它不固定生成内容，后续文本仍过 afterthought 模型、hard guard、Action
-  调度、用户插话取消与 receipt 结算。
+- 独立 afterthought 模型、机会抽签和 Action 旁路已经退役。当前已提交 Affect 与来源绑定的
+  current-self advisory 继续进入普通 `ExpressionPlan` 与事件驱动主动联系，不再开启固定的第二次模型调用。
 - `TurnFrame.capability["current_text"]` 只给情绪机内部读取，不导出到 `prompt_payload` /
   `prompt_delta`，避免当前消息在主 prompt 重复占 token。
 - 修复 first-visible generation timeout 的失败收敛：若语义 fallback 因硬门拒绝短时间锚而失败，

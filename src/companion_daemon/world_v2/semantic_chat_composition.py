@@ -205,12 +205,10 @@ def build_semantic_chat_composition(
         companion_name=character.name,
         companion_aliases=aliases,
         counterpart_name=settings.primary_user_id,
-        relationship_frame=character.relationship,
         stable_identity_facts=tuple(character.canonical_facts),
         personality_frame=character.personality,
         values=tuple(character.values),
         speech_frame=character.speech,
-        style_rules=tuple(character.style_rules),
         boundaries=tuple(character.boundaries),
     )
     semantic_advice = SemanticAdvisoryAdapter(

@@ -180,7 +180,7 @@ class CompanionIdentityFrame(FrozenModel):
     companion_name: str = Field(min_length=1, max_length=128)
     companion_aliases: tuple[str, ...] = Field(default=(), max_length=8)
     counterpart_name: str = Field(min_length=1, max_length=128)
-    relationship_frame: str = Field(min_length=1, max_length=512)
+    relationship_frame: str | None = Field(default=None, min_length=1, max_length=512)
     stable_identity_facts: tuple[str, ...] = Field(default=(), max_length=16)
     personality_frame: str | None = Field(default=None, max_length=2_048)
     values: tuple[str, ...] = Field(default=(), max_length=16)
@@ -195,7 +195,11 @@ def companion_identity_source_ref(identity: CompanionIdentityFrame) -> str:
     """Return the immutable token for the exact deployment identity frame."""
 
     return "identity-frame:sha256:" + _digest(
-        identity.model_dump(mode="json", exclude={"counterpart_name"})
+        identity.model_dump(
+            mode="json",
+            exclude={"counterpart_name"},
+            exclude_none=True,
+        )
     )
 
 
@@ -1086,11 +1090,12 @@ class ChatModelDeliberationAdapter:
             "fact, declare it in world_claims and copy exact matching source_refs from Context. "
             "This includes first-person biography, relatives, past experiences, and enduring "
             "preferences; before returning JSON, silently verify that every such clause in the "
-            "visible beats is covered by a declaration and pinned evidence. If evidence is absent, "
-            "express uncertainty, ask an open question, or omit that factual clause. Never add an "
+            "visible beats is covered by a declaration and pinned evidence; unsupported factual "
+            "clauses make the draft invalid; this truth boundary does not choose an alternative "
+            "social move for you. Never add an "
             "unlisted person, event, or past occurrence to your own biography merely to create "
             "rapport or an analogy. "
-            "Subjective feelings, uncertainty, imagination, questions, and freely chosen future "
+            "Subjective feelings, uncertainty, imagination, and freely chosen future "
             "intentions are not committed occurrences and need no factual source. Never use a "
             "companion reply as evidence for a user fact. Attachment metadata proves only that an "
             "attachment exists unless perception_results describes it. "
@@ -1149,7 +1154,11 @@ class ChatModelDeliberationAdapter:
         if self._identity_frame is None:
             return ""
         identity = json.dumps(
-            self._identity_frame.model_dump(mode="json", exclude={"role", "not_an_assistant"}),
+            self._identity_frame.model_dump(
+                mode="json",
+                exclude={"role", "not_an_assistant"},
+                exclude_none=True,
+            ),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

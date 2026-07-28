@@ -44,3 +44,18 @@ def test_contextual_failsafe_requires_an_explicit_deployment_switch() -> None:
     )
 
     assert settings.world_v2_contextual_failsafe_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_production_identity_does_not_freeze_dynamic_relationship_or_turn_shape() -> None:
+    """Relationship and cadence belong to current World Context and the role model."""
+
+    settings = Settings(_env_file=None)
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="test",
+    )
+
+    assert composition.identity_frame.relationship_frame is None
+    assert composition.identity_frame.style_rules == ()
+    await composition.aclose()
