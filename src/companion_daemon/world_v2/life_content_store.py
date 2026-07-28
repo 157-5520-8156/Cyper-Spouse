@@ -18,7 +18,13 @@ from typing import Literal, Protocol
 from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
 
 
-LifeContentKind = Literal["outcome_candidate", "occurrence_result", "experience_summary"]
+LifeContentKind = Literal[
+    "outcome_candidate",
+    "occurrence_result",
+    "experience_summary",
+    "provisional_npc_introduction",
+    "dynamic_life_arc_context",
+]
 
 
 def life_content_payload_hash(text: str) -> str:
@@ -45,7 +51,13 @@ class StoredLifeContent:
     def __post_init__(self) -> None:
         if not self.content_ref or len(self.content_ref) > 512:
             raise ValueError("life content ref must contain between 1 and 512 chars")
-        if self.content_kind not in {"outcome_candidate", "occurrence_result", "experience_summary"}:
+        if self.content_kind not in {
+            "outcome_candidate",
+            "occurrence_result",
+            "experience_summary",
+            "provisional_npc_introduction",
+            "dynamic_life_arc_context",
+        }:
             raise ValueError("unsupported life content kind")
         if len(self.text) > 12_000:
             raise ValueError("life content exceeds the maximum size")

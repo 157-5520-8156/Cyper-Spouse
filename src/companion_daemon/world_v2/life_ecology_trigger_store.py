@@ -28,11 +28,35 @@ from .life_ecology_contract import (
     parse_life_ecology_trigger_ref,
     validate_life_ecology_run_key,
 )
+from .random_authority import RandomAuthority
 from .schemas import ClaimLease, TriggerProcess, WorldEvent
 
 
 _OUTCOME = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _MAX_CAS_RETRIES = 8
+_AMBIENT_CADENCE_OUTCOMES = frozenset(
+    {
+        "idle",
+        "author_idle",
+        "author_no_opening",
+        "life_development_no_op",
+        "life_development_plan_committed",
+        "life_development_occurrence_committed",
+        "life_development_recovered",
+    }
+)
+_AMBIENT_CADENCE_SECONDS = (2700, 7200, 14_400, 21_600, 28_800)
+_SEMANTIC_STIMULUS_OUTCOMES = frozenset(
+    {
+        "activity_transitioned",
+        "biographical_transitioned",
+        "aftermath_occurrence_opened",
+        "aftermath_settled",
+        "aftermath_recovered_experience",
+        "aftermath_recovered_memory",
+    }
+)
+_SEMANTIC_STIMULUS_SECONDS = (120, 900, 2700)
 
 
 def _digest(value: object) -> str:
@@ -309,12 +333,46 @@ class LedgerLifeEcologyTriggerStore:
             completed_at = max(logical_time, process.claim_lease.acquired_at)
             if completed_at > process.claim_lease.expires_at:
                 raise ValueError("life ecology lease expired before completion")
+            cadence_draw_ref: str | None = None
+            cadence_delay_seconds: int | None = None
+            schedule = getattr(projection, "life_ecology_schedule", None)
+            cadence_reused = (
+                outcome in _SEMANTIC_STIMULUS_OUTCOMES
+                and schedule is not None
+                and schedule.last_outcome_ref.removeprefix("life-ecology:")
+                in _SEMANTIC_STIMULUS_OUTCOMES
+                and completed_at < schedule.next_consideration_at
+            )
+            cadence_candidates = (
+                _AMBIENT_CADENCE_SECONDS
+                if outcome in _AMBIENT_CADENCE_OUTCOMES
+                else _SEMANTIC_STIMULUS_SECONDS
+                if outcome in _SEMANTIC_STIMULUS_OUTCOMES
+                else None
+            )
+            if cadence_candidates is not None and not cadence_reused:
+                draw = await self._consideration_cadence_draw(
+                    process=process,
+                    source_event=source_event,
+                    outcome=outcome,
+                    logical_time=logical_time,
+                    candidate_seconds=cadence_candidates,
+                )
+                cadence_draw_ref = "event:random-draw:" + draw.draw_id
+                cadence_delay_seconds = int(
+                    draw.selected_candidate_ref.removeprefix(
+                        "life-ecology-cadence-seconds:"
+                    )
+                )
             payload = {
                 "trigger_id": process.trigger_id,
                 "owner_id": process.claim_lease.owner_id,
                 "attempt_id": process.claim_lease.attempt_id,
                 "completed_at": completed_at.isoformat(),
                 "runtime_outcome_ref": outcome_ref,
+                "cadence_draw_event_ref": cadence_draw_ref,
+                "cadence_delay_seconds": cadence_delay_seconds,
+                "cadence_reused": cadence_reused,
             }
             event = WorldEvent.from_payload(
                 schema_version="world-v2.1",
@@ -336,6 +394,52 @@ class LedgerLifeEcologyTriggerStore:
             if await self._try_commit((event,), projection=projection):
                 return
         raise ConcurrencyConflict("life ecology trigger completion did not converge")
+
+    async def _consideration_cadence_draw(
+        self,
+        *,
+        process: TriggerProcess,
+        source_event: WorldEvent,
+        outcome: str,
+        logical_time: datetime,
+        candidate_seconds: tuple[int, ...],
+    ):
+        """Record one replay-stable model-consideration opportunity time.
+
+        The draw changes only when another model consideration may happen.  It
+        never chooses a life action or turns a model ``no_op`` into a scripted
+        behavior.
+        """
+
+        assert process.claim_lease is not None
+        candidate_refs = tuple(
+            f"life-ecology-cadence-seconds:{seconds}"
+            for seconds in candidate_seconds
+        )
+        kwargs = {
+            "attempt_id": "attempt:life-ecology:cadence:"
+            + _digest(
+                [
+                    process.trigger_id,
+                    process.claim_lease.attempt_id,
+                    outcome,
+                ]
+            ),
+            "candidate_refs": candidate_refs,
+            "catalog_version": "life-ecology-ambient-cadence.1",
+            "logical_time": logical_time,
+            "seed_instant": source_event.logical_time,
+            "actor": self._owner_id,
+            "trace_id": source_event.trace_id,
+            "correlation_id": source_event.correlation_id,
+        }
+        authority = RandomAuthority(
+            ledger=self._ledger,
+            source="world-v2:life-ecology-cadence",
+        )
+        if getattr(self._ledger, "blocks_event_loop", False):
+            return await asyncio.to_thread(authority.draw, **kwargs)
+        return authority.draw(**kwargs)
 
     async def _verified_wake(self, *, key: LifeEcologyRunKey, projection) -> WorldEvent:
         source_event = await self._source_event_ref(key.wake_event_ref)

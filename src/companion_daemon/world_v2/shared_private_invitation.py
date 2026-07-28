@@ -344,6 +344,7 @@ class SharedPrivateInvitationRuntime:
                 instant=wake.logical_time,
                 plans=owner_plans,
                 npcs=projection.npcs,
+                life_arcs=projection.life_arcs,
                 social_shapes=frozenset({"shared_private"}),
             )
             if item.opening.requires_relationship_closeness_bp is not None
@@ -556,6 +557,7 @@ class SharedPrivateInvitationRuntime:
             catalog_version=self._catalog.version,
             catalog_hash=self._catalog.catalog_hash,
             owner_actor_ref=self._owner_actor_ref,
+            availability_scope="reviewed_future_slot",
             location_ref=slot.get("location_ref"),
             participant_refs=(),
             availability_hash=slot["availability_hash"],

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -15,6 +16,8 @@ from .schemas import (
     NpcProjection,
     OutcomeObservationProjection,
     PlanStateProjection,
+    ProjectionCursor,
+    RecordedWorldDrawBinding,
     WorldOccurrenceProjection,
 )
 
@@ -36,6 +39,35 @@ class NpcRegisteredPayload(DomainMutationPayload):
             raise ValueError("NpcRegistered must create entity revision one")
         if self.npc.status != "active":
             raise ValueError("NpcRegistered requires an active NPC")
+        return self
+
+
+class NpcStatusChangedPayload(DomainMutationPayload):
+    npc_before: NpcProjection
+    npc_after: NpcProjection
+
+    @model_validator(mode="after")
+    def changes_only_lifecycle_status(self) -> "NpcStatusChangedPayload":
+        before = self.npc_before
+        after = self.npc_after
+        if (
+            self.expected_entity_revision != before.entity_revision
+            or after.entity_revision != before.entity_revision + 1
+            or after.npc_id != before.npc_id
+            or after.status == before.status
+        ):
+            raise ValueError("NPC status transition revision is inconsistent")
+        immutable = (
+            "stable_identity_ref",
+            "known_trait_refs",
+            "privacy_class",
+            "current_location_ref",
+            "source_event_ref",
+            "effect_descriptor_hash",
+            "accepted_event_ref",
+        )
+        if any(getattr(after, field) != getattr(before, field) for field in immutable):
+            raise ValueError("NPC status transition changed reviewed identity")
         return self
 
 
@@ -132,11 +164,128 @@ class OutcomeProposalRecordedPayload(FrozenModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     confidence_bp: int = Field(ge=0, le=10_000)
     expires_at: datetime
+    # Legacy and ordinary proposals predate character-owned consequential
+    # outcome selection. A long-lived biographical choice writes this complete
+    # group so the selected candidate is auditable against exactly one pinned
+    # Context Capsule and model result.
+    decision_authority: Literal[
+        "character_model",
+        "recorded_world_draw",
+        "external_observation",
+    ] | None = None
+    recorded_world_draw: RecordedWorldDrawBinding | None = None
+    decision_model: str | None = Field(default=None, min_length=1, max_length=256)
+    decision_raw_output_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    decision_model_result_ref: str | None = Field(default=None, min_length=1)
+    decision_model_result_event_ref: str | None = Field(default=None, min_length=1)
+    decision_audit_proposal_event_ref: str | None = Field(default=None, min_length=1)
+    decision_audit_proposal_event_payload_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    decision_candidate_matrix_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    adopt_proposed_life_direction: bool | None = None
+    context_identity_version: Literal[
+        "life-aftermath-context.1",
+        "life-aftermath-context.2",
+    ] | None = None
+    context_capsule_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    context_model_content_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    context_snapshot_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    context_cursor: ProjectionCursor | None = None
 
     @model_validator(mode="after")
     def proposed_change_hash_matches_fields(self) -> OutcomeProposalRecordedPayload:
         if (self.deliberation_trigger_id is None) != (self.source_observation_id is None):
             raise ValueError("outcome proposal trigger binding is incomplete")
+        context_identity = (
+            self.decision_model,
+            self.decision_raw_output_hash,
+            self.context_identity_version,
+            self.context_capsule_id,
+            self.context_model_content_hash,
+            self.context_snapshot_hash,
+            self.context_cursor,
+        )
+        durable_audit_identity = (
+            self.decision_model_result_ref,
+            self.decision_model_result_event_ref,
+            self.decision_audit_proposal_event_ref,
+            self.decision_audit_proposal_event_payload_hash,
+            self.decision_candidate_matrix_hash,
+        )
+        if any(item is not None for item in durable_audit_identity) and any(
+            item is None for item in durable_audit_identity
+        ):
+            raise ValueError("outcome proposal durable model audit is incomplete")
+        if any(item is not None for item in context_identity) and any(
+            item is None for item in context_identity
+        ):
+            raise ValueError("outcome proposal Context identity must be complete")
+        if self.decision_authority == "character_model":
+            if any(item is None for item in context_identity):
+                raise ValueError(
+                    "character outcome proposal requires complete Context identity"
+                )
+            if self.recorded_world_draw is not None:
+                raise ValueError("character outcome cannot carry a world draw")
+            if (
+                self.context_identity_version == "life-aftermath-context.2"
+                and (
+                    any(item is None for item in durable_audit_identity)
+                    or self.adopt_proposed_life_direction is None
+                )
+            ):
+                raise ValueError(
+                    "Context v2 character outcome requires a durable model audit "
+                    "and an explicit direction-adoption decision"
+                )
+            if (
+                self.context_identity_version == "life-aftermath-context.1"
+                and any(item is not None for item in durable_audit_identity)
+            ):
+                raise ValueError(
+                    "legacy Context v1 cannot claim a durable model audit"
+                )
+        elif self.decision_authority == "recorded_world_draw":
+            if self.recorded_world_draw is None:
+                raise ValueError("world contingency requires a recorded world draw")
+            if any(item is not None for item in context_identity) or any(
+                item is not None for item in durable_audit_identity
+            ) or self.adopt_proposed_life_direction is not None:
+                raise ValueError("world draw cannot carry character-model identity")
+        elif self.decision_authority == "external_observation":
+            if self.recorded_world_draw is not None or any(
+                item is not None for item in context_identity
+            ) or any(
+                item is not None for item in durable_audit_identity
+            ) or self.adopt_proposed_life_direction is not None:
+                raise ValueError(
+                    "external outcome cannot carry model or random authority"
+                )
+        elif (
+            self.recorded_world_draw is not None
+            or any(item is not None for item in context_identity)
+            or any(item is not None for item in durable_audit_identity)
+            or self.adopt_proposed_life_direction is not None
+        ):
+            raise ValueError(
+                "legacy outcome proposal cannot carry resolution authority"
+            )
+        if (
+            self.context_cursor is not None
+            and self.context_cursor.world_revision != self.evaluated_world_revision
+        ):
+            raise ValueError(
+                "outcome proposal must be recorded against its exact pinned World prefix"
+            )
         expected = outcome_mutation_hash(
             change_id=self.change_id,
             occurrence_id=self.occurrence_id,
@@ -147,6 +296,7 @@ class OutcomeProposalRecordedPayload(FrozenModel):
             result_payload_ref=self.proposed_result_payload_ref,
             result_payload_hash=self.proposed_result_payload_hash,
             observation_refs=self.observation_refs,
+            adopt_proposed_life_direction=self.adopt_proposed_life_direction,
         )
         if self.proposed_change_hash != expected:
             raise ValueError("outcome proposal change hash does not match proposed mutation")
@@ -166,6 +316,7 @@ class WorldOccurrenceSettledPayload(DomainMutationPayload):
     result_payload_hash: str = Field(min_length=1)
     settled_at: datetime
     appraisal_trigger_ref: str = Field(min_length=1)
+    adopt_proposed_life_direction: bool | None = None
 
     @model_validator(mode="after")
     def accepted_change_hash_matches_fields(self) -> WorldOccurrenceSettledPayload:
@@ -179,6 +330,7 @@ class WorldOccurrenceSettledPayload(DomainMutationPayload):
             result_payload_ref=self.result_payload_ref,
             result_payload_hash=self.result_payload_hash,
             observation_refs=self.observation_refs,
+            adopt_proposed_life_direction=self.adopt_proposed_life_direction,
         )
         if self.accepted_change_hash != expected:
             raise ValueError("settlement change hash does not match accepted mutation")
@@ -196,9 +348,9 @@ def outcome_mutation_hash(
     result_payload_ref: str,
     result_payload_hash: str,
     observation_refs: tuple[str, ...] | list[str],
+    adopt_proposed_life_direction: bool | None = None,
 ) -> str:
-    encoded = json.dumps(
-        {
+    material: dict[str, object] = {
             "candidate_result_ref": candidate_result_ref,
             "change_id": change_id,
             "evaluated_entity_revision": evaluated_entity_revision,
@@ -208,7 +360,13 @@ def outcome_mutation_hash(
             "result_id": result_id,
             "result_payload_hash": result_payload_hash,
             "result_payload_ref": result_payload_ref,
-        },
+        }
+    # Historical V2 hashes predate this independent character choice.  Omit
+    # the field only for those legacy records so cold replay stays byte exact.
+    if adopt_proposed_life_direction is not None:
+        material["adopt_proposed_life_direction"] = adopt_proposed_life_direction
+    encoded = json.dumps(
+        material,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -218,6 +376,7 @@ def outcome_mutation_hash(
 
 LIFE_PAYLOAD_MODELS = {
     "NpcRegistered": NpcRegisteredPayload,
+    "NpcStatusChanged": NpcStatusChangedPayload,
     "ActivityPlanned": ActivityPlannedPayload,
     "ActivityStarted": ActivityTransitionPayload,
     "ActivityPaused": ActivityTransitionPayload,

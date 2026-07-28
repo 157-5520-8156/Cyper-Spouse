@@ -106,6 +106,9 @@ def _payload(index: int = 1, *, padding: int = 0) -> CompiledDomainPayload:
                 "known_trait_refs": (["x" * padding] if padding else []),
                 "npc_id": f"npc:{index}",
                 "privacy_class": "private",
+                "source_event_ref": None,
+                "effect_descriptor_hash": None,
+                "accepted_event_ref": None,
                 "stable_identity_ref": f"identity:{index}",
                 "status": "active",
             },
@@ -167,7 +170,14 @@ class _Adapter:
         if self.omit_defaults:
             decoded = json.loads(payload.payload_json)
             npc = decoded["npc"]
-            for field in ("current_location_ref", "known_trait_refs", "status"):
+            for field in (
+                "accepted_event_ref",
+                "current_location_ref",
+                "effect_descriptor_hash",
+                "known_trait_refs",
+                "source_event_ref",
+                "status",
+            ):
                 npc.pop(field)
             payload_json = json.dumps(
                 decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")

@@ -69,16 +69,48 @@ class _OpenWorldModel:
         )
 
 
+class _OutcomeModel:
+    model = "test-open-world-outcome-model"
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        del temperature
+        candidates = json.loads(messages[-1]["content"])["candidates"]
+        return json.dumps(
+            {
+                "candidate_result_ref": candidates[0]["candidate_result_ref"],
+                "adopt_proposed_life_direction": False,
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_production_open_world_model_turns_active_plan_into_replayable_occurrence(
     tmp_path: Path,
 ) -> None:
+    seed = tmp_path / "open-world-seed.yaml"
+    seed.write_text(
+        """
+world_id: open-world-production
+life_author_catalog:
+  version: open-world-test.1
+  story_candidate_role: legacy_replay_and_fixture
+  locations: []
+  npcs: []
+  openings: []
+  future_openings: []
+  npc_initiated_events: []
+  aspiration_seeds: []
+""".strip(),
+        encoding="utf-8",
+    )
     config = WorldV2TurnApplicationConfig(
         world_id="world:open-world-production",
         companion_actor_ref="agent:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:open-world-production",
-        life_ecology=LifeEcologyComposition.production_v1(),
+        life_ecology=LifeEcologyComposition.production_v1(
+            seed_catalog_path=seed
+        ),
     )
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "open-world-production.sqlite",
@@ -89,6 +121,7 @@ async def test_production_open_world_model_turns_active_plan_into_replayable_occ
         quick_recovery=_QuickRecovery(),
         transport=_Transport(),
         open_world_event_model=_OpenWorldModel(),
+        outcome_draft_model=_OutcomeModel(),
         now=NOW,
     )
     try:

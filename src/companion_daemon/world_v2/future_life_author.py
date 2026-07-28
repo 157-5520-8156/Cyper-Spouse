@@ -25,11 +25,14 @@ import httpx
 from pydantic import Field, model_validator
 
 from .event_identity import domain_idempotency_key
+from .errors import ConcurrencyConflict
 from .life_author_runtime import (
+    LifeContextCapsuleCompiler,
     LifeAuthorDecisionRecordedPayload,
     LifeAuthorModel,
     LifeAuthorModelFailure,
     LifeAvailabilitySnapshotRecordedPayload,
+    compile_life_decision_context,
 )
 from .life_author_seed import ReviewedLifeSeedCatalog, ReviewedLifeSeedFutureCandidate
 from .life_events import ActivityPlannedPayload
@@ -37,6 +40,7 @@ from .mood_view import active_mood_intensities
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
 from .schemas import DueWindow, EvidenceRef, PlanStateProjection, ProjectionCursor, WorldEvent
+from .context_resolver import query_from_projection
 
 
 def _digest(value: object) -> str:
@@ -68,9 +72,12 @@ class FutureLifeAuthorWeightPolicy:
       loneliness reaches toward company days ahead, while heaviness that is
       not loneliness makes her less likely to promise company.  This mirrors
       ``LifeAuthorWeightPolicy`` and stays a tendency, never an if/else rule.
+
+    ``future-life-author-weight.2`` also accounts for an active Life Arc's
+    source-bound context affinity.
     """
 
-    version = "future-life-author-weight.1"
+    version = "future-life-author-weight.2"
 
     def compile(
         self, *, candidates: tuple[ReviewedLifeSeedFutureCandidate, ...],
@@ -80,6 +87,7 @@ class FutureLifeAuthorWeightPolicy:
         weights: dict[str, int] = {}
         for candidate in candidates:
             mass = max(1_000, candidate.opening.importance_bp)
+            mass = max(1, mass * candidate.context_fit_bp // 10_000)
             mass = max(1, mass * self._proximity_multiplier_bp(candidate.day_offset) // 10_000)
             mass = max(
                 1,
@@ -133,6 +141,7 @@ class FutureLifeAuthorRuntime:
     def __init__(
         self, *, ledger, catalog: ReviewedLifeSeedCatalog, model: LifeAuthorModel,
         owner_actor_ref: str, actor: str = "worker:world-v2:future-life-author",
+        capsule_compiler: LifeContextCapsuleCompiler,
         horizon_days: int = 7, max_candidates: int = 16,
     ) -> None:
         if not owner_actor_ref or not actor:
@@ -144,6 +153,7 @@ class FutureLifeAuthorRuntime:
         self._model = model
         self._owner_actor_ref = owner_actor_ref
         self._actor = actor
+        self._capsule_compiler = capsule_compiler
         self._horizon_days = horizon_days
         self._max_candidates = max_candidates
         self._random = RandomAuthority(
@@ -199,6 +209,7 @@ class FutureLifeAuthorRuntime:
             instant=wake.logical_time,
             plans=owner_plans,
             npcs=projection.npcs,
+            life_arcs=projection.life_arcs,
             horizon_days=self._horizon_days,
             max_candidates=self._max_candidates,
         )
@@ -236,7 +247,7 @@ class FutureLifeAuthorRuntime:
             item for item in candidates if item.token == draw.selected_candidate_ref
         )
         try:
-            decision = await self._decision_once(
+            pinned_decision = await self._decision_once(
                 candidate=selected,
                 attempt_id=attempt_id,
                 wake=wake,
@@ -244,11 +255,19 @@ class FutureLifeAuthorRuntime:
                 trace_id=trace_id,
                 correlation_id=correlation_id,
             )
+        except ConcurrencyConflict:
+            return FutureLifeAuthorResult(
+                status="blocked",
+                reason_code="future_life_author.candidate_prefix_stale",
+                draw_event_ref=draw_event_ref,
+            )
         except LifeAuthorModelFailure:
             return FutureLifeAuthorResult(
                 status="blocked", reason_code="future_life_author.model_unavailable",
                 draw_event_ref=draw_event_ref,
             )
+        decision = pinned_decision.decision
+        selected = pinned_decision.candidate
         if decision.decision == "no_op":
             return FutureLifeAuthorResult(
                 status="no_op", reason_code="future_life_author.model_declined",
@@ -262,10 +281,21 @@ class FutureLifeAuthorRuntime:
                 reason_code="future_life_author.selected_slot_no_longer_future",
                 draw_event_ref=draw_event_ref,
             )
-        event_ref = self._accept_plan(
-            candidate=selected, wake_event_ref=wake_event_ref,
-            suffix=suffix, trace_id=trace_id, correlation_id=correlation_id,
-        )
+        try:
+            event_ref = self._accept_plan(
+                candidate=selected,
+                wake_event_ref=wake_event_ref,
+                suffix=suffix,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                expected_cursor=pinned_decision.decision_commit_cursor,
+            )
+        except ConcurrencyConflict:
+            return FutureLifeAuthorResult(
+                status="blocked",
+                reason_code="future_life_author.acceptance_cursor_stale",
+                draw_event_ref=draw_event_ref,
+            )
         return FutureLifeAuthorResult(
             status="planned", reason_code="future_life_author.plan_accepted",
             plan_event_ref=event_ref, draw_event_ref=draw_event_ref,
@@ -274,7 +304,7 @@ class FutureLifeAuthorRuntime:
     async def _decision_once(
         self, *, candidate: ReviewedLifeSeedFutureCandidate, attempt_id: str, wake,
         draw_event_ref: str, trace_id: str, correlation_id: str,
-    ) -> "_FutureDecision":
+    ) -> "_PinnedFutureDecision":
         decision_id = "decision:future-life-author:" + _digest({
             "attempt_id": attempt_id, "candidate_token": candidate.token
         })
@@ -282,15 +312,50 @@ class FutureLifeAuthorRuntime:
         existing = self._ledger.lookup_event_commit(event_id)
         if existing is not None:
             payload = LifeAuthorDecisionRecordedPayload.model_validate_json(existing[0].payload_json)
-            return _FutureDecision(
-                decision=payload.decision,
-                candidate_token=payload.selected_candidate_token,
+            projection = self._ledger.project()
+            candidate = self._revalidated_candidate(
+                candidate=candidate,
+                wake_logical_time=wake.logical_time,
+                projection=projection,
             )
-        decision, raw = await self._deliberate(candidate, logical_time=wake.logical_time)
+            return _PinnedFutureDecision(
+                decision=_FutureDecision(
+                    decision=payload.decision,
+                    candidate_token=payload.selected_candidate_token,
+                ),
+                candidate=candidate,
+                decision_event_ref=event_id,
+                decision_commit_cursor=ProjectionCursor(
+                    world_revision=projection.world_revision,
+                    deliberation_revision=projection.deliberation_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                ),
+            )
         projection = self._ledger.project()
+        candidate = self._revalidated_candidate(
+            candidate=candidate,
+            wake_logical_time=wake.logical_time,
+            projection=projection,
+        )
         draw = next(
             item for item in projection.committed_world_event_refs
             if item.event_id == draw_event_ref and item.event_type == "RandomDrawRecorded"
+        )
+        query = query_from_projection(
+            projection,
+            actor_ref=self._owner_actor_ref,
+            trigger_ref=wake.event_id,
+        )
+        capsule = self._capsule_compiler.compile_for_deliberation(query).capsule
+        context_cursor = ProjectionCursor(
+            world_revision=capsule.world_revision,
+            deliberation_revision=capsule.deliberation_revision,
+            ledger_sequence=capsule.ledger_sequence,
+        )
+        decision, raw = await self._deliberate(
+            candidate,
+            logical_time=wake.logical_time,
+            decision_context=compile_life_decision_context(capsule),
         )
         payload = LifeAuthorDecisionRecordedPayload(
             decision_id=decision_id,
@@ -308,6 +373,13 @@ class FutureLifeAuthorRuntime:
             selected_candidate_token=decision.candidate_token,
             model=(str(getattr(self._model, "model", "")).strip() or type(self._model).__name__),
             raw_output_hash=_digest(raw),
+            context_identity_version="life-author-context.1",
+            context_capsule_id=capsule.capsule_id,
+            context_model_content_hash=hashlib.sha256(
+                capsule.model_content_json.encode("utf-8")
+            ).hexdigest(),
+            context_snapshot_hash=capsule.snapshot_hash,
+            context_cursor=context_cursor,
         )
         event = WorldEvent.from_payload(
             schema_version="world-v2.1",
@@ -332,18 +404,26 @@ class FutureLifeAuthorRuntime:
             ),
             payload=payload.model_dump(mode="json"),
         )
-        cursor = ProjectionCursor(
-            world_revision=projection.world_revision,
-            deliberation_revision=projection.deliberation_revision,
-            ledger_sequence=projection.ledger_sequence,
+        committed = self._ledger.commit_at_cursor(
+            (event,), expected_cursor=context_cursor, commit_id="commit:" + event_id
         )
-        self._ledger.commit_at_cursor(
-            (event,), expected_cursor=cursor, commit_id="commit:" + event_id
+        return _PinnedFutureDecision(
+            decision=decision,
+            candidate=candidate,
+            decision_event_ref=event_id,
+            decision_commit_cursor=ProjectionCursor(
+                world_revision=committed.world_revision,
+                deliberation_revision=committed.deliberation_revision,
+                ledger_sequence=committed.ledger_sequence,
+            ),
         )
-        return decision
 
     async def _deliberate(
-        self, candidate: ReviewedLifeSeedFutureCandidate, *, logical_time: datetime
+        self,
+        candidate: ReviewedLifeSeedFutureCandidate,
+        *,
+        logical_time: datetime,
+        decision_context: dict[str, object],
     ) -> tuple["_FutureDecision", str]:
         try:
             raw = await self._model.complete(
@@ -352,10 +432,11 @@ class FutureLifeAuthorRuntime:
                     "You are the final semantic veto for one reviewed future life commitment. The host "
                     "has already verified the target local day, weekly location/NPC availability, plan "
                     "overlap, privacy, and controlled-random selection; the commitment only becomes a "
-                    "plan she may mention, and the activity lifecycle lives the day itself later. Select "
-                    "the offered future slot when its supplied coordinates are coherent; use no_op only "
-                    "for a concrete semantic contradiction visible in those coordinates, not from "
-                    "uncertainty or lack of extra narrative detail. Return exactly "
+                    "plan she may mention, and the activity lifecycle lives the day itself later. The "
+                    "offered future slot is an opportunity, not an instruction. Decide as the character "
+                    "whether she actually wants it in light of her present feelings, relationships, "
+                    "memories, unfinished matters, recent life and aspirations. Selecting it and leaving "
+                    "the day unplanned are both legitimate character decisions. Return exactly "
                     "{\"decision\":\"no_op\"} or "
                     "{\"decision\":\"select\",\"candidate_token\":\"offered token\"}. "
                     "Do not invent an outcome, location, NPC, event id, or additional activity."
@@ -369,6 +450,11 @@ class FutureLifeAuthorRuntime:
                         "location_ref": candidate.location_ref,
                         "participant_ref": candidate.participant_ref,
                         "availability_hash": candidate.availability_hash,
+                        "biographical_context": (
+                            candidate.biographical_context.model_dump(mode="json")
+                            if candidate.biographical_context is not None
+                            else None
+                        ),
                     },
                     "future_candidate": {
                         "token": candidate.token,
@@ -381,7 +467,8 @@ class FutureLifeAuthorRuntime:
                         "privacy": candidate.opening.privacy,
                         "duration_minutes": candidate.opening.duration_minutes,
                         "importance_bp": candidate.opening.importance_bp,
-                    }
+                    },
+                    "current_character_context": decision_context,
                 }, ensure_ascii=False, separators=(",", ":"))},
                 ],
                 temperature=0.2,
@@ -409,12 +496,24 @@ class FutureLifeAuthorRuntime:
     def _accept_plan(
         self, *, candidate: ReviewedLifeSeedFutureCandidate, wake_event_ref: str,
         suffix: str, trace_id: str, correlation_id: str,
+        expected_cursor: ProjectionCursor,
     ) -> str:
         projection = self._ledger.project()
+        if (
+            projection.world_revision != expected_cursor.world_revision
+            or projection.deliberation_revision != expected_cursor.deliberation_revision
+            or projection.ledger_sequence != expected_cursor.ledger_sequence
+        ):
+            raise ConcurrencyConflict("Future Life Author acceptance cursor is stale")
         logical_time = projection.logical_time
         wake = next(
             item for item in projection.committed_world_event_refs
             if item.event_id == wake_event_ref and item.event_type == "ClockAdvanced"
+        )
+        candidate = self._revalidated_candidate(
+            candidate=candidate,
+            wake_logical_time=wake.logical_time,
+            projection=projection,
         )
         clock_evidence = EvidenceRef(
             ref_id=wake.event_id,
@@ -446,6 +545,7 @@ class FutureLifeAuthorRuntime:
             catalog_version=self._catalog.version,
             catalog_hash=self._catalog.catalog_hash,
             owner_actor_ref=self._owner_actor_ref,
+            availability_scope="reviewed_future_slot",
             location_ref=candidate.location_ref,
             participant_refs=participant_refs,
             availability_hash=candidate.availability_hash,
@@ -527,6 +627,44 @@ class FutureLifeAuthorRuntime:
         )
         return event.event_id
 
+    def _revalidated_candidate(
+        self,
+        *,
+        candidate: ReviewedLifeSeedFutureCandidate,
+        wake_logical_time: datetime,
+        projection,
+    ) -> ReviewedLifeSeedFutureCandidate:
+        """Bind the exact drawn slot to the prefix used to decide and accept."""
+
+        owner_plans = tuple(
+            plan
+            for plan in projection.plans
+            if plan.owner_actor_ref == self._owner_actor_ref
+        )
+        current = next(
+            (
+                item
+                for item in self._catalog.future_candidates_at(
+                    instant=wake_logical_time,
+                    plans=owner_plans,
+                    npcs=projection.npcs,
+                    life_arcs=projection.life_arcs,
+                    horizon_days=self._horizon_days,
+                    max_candidates=self._max_candidates,
+                )
+                if item.token == candidate.token
+            ),
+            None,
+        )
+        # Token identity alone is insufficient: an accepted Life Arc or NPC
+        # transition can leave the same slot token present while changing its
+        # reviewed availability hash or target-date biographical context.
+        if current is None or current != candidate:
+            raise ConcurrencyConflict(
+                "Future Life Author candidate availability prefix is stale"
+            )
+        return current
+
 
 class _FutureDecision(FrozenModel):
     decision: Literal["no_op", "select"]
@@ -537,6 +675,13 @@ class _FutureDecision(FrozenModel):
         if (self.decision == "select") != (self.candidate_token is not None):
             raise ValueError("future life author selection must bind exactly one candidate")
         return self
+
+
+class _PinnedFutureDecision(FrozenModel):
+    decision: _FutureDecision
+    candidate: ReviewedLifeSeedFutureCandidate
+    decision_event_ref: str
+    decision_commit_cursor: ProjectionCursor
 
 
 __all__ = [

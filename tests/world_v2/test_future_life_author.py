@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.future_life_author import FutureLifeAuthorWeightPolicy
 from companion_daemon.world_v2.life_author_seed import ReviewedLifeSeedCatalog
 from companion_daemon.world_v2.local_chronology import LocalChronology
@@ -282,14 +283,29 @@ async def test_future_author_plans_at_most_once_per_local_day_and_rolls_over(
         assert plan.authority_origin is not None
         assert model.future_calls == 1
         assert "future life commitment" in (model.last_future_system or "")
+        assert "opportunity, not an instruction" in (model.last_future_system or "")
+        assert "use no_op only" not in (model.last_future_system or "")
         assert model.last_future_payload is not None
         eligibility = model.last_future_payload["authoritative_eligibility"]
         assert eligibility["target_local_date"] > "2026-07-17"
+        current_context = model.last_future_payload["current_character_context"]
+        assert current_context["world_revision"] >= 1
+        assert "active_memory_candidates" in current_context["slices"]
 
         events = app._ledger.export_replay_evidence().events  # noqa: SLF001
         types = [item.event.event_type for item in events]
         assert types.count("RandomDrawRecorded") == 1
         assert types.count("LifeAuthorDecisionRecorded") == 1
+        decision_event = next(
+            item.event
+            for item in events
+            if item.event.event_type == "LifeAuthorDecisionRecorded"
+        )
+        decision_payload = json.loads(decision_event.payload_json)
+        assert decision_payload["context_identity_version"] == "life-author-context.1"
+        assert decision_payload["context_capsule_id"]
+        assert decision_payload["context_model_content_hash"]
+        assert decision_payload["context_cursor"]["world_revision"] >= 1
         snapshot_index = types.index("LifeAvailabilitySnapshotRecorded")
         assert types[snapshot_index + 1] == "ActivityPlanned"
 
@@ -344,8 +360,163 @@ async def test_future_model_no_op_holds_and_replays_for_the_same_day(
         assert model.future_calls == 1
         events = app._ledger.export_replay_evidence().events  # noqa: SLF001
         types = [item.event.event_type for item in events]
-        assert types.count("RandomDrawRecorded") == 1
+        assert (
+            sum(
+                item.event.event_type == "RandomDrawRecorded"
+                and item.event.source == "world-v2:future-life-author-random"
+                for item in events
+            )
+            == 1
+        )
         assert types.count("LifeAuthorDecisionRecorded") == 1
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_future_acceptance_uses_the_decision_commit_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _LifeModel()
+    app = _build(
+        tmp_path,
+        _single_slot_seed(tmp_path / "pinned-seed.yaml"),
+        model,
+        name="pinned-prefix",
+    )
+    future = app._life_ecology._future_life_author_followup  # noqa: SLF001
+    captured: dict[str, object] = {}
+
+    def reject_stale_acceptance(**kwargs):  # type: ignore[no-untyped-def]
+        captured["expected_cursor"] = kwargs["expected_cursor"]
+        raise ConcurrencyConflict("simulated write after the recorded decision")
+
+    monkeypatch.setattr(future, "_accept_plan", reject_stale_acceptance)
+    try:
+        await _tick(
+            app,
+            tick_id="pinned-prefix:a",
+            frm=NOW,
+            to=NOW + timedelta(hours=1),
+        )
+        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
+        assert model.future_calls == 1
+        decision_cursor = next(
+            item
+            for item in app._ledger.export_replay_evidence().events  # noqa: SLF001
+            if item.event.event_type == "LifeAuthorDecisionRecorded"
+        ).cursor
+        expected = captured["expected_cursor"]
+        assert expected == decision_cursor
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_future_reused_decision_accepts_against_current_pinned_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable semantic choice may be reused without reusing its old cursor."""
+
+    model = _LifeModel()
+    app = _build(
+        tmp_path,
+        _single_slot_seed(tmp_path / "reused-decision-seed.yaml"),
+        model,
+        name="reused-decision-prefix",
+    )
+    future = app._life_ecology._future_life_author_followup  # noqa: SLF001
+    accept_plan = future._accept_plan  # noqa: SLF001
+    acceptance_cursors = []
+
+    def conflict_once_then_accept(**kwargs):  # type: ignore[no-untyped-def]
+        acceptance_cursors.append(kwargs["expected_cursor"])
+        if len(acceptance_cursors) == 1:
+            raise ConcurrencyConflict("simulated concurrent write after decision")
+        return accept_plan(**kwargs)
+
+    monkeypatch.setattr(future, "_accept_plan", conflict_once_then_accept)
+    try:
+        await _tick(
+            app,
+            tick_id="reused-decision-prefix:a",
+            frm=NOW,
+            to=NOW + timedelta(hours=1),
+        )
+        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
+        assert model.future_calls == 1
+
+        await _tick(
+            app,
+            tick_id="reused-decision-prefix:b",
+            frm=NOW + timedelta(hours=1),
+            to=NOW + timedelta(hours=2),
+        )
+
+        assert len(_future_plans(app._ledger.project())) == 1  # noqa: SLF001
+        assert model.future_calls == 1
+        assert len(acceptance_cursors) == 2
+        assert acceptance_cursors[1] != acceptance_cursors[0]
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_future_candidate_invalidated_before_capsule_never_reaches_model_or_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorded draw cannot carry a slot across a changed World prefix."""
+
+    model = _LifeModel()
+    app = _build(
+        tmp_path,
+        _single_slot_seed(tmp_path / "invalidated-seed.yaml"),
+        model,
+        name="invalidated-before-capsule",
+    )
+    future = app._life_ecology._future_life_author_followup  # noqa: SLF001
+    compile_candidates = future._catalog.future_candidates_at  # noqa: SLF001
+    calls = 0
+
+    def invalidated_after_draw(**kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        candidates = compile_candidates(**kwargs)
+        # The first compilation feeds the recorded draw.  The second represents
+        # the same exact-token check at the Context prefix after a concurrent
+        # plan/biography/NPC change made that slot unavailable.
+        return candidates if calls == 1 else ()
+
+    monkeypatch.setattr(
+        future._catalog,  # noqa: SLF001
+        "future_candidates_at",
+        invalidated_after_draw,
+    )
+    try:
+        await _tick(
+            app,
+            tick_id="invalidated-before-capsule:a",
+            frm=NOW,
+            to=NOW + timedelta(hours=1),
+        )
+
+        assert calls >= 2
+        assert model.future_calls == 0
+        assert _future_plans(app._ledger.project()) == []  # noqa: SLF001
+        events = app._ledger.export_replay_evidence().events  # noqa: SLF001
+        event_types = [item.event.event_type for item in events]
+        assert (
+            sum(
+                item.event.event_type == "RandomDrawRecorded"
+                and item.event.source == "world-v2:future-life-author-random"
+                for item in events
+            )
+            == 1
+        )
+        assert event_types.count("LifeAuthorDecisionRecorded") == 0
     finally:
         app.close()
 

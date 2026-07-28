@@ -97,8 +97,13 @@ async def test_ledger_store_survives_restart_and_completion_is_idempotent() -> N
     assert projection.trigger_processes == ()
     assert projection.life_ecology_schedule is not None
     assert projection.life_ecology_schedule.last_outcome_ref == "life-ecology:idle"
-    assert projection.life_ecology_schedule.next_consideration_at == NOW + timedelta(minutes=10)
-    assert ledger.project().world_revision == 1
+    cadence = projection.life_ecology_schedule.next_consideration_at - NOW
+    assert timedelta(minutes=45) <= cadence <= timedelta(hours=8)
+    assert sum(
+        item.event_type == "RandomDrawRecorded"
+        for item in projection.committed_world_event_refs
+    ) == 1
+    assert ledger.project().world_revision == 2
     assert ledger.project().deliberation_revision == 3
 
 
@@ -351,7 +356,7 @@ async def test_sqlite_migrates_v33_terminal_ecology_head_to_current_bundle(
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
     try:
         projection = migrated.project()
-        assert projection.reducer_bundle_version == "world-v2-reducers.40"
+        assert projection.reducer_bundle_version == "world-v2-reducers.43"
         assert projection.completed_trigger_ids == ()
         assert projection.life_ecology_schedule == compact.life_ecology_schedule
         assert migrated.rebuild() == projection
@@ -521,6 +526,144 @@ async def test_structured_technical_failure_uses_backoff_and_exposes_its_code() 
     assert schedule.consecutive_failures == 1
     assert schedule.last_failure_code == "media.type_error"
     assert (schedule.next_consideration_at - schedule.last_completed_at).total_seconds() == 600
+
+
+@pytest.mark.asyncio
+async def test_deterministic_followup_probe_does_not_move_ambient_cadence() -> None:
+    ledger = _ledger()
+    store = LedgerLifeEcologyTriggerStore(ledger=ledger, owner_id="worker:cadence")
+    first_key = _key()
+    first = await store.claim_or_join(
+        key=first_key,
+        trace_id="trace:cadence:first",
+        correlation_id="correlation:cadence",
+    )
+    await store.complete(
+        key=first_key,
+        trigger_id=first.trigger_id,
+        outcome="life_development_no_op",
+    )
+    original = ledger.project().life_ecology_schedule
+    assert original is not None
+
+    probe_time = NOW + timedelta(minutes=10)
+    probe_event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:life-ecology:wake:cadence-probe",
+        world_id=WORLD_ID,
+        event_type="ClockAdvanced",
+        logical_time=probe_time,
+        created_at=probe_time,
+        actor="worker:clock",
+        source="test:life-ecology-trigger-store",
+        trace_id="trace:cadence:probe",
+        causation_id=first_key.wake_event_ref,
+        correlation_id="correlation:cadence",
+        idempotency_key="test:life-ecology:wake:cadence-probe",
+        payload={
+            "logical_time_from": NOW.isoformat(),
+            "logical_time_to": probe_time.isoformat(),
+        },
+    )
+    projection = ledger.project()
+    ledger.commit(
+        (probe_event,),
+        expected_world_revision=projection.world_revision,
+        expected_deliberation_revision=projection.deliberation_revision,
+    )
+    probe_key = LifeEcologyRunKey(
+        world_id=WORLD_ID,
+        wake_event_ref=probe_event.event_id,
+        catalog_version="life-ecology.1",
+    )
+    probe = await store.claim_or_join(
+        key=probe_key,
+        trace_id="trace:cadence:probe",
+        correlation_id="correlation:cadence",
+    )
+    await store.complete(
+        key=probe_key,
+        trigger_id=probe.trigger_id,
+        outcome="cooldown",
+    )
+
+    assert ledger.project().life_ecology_schedule == original
+
+
+@pytest.mark.asyncio
+async def test_semantic_stimuli_join_open_cadence_window_without_redrawing() -> None:
+    ledger = _ledger()
+    store = LedgerLifeEcologyTriggerStore(
+        ledger=ledger,
+        owner_id="worker:semantic-window",
+    )
+    first_key = _key()
+    first = await store.claim_or_join(
+        key=first_key,
+        trace_id="trace:semantic-window:first",
+        correlation_id="correlation:semantic-window",
+    )
+    await store.complete(
+        key=first_key,
+        trigger_id=first.trigger_id,
+        outcome="activity_transitioned",
+    )
+    first_schedule = ledger.project().life_ecology_schedule
+    assert first_schedule is not None
+    first_due = first_schedule.next_consideration_at
+
+    second_time = NOW + timedelta(minutes=1)
+    second_event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:life-ecology:wake:semantic-window:second",
+        world_id=WORLD_ID,
+        event_type="ClockAdvanced",
+        logical_time=second_time,
+        created_at=second_time,
+        actor="worker:clock",
+        source="test:life-ecology-trigger-store",
+        trace_id="trace:semantic-window:second",
+        causation_id=first_key.wake_event_ref,
+        correlation_id="correlation:semantic-window",
+        idempotency_key="test:life-ecology:wake:semantic-window:second",
+        payload={
+            "logical_time_from": NOW.isoformat(),
+            "logical_time_to": second_time.isoformat(),
+        },
+    )
+    projection = ledger.project()
+    ledger.commit(
+        (second_event,),
+        expected_world_revision=projection.world_revision,
+        expected_deliberation_revision=projection.deliberation_revision,
+    )
+    second_key = LifeEcologyRunKey(
+        world_id=WORLD_ID,
+        wake_event_ref=second_event.event_id,
+        catalog_version="life-ecology.1",
+    )
+    second = await store.claim_or_join(
+        key=second_key,
+        trace_id="trace:semantic-window:second",
+        correlation_id="correlation:semantic-window",
+    )
+    await store.complete(
+        key=second_key,
+        trigger_id=second.trigger_id,
+        outcome="aftermath_occurrence_opened",
+    )
+
+    completed = ledger.project()
+    assert completed.life_ecology_schedule is not None
+    assert completed.life_ecology_schedule.next_consideration_at == first_due
+    assert (
+        completed.life_ecology_schedule.last_outcome_ref
+        == "life-ecology:aftermath_occurrence_opened"
+    )
+    assert sum(
+        item.event_type == "RandomDrawRecorded"
+        for item in completed.committed_world_event_refs
+    ) == 1
 
 
 @pytest.mark.asyncio

@@ -2371,6 +2371,72 @@ class NpcProjection(FrozenModel):
     privacy_class: PrivacyClass
     current_location_ref: str | None = None
     status: Literal["active", "retired"] = "active"
+    # Present only for a provisional NPC materialized by one settled outcome.
+    source_event_ref: str | None = Field(default=None, min_length=1)
+    effect_descriptor_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    accepted_event_ref: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def dynamic_introduction_binding_is_complete(self) -> "NpcProjection":
+        if (self.source_event_ref is None) != (
+            self.effect_descriptor_hash is None
+        ):
+            raise ValueError("dynamic NPC introduction binding must be complete")
+        if self.accepted_event_ref is not None and self.source_event_ref is None:
+            raise ValueError("accepted dynamic NPC requires its settlement source")
+        return self
+
+
+class LifeArcProjection(FrozenModel):
+    """One accepted, long-lived chapter that changes the character's context.
+
+    A Life Arc is not a daily activity and does not claim that every day is
+    about the arc.  While active it contributes durable context tags and a
+    reviewed context pack to downstream deliberation.
+    """
+
+    arc_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    owner_actor_ref: str = Field(min_length=1)
+    arc_kind: Literal[
+        "academic",
+        "employment",
+        "residence",
+        "travel",
+        "personal",
+        "dynamic",
+    ]
+    context_pack_ref: str = Field(min_length=1)
+    context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    effect_descriptor_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    status: Literal["active", "completed", "abandoned"] = "active"
+    started_at: datetime
+    ends_at: datetime | None = None
+    closed_at: datetime | None = None
+    source_event_ref: str = Field(min_length=1)
+    # The settled consequence explains why this Arc exists. The accepted
+    # LifeArcChanged event proves which immutable event established or last
+    # updated the current projection image. Reducers fill this derived binding
+    # even when replaying an older payload that predates the field.
+    accepted_event_ref: str | None = Field(default=None, min_length=1)
+    privacy_class: PrivacyClass
+
+    @model_validator(mode="after")
+    def lifecycle_is_consistent(self) -> "LifeArcProjection":
+        if self.context_tags != tuple(sorted(set(self.context_tags))):
+            raise ValueError("Life Arc context tags must be sorted and unique")
+        if self.ends_at is not None and self.ends_at <= self.started_at:
+            raise ValueError("Life Arc end must follow its start")
+        terminal = self.status in {"completed", "abandoned"}
+        if terminal != (self.closed_at is not None):
+            raise ValueError("Life Arc close time must match terminal status")
+        if self.closed_at is not None and self.closed_at < self.started_at:
+            raise ValueError("Life Arc cannot close before it starts")
+        return self
 
 
 class AspirationProjection(FrozenModel):
@@ -2479,6 +2545,26 @@ class OutcomeObservation(FrozenModel):
         )
 
 
+class RecordedWorldDrawBinding(FrozenModel):
+    """Exact replay bytes proving a RandomAuthority candidate selection."""
+
+    draw_event_ref: str = Field(min_length=1)
+    draw_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    draw_payload_json: str = Field(min_length=2, max_length=24_000)
+
+    @model_validator(mode="after")
+    def exact_payload_hash_matches(self) -> "RecordedWorldDrawBinding":
+        if (
+            hashlib.sha256(self.draw_payload_json.encode()).hexdigest()
+            != self.draw_event_payload_hash
+        ):
+            raise ValueError("recorded world draw payload hash does not match bytes")
+        decoded = json.loads(self.draw_payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("recorded world draw payload must be an object")
+        return self
+
+
 class OutcomeProposalProjection(FrozenModel):
     outcome_proposal_id: str = Field(min_length=1)
     decision_proposal_id: str = Field(min_length=1)
@@ -2499,6 +2585,38 @@ class OutcomeProposalProjection(FrozenModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     confidence_bp: int = Field(ge=0, le=10_000)
     expires_at: datetime
+    decision_authority: Literal[
+        "character_model",
+        "recorded_world_draw",
+        "external_observation",
+    ] | None = None
+    recorded_world_draw: RecordedWorldDrawBinding | None = None
+    decision_model: str | None = Field(default=None, min_length=1, max_length=256)
+    decision_raw_output_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    decision_model_result_ref: str | None = Field(default=None, min_length=1)
+    decision_model_result_event_ref: str | None = Field(default=None, min_length=1)
+    decision_audit_proposal_event_ref: str | None = Field(default=None, min_length=1)
+    decision_audit_proposal_event_payload_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    decision_candidate_matrix_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    adopt_proposed_life_direction: bool | None = None
+    context_identity_version: Literal[
+        "life-aftermath-context.1",
+        "life-aftermath-context.2",
+    ] | None = None
+    context_capsule_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    context_model_content_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    context_snapshot_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    context_cursor: ProjectionCursor | None = None
 
 
 class InteractionBidOrigin(FrozenModel):
@@ -2588,6 +2706,310 @@ class MediaDeliveryThreadProposalProjection(FrozenModel):
     proposed_change_hash: str = Field(min_length=64, max_length=64)
 
 
+def _open_life_descriptor_hash(values: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            values,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def open_life_npc_id(
+    *,
+    world_id: str,
+    settlement_event_ref: str,
+    provisional_entity_ref: str,
+    descriptor_hash: str,
+) -> str:
+    return "open-life-npc:" + _open_life_descriptor_hash(
+        {
+            "world_id": world_id,
+            "settlement_event_ref": settlement_event_ref,
+            "provisional_entity_ref": provisional_entity_ref,
+            "descriptor_hash": descriptor_hash,
+        }
+    )
+
+
+def open_life_arc_id(
+    *,
+    world_id: str,
+    settlement_event_ref: str,
+    descriptor_hash: str,
+) -> str:
+    return "open-life-arc:" + _open_life_descriptor_hash(
+        {
+            "world_id": world_id,
+            "settlement_event_ref": settlement_event_ref,
+            "descriptor_hash": descriptor_hash,
+        }
+    )
+
+
+def _validate_narrative_tags(
+    tags: tuple[str, ...],
+    *,
+    label: str,
+) -> None:
+    if tags != tuple(sorted(set(tags))):
+        raise ValueError(f"{label} narrative tags must be sorted and unique")
+    if any(
+        not tag.startswith("narrative:")
+        or len(tag) <= len("narrative:")
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789._-"
+            for character in tag.removeprefix("narrative:")
+        )
+        for tag in tags
+    ):
+        raise ValueError(
+            f"{label} tags must use the lowercase narrative namespace"
+        )
+
+
+class ProvisionalNpcIntroductionDescriptor(FrozenModel):
+    """Hash-bound NPC introduction that has no World existence before settlement."""
+
+    provisional_entity_ref: str = Field(min_length=1, max_length=256)
+    summary_content_ref: str = Field(min_length=1, max_length=512)
+    summary_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    narrative_tags: tuple[str, ...] = Field(default=(), max_length=16)
+    privacy_class: PrivacyClass = "personal"
+    descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        provisional_entity_ref: str,
+        summary_content_ref: str,
+        summary_payload_hash: str,
+        narrative_tags: tuple[str, ...],
+        privacy_class: PrivacyClass,
+    ) -> "ProvisionalNpcIntroductionDescriptor":
+        values = {
+            "provisional_entity_ref": provisional_entity_ref,
+            "summary_content_ref": summary_content_ref,
+            "summary_payload_hash": summary_payload_hash,
+            "narrative_tags": narrative_tags,
+            "privacy_class": privacy_class,
+        }
+        return cls(**values, descriptor_hash=_open_life_descriptor_hash(values))
+
+    def canonical_hash(self) -> str:
+        return _open_life_descriptor_hash(
+            self.model_dump(mode="json", exclude={"descriptor_hash"})
+        )
+
+    @model_validator(mode="after")
+    def descriptor_is_canonical(self) -> "ProvisionalNpcIntroductionDescriptor":
+        if not self.provisional_entity_ref.startswith("provisional:npc:"):
+            raise ValueError("provisional NPC ref must use provisional:npc namespace")
+        _validate_narrative_tags(
+            self.narrative_tags,
+            label="provisional NPC",
+        )
+        if self.descriptor_hash != self.canonical_hash():
+            raise ValueError("provisional NPC descriptor hash does not match descriptor")
+        return self
+
+
+class DynamicLifeArcContextDescriptor(FrozenModel):
+    """Free long-range context frozen as prose, without executable capabilities."""
+
+    summary_content_ref: str = Field(min_length=1, max_length=512)
+    summary_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    narrative_tags: tuple[str, ...] = Field(default=(), max_length=16)
+    duration_days: int | None = Field(default=None, ge=1, le=730)
+    privacy_class: PrivacyClass = "personal"
+    descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        summary_content_ref: str,
+        summary_payload_hash: str,
+        narrative_tags: tuple[str, ...],
+        duration_days: int | None,
+        privacy_class: PrivacyClass,
+    ) -> "DynamicLifeArcContextDescriptor":
+        values = {
+            "summary_content_ref": summary_content_ref,
+            "summary_payload_hash": summary_payload_hash,
+            "narrative_tags": narrative_tags,
+            "duration_days": duration_days,
+            "privacy_class": privacy_class,
+        }
+        return cls(**values, descriptor_hash=_open_life_descriptor_hash(values))
+
+    def canonical_hash(self) -> str:
+        return _open_life_descriptor_hash(
+            self.model_dump(mode="json", exclude={"descriptor_hash"})
+        )
+
+    @model_validator(mode="after")
+    def descriptor_is_canonical(self) -> "DynamicLifeArcContextDescriptor":
+        _validate_narrative_tags(self.narrative_tags, label="dynamic Life Arc")
+        if self.descriptor_hash != self.canonical_hash():
+            raise ValueError("dynamic Life Arc descriptor hash does not match descriptor")
+        return self
+
+
+class FrozenLifeArcEffectDescriptor(FrozenModel):
+    """Immutable long-lived consequence frozen into an outcome candidate."""
+
+    arc_kind: Literal["academic", "employment", "residence", "travel", "personal"]
+    context_pack_ref: str = Field(min_length=1, max_length=256)
+    context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    duration_days: int | None = Field(default=None, ge=1, le=730)
+    privacy_class: PrivacyClass = "personal"
+    catalog_version: str = Field(min_length=1, max_length=128)
+    catalog_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        arc_kind: Literal["academic", "employment", "residence", "travel", "personal"],
+        context_pack_ref: str,
+        context_tags: tuple[str, ...],
+        duration_days: int | None,
+        privacy_class: PrivacyClass,
+        catalog_version: str,
+        catalog_hash: str,
+    ) -> "FrozenLifeArcEffectDescriptor":
+        values = {
+            "arc_kind": arc_kind,
+            "context_pack_ref": context_pack_ref,
+            "context_tags": context_tags,
+            "duration_days": duration_days,
+            "privacy_class": privacy_class,
+            "catalog_version": catalog_version,
+            "catalog_hash": catalog_hash,
+        }
+        return cls(
+            **values,
+            descriptor_hash=hashlib.sha256(
+                json.dumps(
+                    values,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+        )
+
+    def canonical_hash(self) -> str:
+        values = self.model_dump(mode="json", exclude={"descriptor_hash"})
+        return hashlib.sha256(
+            json.dumps(
+                values,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+    @model_validator(mode="after")
+    def provenance_is_canonical(self) -> "FrozenLifeArcEffectDescriptor":
+        if self.context_tags != tuple(sorted(set(self.context_tags))):
+            raise ValueError("frozen Life Arc context tags must be sorted and unique")
+        if self.descriptor_hash != self.canonical_hash():
+            raise ValueError("frozen Life Arc effect hash does not match descriptor")
+        return self
+
+
+class PendingContextualLifeSourceProjection(FrozenModel):
+    """Compact source queue for character-owned contextual inspiration."""
+
+    source_event_ref: str = Field(min_length=1)
+    source_event_type: Literal[
+        "ObservationRecorded",
+        "FactCommitted",
+        "FactCommittedV2",
+        "MemoryCandidateAccepted",
+    ]
+    source_world_revision: int = Field(ge=1)
+    source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    logical_time: datetime
+
+
+class ContextualLifeRetryProjection(FrozenModel):
+    """One lane/source-specific technical retry; unrelated work cannot reset it."""
+
+    lane: Literal["formation", "planning"]
+    source_event_ref: str = Field(min_length=1)
+    source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    retry_ordinal: int = Field(ge=1)
+    consecutive_technical_failures: int = Field(ge=1)
+    failure_code: str = Field(min_length=1, max_length=128)
+    failed_at: datetime
+    next_retry_at: datetime
+    failure_event_ref: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def retry_window_is_forward(self) -> "ContextualLifeRetryProjection":
+        if self.next_retry_at <= self.failed_at:
+            raise ValueError("contextual life retry must follow its failure")
+        if self.consecutive_technical_failures != self.retry_ordinal:
+            raise ValueError("contextual life retry ordinal must match failure count")
+        return self
+
+
+class ContextualLifeTechnicalFailureRecordedPayload(FrozenModel):
+    failure_id: str = Field(min_length=1)
+    lane: Literal["formation", "planning"]
+    source_event_ref: str = Field(min_length=1)
+    source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evaluated_world_revision: int = Field(ge=0)
+    retry_ordinal: int = Field(ge=1)
+    failure_code: str = Field(min_length=1, max_length=128)
+    failed_at: datetime
+    next_retry_at: datetime
+
+
+class ContextualLifeSourceDispositionRecordedPayload(FrozenModel):
+    disposition_id: str = Field(min_length=1)
+    source_event_ref: str = Field(min_length=1)
+    source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evaluated_world_revision: int = Field(ge=0)
+    disposition: Literal["source_not_character_visible"]
+    disposed_at: datetime
+
+
+class PendingBiographicalSettlementProjection(FrozenModel):
+    """Frozen long-lived outcome waiting for mechanical arc reconciliation."""
+
+    settlement_event_ref: str = Field(min_length=1)
+    settlement_world_revision: int = Field(ge=1)
+    settlement_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    occurrence_id: str = Field(min_length=1)
+    candidate_result_ref: str = Field(min_length=1)
+    settled_at: datetime
+    life_arc_effect: FrozenLifeArcEffectDescriptor | None = None
+    provisional_npc_introductions: tuple[
+        ProvisionalNpcIntroductionDescriptor, ...
+    ] = ()
+    dynamic_life_arc_context: DynamicLifeArcContextDescriptor | None = None
+
+    @model_validator(mode="after")
+    def retains_at_least_one_pending_effect(
+        self,
+    ) -> "PendingBiographicalSettlementProjection":
+        if (
+            self.life_arc_effect is None
+            and not self.provisional_npc_introductions
+            and self.dynamic_life_arc_context is None
+        ):
+            raise ValueError("pending settlement requires at least one frozen effect")
+        return self
+
+
 class OutcomeCandidateDescriptor(FrozenModel):
     """A frozen, model-selectable result candidate for one occurrence.
 
@@ -2604,11 +3026,58 @@ class OutcomeCandidateDescriptor(FrozenModel):
     privacy_class: PrivacyClass
     content_ref: str | None = Field(default=None, min_length=1)
     content_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    causal_authority: Literal[
+        "character_choice",
+        "world_contingency",
+        "external_observation",
+    ] = "character_choice"
+    # World Author may express relative plausibility without prescribing a
+    # probability. Only recorded world-contingency draws consume this value.
+    relative_plausibility_weight: int = Field(default=1, ge=1, le=1_000_000)
+    life_arc_effect: FrozenLifeArcEffectDescriptor | None = None
+    provisional_npc_introductions: tuple[
+        ProvisionalNpcIntroductionDescriptor, ...
+    ] = ()
+    dynamic_life_arc_context: DynamicLifeArcContextDescriptor | None = None
 
     @model_validator(mode="after")
     def content_binding_is_complete(self) -> OutcomeCandidateDescriptor:
         if (self.content_ref is None) != (self.content_payload_hash is None):
             raise ValueError("outcome candidate content binding is incomplete")
+        provisional_refs = tuple(
+            item.provisional_entity_ref
+            for item in self.provisional_npc_introductions
+        )
+        if len(provisional_refs) != len(set(provisional_refs)):
+            raise ValueError("outcome candidate provisional entity refs must be unique")
+        descriptor_hashes = tuple(
+            item.descriptor_hash for item in self.provisional_npc_introductions
+        )
+        if len(descriptor_hashes) != len(set(descriptor_hashes)):
+            raise ValueError("outcome candidate provisional entity descriptors must be unique")
+        if (
+            self.life_arc_effect is not None
+            and self.dynamic_life_arc_context is not None
+        ):
+            raise ValueError(
+                "outcome candidate cannot carry reviewed and dynamic Life Arc effects together"
+            )
+        privacy_rank = {
+            "public": 0,
+            "shareable": 1,
+            "personal": 2,
+            "private": 3,
+            "withhold": 4,
+        }
+        if any(
+            privacy_rank[item.privacy_class] < privacy_rank[self.privacy_class]
+            for item in self.provisional_npc_introductions
+        ) or (
+            self.dynamic_life_arc_context is not None
+            and privacy_rank[self.dynamic_life_arc_context.privacy_class]
+            < privacy_rank[self.privacy_class]
+        ):
+            raise ValueError("outcome effect cannot weaken candidate privacy")
         return self
 
 
@@ -2617,7 +3086,10 @@ class WorldOccurrenceProjection(FrozenModel):
     entity_revision: int = Field(ge=1)
     trigger_ref: str = Field(min_length=1)
     participant_refs: tuple[str, ...] = Field(min_length=1)
-    location_ref: str = Field(min_length=1)
+    # Some real activities are non-spatial (for example researching a possible
+    # destination online).  Absence means that settlement proves no place at
+    # all; callers must not substitute a home or infer a visit.
+    location_ref: str | None = Field(default=None, min_length=1)
     time_window: DueWindow
     precondition_refs: tuple[str, ...] = ()
     satisfied_precondition_refs: tuple[str, ...] = ()
@@ -2637,6 +3109,7 @@ class WorldOccurrenceProjection(FrozenModel):
     settlement_event_ref: str | None = None
     settlement_world_revision: int | None = Field(default=None, ge=1)
     settlement_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    settled_dynamic_life_direction_adopted: bool | None = None
     terminal_reason_ref: str | None = None
 
     @model_validator(mode="after")
@@ -2654,6 +3127,13 @@ class WorldOccurrenceProjection(FrozenModel):
                 raise ValueError("settled occurrence requires one candidate outcome")
         elif self.settled_outcome_ref is not None:
             raise ValueError("non-settled occurrence cannot retain a settled outcome")
+        if (
+            self.status != "settled"
+            and self.settled_dynamic_life_direction_adopted is not None
+        ):
+            raise ValueError(
+                "non-settled occurrence cannot retain a direction-adoption decision"
+            )
         if self.candidate_outcomes:
             refs = tuple(item.candidate_result_ref for item in self.candidate_outcomes)
             if refs != self.candidate_outcome_refs or len(set(refs)) != len(refs):
@@ -2662,6 +3142,12 @@ class WorldOccurrenceProjection(FrozenModel):
                 self.candidate_outcomes
             ):
                 raise ValueError("outcome candidate result ids must be unique")
+            if len(
+                {item.causal_authority for item in self.candidate_outcomes}
+            ) != 1:
+                raise ValueError(
+                    "one occurrence candidate matrix must use one causal authority"
+                )
         return self
 
 
@@ -4876,7 +5362,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.40"
+    reducer_bundle_version: str = "world-v2-reducers.43"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4942,12 +5428,18 @@ class LedgerProjection(FrozenModel):
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
     life_ecology_schedule: LifeEcologyScheduleProjection | None = None
+    pending_contextual_life_sources: tuple[PendingContextualLifeSourceProjection, ...] = ()
+    contextual_life_retries: tuple[ContextualLifeRetryProjection, ...] = ()
+    pending_biographical_settlements: tuple[
+        PendingBiographicalSettlementProjection, ...
+    ] = ()
     pending_external_observations: tuple[ExternalObservation, ...] = ()
     execution_receipts: tuple[ExecutionReceipt, ...] = ()
     budget_settlements: tuple[BudgetSettlement, ...] = ()
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
     npcs: tuple[NpcProjection, ...] = ()
+    life_arcs: tuple[LifeArcProjection, ...] = ()
     aspirations: tuple[AspirationProjection, ...] = ()
     plans: tuple[PlanStateProjection, ...] = ()
     world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()

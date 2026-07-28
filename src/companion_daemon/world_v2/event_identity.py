@@ -103,6 +103,27 @@ def _life_identity_components(
         )
     if event_type == "NpcRegistered":
         return world_id, _nested(payload, "npc", "npc_id")
+    if event_type == "NpcStatusChanged":
+        return (
+            world_id,
+            _nested(payload, "npc_after", "npc_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
+    if event_type == "LifeArcChanged":
+        return (
+            world_id,
+            _nested(payload, "arc_after", "arc_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
+    if event_type == "BiographicalTimelineConfigured":
+        return (
+            world_id,
+            payload.get("timeline_id"),
+            payload.get("document_hash"),
+            payload.get("timezone_name"),
+        )
     if event_type == "AspirationPlanted":
         return (
             world_id,
@@ -298,6 +319,19 @@ def _life_identity_components(
             payload.get("trigger_id"),
             payload.get("attempt_id"),
             "technical_failure",
+        )
+    if event_type == "ContextualLifeTechnicalFailureRecorded":
+        return (
+            world_id,
+            payload.get("lane"),
+            payload.get("source_event_ref"),
+            payload.get("retry_ordinal"),
+        )
+    if event_type == "ContextualLifeSourceDispositionRecorded":
+        return (
+            world_id,
+            payload.get("source_event_ref"),
+            payload.get("disposition"),
         )
     if event_type == "InteractionFactDecisionRecorded":
         return (

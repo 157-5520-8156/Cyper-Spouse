@@ -18,6 +18,9 @@ from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+from companion_daemon.world_v2.life_development_model_adapter import (
+    RoleBoundLifeDevelopmentModelAdapter,
+)
 from companion_daemon.world_v2.simulator_adapters import (
     CaptureSimulatorTransport,
     SimulatorIdentityResolver,
@@ -99,6 +102,15 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         relationship_model=RelationshipDraftDeliberationAdapter(model=flash_model),
         fact_model=flash_model,
         memory_model=flash_model,
+        activity_lifecycle_model=flash_model,
+        life_world_author_model=RoleBoundLifeDevelopmentModelAdapter(
+            model=flash_model,
+            role="world_author",
+        ),
+        life_character_model=RoleBoundLifeDevelopmentModelAdapter(
+            model=flash_model,
+            role="character_model",
+        ),
         now=now,
     )
     try:

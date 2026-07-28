@@ -168,6 +168,6 @@ def test_sqlite_migrates_v31_head_without_inventing_media_thread_proposals(tmp_p
             (legacy_hash, "world-v2-reducers.31", WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.40"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.43"
     assert migrated.project().media_thread_proposals == ()
     assert migrated.rebuild() == migrated.project()

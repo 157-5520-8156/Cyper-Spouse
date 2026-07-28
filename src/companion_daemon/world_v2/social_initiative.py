@@ -31,6 +31,8 @@ _SITUATION_STIMULUS_EVENT_TYPES = frozenset(
         "WorldOccurrenceActivated",
         "WorldOccurrenceSettled",
         "ExperienceCommitted",
+        "LifeArcChanged",
+        "NpcStatusChanged",
         "AffectEpisodeOpened",
         "AffectEpisodeUpdated",
         "AffectEpisodeResolved",

@@ -11,6 +11,8 @@ import httpx
 from pydantic import Field, model_validator
 
 from .change_phase_view import change_phase_by_dimension, change_phase_readings
+from .context_resolver import query_from_projection
+from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
 from .life_author_seed import ReviewedLifeSeedCandidate, ReviewedLifeSeedCatalog
 from .life_events import ActivityPlannedPayload
@@ -28,11 +30,48 @@ def _digest(value: object) -> str:
 class LifeAuthorModel(Protocol):
     model: str
 
-    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.2) -> str: ...
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.2
+    ) -> str: ...
+
+
+class LifeContextCapsule(Protocol):
+    capsule_id: str
+    snapshot_hash: str
+    world_revision: int
+    deliberation_revision: int
+    ledger_sequence: int
+    logical_time: datetime | None
+    model_content_json: str
+
+
+class LifeContextCapsuleHandle(Protocol):
+    @property
+    def capsule(self) -> LifeContextCapsule: ...
+
+
+class LifeContextCapsuleCompiler(Protocol):
+    def compile_for_deliberation(self, query) -> LifeContextCapsuleHandle: ...  # type: ignore[no-untyped-def]
 
 
 class LifeAuthorModelFailure(RuntimeError):
     """An explicit provider outage or invalid bounded model response."""
+
+
+def compile_life_decision_context(capsule: LifeContextCapsule) -> dict[str, object]:
+    """Expose the compiler-issued bounded model view without a second truth path.
+
+    The Context Capsule has already resolved source authority, applied
+    deterministic per-slice/global budgets, and recorded every omission.  Life
+    Author therefore consumes that exact canonical view—including active
+    MemoryCandidate source bindings and salience—instead of walking the mutable
+    projection again.
+    """
+
+    decoded = json.loads(capsule.model_content_json)
+    if not isinstance(decoded, dict):
+        raise ValueError("Life Author Context Capsule must decode to an object")
+    return decoded
 
 
 class LifeAuthorResult(FrozenModel):
@@ -57,9 +96,13 @@ class LifeAuthorWeightPolicy:
     return toward baseline restores some appetite for demanding and outgoing
     ones.  Both remain tendencies; recorded draws replay under their original
     versioned weights.
+
+    ``life-author-weight.5`` adds the source-bound biographical context fit.
+    It changes attention mass only; the character model still decides whether
+    the offered opportunity fits the whole current situation.
     """
 
-    version = "life-author-weight.4"
+    version = "life-author-weight.5"
 
     def __init__(self, *, recent_window: timedelta = timedelta(days=7)) -> None:
         if recent_window <= timedelta(0):
@@ -67,18 +110,18 @@ class LifeAuthorWeightPolicy:
         self._recent_window = recent_window
 
     def compile(
-        self, *, candidates: tuple[ReviewedLifeSeedCandidate, ...],
-        plans: tuple[object, ...], logical_time: datetime,
+        self,
+        *,
+        candidates: tuple[ReviewedLifeSeedCandidate, ...],
+        plans: tuple[object, ...],
+        logical_time: datetime,
         recent_domain_by_activity: dict[str, str] | None = None,
         affect_episodes: tuple[object, ...] = (),
     ) -> dict[str, int]:
         recent = tuple(
-            plan for plan in plans
-            if self._is_recent(plan=plan, logical_time=logical_time)
+            plan for plan in plans if self._is_recent(plan=plan, logical_time=logical_time)
         )
-        recent_social_count = sum(
-            bool(getattr(plan, "participant_refs", ())) for plan in recent
-        )
+        recent_social_count = sum(bool(getattr(plan, "participant_refs", ())) for plan in recent)
         previous_domain = self._latest_domain(
             recent=recent,
             domain_by_activity=recent_domain_by_activity or {},
@@ -95,33 +138,37 @@ class LifeAuthorWeightPolicy:
         weights: dict[str, int] = {}
         for candidate in candidates:
             same_kind_count = sum(
-                getattr(plan, "activity_kind", None)
-                == candidate.opening.activity_kind
+                getattr(plan, "activity_kind", None) == candidate.opening.activity_kind
                 for plan in recent
             )
             mass = max(1_000, candidate.opening.importance_bp)
             mass = max(1, mass * candidate.daypart_fit_bp // 10_000)
+            mass = max(1, mass * candidate.context_fit_bp // 10_000)
             mass = max(1, mass // (1 + same_kind_count))
             if candidate.participant_ref is not None and recent_social_count == 0:
                 mass = max(1, mass * 3 // 2)
             mass = max(
                 1,
-                mass * self._rhythm_multiplier_bp(
+                mass
+                * self._rhythm_multiplier_bp(
                     previous_domain=previous_domain,
                     candidate_domain=candidate.opening.domain,
-                ) // 10_000,
+                )
+                // 10_000,
             )
             mass = max(
                 1,
-                mass * self._mood_multiplier_bp(
-                    mood=mood, candidate_domain=candidate.opening.domain
-                ) // 10_000,
+                mass
+                * self._mood_multiplier_bp(mood=mood, candidate_domain=candidate.opening.domain)
+                // 10_000,
             )
             mass = max(
                 1,
-                mass * self._change_phase_multiplier_bp(
+                mass
+                * self._change_phase_multiplier_bp(
                     phases=phases, candidate_domain=candidate.opening.domain
-                ) // 10_000,
+                )
+                // 10_000,
             )
             weights[candidate.token] = mass
         return weights
@@ -154,8 +201,11 @@ class LifeAuthorWeightPolicy:
         if not mood:
             return 10_000
         heaviness = max(
-            mood.get("sadness", 0), mood.get("hurt", 0), mood.get("anxiety", 0),
-            mood.get("anger", 0), mood.get("resentment", 0),
+            mood.get("sadness", 0),
+            mood.get("hurt", 0),
+            mood.get("anxiety", 0),
+            mood.get("anger", 0),
+            mood.get("resentment", 0),
         )
         loneliness = mood.get("loneliness", 0)
         brightness = max(mood.get("joy", 0), mood.get("warmth", 0))
@@ -191,9 +241,10 @@ class LifeAuthorWeightPolicy:
             return 10_000
         heavy = ("sadness", "hurt", "anxiety", "anger", "resentment", "loneliness")
         departing_heavy = any(phases.get(dimension) == "departing" for dimension in heavy)
-        returning_heavy = any(
-            phases.get(dimension) in {"returning", "recovering"} for dimension in heavy
-        ) and not departing_heavy
+        returning_heavy = (
+            any(phases.get(dimension) in {"returning", "recovering"} for dimension in heavy)
+            and not departing_heavy
+        )
         restorative = {"rest_recovery", "sleep_wake", "digital_leisure"}
         demanding = {"study_class", "creative_photo_writing", "errand_household"}
         outgoing = {"commute_walk", "creative_photo_writing", "family_roommate_friend"}
@@ -210,13 +261,13 @@ class LifeAuthorWeightPolicy:
 
     @staticmethod
     def _latest_domain(
-        *, recent: tuple[object, ...], domain_by_activity: dict[str, str],
+        *,
+        recent: tuple[object, ...],
+        domain_by_activity: dict[str, str],
     ) -> str | None:
         ordered = sorted(
             recent,
-            key=lambda plan: getattr(
-                getattr(plan, "authority_origin", None), "accepted_at"
-            ),
+            key=lambda plan: getattr(getattr(plan, "authority_origin", None), "accepted_at"),
             reverse=True,
         )
         for plan in ordered:
@@ -227,7 +278,9 @@ class LifeAuthorWeightPolicy:
 
     @staticmethod
     def _rhythm_multiplier_bp(
-        *, previous_domain: str | None, candidate_domain: str,
+        *,
+        previous_domain: str | None,
+        candidate_domain: str,
     ) -> int:
         """Return a soft phase-transition prior, never an eligibility rule.
 
@@ -247,9 +300,7 @@ class LifeAuthorWeightPolicy:
         return 10_000
 
     def _is_recent(self, *, plan: object, logical_time: datetime) -> bool:
-        accepted_at = getattr(
-            getattr(plan, "authority_origin", None), "accepted_at", None
-        )
+        accepted_at = getattr(getattr(plan, "authority_origin", None), "accepted_at", None)
         return (
             isinstance(accepted_at, datetime)
             and accepted_at.tzinfo is not None
@@ -285,6 +336,13 @@ class LifeAuthorDecisionRecordedPayload(FrozenModel):
     selected_candidate_token: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     model: str = Field(min_length=1, max_length=256)
     raw_output_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # Legacy decisions predate pinned Context identity. New production writes
+    # populate the whole group; optionality is replay compatibility only.
+    context_identity_version: Literal["life-author-context.1"] | None = None
+    context_capsule_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    context_model_content_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    context_snapshot_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    context_cursor: ProjectionCursor | None = None
 
     @model_validator(mode="after")
     def selection_is_bound_to_the_drawn_candidate(self) -> "LifeAuthorDecisionRecordedPayload":
@@ -293,7 +351,24 @@ class LifeAuthorDecisionRecordedPayload(FrozenModel):
                 raise ValueError("life author decision selected a different candidate")
         elif self.selected_candidate_token is not None:
             raise ValueError("life author no-op cannot select a candidate")
+        context_identity = (
+            self.context_identity_version,
+            self.context_capsule_id,
+            self.context_model_content_hash,
+            self.context_snapshot_hash,
+            self.context_cursor,
+        )
+        if any(item is not None for item in context_identity) and any(
+            item is None for item in context_identity
+        ):
+            raise ValueError("life author Context identity must be complete")
         return self
+
+
+class _PinnedDecision(FrozenModel):
+    decision: _Decision
+    decision_event_ref: str
+    decision_commit_cursor: ProjectionCursor
 
 
 class LifeAvailabilitySnapshotRecordedPayload(FrozenModel):
@@ -307,6 +382,9 @@ class LifeAvailabilitySnapshotRecordedPayload(FrozenModel):
     catalog_version: str = Field(min_length=1, max_length=128)
     catalog_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     owner_actor_ref: str = Field(min_length=1)
+    availability_scope: Literal["current_presence", "reviewed_future_slot"] = (
+        "current_presence"
+    )
     location_ref: str | None = Field(default=None, min_length=1)
     participant_refs: tuple[str, ...] = ()
     availability_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -329,8 +407,14 @@ class LifeAuthorRuntime:
     """
 
     def __init__(
-        self, *, ledger, catalog: ReviewedLifeSeedCatalog, model: LifeAuthorModel,
-        owner_actor_ref: str, actor: str = "worker:world-v2:life-author",
+        self,
+        *,
+        ledger,
+        catalog: ReviewedLifeSeedCatalog,
+        model: LifeAuthorModel,
+        owner_actor_ref: str,
+        capsule_compiler: LifeContextCapsuleCompiler,
+        actor: str = "worker:world-v2:life-author",
     ) -> None:
         if not owner_actor_ref or not actor:
             raise ValueError("life author requires owner and worker actors")
@@ -338,6 +422,7 @@ class LifeAuthorRuntime:
         self._catalog = catalog
         self._model = model
         self._owner_actor_ref = owner_actor_ref
+        self._capsule_compiler = capsule_compiler
         self._actor = actor
         self._random = RandomAuthority(ledger=ledger, source="world-v2:life-author-random")
         self._weight_policy = LifeAuthorWeightPolicy()
@@ -348,41 +433,54 @@ class LifeAuthorRuntime:
         projection = self._ledger.project()
         logical_time = projection.logical_time
         wake = next(
-            (item for item in projection.committed_world_event_refs if item.event_id == wake_event_ref),
+            (
+                item
+                for item in projection.committed_world_event_refs
+                if item.event_id == wake_event_ref
+            ),
             None,
         )
         transition = next(
-            (item for item in projection.clock_transition_history if item.clock_event_ref == wake_event_ref),
+            (
+                item
+                for item in projection.clock_transition_history
+                if item.clock_event_ref == wake_event_ref
+            ),
             None,
         )
         if (
-            logical_time is None or wake is None or wake.event_type != "ClockAdvanced"
-            or transition is None or transition.payload_hash != wake.payload_hash
+            logical_time is None
+            or wake is None
+            or wake.event_type != "ClockAdvanced"
+            or transition is None
+            or transition.payload_hash != wake.payload_hash
             or transition.computed_world_revision != wake.world_revision
         ):
             return LifeAuthorResult(
                 status="blocked", reason_code="life_author.wake_not_exact_clock"
             )
         owner_plans = tuple(
-            plan for plan in projection.plans
-            if plan.owner_actor_ref == self._owner_actor_ref
+            plan for plan in projection.plans if plan.owner_actor_ref == self._owner_actor_ref
         )
         candidates = self._catalog.candidates_at(
             instant=wake.logical_time,
             wake_event_ref=wake_event_ref,
             plans=owner_plans,
             npcs=projection.npcs,
+            life_arcs=projection.life_arcs,
         )
         if not candidates:
             return LifeAuthorResult(
                 status="no_opening", reason_code="life_author.no_eligible_opening"
             )
-        attempt_id = "attempt:life-author:" + _digest({
-            "world_id": self._ledger.world_id,
-            "wake_event_ref": wake_event_ref,
-            "catalog_version": self._catalog.version,
-            "catalog_hash": self._catalog.catalog_hash,
-        })
+        attempt_id = "attempt:life-author:" + _digest(
+            {
+                "world_id": self._ledger.world_id,
+                "wake_event_ref": wake_event_ref,
+                "catalog_version": self._catalog.version,
+                "catalog_hash": self._catalog.catalog_hash,
+            }
+        )
         draw = self._random.draw(
             attempt_id=attempt_id,
             candidate_refs=tuple(item.token for item in candidates),
@@ -393,18 +491,18 @@ class LifeAuthorRuntime:
             trace_id=trace_id,
             correlation_id=correlation_id,
             candidate_weights=self._weight_policy.compile(
-                candidates=candidates, plans=owner_plans, logical_time=logical_time,
+                candidates=candidates,
+                plans=owner_plans,
+                logical_time=logical_time,
                 recent_domain_by_activity=self._catalog.activity_domains,
                 affect_episodes=projection.affect_episodes,
             ),
             weight_policy_version=self._weight_policy.version,
         )
         draw_event_ref = "event:random-draw:" + draw.draw_id
-        selected = next(
-            item for item in candidates if item.token == draw.selected_candidate_ref
-        )
+        selected = next(item for item in candidates if item.token == draw.selected_candidate_ref)
         try:
-            decision = await self._decision_once(
+            pinned_decision = await self._decision_once(
                 candidate=selected,
                 attempt_id=attempt_id,
                 wake=wake,
@@ -414,53 +512,106 @@ class LifeAuthorRuntime:
             )
         except LifeAuthorModelFailure:
             return LifeAuthorResult(
-                status="blocked", reason_code="life_author.model_unavailable",
+                status="blocked",
+                reason_code="life_author.model_unavailable",
                 draw_event_ref=draw_event_ref,
             )
+        except ConcurrencyConflict:
+            return LifeAuthorResult(
+                status="blocked",
+                reason_code="life_author.context_cursor_stale",
+                draw_event_ref=draw_event_ref,
+            )
+        decision = pinned_decision.decision
         if decision.decision == "no_op":
             return LifeAuthorResult(
-                status="no_op", reason_code="life_author.model_declined",
+                status="no_op",
+                reason_code="life_author.model_declined",
                 draw_event_ref=draw_event_ref,
             )
         assert decision.candidate_token == selected.token
-        if logical_time >= wake.logical_time + timedelta(
-            minutes=selected.opening.duration_minutes
-        ):
+        if logical_time >= wake.logical_time + timedelta(minutes=selected.opening.duration_minutes):
             return LifeAuthorResult(
                 status="blocked",
                 reason_code="life_author.selected_opening_expired_before_acceptance",
                 draw_event_ref=draw_event_ref,
             )
-        event_ref = self._accept_plan(
-            candidate=selected, wake_event_ref=wake_event_ref, logical_time=logical_time,
-            scheduled_from=wake.logical_time,
-            trace_id=trace_id, correlation_id=correlation_id,
-        )
+        try:
+            event_ref = self._accept_plan(
+                candidate=selected,
+                wake_event_ref=wake_event_ref,
+                logical_time=logical_time,
+                scheduled_from=wake.logical_time,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                expected_cursor=pinned_decision.decision_commit_cursor,
+            )
+        except ConcurrencyConflict:
+            return LifeAuthorResult(
+                status="blocked",
+                reason_code="life_author.acceptance_cursor_stale",
+                draw_event_ref=draw_event_ref,
+            )
         return LifeAuthorResult(
-            status="planned", reason_code="life_author.plan_accepted",
-            plan_event_ref=event_ref, draw_event_ref=draw_event_ref,
+            status="planned",
+            reason_code="life_author.plan_accepted",
+            plan_event_ref=event_ref,
+            draw_event_ref=draw_event_ref,
         )
 
     async def _decision_once(
-        self, *, candidate: ReviewedLifeSeedCandidate, attempt_id: str, wake,
-        draw_event_ref: str, trace_id: str, correlation_id: str,
-    ) -> _Decision:
-        decision_id = "decision:life-author:" + _digest({
-            "attempt_id": attempt_id, "candidate_token": candidate.token
-        })
+        self,
+        *,
+        candidate: ReviewedLifeSeedCandidate,
+        attempt_id: str,
+        wake,
+        draw_event_ref: str,
+        trace_id: str,
+        correlation_id: str,
+    ) -> _PinnedDecision:
+        decision_id = "decision:life-author:" + _digest(
+            {"attempt_id": attempt_id, "candidate_token": candidate.token}
+        )
         event_id = "event:life-author-decision:" + _digest(decision_id)
         existing = self._ledger.lookup_event_commit(event_id)
         if existing is not None:
-            payload = LifeAuthorDecisionRecordedPayload.model_validate_json(existing[0].payload_json)
-            return _Decision(
-                decision=payload.decision,
-                candidate_token=payload.selected_candidate_token,
+            payload = LifeAuthorDecisionRecordedPayload.model_validate_json(
+                existing[0].payload_json
             )
-        decision, raw = await self._deliberate(candidate, logical_time=wake.logical_time)
+            return _PinnedDecision(
+                decision=_Decision(
+                    decision=payload.decision,
+                    candidate_token=payload.selected_candidate_token,
+                ),
+                decision_event_ref=event_id,
+                decision_commit_cursor=ProjectionCursor(
+                    world_revision=existing[1].world_revision,
+                    deliberation_revision=existing[1].deliberation_revision,
+                    ledger_sequence=existing[1].ledger_sequence,
+                ),
+            )
         projection = self._ledger.project()
         draw = next(
-            item for item in projection.committed_world_event_refs
+            item
+            for item in projection.committed_world_event_refs
             if item.event_id == draw_event_ref and item.event_type == "RandomDrawRecorded"
+        )
+        query = query_from_projection(
+            projection,
+            actor_ref=self._owner_actor_ref,
+            trigger_ref=wake.event_id,
+        )
+        capsule = self._capsule_compiler.compile_for_deliberation(query).capsule
+        context_cursor = ProjectionCursor(
+            world_revision=capsule.world_revision,
+            deliberation_revision=capsule.deliberation_revision,
+            ledger_sequence=capsule.ledger_sequence,
+        )
+        decision_context = compile_life_decision_context(capsule)
+        decision, raw = await self._deliberate(
+            candidate,
+            logical_time=wake.logical_time,
+            decision_context=decision_context,
         )
         payload = LifeAuthorDecisionRecordedPayload(
             decision_id=decision_id,
@@ -478,14 +629,21 @@ class LifeAuthorRuntime:
             selected_candidate_token=decision.candidate_token,
             model=(str(getattr(self._model, "model", "")).strip() or type(self._model).__name__),
             raw_output_hash=_digest(raw),
+            context_identity_version="life-author-context.1",
+            context_capsule_id=capsule.capsule_id,
+            context_model_content_hash=hashlib.sha256(
+                capsule.model_content_json.encode("utf-8")
+            ).hexdigest(),
+            context_snapshot_hash=capsule.snapshot_hash,
+            context_cursor=context_cursor,
         )
         event = WorldEvent.from_payload(
             schema_version="world-v2.1",
             event_id=event_id,
             world_id=self._ledger.world_id,
             event_type="LifeAuthorDecisionRecorded",
-            logical_time=projection.logical_time,
-            created_at=projection.logical_time,
+            logical_time=capsule.logical_time,
+            created_at=capsule.logical_time,
             actor=self._actor,
             source="world-v2:life-author",
             trace_id=trace_id,
@@ -496,60 +654,83 @@ class LifeAuthorRuntime:
                     event_type="LifeAuthorDecisionRecorded",
                     world_id=self._ledger.world_id,
                     payload=payload.model_dump(mode="json"),
-                ) or "life-author-decision:" + _digest({
-                    "world_id": self._ledger.world_id, "decision_id": decision_id
-                })
+                )
+                or "life-author-decision:"
+                + _digest({"world_id": self._ledger.world_id, "decision_id": decision_id})
             ),
             payload=payload.model_dump(mode="json"),
         )
-        cursor = ProjectionCursor(
-            world_revision=projection.world_revision,
-            deliberation_revision=projection.deliberation_revision,
-            ledger_sequence=projection.ledger_sequence,
+        committed = self._ledger.commit_at_cursor(
+            (event,), expected_cursor=context_cursor, commit_id="commit:" + event_id
         )
-        self._ledger.commit_at_cursor(
-            (event,), expected_cursor=cursor, commit_id="commit:" + event_id
+        return _PinnedDecision(
+            decision=decision,
+            decision_event_ref=event_id,
+            decision_commit_cursor=ProjectionCursor(
+                world_revision=committed.world_revision,
+                deliberation_revision=committed.deliberation_revision,
+                ledger_sequence=committed.ledger_sequence,
+            ),
         )
-        return decision
 
     async def _deliberate(
-        self, candidate: ReviewedLifeSeedCandidate, *, logical_time: datetime
+        self,
+        candidate: ReviewedLifeSeedCandidate,
+        *,
+        logical_time: datetime,
+        decision_context: dict[str, object],
     ) -> tuple[_Decision, str]:
         try:
             raw = await self._model.complete(
                 [
-                {"role": "system", "content": (
-                    "You are the final semantic veto for one reviewed abstract life opening. The host has "
-                    "already verified its local-time window, daily frequency, plan overlap, location, NPC "
-                    "availability, privacy, and controlled-random selection. This is not a choice between "
-                    "having a life and staying empty. Select the offered opening when its supplied coordinates "
-                    "are coherent; use no_op only for a concrete semantic contradiction visible in those "
-                    "coordinates, not from uncertainty or lack of extra narrative detail. Return exactly "
-                    "{\"decision\":\"no_op\"} or "
-                    "{\"decision\":\"select\",\"candidate_token\":\"offered token\"}. "
-                    "Do not invent an outcome, location, NPC, event id, or additional activity."
-                )},
-                {"role": "user", "content": json.dumps({
-                    "authoritative_eligibility": {
-                        "logical_time": logical_time.isoformat(),
-                        "daypart_fit_bp": candidate.daypart_fit_bp,
-                        "location_ref": candidate.location_ref,
-                        "participant_ref": candidate.participant_ref,
-                        "availability_hash": candidate.availability_hash,
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are the final semantic veto for one reviewed abstract life opening. The host has "
+                            "already verified its local-time window, daily frequency, plan overlap, location, NPC "
+                            "availability, privacy, and controlled-random attention. The offered opening is an "
+                            "opportunity, not an instruction. Decide as the character whether it fits her present "
+                            "life, feelings, relationships, unfinished matters, and ordinary spontaneity. Both "
+                            "select and no_op are legitimate character decisions. Return exactly "
+                            '{"decision":"no_op"} or '
+                            '{"decision":"select","candidate_token":"offered token"}. '
+                            "Do not invent an outcome, location, NPC, event id, or additional activity."
+                        ),
                     },
-                    "candidate": {
-                        "token": candidate.token,
-                        "activity_kind": candidate.opening.activity_kind,
-                        "source": candidate.opening.source,
-                        "domain": candidate.opening.domain,
-                        "social_shape": candidate.opening.social_shape,
-                        "deviation": candidate.opening.deviation,
-                        "visual_potential": candidate.opening.visual_potential,
-                        "privacy": candidate.opening.privacy,
-                        "duration_minutes": candidate.opening.duration_minutes,
-                        "importance_bp": candidate.opening.importance_bp,
-                    }
-                }, ensure_ascii=False, separators=(",", ":"))},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "authoritative_eligibility": {
+                                    "logical_time": logical_time.isoformat(),
+                                    "daypart_fit_bp": candidate.daypart_fit_bp,
+                                    "location_ref": candidate.location_ref,
+                                    "participant_ref": candidate.participant_ref,
+                                    "availability_hash": candidate.availability_hash,
+                                    "biographical_context": (
+                                        candidate.biographical_context.model_dump(mode="json")
+                                        if candidate.biographical_context is not None
+                                        else None
+                                    ),
+                                },
+                                "candidate": {
+                                    "token": candidate.token,
+                                    "activity_kind": candidate.opening.activity_kind,
+                                    "source": candidate.opening.source,
+                                    "domain": candidate.opening.domain,
+                                    "social_shape": candidate.opening.social_shape,
+                                    "deviation": candidate.opening.deviation,
+                                    "visual_potential": candidate.opening.visual_potential,
+                                    "privacy": candidate.opening.privacy,
+                                    "duration_minutes": candidate.opening.duration_minutes,
+                                    "importance_bp": candidate.opening.importance_bp,
+                                },
+                                "current_character_context": decision_context,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    },
                 ],
                 temperature=0.2,
             )
@@ -562,7 +743,8 @@ class LifeAuthorRuntime:
         except json.JSONDecodeError as exc:
             raise LifeAuthorModelFailure("life author model response is not valid JSON") from exc
         if not isinstance(parsed, dict) or set(parsed) not in (
-            {"decision"}, {"decision", "candidate_token"}
+            {"decision"},
+            {"decision", "candidate_token"},
         ):
             raise LifeAuthorModelFailure("life author model returned an invalid decision")
         try:
@@ -574,13 +756,26 @@ class LifeAuthorRuntime:
         return decision, raw
 
     def _accept_plan(
-        self, *, candidate: ReviewedLifeSeedCandidate, wake_event_ref: str,
-        logical_time: datetime, scheduled_from: datetime,
-        trace_id: str, correlation_id: str,
+        self,
+        *,
+        candidate: ReviewedLifeSeedCandidate,
+        wake_event_ref: str,
+        logical_time: datetime,
+        scheduled_from: datetime,
+        trace_id: str,
+        correlation_id: str,
+        expected_cursor: ProjectionCursor,
     ) -> str:
         projection = self._ledger.project()
+        if (
+            projection.world_revision != expected_cursor.world_revision
+            or projection.deliberation_revision != expected_cursor.deliberation_revision
+            or projection.ledger_sequence != expected_cursor.ledger_sequence
+        ):
+            raise ConcurrencyConflict("Life Author acceptance cursor is stale")
         wake = next(
-            item for item in projection.committed_world_event_refs
+            item
+            for item in projection.committed_world_event_refs
             if item.event_id == wake_event_ref and item.event_type == "ClockAdvanced"
         )
         clock_evidence = EvidenceRef(
@@ -590,11 +785,13 @@ class LifeAuthorRuntime:
             source_world_revision=wake.world_revision,
             immutable_hash=wake.payload_hash,
         )
-        suffix = _digest({
-            "world_id": self._ledger.world_id,
-            "wake_event_ref": wake_event_ref,
-            "candidate_token": candidate.token,
-        })
+        suffix = _digest(
+            {
+                "world_id": self._ledger.world_id,
+                "wake_event_ref": wake_event_ref,
+                "candidate_token": candidate.token,
+            }
+        )
         opening = candidate.opening
         participant_refs = (
             (candidate.participant_ref,) if candidate.participant_ref is not None else ()
@@ -689,18 +886,15 @@ class LifeAuthorRuntime:
             idempotency_key=(
                 domain_idempotency_key(
                     event_type="ActivityPlanned", world_id=self._ledger.world_id, payload=payload
-                ) or "life-author-plan:" + suffix
+                )
+                or "life-author-plan:" + suffix
             ),
             payload=payload,
         )
-        cursor = ProjectionCursor(
-            world_revision=projection.world_revision,
-            deliberation_revision=projection.deliberation_revision,
-            ledger_sequence=projection.ledger_sequence,
-        )
         self._ledger.commit_at_cursor(
-            (snapshot_event, event), expected_cursor=cursor,
-            commit_id="commit:life-author-plan:" + suffix
+            (snapshot_event, event),
+            expected_cursor=expected_cursor,
+            commit_id="commit:life-author-plan:" + suffix,
         )
         return event.event_id
 
@@ -713,4 +907,5 @@ __all__ = [
     "LifeAuthorResult",
     "LifeAuthorRuntime",
     "LifeAuthorWeightPolicy",
+    "compile_life_decision_context",
 ]

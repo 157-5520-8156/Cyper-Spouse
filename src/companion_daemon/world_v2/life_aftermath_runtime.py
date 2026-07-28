@@ -1,4 +1,4 @@
-"""Reviewed activity aftermath: occurrence, settlement, experience, content."""
+"""Activity aftermath: occurrence, settlement, experience, and content."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Literal
 import httpx
 
 from .batch_invariants import appraisal_trigger_identity
+from .context_resolver import query_from_projection
 from .event_identity import domain_idempotency_key
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .experience_memory_candidate_lifecycle import ExperienceMemoryCandidateLifecycle
@@ -31,12 +32,17 @@ from .life_content_store import (
     StoredLifeContent,
     life_content_payload_hash,
 )
+from .life_development_runtime import LifeDevelopmentProposalReader
 from .life_events import (
     OutcomeObservationRecordedPayload,
     OutcomeProposalRecordedPayload,
     WorldOccurrenceActivatedPayload,
     WorldOccurrenceSettledPayload,
     outcome_mutation_hash,
+)
+from .life_author_runtime import (
+    LifeContextCapsuleCompiler,
+    compile_life_decision_context,
 )
 from .occurrence_content_coordinator import (
     OccurrenceContentCommitRequest,
@@ -45,11 +51,25 @@ from .occurrence_content_coordinator import (
 )
 from .mood_view import mood_summary_prose
 from .outcome_selection_draft import (
+    OutcomeSelectionDraft,
     OutcomeSelectionDraftAdapter,
+    OutcomeSelectionFailure,
     OutcomeSelectionModel,
     OutcomeSelectionOption,
+    ProposedLifeDirectionOption,
+    outcome_selection_audit_text,
 )
 from .plan_evidence import canonical_plan_evidence_hash
+from .proposal_audit_schemas import (
+    ModelResultRecordedPayload,
+    ProposalRecordedV2Payload,
+    RecordedModelResultAudit,
+    RecordedModelRoute,
+    canonical_json,
+    model_audit_json,
+    sha256,
+)
+from .proposal_envelope import MinimalProposal
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
 from .schemas import (
@@ -63,6 +83,7 @@ from .schemas import (
     ExperienceValues,
     OutcomeObservationProjection,
     ProjectionCursor,
+    RecordedWorldDrawBinding,
     TriggerProcess,
     WorldEvent,
     WorldOccurrenceProjection,
@@ -74,6 +95,25 @@ def _digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _candidate_matrix_hash(occurrence) -> str:
+    return sha256(
+        canonical_json(
+            [
+                item.model_dump(mode="json")
+                for item in occurrence.candidate_outcomes
+            ]
+        )
+    )
+
+
+def _cursor(projection) -> ProjectionCursor:
+    return ProjectionCursor(
+        world_revision=projection.world_revision,
+        deliberation_revision=projection.deliberation_revision,
+        ledger_sequence=projection.ledger_sequence,
+    )
 
 
 _PRIVACY_RANK = {
@@ -101,12 +141,25 @@ def _experience_privacy(source_privacy: str) -> str:
 _LOG = logging.getLogger(__name__)
 
 
+class LifeAftermathModelFailure(RuntimeError):
+    """A character-owned consequential outcome could not be decided."""
+
+    def __init__(self, message: str, *, failure_code: str = "unknown") -> None:
+        self.failure_code = failure_code
+        super().__init__(message)
+
+
+class _LifeAftermathRetryWait(RuntimeError):
+    """The occurrence-owned model lane is waiting for its recorded retry due time."""
+
+
 class LifeAftermathResult(FrozenModel):
     status: Literal[
         "occurrence_opened",
         "settled",
         "recovered_experience",
         "recovered_memory",
+        "retry_wait",
         "no_op",
     ]
     reason_code: str
@@ -117,11 +170,12 @@ class LifeAftermathResult(FrozenModel):
 class LifeAftermathRuntime:
     """One bounded authority seam from accepted activity to lived history.
 
-    Models never provide identities, locations, result refs, hashes, or prose.
-    Candidate prose comes only from the reviewed seed. When an optional
-    outcome-selection model is installed it chooses among those candidates;
-    the durable random draw remains the deterministic fallback when the model
-    is unavailable or returns an invalid response.
+    Legacy activities read their frozen candidates from the reviewed replay
+    catalog; open LifeDevelopment plans rehydrate model-authored candidates
+    from the accepted Proposal and exact sidecars. World contingencies resolve
+    through recorded weighted randomness, character-controlled consequences
+    require the Character Model, and external results require a matching
+    observation. No branch may invent identities or content during settlement.
     """
 
     def __init__(
@@ -132,6 +186,7 @@ class LifeAftermathRuntime:
         occurrence_content: OccurrenceContentCoordinator,
         content_store: ImmutableLifeContentStore,
         owner_actor_ref: str,
+        capsule_compiler: LifeContextCapsuleCompiler,
         experience_memory_lifecycle: ExperienceMemoryCandidateLifecycle | None = None,
         outcome_selection_model: OutcomeSelectionModel | None = None,
         memory_adapter: FactMemoryDraftAdapter | None = None,
@@ -145,6 +200,10 @@ class LifeAftermathRuntime:
         self._catalog = catalog
         self._occurrence_content = occurrence_content
         self._content_store = content_store
+        self._life_development_proposals = LifeDevelopmentProposalReader(
+            ledger=ledger,
+            content_store=content_store,
+        )
         if (
             experience_memory_lifecycle is not None
             and experience_memory_lifecycle._ledger is not ledger  # noqa: SLF001
@@ -156,6 +215,7 @@ class LifeAftermathRuntime:
             if outcome_selection_model is not None
             else None
         )
+        self._capsule_compiler = capsule_compiler
         self._memory_adapter = memory_adapter
         self._owner_actor_ref = owner_actor_ref
         self._actor = actor
@@ -259,13 +319,20 @@ class LifeAftermathRuntime:
             None,
         )
         if active is not None:
-            experience_id = await self._settle(
-                occurrence=active,
-                wake=wake,
-                logical_time=projection.logical_time,
-                trace_id=trace_id,
-                correlation_id=correlation_id,
-            )
+            try:
+                experience_id = await self._settle(
+                    occurrence=active,
+                    wake=wake,
+                    logical_time=projection.logical_time,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+            except _LifeAftermathRetryWait:
+                return LifeAftermathResult(
+                    status="retry_wait",
+                    reason_code="life_aftermath.outcome_retry_wait",
+                    occurrence_id=active.occurrence_id,
+                )
             return LifeAftermathResult(
                 status="settled",
                 reason_code="life_aftermath.settled",
@@ -281,8 +348,13 @@ class LifeAftermathRuntime:
                 if item.owner_actor_ref == self._owner_actor_ref
                 and item.status == "active"
                 and item.plan_id not in existing_plan_ids
-                and item.location_ref is not None
-                and self._catalog.outcomes_for_activity(item.activity_kind)
+                and (
+                    self._catalog.outcomes_for_activity(item.activity_kind)
+                    or self._life_development_proposals.read_for_plan(
+                        plan_id=item.plan_id
+                    )
+                    is not None
+                )
             ),
             None,
         )
@@ -307,22 +379,73 @@ class LifeAftermathRuntime:
         self, *, plan, wake, logical_time: datetime, trace_id: str, correlation_id: str
     ) -> str:
         outcomes = self._catalog.outcomes_for_activity(plan.activity_kind)
+        dynamic = (
+            None
+            if outcomes
+            else self._life_development_proposals.read_for_plan(
+                plan_id=plan.plan_id
+            )
+        )
+        outcome_authority = (
+            "character_choice"
+            if any(item.life_arc_effect is not None for item in outcomes)
+            else "world_contingency"
+        )
         suffix = _digest({"world": self._ledger.world_id, "plan": plan.plan_id})
         occurrence_id = "occurrence:life-aftermath:" + suffix
         existing = self._ledger.project()
         if any(item.occurrence_id == occurrence_id for item in existing.world_occurrences):
             return occurrence_id
-        candidate_contents = tuple(
-            OutcomeCandidateContent(
-                candidate_result_ref=f"candidate:life-aftermath:{suffix}:{item.id}",
-                result_id=f"result:life-aftermath:{suffix}:{item.id}",
-                result_payload_ref=f"content:occurrence-result:{suffix}:{item.id}",
-                result_payload_hash=life_content_payload_hash(item.text),
-                privacy_class=item.privacy,
-                content_ref=f"content:outcome-candidate:{suffix}:{item.id}",
-                text=item.text,
+        candidate_contents = (
+            tuple(
+                OutcomeCandidateContent(
+                    candidate_result_ref=(
+                        f"candidate:life-aftermath:{suffix}:{item.id}"
+                    ),
+                    result_id=f"result:life-aftermath:{suffix}:{item.id}",
+                    result_payload_ref=(
+                        f"content:occurrence-result:{suffix}:{item.id}"
+                    ),
+                    result_payload_hash=life_content_payload_hash(item.text),
+                    privacy_class=item.privacy,
+                    content_ref=(
+                        f"content:outcome-candidate:{suffix}:{item.id}"
+                    ),
+                    text=item.text,
+                    causal_authority=outcome_authority,
+                    life_arc_effect=(
+                        self._catalog.frozen_life_arc_effect_for_outcome(
+                            activity_kind=plan.activity_kind,
+                            outcome_id=item.id,
+                        )
+                    ),
+                )
+                for item in outcomes
             )
-            for item in outcomes
+            if outcomes
+            else tuple(
+                OutcomeCandidateContent(
+                    candidate_result_ref=item.descriptor.candidate_result_ref,
+                    result_id=item.descriptor.result_id,
+                    result_payload_ref=item.descriptor.result_payload_ref,
+                    result_payload_hash=item.descriptor.result_payload_hash,
+                    privacy_class=item.descriptor.privacy_class,
+                    content_ref=item.descriptor.content_ref or "",
+                    text=item.text,
+                    life_arc_effect=item.descriptor.life_arc_effect,
+                    causal_authority=item.descriptor.causal_authority,
+                    relative_plausibility_weight=(
+                        item.descriptor.relative_plausibility_weight
+                    ),
+                    provisional_npc_introductions=(
+                        item.descriptor.provisional_npc_introductions
+                    ),
+                    dynamic_life_arc_context=(
+                        item.descriptor.dynamic_life_arc_context
+                    ),
+                )
+                for item in dynamic.outcomes
+            )
         )
         wake_evidence = self._event_evidence(wake, purpose="life_transition")
         plan_evidence = EvidenceRef(
@@ -397,40 +520,74 @@ class LifeAftermathRuntime:
     ) -> str:
         wake_evidence = self._event_evidence(wake, purpose="life_transition")
         suffix = occurrence.occurrence_id.removeprefix("occurrence:life-aftermath:")
-        observation_id = "observation:life-aftermath:" + _digest(
-            [occurrence.occurrence_id, wake.event_id]
-        )
-        observation = OutcomeObservationProjection(
-            observation_id=observation_id,
-            occurrence_id=occurrence.occurrence_id,
-            source_kind="committed_world_event",
-            source_refs=(wake.event_id,),
-            observed_payload_ref=wake.event_id,
-            observed_payload_hash=wake.payload_hash,
-            observed_at=logical_time,
-            confidence_bp=10_000,
-        )
-        observation_payload = OutcomeObservationRecordedPayload(
-            change_id="change:life-aftermath:observation:" + suffix,
-            transition_id="transition:life-aftermath:observation:" + suffix,
-            expected_entity_revision=occurrence.entity_revision,
-            evidence_refs=(wake_evidence,),
-            policy_refs=("policy:life-aftermath.1",),
-            observation=observation,
-        )
-        observation_event = self._event(
-            event_id=f"event:outcome-observation:{observation_id}",
-            event_type="OutcomeObservationRecorded",
-            payload=observation_payload.model_dump(mode="json"),
-            logical_time=logical_time,
-            trace_id=trace_id,
-            causation_id=wake.event_id,
-            correlation_id=correlation_id,
-        )
-        if self._ledger.lookup_event_commit(observation_event.event_id) is None:
-            self._commit(
-                (observation_event,), commit_id="commit:life-aftermath:observation:" + suffix
+        # Settlement observation is effect-once per occurrence.  A character
+        # model failure may leave the observation committed while the outcome
+        # remains undecided; a later clock wake must recover that same
+        # observation instead of trying to write different content through the
+        # occurrence-stable commit id.
+        matrix_authority = occurrence.candidate_outcomes[0].causal_authority
+        projected_before_observation = self._ledger.project()
+        external_observation = (
+            next(
+                (
+                    item
+                    for item in projected_before_observation.outcome_observations
+                    if item.occurrence_id == occurrence.occurrence_id
+                    and item.source_kind == "settled_external_result"
+                ),
+                None,
             )
+            if matrix_authority == "external_observation"
+            else None
+        )
+        if matrix_authority == "external_observation":
+            if external_observation is None:
+                raise ValueError(
+                    "external outcome is waiting for a settled external observation"
+                )
+            observation_id = external_observation.observation_id
+            located_observation = self._ledger.lookup_event_commit(
+                f"event:outcome-observation:{observation_id}"
+            )
+            if located_observation is None:
+                raise ValueError("external outcome observation event is unavailable")
+            observation_event = located_observation[0]
+        else:
+            observation_id = "observation:life-aftermath:" + _digest(
+                [occurrence.occurrence_id]
+            )
+            observation = OutcomeObservationProjection(
+                observation_id=observation_id,
+                occurrence_id=occurrence.occurrence_id,
+                source_kind="committed_world_event",
+                source_refs=(wake.event_id,),
+                observed_payload_ref=wake.event_id,
+                observed_payload_hash=wake.payload_hash,
+                observed_at=logical_time,
+                confidence_bp=10_000,
+            )
+            observation_payload = OutcomeObservationRecordedPayload(
+                change_id="change:life-aftermath:observation:" + suffix,
+                transition_id="transition:life-aftermath:observation:" + suffix,
+                expected_entity_revision=occurrence.entity_revision,
+                evidence_refs=(wake_evidence,),
+                policy_refs=("policy:life-aftermath.1",),
+                observation=observation,
+            )
+            observation_event = self._event(
+                event_id=f"event:outcome-observation:{observation_id}",
+                event_type="OutcomeObservationRecorded",
+                payload=observation_payload.model_dump(mode="json"),
+                logical_time=logical_time,
+                trace_id=trace_id,
+                causation_id=wake.event_id,
+                correlation_id=correlation_id,
+            )
+            if self._ledger.lookup_event_commit(observation_event.event_id) is None:
+                self._commit(
+                    (observation_event,),
+                    commit_id="commit:life-aftermath:observation:" + suffix,
+                )
 
         projection = self._ledger.project()
         occurrence = next(
@@ -438,111 +595,249 @@ class LifeAftermathRuntime:
             for item in projection.world_occurrences
             if item.occurrence_id == occurrence.occurrence_id
         )
-        draw = self._random.draw(
-            attempt_id="attempt:life-aftermath:"
-            + _digest([occurrence.occurrence_id, wake.event_id]),
-            candidate_refs=occurrence.candidate_outcome_refs,
-            catalog_version="life-aftermath.1",
-            logical_time=logical_time,
-            seed_instant=wake.logical_time,
-            actor=self._actor,
-            trace_id=trace_id,
-            correlation_id=correlation_id,
-        )
-        projection = self._ledger.project()
-        chosen = next(
-            item
-            for item in occurrence.candidate_outcomes
-            if item.candidate_result_ref == draw.selected_candidate_ref
-        )
         proposal_id = "proposal:life-aftermath:outcome:" + _digest(
-            [occurrence.occurrence_id, wake.event_id]
+            [occurrence.occurrence_id]
         )
         proposal_event_id = "event:life-aftermath:outcome-proposal:" + suffix
         existing_proposal = self._ledger.lookup_event_commit(proposal_event_id)
+        decision_identity: dict[str, object] = {}
+        resolution_evidence = (wake_evidence,)
         if existing_proposal is not None:
             persisted = OutcomeProposalRecordedPayload.model_validate_json(
                 existing_proposal[0].payload_json
             )
+            if (
+                persisted.decision_authority == "character_model"
+                and persisted.context_identity_version
+                == "life-aftermath-context.2"
+            ):
+                raise ValueError(
+                    "incomplete Context v2 character outcome cannot cross a "
+                    "later World prefix"
+                )
+            proposal_id = persisted.outcome_proposal_id
             chosen = next(
                 item
                 for item in occurrence.candidate_outcomes
                 if item.candidate_result_ref == persisted.candidate_result_ref
             )
-        elif self._outcome_selection is not None:
-            options = tuple(
-                OutcomeSelectionOption(
-                    candidate_result_ref=item.candidate_result_ref,
-                    summary=self._candidate_text(item.content_ref, item.content_payload_hash),
-                )
-                for item in occurrence.candidate_outcomes
+        elif matrix_authority == "character_choice":
+            query = query_from_projection(
+                projection,
+                actor_ref=self._owner_actor_ref,
+                trigger_ref=observation_event.event_id,
             )
+            capsule = self._capsule_compiler.compile_for_deliberation(query).capsule
+            capsule_cursor = ProjectionCursor(
+                world_revision=capsule.world_revision,
+                deliberation_revision=capsule.deliberation_revision,
+                ledger_sequence=capsule.ledger_sequence,
+            )
+            retry_ordinal, retry_due_at = self._outcome_retry_state(
+                occurrence=occurrence,
+                observation_id=observation_id,
+            )
+            if retry_due_at is not None and logical_time < retry_due_at:
+                raise _LifeAftermathRetryWait
+            decision_context = compile_life_decision_context(capsule)
             try:
-                selected = await self._outcome_selection.deliberate(
-                    options=options,
-                    mood_summary=mood_summary_prose(projection.affect_episodes) or None,
+                chosen, selected = await self._select_long_lived_outcome(
+                    occurrence=occurrence,
+                    projection=projection,
+                    decision_context=decision_context,
                 )
-            except (TimeoutError, ConnectionError, OSError, httpx.HTTPError, ValueError) as exc:
-                _LOG.warning(
-                    "life aftermath outcome model unavailable; using reviewed random fallback: %s",
-                    exc,
+            except OutcomeSelectionFailure as exc:
+                self._record_outcome_model_failure(
+                    occurrence=occurrence,
+                    observation_event=observation_event,
+                    observation_id=observation_id,
+                    capsule=capsule,
+                    capsule_cursor=capsule_cursor,
+                    failure=exc,
+                    retry_ordinal=retry_ordinal + 1,
+                    logical_time=logical_time,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
                 )
-            else:
-                chosen = next(
+                raise LifeAftermathModelFailure(
+                    "long-lived outcome model failed with a durable audit",
+                    failure_code=exc.failure_code,
+                ) from exc
+            self._record_outcome_model_result(
+                occurrence=occurrence,
+                observation_event=observation_event,
+                observation_id=observation_id,
+                capsule=capsule,
+                capsule_cursor=capsule_cursor,
+                selected=selected,
+                resolution_evidence=resolution_evidence,
+                logical_time=logical_time,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+            existing_proposal = self._ledger.lookup_event_commit(proposal_event_id)
+            if existing_proposal is None:
+                raise LifeAftermathModelFailure(
+                    "character outcome proposal disappeared after atomic audit"
+                )
+            persisted = OutcomeProposalRecordedPayload.model_validate_json(
+                existing_proposal[0].payload_json
+            )
+            proposal_id = persisted.outcome_proposal_id
+            chosen = next(
+                item
+                for item in occurrence.candidate_outcomes
+                if item.candidate_result_ref == persisted.candidate_result_ref
+            )
+        elif matrix_authority == "world_contingency":
+            relative_weights = {
+                item.candidate_result_ref: item.relative_plausibility_weight
+                for item in occurrence.candidate_outcomes
+            }
+            draw = self._random.draw(
+                attempt_id="attempt:life-aftermath:"
+                + _digest([occurrence.occurrence_id, "world-contingency"]),
+                candidate_refs=occurrence.candidate_outcome_refs,
+                catalog_version="open-life-outcome.1",
+                logical_time=logical_time,
+                # Outcome identity belongs to the occurrence, not to whichever
+                # scheduler wake happened to resume settlement.  A crash after
+                # RandomDrawRecorded must therefore rejoin this exact draw.
+                seed_instant=occurrence.time_window.opens_at,
+                actor=self._actor,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                candidate_weights=relative_weights,
+                weight_policy_version="open-life-outcome-weight.1",
+            )
+            projection = self._ledger.project()
+            chosen = next(
+                item
+                for item in occurrence.candidate_outcomes
+                if item.candidate_result_ref == draw.selected_candidate_ref
+            )
+            draw_event_ref = f"event:random-draw:{draw.draw_id}"
+            draw_event = self._ledger.lookup_event_commit(draw_event_ref)
+            if draw_event is None:
+                raise ValueError("recorded outcome draw event is unavailable")
+            decision_identity = {
+                "decision_authority": "recorded_world_draw",
+                "recorded_world_draw": RecordedWorldDrawBinding(
+                    draw_event_ref=draw_event_ref,
+                    draw_event_payload_hash=draw_event[0].payload_hash,
+                    draw_payload_json=draw_event[0].payload_json,
+                ),
+            }
+            resolution_evidence = (
+                EvidenceRef(
+                    ref_id=draw_event_ref,
+                    evidence_type="committed_world_event",
+                    claim_purpose="life_transition",
+                    source_world_revision=draw_event[1].world_revision,
+                    immutable_hash=draw_event[0].payload_hash,
+                ),
+            )
+        else:
+            source_observation = next(
+                (
                     item
-                    for item in occurrence.candidate_outcomes
-                    if item.candidate_result_ref == selected.candidate_result_ref
+                    for item in projection.outcome_observations
+                    if item.observation_id == observation_id
+                    and item.source_kind == "settled_external_result"
+                ),
+                None,
+            )
+            chosen = (
+                next(
+                    (
+                        item
+                        for item in occurrence.candidate_outcomes
+                        if source_observation is not None
+                        and item.result_payload_ref
+                        == source_observation.observed_payload_ref
+                        and item.result_payload_hash
+                        == source_observation.observed_payload_hash
+                    ),
+                    None,
                 )
-        change_id = "change:life-aftermath:settle:" + suffix
-        change_hash = outcome_mutation_hash(
-            change_id=change_id,
-            occurrence_id=occurrence.occurrence_id,
-            evaluated_entity_revision=occurrence.entity_revision,
-            evaluated_world_revision=projection.world_revision,
-            candidate_result_ref=chosen.candidate_result_ref,
-            result_id=chosen.result_id,
-            result_payload_ref=chosen.result_payload_ref,
-            result_payload_hash=chosen.result_payload_hash,
-            observation_refs=(observation_id,),
-        )
-        proposal_payload = OutcomeProposalRecordedPayload(
-            outcome_proposal_id=proposal_id,
-            decision_proposal_id=proposal_id,
-            change_id=change_id,
-            occurrence_id=occurrence.occurrence_id,
-            evaluated_entity_revision=occurrence.entity_revision,
-            evaluated_world_revision=projection.world_revision,
-            trigger_ref=occurrence.trigger_ref,
-            candidate_result_ref=chosen.candidate_result_ref,
-            proposed_result_id=chosen.result_id,
-            proposed_result_payload_ref=chosen.result_payload_ref,
-            proposed_result_payload_hash=chosen.result_payload_hash,
-            proposed_change_hash=change_hash,
-            observation_refs=(observation_id,),
-            precondition_refs=occurrence.satisfied_precondition_refs,
-            evidence_refs=(wake_evidence,),
-            confidence_bp=10_000,
-            expires_at=logical_time + timedelta(minutes=5),
-        )
-        proposal_event = self._event(
-            event_id=proposal_event_id,
-            event_type="OutcomeProposalRecorded",
-            payload=proposal_payload.model_dump(mode="json"),
-            logical_time=logical_time,
-            trace_id=trace_id,
-            causation_id=observation_event.event_id,
-            correlation_id=correlation_id,
-        )
-        if self._ledger.lookup_event_commit(proposal_event.event_id) is None:
-            self._commit((proposal_event,), commit_id="commit:life-aftermath:proposal:" + suffix)
+            )
+            if chosen is None:
+                raise ValueError(
+                    "external outcome observation matches no frozen candidate"
+                )
+            decision_identity = {
+                "decision_authority": "external_observation",
+            }
+            located = self._ledger.lookup_event_commit(observation_event.event_id)
+            if located is None:
+                raise ValueError("external outcome observation authority disappeared")
+            resolution_evidence = (
+                EvidenceRef(
+                    ref_id=located[0].event_id,
+                    evidence_type="committed_world_event",
+                    claim_purpose="life_transition",
+                    source_world_revision=located[1].world_revision,
+                    immutable_hash=located[0].payload_hash,
+                ),
+            )
+        if existing_proposal is not None:
+            proposal_payload = persisted
+            proposal_event = existing_proposal[0]
+            change_id = persisted.change_id
+            change_hash = persisted.proposed_change_hash
+        else:
+            change_id = "change:life-aftermath:settle:" + suffix
+            change_hash = outcome_mutation_hash(
+                change_id=change_id,
+                occurrence_id=occurrence.occurrence_id,
+                evaluated_entity_revision=occurrence.entity_revision,
+                evaluated_world_revision=projection.world_revision,
+                candidate_result_ref=chosen.candidate_result_ref,
+                result_id=chosen.result_id,
+                result_payload_ref=chosen.result_payload_ref,
+                result_payload_hash=chosen.result_payload_hash,
+                observation_refs=(observation_id,),
+            )
+            proposal_payload = OutcomeProposalRecordedPayload(
+                outcome_proposal_id=proposal_id,
+                decision_proposal_id=proposal_id,
+                change_id=change_id,
+                occurrence_id=occurrence.occurrence_id,
+                evaluated_entity_revision=occurrence.entity_revision,
+                evaluated_world_revision=projection.world_revision,
+                trigger_ref=occurrence.trigger_ref,
+                candidate_result_ref=chosen.candidate_result_ref,
+                proposed_result_id=chosen.result_id,
+                proposed_result_payload_ref=chosen.result_payload_ref,
+                proposed_result_payload_hash=chosen.result_payload_hash,
+                proposed_change_hash=change_hash,
+                observation_refs=(observation_id,),
+                precondition_refs=occurrence.satisfied_precondition_refs,
+                evidence_refs=resolution_evidence,
+                confidence_bp=10_000,
+                expires_at=logical_time + timedelta(minutes=5),
+                **decision_identity,
+            )
+            proposal_event = self._event(
+                event_id=proposal_event_id,
+                event_type="OutcomeProposalRecorded",
+                payload=proposal_payload.model_dump(mode="json"),
+                logical_time=logical_time,
+                trace_id=trace_id,
+                causation_id=observation_event.event_id,
+                correlation_id=correlation_id,
+            )
+            self._commit(
+                (proposal_event,),
+                commit_id="commit:life-aftermath:proposal:" + suffix,
+            )
 
-        projection = self._ledger.project()
         acceptance_id = "acceptance:life-aftermath:" + suffix
         acceptance_payload = {
             "status": "accepted",
             "acceptance_id": acceptance_id,
             "proposal_id": proposal_id,
-            "evaluated_world_revision": projection.world_revision,
+            "evaluated_world_revision": proposal_payload.evaluated_world_revision,
             "accepted_change_id": change_id,
             "accepted_change_hash": change_hash,
         }
@@ -563,7 +858,7 @@ class LifeAftermathRuntime:
             evidence_refs=(wake_evidence,),
             policy_refs=("policy:outcome-v1",),
             acceptance_id=acceptance_id,
-            evaluated_world_revision=projection.world_revision,
+            evaluated_world_revision=proposal_payload.evaluated_world_revision,
             accepted_change_hash=change_hash,
             occurrence_id=occurrence.occurrence_id,
             outcome_proposal_id=proposal_id,
@@ -574,6 +869,9 @@ class LifeAftermathRuntime:
             result_payload_hash=chosen.result_payload_hash,
             settled_at=logical_time,
             appraisal_trigger_ref=trigger_id,
+            adopt_proposed_life_direction=(
+                proposal_payload.adopt_proposed_life_direction
+            ),
         )
         settlement_event = self._event(
             event_id="event:life-aftermath:settlement:" + suffix,
@@ -879,6 +1177,701 @@ class LifeAftermathRuntime:
             correlation_id=correlation_id,
         )
         return experience_id
+
+    def _outcome_decision_key(
+        self,
+        *,
+        occurrence,
+        observation_id: str,
+    ) -> tuple[str, str]:
+        matrix_hash = _candidate_matrix_hash(occurrence)
+        return (
+            _digest(
+                {
+                    "candidate_matrix_hash": matrix_hash,
+                    "observation_id": observation_id,
+                    "occurrence_entity_revision": occurrence.entity_revision,
+                    "occurrence_id": occurrence.occurrence_id,
+                    "world_id": self._ledger.world_id,
+                }
+            ),
+            matrix_hash,
+        )
+
+    def _record_outcome_model_result(
+        self,
+        *,
+        occurrence,
+        observation_event: WorldEvent,
+        observation_id: str,
+        capsule,
+        capsule_cursor: ProjectionCursor,
+        selected: OutcomeSelectionDraft,
+        resolution_evidence: tuple[EvidenceRef, ...],
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> None:
+        decision_key, matrix_hash = self._outcome_decision_key(
+            occurrence=occurrence,
+            observation_id=observation_id,
+        )
+        if len(selected.attempt_request_hashes) != len(
+            selected.attempt_raw_outputs
+        ):
+            raise LifeAftermathModelFailure(
+                "outcome selection did not retain exact per-call request hashes"
+            )
+        context_material = {
+            "candidate_matrix_hash": matrix_hash,
+            "capsule_id": capsule.capsule_id,
+            "context_cursor": capsule_cursor.model_dump(mode="json"),
+            "context_model_content_hash": hashlib.sha256(
+                capsule.model_content_json.encode("utf-8")
+            ).hexdigest(),
+            "context_snapshot_hash": capsule.snapshot_hash,
+            "observation_id": observation_id,
+            "occurrence_entity_revision": occurrence.entity_revision,
+            "occurrence_id": occurrence.occurrence_id,
+        }
+        context_text = canonical_json(context_material)
+        context_ref = (
+            "content:life-aftermath:outcome-model-context:"
+            + decision_key
+            + ":"
+            + capsule.capsule_id
+        )
+        self._content_store.put_if_absent(
+            StoredLifeContent(
+                content_ref=context_ref,
+                content_kind="outcome_candidate",
+                content_payload_hash=life_content_payload_hash(context_text),
+                text=context_text,
+            )
+        )
+
+        attempt_id = "attempt:life-aftermath:outcome:" + decision_key
+        route = RecordedModelRoute(
+            tier="flash",
+            reason_code="life_aftermath.character_outcome_selection",
+            router_version="life-aftermath-outcome-router.1",
+        )
+        audits: list[RecordedModelResultAudit] = []
+        for index, raw in enumerate(selected.attempt_raw_outputs):
+            response_hash = life_content_payload_hash(raw)
+            content_ref = (
+                "content:life-aftermath:outcome-model:"
+                + decision_key
+                + ":"
+                + response_hash
+            )
+            self._content_store.put_if_absent(
+                StoredLifeContent(
+                    content_ref=content_ref,
+                    content_kind="outcome_candidate",
+                    content_payload_hash=response_hash,
+                    text=raw,
+                )
+            )
+            model_call_id = (
+                "model-call:life-aftermath:outcome:"
+                + decision_key
+                + ":correction:"
+                + str(index)
+            )
+            model_result_ref = "model-result:" + sha256(
+                canonical_json(
+                    {
+                        "model_call_id": model_call_id,
+                        "response_hash": response_hash,
+                    }
+                )
+            )
+            repaired = len(selected.attempt_raw_outputs) == 2
+            audits.append(
+                RecordedModelResultAudit(
+                    model_call_id=model_call_id,
+                    model_result_ref=model_result_ref,
+                    attempt_id=attempt_id,
+                    route=route,
+                    model_id=selected.model,
+                    model_version=selected.model,
+                    request_hash=selected.attempt_request_hashes[index],
+                    response_hash=response_hash,
+                    status=(
+                        "main_invalid"
+                        if repaired and index == 0
+                        else "main_invalid_recovered"
+                        if repaired
+                        else "proposal_validated"
+                    ),
+                    failure_code=(
+                        "main_invalid_output" if repaired else None
+                    ),
+                )
+            )
+
+        final = audits[-1]
+        audit_response_text = outcome_selection_audit_text(
+            candidate_result_ref=selected.candidate_result_ref,
+            adopt_proposed_life_direction=(
+                selected.adopt_proposed_life_direction
+            ),
+            candidate_matrix_hash=matrix_hash,
+            response_hash=str(final.response_hash),
+        )
+        audit_proposal = MinimalProposal(
+            proposal_id="proposal:life-aftermath:outcome-model:" + decision_key,
+            trigger_ref=observation_event.event_id,
+            evaluated_world_revision=capsule_cursor.world_revision,
+            evidence_refs=(),
+            proposed_changes=(),
+            action_intents=(),
+            confidence=10_000,
+            brief_rationale="Persist validated character-owned outcome selection.",
+            source_model_result=final.model_result_ref,
+            response_text=audit_response_text,
+            stance="answer_without_world_claims",
+        )
+        proposal_json = canonical_json(
+            audit_proposal.model_dump(mode="json")
+        )
+        proposal_hash = audit_proposal.proposal_hash
+        deliberation_result_id = "deliberation:" + sha256(
+            canonical_json(
+                {
+                    "capsule_id": capsule.capsule_id,
+                    "proposal_hash": proposal_hash,
+                    "attempt_audits": [
+                        json.loads(model_audit_json(item)) for item in audits
+                    ],
+                }
+            )
+        )
+        events: list[WorldEvent] = []
+        for index, audit in enumerate(audits):
+            audit_json = model_audit_json(audit)
+            payload = ModelResultRecordedPayload(
+                model_result_ref=audit.model_result_ref,
+                deliberation_result_id=deliberation_result_id,
+                proposal_hash=proposal_hash,
+                model_call_id=audit.model_call_id,
+                attempt_id=attempt_id,
+                capsule_id=capsule.capsule_id,
+                trigger_ref=observation_event.event_id,
+                evaluated_world_revision=capsule_cursor.world_revision,
+                attempt_index=index,
+                attempt_count=len(audits),
+                audit_json=audit_json,
+                audit_hash=sha256(audit_json),
+            ).model_dump(mode="json")
+            events.append(
+                self._event(
+                    event_id=(
+                        "event:life-aftermath:outcome-model-result:"
+                        + decision_key
+                        + ":"
+                        + str(index)
+                    ),
+                    event_type="ModelResultRecorded",
+                    payload=payload,
+                    logical_time=observation_event.logical_time,
+                    trace_id=trace_id,
+                    causation_id=(
+                        observation_event.event_id
+                        if index == 0
+                        else events[-1].event_id
+                    ),
+                    correlation_id=correlation_id,
+                )
+            )
+        proposal_payload = ProposalRecordedV2Payload(
+            proposal_id=audit_proposal.proposal_id,
+            proposal_kind=audit_proposal.proposal_kind,
+            model_result_ref=final.model_result_ref,
+            deliberation_result_id=deliberation_result_id,
+            model_call_id=final.model_call_id,
+            attempt_id=attempt_id,
+            capsule_id=capsule.capsule_id,
+            trigger_ref=observation_event.event_id,
+            evaluated_world_revision=capsule_cursor.world_revision,
+            proposal_json=proposal_json,
+            proposal_hash=proposal_hash,
+        ).model_dump(mode="json")
+        audit_proposal_event = self._event(
+            event_id=(
+                "event:life-aftermath:outcome-model-proposal:"
+                + decision_key
+            ),
+            event_type="ProposalRecorded",
+            payload=proposal_payload,
+            logical_time=observation_event.logical_time,
+            trace_id=trace_id,
+            causation_id=events[-1].event_id,
+            correlation_id=correlation_id,
+        )
+        events.append(audit_proposal_event)
+        chosen = next(
+            item
+            for item in occurrence.candidate_outcomes
+            if item.candidate_result_ref == selected.candidate_result_ref
+        )
+        suffix = occurrence.occurrence_id.removeprefix(
+            "occurrence:life-aftermath:"
+        )
+        change_id = "change:life-aftermath:settle:" + suffix
+        change_hash = outcome_mutation_hash(
+            change_id=change_id,
+            occurrence_id=occurrence.occurrence_id,
+            evaluated_entity_revision=occurrence.entity_revision,
+            evaluated_world_revision=capsule_cursor.world_revision,
+            candidate_result_ref=chosen.candidate_result_ref,
+            result_id=chosen.result_id,
+            result_payload_ref=chosen.result_payload_ref,
+            result_payload_hash=chosen.result_payload_hash,
+            observation_refs=(observation_id,),
+            adopt_proposed_life_direction=(
+                selected.adopt_proposed_life_direction
+            ),
+        )
+        outcome_proposal = OutcomeProposalRecordedPayload(
+            outcome_proposal_id=(
+                "proposal:life-aftermath:outcome:"
+                + _digest([occurrence.occurrence_id])
+            ),
+            decision_proposal_id=(
+                "proposal:life-aftermath:outcome:"
+                + _digest([occurrence.occurrence_id])
+            ),
+            change_id=change_id,
+            occurrence_id=occurrence.occurrence_id,
+            evaluated_entity_revision=occurrence.entity_revision,
+            evaluated_world_revision=capsule_cursor.world_revision,
+            trigger_ref=occurrence.trigger_ref,
+            candidate_result_ref=chosen.candidate_result_ref,
+            proposed_result_id=chosen.result_id,
+            proposed_result_payload_ref=chosen.result_payload_ref,
+            proposed_result_payload_hash=chosen.result_payload_hash,
+            proposed_change_hash=change_hash,
+            observation_refs=(observation_id,),
+            precondition_refs=occurrence.satisfied_precondition_refs,
+            evidence_refs=resolution_evidence,
+            confidence_bp=10_000,
+            expires_at=logical_time + timedelta(minutes=5),
+            decision_authority="character_model",
+            decision_model=selected.model,
+            decision_raw_output_hash=life_content_payload_hash(
+                selected.raw_output
+            ),
+            decision_model_result_ref=final.model_result_ref,
+            decision_model_result_event_ref=events[-2].event_id,
+            decision_audit_proposal_event_ref=audit_proposal_event.event_id,
+            decision_audit_proposal_event_payload_hash=(
+                audit_proposal_event.payload_hash
+            ),
+            decision_candidate_matrix_hash=matrix_hash,
+            adopt_proposed_life_direction=(
+                selected.adopt_proposed_life_direction
+            ),
+            context_identity_version="life-aftermath-context.2",
+            context_capsule_id=capsule.capsule_id,
+            context_model_content_hash=context_material[
+                "context_model_content_hash"
+            ],
+            context_snapshot_hash=capsule.snapshot_hash,
+            context_cursor=capsule_cursor,
+        )
+        outcome_proposal_event = self._event(
+            event_id="event:life-aftermath:outcome-proposal:" + suffix,
+            event_type="OutcomeProposalRecorded",
+            payload=outcome_proposal.model_dump(mode="json"),
+            logical_time=observation_event.logical_time,
+            trace_id=trace_id,
+            causation_id=audit_proposal_event.event_id,
+            correlation_id=correlation_id,
+        )
+        events.append(outcome_proposal_event)
+        acceptance_id = "acceptance:life-aftermath:" + suffix
+        acceptance_event = self._event(
+            event_id="event:life-aftermath:acceptance:" + suffix,
+            event_type="AcceptanceRecorded",
+            payload={
+                "status": "accepted",
+                "acceptance_id": acceptance_id,
+                "proposal_id": outcome_proposal.outcome_proposal_id,
+                "evaluated_world_revision": (
+                    outcome_proposal.evaluated_world_revision
+                ),
+                "accepted_change_id": change_id,
+                "accepted_change_hash": change_hash,
+            },
+            logical_time=observation_event.logical_time,
+            trace_id=trace_id,
+            causation_id=outcome_proposal_event.event_id,
+            correlation_id=correlation_id,
+        )
+        events.append(acceptance_event)
+        appraisal_trigger_ref = appraisal_trigger_identity(
+            occurrence.occurrence_id,
+            chosen.result_id,
+        )
+        settlement = WorldOccurrenceSettledPayload(
+            change_id=change_id,
+            transition_id="transition:life-aftermath:settle:" + suffix,
+            expected_entity_revision=occurrence.entity_revision,
+            evidence_refs=resolution_evidence,
+            policy_refs=("policy:outcome-v1",),
+            acceptance_id=acceptance_id,
+            evaluated_world_revision=outcome_proposal.evaluated_world_revision,
+            accepted_change_hash=change_hash,
+            occurrence_id=occurrence.occurrence_id,
+            outcome_proposal_id=outcome_proposal.outcome_proposal_id,
+            candidate_result_ref=chosen.candidate_result_ref,
+            result_id=chosen.result_id,
+            observation_refs=(observation_id,),
+            result_payload_ref=chosen.result_payload_ref,
+            result_payload_hash=chosen.result_payload_hash,
+            settled_at=logical_time,
+            appraisal_trigger_ref=appraisal_trigger_ref,
+            adopt_proposed_life_direction=(
+                selected.adopt_proposed_life_direction
+            ),
+        )
+        settlement_event = self._event(
+            event_id="event:life-aftermath:settlement:" + suffix,
+            event_type="WorldOccurrenceSettled",
+            payload=settlement.model_dump(mode="json"),
+            logical_time=observation_event.logical_time,
+            trace_id=trace_id,
+            causation_id=acceptance_event.event_id,
+            correlation_id=correlation_id,
+        )
+        events.append(settlement_event)
+        appraisal_trigger = TriggerProcess(
+            trigger_id=appraisal_trigger_ref,
+            trigger_ref=appraisal_trigger_ref,
+            process_kind="npc_world_appraisal",
+            source_evidence_ref=settlement_event.event_id,
+            state="open",
+        )
+        events.append(
+            self._event(
+                event_id="event:life-aftermath:appraisal-trigger:" + suffix,
+                event_type="TriggerProcessOpened",
+                payload={"process": appraisal_trigger.model_dump(mode="json")},
+                logical_time=observation_event.logical_time,
+                trace_id=trace_id,
+                causation_id=settlement_event.event_id,
+                correlation_id=correlation_id,
+            )
+        )
+        try:
+            self._ledger.commit_at_cursor(
+                tuple(events),
+                expected_cursor=capsule_cursor,
+                commit_id=(
+                    "commit:life-aftermath:character-outcome:" + decision_key
+                ),
+            )
+        except ConcurrencyConflict:
+            if (
+                self._ledger.lookup_event_commit(
+                    "event:life-aftermath:outcome-model-result:"
+                    + decision_key
+                    + ":0"
+                )
+                is None
+            ):
+                raise
+
+    def _outcome_retry_state(
+        self,
+        *,
+        occurrence,
+        observation_id: str,
+    ) -> tuple[int, datetime | None]:
+        """Derive occurrence-scoped retry state solely from terminal audit events."""
+
+        decision_key, _matrix_hash = self._outcome_decision_key(
+            occurrence=occurrence,
+            observation_id=observation_id,
+        )
+        ordinal = 0
+        failed_at: datetime | None = None
+        while True:
+            first = self._ledger.lookup_event_commit(
+                "event:life-aftermath:outcome-model-failure:"
+                + decision_key
+                + ":retry:"
+                + str(ordinal + 1)
+                + ":0"
+            )
+            if first is None:
+                break
+            first_payload = ModelResultRecordedPayload.model_validate_json(
+                first[0].payload_json
+            )
+            terminal = self._ledger.lookup_event_commit(
+                "event:life-aftermath:outcome-model-failure:"
+                + decision_key
+                + ":retry:"
+                + str(ordinal + 1)
+                + ":"
+                + str(first_payload.attempt_count - 1)
+            )
+            if terminal is None:
+                raise ValueError("outcome failure audit retry is incomplete")
+            terminal_payload = ModelResultRecordedPayload.model_validate_json(
+                terminal[0].payload_json
+            )
+            terminal_audit = RecordedModelResultAudit.model_validate_json(
+                terminal_payload.audit_json
+            )
+            if terminal_audit.status not in {
+                "main_timeout",
+                "main_exception",
+                "recovery_failed",
+            }:
+                raise ValueError("outcome retry audit is not a terminal failure")
+            ordinal += 1
+            failed_at = terminal[0].logical_time
+        if failed_at is None:
+            return 0, None
+        delay_seconds = (600, 1_800, 7_200)[min(ordinal - 1, 2)]
+        return ordinal, failed_at + timedelta(seconds=delay_seconds)
+
+    def _record_outcome_model_failure(
+        self,
+        *,
+        occurrence,
+        observation_event: WorldEvent,
+        observation_id: str,
+        capsule,
+        capsule_cursor: ProjectionCursor,
+        failure: OutcomeSelectionFailure,
+        retry_ordinal: int,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> None:
+        decision_key, _matrix_hash = self._outcome_decision_key(
+            occurrence=occurrence,
+            observation_id=observation_id,
+        )
+        attempt_id = (
+            "attempt:life-aftermath:outcome:"
+            + decision_key
+            + ":retry:"
+            + str(retry_ordinal)
+        )
+        route = RecordedModelRoute(
+            tier="flash",
+            reason_code="life_aftermath.character_outcome_selection",
+            router_version="life-aftermath-outcome-router.1",
+        )
+        audits: list[RecordedModelResultAudit] = []
+        for index, failed in enumerate(failure.attempts):
+            response_hash = (
+                life_content_payload_hash(failed.raw_output)
+                if failed.raw_output is not None
+                else None
+            )
+            if failed.raw_output is not None and response_hash is not None:
+                self._content_store.put_if_absent(
+                    StoredLifeContent(
+                        content_ref=(
+                            "content:life-aftermath:outcome-model-failure:"
+                            + decision_key
+                            + ":retry:"
+                            + str(retry_ordinal)
+                            + ":"
+                            + response_hash
+                        ),
+                        content_kind="outcome_candidate",
+                        content_payload_hash=response_hash,
+                        text=failed.raw_output,
+                    )
+                )
+            model_call_id = (
+                "model-call:life-aftermath:outcome:"
+                + decision_key
+                + ":retry:"
+                + str(retry_ordinal)
+                + ":"
+                + str(index)
+            )
+            model_result_ref = "model-result:" + sha256(
+                canonical_json(
+                    {
+                        "model_call_id": model_call_id,
+                        "response_hash": response_hash,
+                    }
+                )
+            )
+            has_output = response_hash is not None
+            audits.append(
+                RecordedModelResultAudit(
+                    model_call_id=model_call_id,
+                    model_result_ref=model_result_ref,
+                    attempt_id=attempt_id,
+                    route=route,
+                    model_id=failure.model_id if has_output else None,
+                    model_version=failure.model_id if has_output else None,
+                    attempted_model_id=(
+                        None if has_output else failure.model_id
+                    ),
+                    attempted_model_version=(
+                        None if has_output else failure.model_id
+                    ),
+                    request_hash=failed.request_hash,
+                    response_hash=response_hash,
+                    status=failed.status,
+                    failure_code=failed.failure_code,
+                    slot=failed.slot,
+                    outcome=failed.outcome,
+                )
+            )
+        deliberation_result_id = "deliberation:" + sha256(
+            canonical_json(
+                {
+                    "capsule_id": capsule.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [
+                        json.loads(model_audit_json(item)) for item in audits
+                    ],
+                }
+            )
+        )
+        events: list[WorldEvent] = []
+        for index, audit in enumerate(audits):
+            audit_json = model_audit_json(audit)
+            payload = ModelResultRecordedPayload(
+                audit_contract="model-result-audit.3",
+                model_result_ref=audit.model_result_ref,
+                deliberation_result_id=deliberation_result_id,
+                proposal_hash=None,
+                model_call_id=audit.model_call_id,
+                attempt_id=attempt_id,
+                capsule_id=capsule.capsule_id,
+                trigger_ref=observation_event.event_id,
+                evaluated_world_revision=capsule_cursor.world_revision,
+                attempt_index=index,
+                attempt_count=len(audits),
+                audit_json=audit_json,
+                audit_hash=sha256(audit_json),
+            )
+            events.append(
+                self._event(
+                    event_id=(
+                        "event:life-aftermath:outcome-model-failure:"
+                        + decision_key
+                        + ":retry:"
+                        + str(retry_ordinal)
+                        + ":"
+                        + str(index)
+                    ),
+                    event_type="ModelResultRecorded",
+                    payload=payload.model_dump(mode="json"),
+                    logical_time=logical_time,
+                    trace_id=trace_id,
+                    causation_id=(
+                        observation_event.event_id
+                        if index == 0
+                        else events[-1].event_id
+                    ),
+                    correlation_id=correlation_id,
+                )
+            )
+        try:
+            self._ledger.commit_at_cursor(
+                tuple(events),
+                expected_cursor=capsule_cursor,
+                commit_id=(
+                    "commit:life-aftermath:outcome-model-failure:"
+                    + decision_key
+                    + ":retry:"
+                    + str(retry_ordinal)
+                ),
+            )
+        except ConcurrencyConflict:
+            if (
+                self._ledger.lookup_event_commit(events[0].event_id)
+                is None
+            ):
+                raise
+
+    async def _select_long_lived_outcome(
+        self,
+        *,
+        occurrence,
+        projection,
+        decision_context: dict[str, object],
+    ):
+        """Require character-model authority whenever an option changes biography."""
+
+        if self._outcome_selection is None:
+            raise LifeAftermathModelFailure(
+                "long-lived outcome requires the installed character model"
+            )
+        options = self._outcome_selection_options(occurrence)
+        try:
+            selected = await self._outcome_selection.deliberate(
+                options=options,
+                mood_summary=mood_summary_prose(projection.affect_episodes) or None,
+                decision_context=decision_context,
+            )
+        except OutcomeSelectionFailure:
+            raise
+        except (
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            httpx.HTTPError,
+            ValueError,
+        ) as exc:
+            raise LifeAftermathModelFailure(
+                "long-lived outcome model unavailable"
+            ) from exc
+        return (
+            next(
+                item
+                for item in occurrence.candidate_outcomes
+                if item.candidate_result_ref == selected.candidate_result_ref
+            ),
+            selected,
+        )
+
+    def _outcome_selection_options(
+        self,
+        occurrence,
+    ) -> tuple[OutcomeSelectionOption, ...]:
+        """Expose objective alternatives and subjective direction effects separately."""
+
+        options: list[OutcomeSelectionOption] = []
+        for item in occurrence.candidate_outcomes:
+            direction = item.dynamic_life_arc_context
+            direction_option = None
+            if direction is not None:
+                direction_option = ProposedLifeDirectionOption(
+                    summary=self._candidate_text(
+                        direction.summary_content_ref,
+                        direction.summary_payload_hash,
+                    ),
+                    narrative_tags=direction.narrative_tags,
+                    duration_days=direction.duration_days,
+                    privacy_class=direction.privacy_class,
+                )
+            options.append(
+                OutcomeSelectionOption(
+                    candidate_result_ref=item.candidate_result_ref,
+                    summary=self._candidate_text(
+                        item.content_ref,
+                        item.content_payload_hash,
+                    ),
+                    proposed_life_direction=direction_option,
+                )
+            )
+        return tuple(options)
 
     async def _materialize_experience_memory(
         self,

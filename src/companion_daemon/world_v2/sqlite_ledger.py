@@ -159,6 +159,7 @@ _SEMANTIC_CONDITIONAL_FIELDS = frozenset(
         "appearance_states",
         "visible_physical_states",
         "aspirations",
+        "life_arcs",
         "expression_payload_descriptors",
         "life_ecology_schedule",
     }
@@ -1221,6 +1222,14 @@ class SQLiteWorldLedger:
         dumped = state.model_dump(mode="json")
         if not state.aspirations:
             dumped.pop("aspirations", None)
+        if not state.life_arcs:
+            dumped.pop("life_arcs", None)
+        if not state.pending_contextual_life_sources:
+            dumped.pop("pending_contextual_life_sources", None)
+        if not state.contextual_life_retries:
+            dumped.pop("contextual_life_retries", None)
+        if not state.pending_biographical_settlements:
+            dumped.pop("pending_biographical_settlements", None)
         return dumped
 
     @classmethod
@@ -1715,9 +1724,15 @@ class SQLiteWorldLedger:
             new_value = getattr(state, field_name)
             if old_value is new_value:
                 continue
-            if field_name == "aspirations" and not state.aspirations:
-                # `_state_dump` keeps an empty aspirations tuple out of the
-                # durable bytes for hash compatibility.
+            if field_name in {
+                "aspirations",
+                "life_arcs",
+                "pending_contextual_life_sources",
+                "contextual_life_retries",
+                "pending_biographical_settlements",
+            } and not getattr(state, field_name):
+                # `_state_dump` keeps current-generation empty tuple fields
+                # out of durable bytes for old-head hash compatibility.
                 if fragments.pop(field_name, None) is not None:
                     field_deletes.append(field_name)
                     changed_fields.append(field_name)
@@ -2902,6 +2917,9 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.37",
                 "world-v2-reducers.38",
                 "world-v2-reducers.39",
+                "world-v2-reducers.40",
+                "world-v2-reducers.41",
+                "world-v2-reducers.42",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -2916,6 +2934,9 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.37",
                     "world-v2-reducers.38",
                     "world-v2-reducers.39",
+                    "world-v2-reducers.40",
+                    "world-v2-reducers.41",
+                    "world-v2-reducers.42",
                 }:
                     canonical_legacy_state = json.dumps(
                         json.loads(legacy_state_json),
@@ -2963,6 +2984,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.37",
                     "world-v2-reducers.38",
                     "world-v2-reducers.39",
+                    "world-v2-reducers.40",
                 }:
                     # .37 added optional non-factual reflection prose and .38
                     # adds optional reflection/audit lineage to the pending
@@ -3231,6 +3253,8 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.37",
                 "world-v2-reducers.38",
                 "world-v2-reducers.39",
+                "world-v2-reducers.40",
+                "world-v2-reducers.41",
             }:
                 state = ReducerState.model_validate_json(
                     json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
@@ -3672,13 +3696,17 @@ class SQLiteWorldLedger:
             budget_accounts=projection.budget_accounts,
             budget_reservations=projection.budget_reservations,
             trigger_processes=projection.trigger_processes,
+            life_ecology_schedule=projection.life_ecology_schedule,
+            pending_contextual_life_sources=projection.pending_contextual_life_sources,
+            contextual_life_retries=projection.contextual_life_retries,
+            pending_biographical_settlements=projection.pending_biographical_settlements,
             pending_external_observations=projection.pending_external_observations,
             execution_receipts=projection.execution_receipts,
             budget_settlements=projection.budget_settlements,
             reconciliations=projection.reconciliations,
-            life_ecology_schedule=projection.life_ecology_schedule,
             completed_trigger_ids=projection.completed_trigger_ids,
             npcs=projection.npcs,
+            life_arcs=projection.life_arcs,
             aspirations=projection.aspirations,
             plans=projection.plans,
             world_occurrences=projection.world_occurrences,

@@ -67,6 +67,8 @@ from .experience_events import (
 )
 from .aspiration_events import ASPIRATION_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
+from .biographical_lifecycle import BIOGRAPHICAL_LIFECYCLE_PAYLOAD_MODELS
+from .biographical_timeline_authority import BIOGRAPHICAL_TIMELINE_PAYLOAD_MODELS
 from .life_content_events import LIFE_CONTENT_PAYLOAD_MODELS
 from .expression_payload_events import EXPRESSION_PAYLOAD_EVENT_MODELS
 from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
@@ -125,6 +127,8 @@ from .schemas import (
     BudgetSettlement,
     ClaimLease,
     ClockObservation,
+    ContextualLifeTechnicalFailureRecordedPayload,
+    ContextualLifeSourceDispositionRecordedPayload,
     DispatchPending,
     ExecutionReceipt,
     ExternalObservation,
@@ -149,7 +153,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.40"
+    reducer_bundle: str = "world-v2-reducers.43"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -376,9 +380,18 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
                 "attempt_id": _ID,
                 "completed_at": (datetime, ...),
                 "runtime_outcome_ref": _ID,
+                "cadence_draw_event_ref": (str | None, None),
+                "cadence_delay_seconds": (int | None, None),
+                "cadence_reused": (bool, False),
             },
         ),
         "InteractionFactTechnicalFailureRecorded": InteractionFactTechnicalFailurePayload,
+        "ContextualLifeTechnicalFailureRecorded": (
+            ContextualLifeTechnicalFailureRecordedPayload
+        ),
+        "ContextualLifeSourceDispositionRecorded": (
+            ContextualLifeSourceDispositionRecordedPayload
+        ),
         "InteractionFactDecisionRecorded": InteractionFactDecisionRecordedPayload,
         "FactMemoryDecisionRecorded": FactMemoryDecisionRecordedPayload,
         "ExperienceMemoryDecisionRecorded": ExperienceMemoryDecisionRecordedPayload,
@@ -480,6 +493,8 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             "ActionReconciliationPayload", {"reconciliation": (ActionReconciliation, ...)}
         ),
         **LIFE_PAYLOAD_MODELS,
+        **BIOGRAPHICAL_LIFECYCLE_PAYLOAD_MODELS,
+        **BIOGRAPHICAL_TIMELINE_PAYLOAD_MODELS,
         **ASPIRATION_PAYLOAD_MODELS,
         **APPRAISAL_PAYLOAD_MODELS,
         **AFFECT_PAYLOAD_MODELS,
@@ -523,6 +538,12 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
         "InteractionFactTechnicalFailureRecorded": (
             "world_id+trigger_id+attempt_id+technical_failure"
+        ),
+        "ContextualLifeTechnicalFailureRecorded": (
+            "world_id+lane+source_event_ref+retry_ordinal"
+        ),
+        "ContextualLifeSourceDispositionRecorded": (
+            "world_id+source_event_ref+disposition"
         ),
         "InteractionFactDecisionRecorded": (
             "world_id+trigger_id+fact_context_hash+decision_id"
@@ -605,6 +626,9 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ExecutionReceiptRecorded": "provider+source_event_id+raw_payload_hash",
         "ActionReconciliationRequired": "result_id+reason+observed_state",
         "NpcRegistered": "world_id+npc_id",
+        "NpcStatusChanged": "world_id+npc_id+expected_entity_revision+transition_id",
+        "LifeArcChanged": "world_id+arc_id+expected_entity_revision+transition_id",
+        "BiographicalTimelineConfigured": "world_id+timeline_id+document_hash+timezone_name",
         "AspirationPlanted": "world_id+aspiration_id+transition_id",
         "AspirationReinforced": "world_id+aspiration_id+expected_entity_revision+transition_id",
         "AspirationFaded": "world_id+aspiration_id+expected_entity_revision+transition_id",
@@ -935,6 +959,22 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 ),
                 evidence_types=("model_failure", "retry_schedule"),
                 successors=("TriggerProcessReclaimed",),
+            ),
+            _contract(
+                "ContextualLifeTechnicalFailureRecorded",
+                "contextual_life_inspiration",
+                "deliberation",
+                "ContextualLifeTechnicalFailureRecordedPayload",
+                allowed_predecessors=("ClockAdvanced",),
+                evidence_types=("model_failure", "retry_schedule"),
+                successors=("ContextualLifeTechnicalFailureRecorded", "ProposalRecorded"),
+            ),
+            _contract(
+                "ContextualLifeSourceDispositionRecorded",
+                "contextual_life_inspiration",
+                "deliberation",
+                "ContextualLifeSourceDispositionRecordedPayload",
+                evidence_types=("committed_world_event", "privacy_policy"),
             ),
             _contract(
                 "InteractionFactDecisionRecorded",
@@ -1624,8 +1664,61 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "proposal_acceptance",
                 "world",
                 "NpcRegisteredPayload",
-                evidence_types=("committed_world_event", "operator_observation"),
-                successors=("WorldOccurrenceCommitted",),
+                allowed_predecessors=(
+                    "WorldStarted",
+                    "WorldOccurrenceSettled",
+                    "LifeArcChanged",
+                ),
+                evidence_types=(
+                    "committed_world_event",
+                    "settled_world_event",
+                    "operator_observation",
+                ),
+                successors=("NpcStatusChanged", "WorldOccurrenceCommitted"),
+            ),
+            _contract(
+                "NpcStatusChanged",
+                "biographical_lifecycle",
+                "world",
+                "NpcStatusChangedPayload",
+                allowed_predecessors=(
+                    "ClockAdvanced",
+                    "WorldOccurrenceSettled",
+                    "ActivityCompleted",
+                    "ActivityAbandoned",
+                    "LifeArcChanged",
+                    "NpcRegistered",
+                    "NpcStatusChanged",
+                ),
+                evidence_types=("committed_world_event", "settled_world_event"),
+                successors=("NpcStatusChanged", "WorldOccurrenceCommitted"),
+            ),
+            _contract(
+                "BiographicalTimelineConfigured",
+                "world_bootstrap",
+                "world",
+                "BiographicalTimelineConfiguredPayload",
+                allowed_predecessors=("WorldStarted",),
+                successors=("ClockAdvanced", "LifeArcChanged"),
+            ),
+            _contract(
+                "LifeArcChanged",
+                "biographical_lifecycle",
+                "world",
+                "LifeArcChangedPayload",
+                allowed_predecessors=(
+                    "ClockAdvanced",
+                    "WorldOccurrenceSettled",
+                    "ActivityCompleted",
+                    "ActivityAbandoned",
+                    "LifeArcChanged",
+                ),
+                evidence_types=("committed_world_event", "settled_world_event"),
+                successors=(
+                    "LifeArcChanged",
+                    "NpcRegistered",
+                    "NpcStatusChanged",
+                ),
             ),
             _contract(
                 "AspirationPlanted",
@@ -1794,7 +1887,12 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     "OutcomeProposalRecorded",
                 ),
                 evidence_types=("settled_world_event", "operator_observation"),
-                successors=("ExperienceCommitted", "TriggerProcessOpened"),
+                successors=(
+                    "ExperienceCommitted",
+                    "LifeArcChanged",
+                    "NpcRegistered",
+                    "TriggerProcessOpened",
+                ),
             ),
             _contract(
                 "ExperienceCommitted",

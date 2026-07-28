@@ -332,6 +332,32 @@ def _build_current_self_state(
     ]
     if stable_self:
         state["stable_self"] = stable_self
+    biographical_context = [
+        entry
+        for item in _slice_items(slices, "world_life")
+        if isinstance(item.get("value"), dict)
+        and item["value"].get("context_kind") == "biographical_context"
+        for entry in (
+            _state_entry(
+                item,
+                fields=(
+                    "reviewed_timeline_ref",
+                    "timeline_source_event_ref",
+                    "logical_at",
+                    "age",
+                    "academic_phase",
+                    "academic_year",
+                    "season",
+                    "calendar_context_tags",
+                    "current_residence_context_tags",
+                    "active_life_arcs",
+                ),
+            ),
+        )
+        if entry is not None
+    ]
+    if biographical_context:
+        state["biographical_context"] = biographical_context
     lane_contracts = (
         (
             "situation",

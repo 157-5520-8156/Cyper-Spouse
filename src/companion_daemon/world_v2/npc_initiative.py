@@ -253,7 +253,9 @@ class NpcInitiativeRuntime:
                 # Crash between the recorded selection and the occurrence
                 # commit: recover the exact durable choice.
                 candidates = self._catalog.npc_initiative_candidates_at(
-                    instant=wake.logical_time, npcs=projection.npcs
+                    instant=wake.logical_time,
+                    npcs=projection.npcs,
+                    life_arcs=projection.life_arcs,
                 )
                 selected = next(
                     (item for item in candidates if item.token == payload.get("candidate_token")),
@@ -283,7 +285,9 @@ class NpcInitiativeRuntime:
             )
 
         candidates = self._catalog.npc_initiative_candidates_at(
-            instant=wake.logical_time, npcs=projection.npcs
+            instant=wake.logical_time,
+            npcs=projection.npcs,
+            life_arcs=projection.life_arcs,
         )
         if not candidates:
             # An empty world (NPC absent, no reviewed window) never consumes a

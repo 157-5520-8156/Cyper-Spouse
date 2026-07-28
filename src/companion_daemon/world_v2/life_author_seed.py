@@ -20,7 +20,12 @@ from pydantic import Field, model_validator
 import yaml
 
 from .local_chronology import LocalChronology
+from .biographical_lifecycle import (
+    BiographicalContext,
+    BiographicalLifecycleCatalog,
+)
 from .schema_core import FrozenModel, PrivacyClass
+from .schemas import FrozenLifeArcEffectDescriptor
 
 
 LifeOpeningSource = Literal[
@@ -37,6 +42,7 @@ LifeDomain = Literal[
     "sleep_wake", "hygiene_private", "meal_drink", "study_class",
     "creative_photo_writing", "commute_walk", "errand_household",
     "rest_recovery", "family_roommate_friend", "digital_leisure",
+    "work_career",
 ]
 SocialShape = Literal["alone", "npc", "user_relayed", "shared_private", "public"]
 Deviation = Literal["delay", "change_plan", "avoid", "impulse", "persist", "repair"]
@@ -78,6 +84,16 @@ class ReviewedLifeSeedOpening(FrozenModel):
     # registers which always-true visible facts a settled occurrence of this
     # opening may later declare through the source-bound declaration seam.
     visual_evidence: "ReviewedOpeningVisualEvidence | None" = None
+    # Hard truth eligibility from the projected biography. These tags describe
+    # whether an activity is possible (classes are not possible after
+    # graduation); they never decide whether the character wants to do it.
+    requires_all_context_tags: tuple[str, ...] = Field(default=(), max_length=12)
+    excludes_context_tags: tuple[str, ...] = Field(default=(), max_length=12)
+    # Soft relevance belongs to recorded opportunity weighting, not semantic
+    # choice. An active Life Arc can make its own openings more available
+    # without excluding the rest of a person's life.
+    context_affinity_tags: tuple[str, ...] = Field(default=(), max_length=12)
+    context_affinity_bp: int = Field(default=10_000, ge=1_000, le=25_000)
 
     # Present-moment openings stay alone/NPC; the future subclass additionally
     # reviews user-participating shared_private invitations.
@@ -123,6 +139,16 @@ class ReviewedLifeSeedOpening(FrozenModel):
                 raise ValueError(
                     "ordinary visual evidence requires a public or shareable opening"
                 )
+        for field_name in (
+            "requires_all_context_tags",
+            "excludes_context_tags",
+            "context_affinity_tags",
+        ):
+            values = getattr(self, field_name)
+            if values != tuple(sorted(set(values))):
+                raise ValueError(f"{field_name} must be sorted and unique")
+        if set(self.requires_all_context_tags) & set(self.excludes_context_tags):
+            raise ValueError("life opening cannot require and exclude the same context")
         return self
 
     def eligible_at(self, local_time: datetime) -> bool:
@@ -140,13 +166,44 @@ class ReviewedLifeSeedOpening(FrozenModel):
             f"matrix:deviation:{self.deviation}",
             f"matrix:visual:{self.visual_potential}",
             f"matrix:privacy:{self.privacy}",
+            *(
+                f"life-context:requires:{item}"
+                for item in self.requires_all_context_tags
+            ),
+            *(
+                f"life-context:excludes:{item}"
+                for item in self.excludes_context_tags
+            ),
         }))
+
+    def eligible_in_context(self, context: BiographicalContext) -> bool:
+        tags = set(context.context_tags)
+        return set(self.requires_all_context_tags).issubset(tags) and not (
+            set(self.excludes_context_tags) & tags
+        )
+
+
+class ReviewedLifeArcEffect(FrozenModel):
+    """A reviewed long-lived consequence available to one settled outcome."""
+
+    arc_kind: Literal["academic", "employment", "residence", "travel", "personal"]
+    context_pack_ref: str = Field(min_length=1, max_length=256)
+    context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    duration_days: int | None = Field(default=None, ge=1, le=730)
+    privacy: PrivacyClass = "personal"
+
+    @model_validator(mode="after")
+    def tags_are_canonical(self) -> "ReviewedLifeArcEffect":
+        if self.context_tags != tuple(sorted(set(self.context_tags))):
+            raise ValueError("reviewed Life Arc context tags must be sorted and unique")
+        return self
 
 
 class ReviewedLifeOutcome(FrozenModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
     text: str = Field(min_length=1, max_length=800)
     privacy: PrivacyClass
+    life_arc_effect: ReviewedLifeArcEffect | None = None
 
 
 class ReviewedVisualLocationFacts(FrozenModel):
@@ -346,14 +403,26 @@ class ReviewedLifeSeedLocation(FrozenModel):
     privacy: PrivacyClass
     local_windows: tuple[str, ...] = Field(min_length=1, max_length=8)
     weekdays: tuple[int, ...] = Field(min_length=1, max_length=7)
+    requires_all_context_tags: tuple[str, ...] = ()
+    # A reviewed destination can be entered by a future travel plan even when
+    # it is not the character's current residence. Present-moment openings
+    # still require the ordinary context gate.
+    future_entry_authorized: bool = False
 
     @model_validator(mode="after")
     def availability_is_canonical(self) -> "ReviewedLifeSeedLocation":
         _validate_availability(self.local_windows, self.weekdays)
+        if self.requires_all_context_tags != tuple(
+            sorted(set(self.requires_all_context_tags))
+        ):
+            raise ValueError("reviewed location context tags must be sorted and unique")
         return self
 
     def available_at(self, local_time: datetime) -> bool:
         return _available_at(self.local_windows, self.weekdays, local_time)
+
+    def eligible_in_context(self, context: BiographicalContext) -> bool:
+        return set(self.requires_all_context_tags).issubset(context.context_tags)
 
 
 class ReviewedLifeSeedNpc(FrozenModel):
@@ -363,23 +432,65 @@ class ReviewedLifeSeedNpc(FrozenModel):
     known_trait_refs: tuple[str, ...] = ()
     privacy: PrivacyClass
     location_id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
+    # ``location_id`` is the NPC's reviewed current/default presence.  A future
+    # outing may bind one additional reviewed venue without pretending the NPC
+    # is already there at planning time.
+    future_location_ids: tuple[str, ...] = Field(default=(), max_length=8)
     local_windows: tuple[str, ...] = Field(min_length=1, max_length=8)
     weekdays: tuple[int, ...] = Field(min_length=1, max_length=7)
+    requires_all_context_tags: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def availability_is_canonical(self) -> "ReviewedLifeSeedNpc":
         _validate_availability(self.local_windows, self.weekdays)
         if len(self.known_trait_refs) != len(set(self.known_trait_refs)):
             raise ValueError("reviewed NPC trait refs must be unique")
+        if self.future_location_ids != tuple(sorted(set(self.future_location_ids))):
+            raise ValueError("reviewed NPC future location ids must be sorted and unique")
+        if self.location_id in self.future_location_ids:
+            raise ValueError("reviewed NPC future locations cannot repeat its default location")
+        if self.requires_all_context_tags != tuple(
+            sorted(set(self.requires_all_context_tags))
+        ):
+            raise ValueError("reviewed NPC context tags must be sorted and unique")
         return self
 
     def available_at(self, local_time: datetime) -> bool:
         return _available_at(self.local_windows, self.weekdays, local_time)
 
+    def eligible_in_context(self, context: BiographicalContext) -> bool:
+        return set(self.requires_all_context_tags).issubset(context.context_tags)
+
+
+class ReviewedCompletedLifeArcContinuation(FrozenModel):
+    """Reviewed capability context established by one completed Life Arc."""
+
+    source_context_pack_ref: str = Field(min_length=1, max_length=256)
+    completion_context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def tags_are_canonical(self) -> "ReviewedCompletedLifeArcContinuation":
+        if self.completion_context_tags != tuple(
+            sorted(set(self.completion_context_tags))
+        ):
+            raise ValueError("completed Life Arc context tags must be sorted and unique")
+        if any(
+            item.startswith(("academic:", "residence:"))
+            for item in self.completion_context_tags
+        ):
+            raise ValueError(
+                "Life Author continuity cannot override calendar or residence"
+            )
+        return self
+
 
 class _CatalogDocument(FrozenModel):
     version: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
-    openings: tuple[ReviewedLifeSeedOpening, ...] = Field(min_length=1, max_length=128)
+    story_candidate_role: Literal["legacy_replay_and_fixture"] | None = None
+    # Open life development needs no operator-authored story candidate.
+    # Locations, NPC fixtures and reviewed capability metadata remain useful
+    # even when every legacy opening family is intentionally empty.
+    openings: tuple[ReviewedLifeSeedOpening, ...] = Field(default=(), max_length=128)
     future_openings: tuple[ReviewedLifeSeedFutureOpening, ...] = Field(
         default=(), max_length=32
     )
@@ -391,6 +502,9 @@ class _CatalogDocument(FrozenModel):
     )
     locations: tuple[ReviewedLifeSeedLocation, ...] = ()
     npcs: tuple[ReviewedLifeSeedNpc, ...] = ()
+    completed_life_arc_continuities: tuple[
+        ReviewedCompletedLifeArcContinuation, ...
+    ] = ()
 
     @model_validator(mode="after")
     def opening_ids_are_unique(self) -> "_CatalogDocument":
@@ -442,11 +556,23 @@ class _CatalogDocument(FrozenModel):
             or len(stable_refs) != len(set(stable_refs))
         ):
             raise ValueError("reviewed NPC identities must be unique")
+        continuity_refs = tuple(
+            item.source_context_pack_ref
+            for item in self.completed_life_arc_continuities
+        )
+        if len(continuity_refs) != len(set(continuity_refs)):
+            raise ValueError("completed Life Arc continuities must have unique sources")
         known_locations = set(location_ids)
         known_npcs = set(npc_ids)
         every_opening = (*self.openings, *self.future_openings)
         if any(item.location_id not in known_locations for item in self.npcs if item.location_id):
             raise ValueError("reviewed NPC references an unknown location")
+        if any(
+            location_id not in known_locations
+            for item in self.npcs
+            for location_id in item.future_location_ids
+        ):
+            raise ValueError("reviewed NPC future availability references an unknown location")
         if any(item.location_id not in known_locations for item in every_opening if item.location_id):
             raise ValueError("life opening references an unknown location")
         if any(item.npc_id not in known_npcs for item in every_opening if item.npc_id):
@@ -460,6 +586,15 @@ class _CatalogDocument(FrozenModel):
                 raise ValueError("life opening cannot weaken its reviewed location privacy")
             if npc is not None and _PRIVACY_RANK[opening.privacy] < _PRIVACY_RANK[npc.privacy]:
                 raise ValueError("life opening cannot weaken its reviewed NPC privacy")
+            if (
+                npc is not None
+                and opening.location_id is None
+                and self.story_candidate_role != "legacy_replay_and_fixture"
+            ):
+                raise ValueError(
+                    "catalogued NPC-shaped life opening requires a reviewed "
+                    "location; remote interaction needs an explicit capability"
+                )
             outcome_ids = tuple(item.id for item in opening.outcomes)
             if len(outcome_ids) != len(set(outcome_ids)):
                 raise ValueError("life opening outcome ids must be unique")
@@ -468,6 +603,17 @@ class _CatalogDocument(FrozenModel):
                 for item in opening.outcomes
             ):
                 raise ValueError("life outcome cannot weaken its opening privacy")
+            if npc is not None and opening.location_id is not None:
+                permitted_locations = (
+                    {npc.location_id}
+                    if not isinstance(opening, ReviewedLifeSeedFutureOpening)
+                    else {npc.location_id, *npc.future_location_ids}
+                )
+                if opening.location_id not in permitted_locations:
+                    raise ValueError(
+                        "NPC-shaped life opening lacks reviewed availability "
+                        "at its location"
+                    )
         for event in self.npc_initiated_events:
             npc = npcs.get(event.npc_id)
             location = locations.get(event.location_id)
@@ -504,6 +650,10 @@ class ReviewedLifeSeedCandidate(FrozenModel):
     participant_ref: str | None = None
     availability_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     daypart_fit_bp: int = Field(default=10_000, ge=1, le=10_000)
+    context_fit_bp: int = Field(default=10_000, ge=1_000, le=25_000)
+    # Pure weight-policy callers may construct a candidate without a catalog.
+    # Production catalog compilation always supplies this source-bound context.
+    biographical_context: BiographicalContext | None = None
 
 
 class ReviewedLifeSeedFutureCandidate(FrozenModel):
@@ -524,6 +674,8 @@ class ReviewedLifeSeedFutureCandidate(FrozenModel):
     location_ref: str | None = None
     participant_ref: str | None = None
     availability_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    context_fit_bp: int = Field(default=10_000, ge=1_000, le=25_000)
+    biographical_context: BiographicalContext | None = None
 
 
 class NpcInitiativeCandidate(FrozenModel):
@@ -564,11 +716,23 @@ class ReviewedLifeSeedReachability(FrozenModel):
 class ReviewedLifeSeedCatalog:
     """Load once, then compile eligible candidates from local chronology."""
 
-    def __init__(self, *, document: _CatalogDocument, chronology: LocalChronology) -> None:
+    def __init__(
+        self,
+        *,
+        document: _CatalogDocument,
+        chronology: LocalChronology,
+        biography: BiographicalLifecycleCatalog,
+    ) -> None:
         self._document = document
         self._chronology = chronology
+        self._biography = biography
         self.version = document.version
-        self.catalog_hash = _digest(document.model_dump(mode="json"))
+        self.catalog_hash = _digest(
+            {
+                "life": document.model_dump(mode="json"),
+                "biography_hash": biography.document_hash,
+            }
+        )
 
     @classmethod
     def from_yaml(cls, *, path: Path, chronology: LocalChronology) -> "ReviewedLifeSeedCatalog":
@@ -598,6 +762,23 @@ class ReviewedLifeSeedCatalog:
                 },
             }
 
+        def _canonical_outcomes(values: object) -> tuple[object, ...]:
+            if not isinstance(values, (list, tuple)):
+                return ()
+            return tuple(
+                {
+                    **outcome,
+                    "life_arc_effect": {
+                        **effect,
+                        "context_tags": tuple(effect.get("context_tags", ())),
+                    },
+                }
+                if isinstance(outcome, dict)
+                and isinstance((effect := outcome.get("life_arc_effect")), dict)
+                else outcome
+                for outcome in values
+            )
+
         for field, values in (
             ("openings", openings),
             ("future_openings", future_openings),
@@ -608,7 +789,22 @@ class ReviewedLifeSeedCatalog:
                     **item,
                     "local_windows": tuple(item.get("local_windows", ())),
                     "weekdays": tuple(item.get("weekdays", ())),
-                    "outcomes": tuple(item.get("outcomes", ())),
+                    "outcomes": _canonical_outcomes(item.get("outcomes", ())),
+                    **(
+                        {
+                            "requires_all_context_tags": tuple(
+                                item.get("requires_all_context_tags", ())
+                            ),
+                            "excludes_context_tags": tuple(
+                                item.get("excludes_context_tags", ())
+                            ),
+                            "context_affinity_tags": tuple(
+                                item.get("context_affinity_tags", ())
+                            ),
+                        }
+                        if field != "npc_initiated_events"
+                        else {}
+                    ),
                 })
                 if isinstance(item, dict)
                 else item
@@ -628,6 +824,23 @@ class ReviewedLifeSeedCatalog:
             else item
             for item in aspiration_seeds
         )
+        continuities = catalog.get("completed_life_arc_continuities", ())
+        if not isinstance(continuities, (list, tuple)):
+            raise ValueError(
+                "world seed life_author_catalog.completed_life_arc_continuities "
+                "must be a list"
+            )
+        catalog["completed_life_arc_continuities"] = tuple(
+            {
+                **item,
+                "completion_context_tags": tuple(
+                    item.get("completion_context_tags", ())
+                ),
+            }
+            if isinstance(item, dict)
+            else item
+            for item in continuities
+        )
         for field in ("locations", "npcs"):
             values = catalog.get(field, ())
             if not isinstance(values, (list, tuple)):
@@ -637,8 +850,16 @@ class ReviewedLifeSeedCatalog:
                     **item,
                     "local_windows": tuple(item.get("local_windows", ())),
                     "weekdays": tuple(item.get("weekdays", ())),
+                    "requires_all_context_tags": tuple(
+                        item.get("requires_all_context_tags", ())
+                    ),
                     **(
-                        {"known_trait_refs": tuple(item.get("known_trait_refs", ()))}
+                        {
+                            "known_trait_refs": tuple(item.get("known_trait_refs", ())),
+                            "future_location_ids": tuple(
+                                item.get("future_location_ids", ())
+                            ),
+                        }
                         if field == "npcs" else {}
                     ),
                 }
@@ -646,14 +867,25 @@ class ReviewedLifeSeedCatalog:
                 for item in values
             )
         document = _CatalogDocument.model_validate(catalog)
-        return cls(document=document, chronology=chronology)
+        return cls(
+            document=document,
+            chronology=chronology,
+            biography=BiographicalLifecycleCatalog.from_yaml(
+                path=path,
+                timezone_name=chronology.timezone_name,
+            ),
+        )
 
     def candidates_at(
         self, *, instant: datetime, wake_event_ref: str, plans: tuple[object, ...],
-        npcs: tuple[object, ...] = (),
+        npcs: tuple[object, ...] = (), life_arcs: tuple[object, ...] = (),
     ) -> tuple[ReviewedLifeSeedCandidate, ...]:
         local = self._chronology.localize(instant)
         assert local is not None
+        biography = self.biographical_context_at(
+            instant=instant,
+            life_arcs=life_arcs,
+        )
         open_plans = tuple(
             plan for plan in plans
             if getattr(plan, "status", None) in {"planned", "active", "paused"}
@@ -670,7 +902,8 @@ class ReviewedLifeSeedCatalog:
         locations = {item.id: item for item in self._document.locations}
         reviewed_npcs = {item.id: item for item in self._document.npcs}
         active_npc_ids = {
-            str(getattr(item, "npc_id", "")) for item in npcs
+            str(getattr(item, "npc_id", ""))
+            for item in npcs
             if getattr(item, "status", None) == "active"
         }
         candidates: list[ReviewedLifeSeedCandidate] = []
@@ -681,17 +914,25 @@ class ReviewedLifeSeedCatalog:
                 _attributed_local_date(accepted_local, opening=opening) == local.date()
                 for accepted_local in accepted_locals.get(opening.activity_kind, ())
             )
-            if not opening.eligible_at(local) or used_today >= opening.max_per_local_day:
+            if (
+                not opening.eligible_at(local)
+                or not opening.eligible_in_context(biography)
+                or used_today >= opening.max_per_local_day
+            ):
                 continue
             if self._present_lane_suppressed(
                 open_plans=open_plans, instant=instant, opening=opening
             ):
                 continue
-            if location is not None and not location.available_at(local):
+            if location is not None and (
+                not location.available_at(local)
+                or not location.eligible_in_context(biography)
+            ):
                 continue
             if npc is not None and (
                 npc.npc_id not in active_npc_ids
                 or not npc.available_at(local)
+                or not npc.eligible_in_context(biography)
                 or (opening.location_id is not None and npc.location_id != opening.location_id)
             ):
                 continue
@@ -705,7 +946,13 @@ class ReviewedLifeSeedCatalog:
                 "location_ref": location.location_ref if location else None,
                 "npc_id": npc.npc_id if npc else None,
                 "daypart_fit_bp": _daypart_fit_bp(opening.local_windows, local),
+                "biographical_context": biography.model_dump(mode="json"),
             }
+            context_fit_bp = (
+                opening.context_affinity_bp
+                if set(opening.context_affinity_tags) & set(biography.context_tags)
+                else 10_000
+            )
             candidates.append(ReviewedLifeSeedCandidate(
                 token=_digest({
                     "catalog_version": self.version,
@@ -718,6 +965,8 @@ class ReviewedLifeSeedCatalog:
                 participant_ref=f"npc:{npc.npc_id}" if npc else None,
                 availability_hash=_digest(availability_material),
                 daypart_fit_bp=availability_material["daypart_fit_bp"],
+                context_fit_bp=context_fit_bp,
+                biographical_context=biography,
             ))
         return tuple(candidates)
 
@@ -751,6 +1000,7 @@ class ReviewedLifeSeedCatalog:
         npcs: tuple[object, ...] = (), horizon_days: int = 7,
         max_candidates: int = 16,
         social_shapes: frozenset[str] = frozenset({"alone", "npc"}),
+        life_arcs: tuple[object, ...] = (),
     ) -> tuple[ReviewedLifeSeedFutureCandidate, ...]:
         """Compile concrete future slots from the reviewed future catalog.
 
@@ -775,8 +1025,9 @@ class ReviewedLifeSeedCatalog:
         )
         locations = {item.id: item for item in self._document.locations}
         reviewed_npcs = {item.id: item for item in self._document.npcs}
-        active_npc_ids = {
-            str(getattr(item, "npc_id", "")) for item in npcs
+        active_npcs = {
+            str(getattr(item, "npc_id", "")): item
+            for item in npcs
             if getattr(item, "status", None) == "active"
         }
         candidates: list[ReviewedLifeSeedFutureCandidate] = []
@@ -785,9 +1036,14 @@ class ReviewedLifeSeedCatalog:
                 continue
             location = locations.get(opening.location_id or "")
             npc = reviewed_npcs.get(opening.npc_id or "")
+            projected_npc = active_npcs.get(npc.npc_id) if npc is not None else None
             if npc is not None and (
-                npc.npc_id not in active_npc_ids
-                or (opening.location_id is not None and npc.location_id != opening.location_id)
+                projected_npc is None
+                or (
+                    opening.location_id is not None
+                    and opening.location_id
+                    not in {npc.location_id, *npc.future_location_ids}
+                )
             ):
                 continue
             first_offset = max(1, opening.advance_days_min)
@@ -816,6 +1072,23 @@ class ReviewedLifeSeedCatalog:
                         tzinfo=local.tzinfo,
                     ).astimezone(timezone.utc)
                     closes_at = opens_at + timedelta(minutes=opening.duration_minutes)
+                    target_biography = self.biographical_context_at(
+                        instant=opens_at,
+                        life_arcs=life_arcs,
+                    )
+                    if (
+                        not opening.eligible_in_context(target_biography)
+                        or (
+                            location is not None
+                            and not location.future_entry_authorized
+                            and not location.eligible_in_context(target_biography)
+                        )
+                        or (
+                            npc is not None
+                            and not npc.eligible_in_context(target_biography)
+                        )
+                    ):
+                        continue
                     if any(
                         item.opens_at < closes_at and opens_at < item.closes_at
                         for item in occupied
@@ -829,7 +1102,32 @@ class ReviewedLifeSeedCatalog:
                         "local_window": window,
                         "location_id": opening.location_id,
                         "location_ref": location.location_ref if location else None,
+                        "location_future_entry_authorized": (
+                            location.future_entry_authorized if location else False
+                        ),
                         "npc_id": npc.npc_id if npc else None,
+                        "npc_future_location_ids": (
+                            npc.future_location_ids if npc else ()
+                        ),
+                        "npc_projection": (
+                            {
+                                "entity_revision": getattr(
+                                    projected_npc, "entity_revision", None
+                                ),
+                                "stable_identity_ref": getattr(
+                                    projected_npc, "stable_identity_ref", None
+                                ),
+                                "current_location_ref": getattr(
+                                    projected_npc, "current_location_ref", None
+                                ),
+                                "privacy_class": getattr(
+                                    projected_npc, "privacy_class", None
+                                ),
+                            }
+                            if projected_npc is not None
+                            else None
+                        ),
+                        "biographical_context": target_biography.model_dump(mode="json"),
                     }
                     candidates.append(ReviewedLifeSeedFutureCandidate(
                         token=_digest({
@@ -848,12 +1146,20 @@ class ReviewedLifeSeedCatalog:
                         location_ref=location.location_ref if location else None,
                         participant_ref=f"npc:{npc.npc_id}" if npc else None,
                         availability_hash=_digest(availability_material),
+                        context_fit_bp=(
+                            opening.context_affinity_bp
+                            if set(opening.context_affinity_tags)
+                            & set(target_biography.context_tags)
+                            else 10_000
+                        ),
+                        biographical_context=target_biography,
                     ))
         candidates.sort(key=lambda item: (item.day_offset, item.opening.id, item.local_window))
         return tuple(candidates[:max_candidates])
 
     def npc_initiative_candidates_at(
         self, *, instant: datetime, npcs: tuple[object, ...] = (),
+        life_arcs: tuple[object, ...] = (),
     ) -> tuple[NpcInitiativeCandidate, ...]:
         """Compile the NPC-initiated events that may legally begin right now.
 
@@ -865,6 +1171,10 @@ class ReviewedLifeSeedCatalog:
 
         local = self._chronology.localize(instant)
         assert local is not None
+        biography = self.biographical_context_at(
+            instant=instant,
+            life_arcs=life_arcs,
+        )
         minute = local.hour * 60 + local.minute
         locations = {item.id: item for item in self._document.locations}
         reviewed_npcs = {item.id: item for item in self._document.npcs}
@@ -876,7 +1186,12 @@ class ReviewedLifeSeedCatalog:
         for event in self._document.npc_initiated_events:
             npc = reviewed_npcs[event.npc_id]
             location = locations[event.location_id]
-            if npc.npc_id not in active_npc_ids or not event.eligible_at(local):
+            if (
+                npc.npc_id not in active_npc_ids
+                or not event.eligible_at(local)
+                or not npc.eligible_in_context(biography)
+                or not location.eligible_in_context(biography)
+            ):
                 continue
             # Load-time validation already proved the reviewed windows lie
             # inside NPC/location availability; re-checking here keeps "never
@@ -914,12 +1229,51 @@ class ReviewedLifeSeedCatalog:
         return tuple(candidates)
 
     @property
+    def story_candidate_role(self) -> Literal["legacy_replay_and_fixture"] | None:
+        return self._document.story_candidate_role
+
+    @property
+    def timezone_name(self) -> str:
+        return self._chronology.timezone_name
+
+    @property
     def reviewed_locations(self) -> tuple[ReviewedLifeSeedLocation, ...]:
         return self._document.locations
 
     @property
     def reviewed_npcs(self) -> tuple[ReviewedLifeSeedNpc, ...]:
         return self._document.npcs
+
+    def biographical_context_at(
+        self, *, instant: datetime, life_arcs: tuple[object, ...]
+    ) -> BiographicalContext:
+        context = self._biography.context_at(instant, life_arcs=life_arcs)
+        continuities = {
+            item.source_context_pack_ref: item.completion_context_tags
+            for item in self._document.completed_life_arc_continuities
+        }
+        established: set[str] = set()
+        for arc in life_arcs:
+            if getattr(arc, "status", None) != "completed":
+                continue
+            closed_at = getattr(arc, "closed_at", None)
+            if not isinstance(closed_at, datetime) or closed_at > instant:
+                continue
+            established.update(
+                continuities.get(
+                    str(getattr(arc, "context_pack_ref", "")),
+                    (),
+                )
+            )
+        if not established:
+            return context
+        return context.model_copy(
+            update={
+                "context_tags": tuple(
+                    sorted({*context.context_tags, *established})
+                )
+            }
+        )
 
     @property
     def reviewed_future_openings(self) -> tuple[ReviewedLifeSeedFutureOpening, ...]:
@@ -1054,6 +1408,55 @@ class ReviewedLifeSeedCatalog:
             raise ValueError("reviewed aftermath is ambiguous for activity kind")
         return matches[0] if matches else ()
 
+    def life_arc_effect_for_settlement(
+        self, *, activity_kind: str, candidate_result_ref: str
+    ) -> ReviewedLifeArcEffect | None:
+        outcome_id = candidate_result_ref.rsplit(":", 1)[-1]
+        outcome = next(
+            (
+                item
+                for item in self.outcomes_for_activity(activity_kind)
+                if item.id == outcome_id
+            ),
+            None,
+        )
+        return outcome.life_arc_effect if outcome is not None else None
+
+    def frozen_life_arc_effect_for_outcome(
+        self, *, activity_kind: str, outcome_id: str
+    ) -> FrozenLifeArcEffectDescriptor | None:
+        """Freeze reviewed long-lived authority before an occurrence commits."""
+
+        outcome = next(
+            (
+                item
+                for item in self.outcomes_for_activity(activity_kind)
+                if item.id == outcome_id
+            ),
+            None,
+        )
+        if outcome is None or outcome.life_arc_effect is None:
+            return None
+        effect = outcome.life_arc_effect
+        return FrozenLifeArcEffectDescriptor.create(
+            arc_kind=effect.arc_kind,
+            context_pack_ref=effect.context_pack_ref,
+            context_tags=effect.context_tags,
+            duration_days=effect.duration_days,
+            privacy_class=effect.privacy,
+            catalog_version=self.version,
+            catalog_hash=self.catalog_hash,
+        )
+
+    def contextual_npcs(
+        self, context: BiographicalContext
+    ) -> tuple[ReviewedLifeSeedNpc, ...]:
+        return tuple(
+            item
+            for item in self._document.npcs
+            if item.requires_all_context_tags and item.eligible_in_context(context)
+        )
+
     def opening_for_activity(self, activity_kind: str) -> ReviewedLifeSeedOpening | None:
         """Return the unique reviewed opening owning one activity kind."""
 
@@ -1175,6 +1578,7 @@ __all__ = [
     "ReviewedLifeSeedLocation",
     "ReviewedLifeSeedNpc",
     "ReviewedLifeSeedReachability",
+    "ReviewedLifeArcEffect",
     "ReviewedLifeOutcome",
     "ReviewedOpeningVisualEvidence",
     "ReviewedVisualEnvironmentFacts",

@@ -38,7 +38,11 @@ from .schemas import (
     ThreadProjection,
 )
 from .situation_compiler import SituationProjection
-from .world_life_context import WorldLifeContextItem
+from .world_life_context import (
+    BiographicalWorldContextItem,
+    WorldLifeContextItem,
+    WorldLifeModelContextItem,
+)
 from .perception_result_context import PerceptionResultContextItem
 from .recent_dialogue import RecentDialogueItem
 
@@ -512,7 +516,7 @@ class ContextCapsuleRequest(_FrozenModel):
     open_threads: ResolvedSlice[tuple[ThreadProjection, ...]] | None = None
     relevant_facts: ResolvedSlice[tuple[FactProjection | FactRecallItem, ...]] | None = None
     recent_experiences: ResolvedSlice[tuple[ExperienceProjection, ...]] | None = None
-    world_life: ResolvedSlice[tuple[WorldLifeContextItem, ...]] | None = None
+    world_life: ResolvedSlice[tuple[WorldLifeModelContextItem, ...]] | None = None
     perception_results: ResolvedSlice[tuple[PerceptionResultContextItem, ...]] | None = None
     active_memory_candidates: (
         ResolvedSlice[tuple[MemoryCandidateProjection | MemoryRetrievalItem, ...]] | None
@@ -821,7 +825,12 @@ def _values(bound: ResolvedSlice[object]) -> tuple[BaseModel, ...]:
 
 
 def _identity(slice_name: SliceName, item: BaseModel) -> str:
-    field = _ITEM_IDS[slice_name]
+    field = (
+        "biography_id"
+        if slice_name == "world_life"
+        and isinstance(item, BiographicalWorldContextItem)
+        else _ITEM_IDS[slice_name]
+    )
     identity = getattr(item, field)
     if slice_name == "action_budget":
         identity = f"{identity}:{getattr(item, 'window_id')}"
@@ -953,6 +962,12 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
         if item.content is not None:
             refs.add(item.content.descriptor_event_ref)
         return tuple(sorted(refs))
+    if slice_name == "world_life" and isinstance(
+        item, BiographicalWorldContextItem
+    ):
+        return tuple(
+            sorted(binding.authority_event_ref for binding in item.source_bindings)
+        )
     if slice_name == "perception_results" and isinstance(item, PerceptionResultContextItem):
         return tuple(sorted({item.source.result_event_ref, item.source.receipt_event_ref}))
     if slice_name == "relevant_facts" and isinstance(item, FactProjection):
@@ -1038,6 +1053,18 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
                 )
             )
         return tuple(sorted(authorities))
+    if isinstance(item, BiographicalWorldContextItem):
+        return tuple(
+            sorted(
+            (
+                "committed_event",
+                binding.authority_event_ref,
+                binding.authority_world_revision,
+                binding.authority_payload_hash,
+            )
+            for binding in item.source_bindings
+            )
+        )
     if isinstance(item, PerceptionResultContextItem):
         return (
             (

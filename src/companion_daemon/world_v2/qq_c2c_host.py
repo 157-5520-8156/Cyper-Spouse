@@ -52,6 +52,7 @@ from .semantic_chat_composition import (
 )
 from .expression_draft import qq_expression_capabilities
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
+from .life_development_model_adapter import RoleBoundLifeDevelopmentModelAdapter
 from .recall_embedding import configured_recall_embedding
 from .recall_index import RecallEmbedding
 
@@ -1093,6 +1094,14 @@ def build_qq_c2c_host(
     )
     model = semantic_chat.flash_model
     background_model = semantic_chat.background_model
+    life_world_author = RoleBoundLifeDevelopmentModelAdapter(
+        model=background_model,
+        role="world_author",
+    )
+    life_character = RoleBoundLifeDevelopmentModelAdapter(
+        model=background_model,
+        role="character_model",
+    )
     delivery = delivery or QQDelivery(settings)
     transport = QQC2CPlatformTransport(
         delivery=delivery,
@@ -1155,13 +1164,8 @@ def build_qq_c2c_host(
         proactive_identity_frame=semantic_chat.identity_frame,
         memory_model=background_model,
         activity_lifecycle_model=background_model,
-        # The open-world lane was designed and composed in
-        # build_sqlite_world_v2_turn_application but no production host ever
-        # injected its model, so the ledger never contained a single
-        # model-authored temporary event.  It shares the background channel:
-        # it runs only on quiet ecology wakes and never touches the
-        # interactive reply path.
-        open_world_event_model=background_model,
+        life_world_author_model=life_world_author,
+        life_character_model=life_character,
         media_selection_model=(
             media_preview.selection_model if media_preview is not None else None
         ),

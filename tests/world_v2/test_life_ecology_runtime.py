@@ -11,6 +11,9 @@ from companion_daemon.world_v2.life_ecology_runtime import (
     LifeEcologyRunClaim,
     LifeEcologyRuntime,
 )
+from companion_daemon.world_v2.life_aftermath_runtime import (
+    LifeAftermathModelFailure,
+)
 from companion_daemon.world_v2.schemas import (
     CommittedWorldEventRef,
     LifeEcologyScheduleProjection,
@@ -152,6 +155,56 @@ class _OpenWorld:
         return SimpleNamespace(status=self.status)
 
 
+class _LifeDevelopment:
+    def __init__(self, status: str, *, reason_code: str | None = None) -> None:
+        self.status = status
+        self.reason_code = reason_code
+        self.calls = []
+
+    async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        return SimpleNamespace(status=self.status, reason_code=self.reason_code)
+
+
+class _Biographical:
+    def __init__(self, status: str) -> None:
+        self.status = status
+        self.calls = []
+
+    async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        return SimpleNamespace(status=self.status)
+
+
+class _Aftermath:
+    def __init__(
+        self,
+        *,
+        status: str = "no_op",
+        raises: Exception | None = None,
+    ) -> None:
+        self.status = status
+        self.raises = raises
+        self.calls = []
+
+    async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        if self.raises is not None:
+            raise self.raises
+        return SimpleNamespace(status=self.status)
+
+
+class _Aspiration:
+    def __init__(self, *, status: str, reason_code: str) -> None:
+        self.status = status
+        self.reason_code = reason_code
+        self.calls = []
+
+    async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        return SimpleNamespace(status=self.status, reason_code=self.reason_code)
+
+
 @pytest.mark.asyncio
 async def test_life_ecology_accepts_exact_clock_from_a_multi_world_event_commit() -> None:
     """A tick may atomically append ClockAdvanced plus affect decay events."""
@@ -226,7 +279,7 @@ async def test_life_ecology_rejects_a_wake_that_is_not_exactly_committed() -> No
 
 
 @pytest.mark.asyncio
-async def test_life_ecology_skips_a_committed_wake_during_durable_cooldown() -> None:
+async def test_life_development_cooldown_still_drains_non_model_media_work() -> None:
     event = _event("clock-during-cooldown")
     ledger = _Ledger(event)
     ledger._projection.life_ecology_schedule = LifeEcologyScheduleProjection(
@@ -238,10 +291,12 @@ async def test_life_ecology_skips_a_committed_wake_during_durable_cooldown() -> 
         consecutive_failures=2,
     )
     trigger_store, media = _TriggerStore(), _Media()
+    development = _LifeDevelopment("no_op")
     runtime = LifeEcologyRuntime(
         ledger=ledger,
         trigger_store=trigger_store,
         media_followup=media,
+        life_development_followup=development,
         availability=LifeEcologyAvailability(state="installed_and_active"),
     )
 
@@ -252,9 +307,96 @@ async def test_life_ecology_skips_a_committed_wake_during_durable_cooldown() -> 
     )
 
     assert result.status == "idle"
-    assert result.reason_code == "life_ecology.cooldown"
-    assert trigger_store.claims == []
-    assert media.calls == []
+    assert development.calls == []
+    assert len(trigger_store.claims) == 1
+    assert len(media.calls) == 1
+    assert trigger_store.completed[0][2] == "cooldown"
+
+
+@pytest.mark.asyncio
+async def test_open_life_cadence_does_not_block_a_due_activity_transition() -> None:
+    event = _event("clock-due-activity-during-development-cadence")
+    ledger = _Ledger(event)
+    ledger._projection.life_ecology_schedule = LifeEcologyScheduleProjection(
+        last_trigger_id="trigger:previous-no-op",
+        last_wake_event_ref="event:previous-clock",
+        last_outcome_ref="life-ecology:life_development_no_op",
+        last_completed_at=NOW - timedelta(minutes=1),
+        next_consideration_at=NOW + timedelta(hours=3),
+        consecutive_failures=0,
+    )
+    ledger._projection.plans = (
+        SimpleNamespace(
+            status="planned",
+            scheduled_window=SimpleNamespace(
+                opens_at=NOW,
+                closes_at=NOW + timedelta(hours=1),
+            ),
+        ),
+    )
+    ledger._projection.world_occurrences = ()
+    ledger._projection.experiences = ()
+    ledger._projection.pending_biographical_settlements = ()
+    trigger_store, media = _TriggerStore(), _Media()
+    activity = _Activity(status="transitioned")
+    development = _LifeDevelopment("no_op")
+    runtime = LifeEcologyRuntime(
+        ledger=ledger,
+        trigger_store=trigger_store,
+        media_followup=media,
+        activity_followup=activity,
+        life_development_followup=development,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:due-activity",
+        correlation_id="correlation:due-activity",
+    )
+
+    assert result.status == "advanced"
+    assert result.activity_followup_status == "transitioned"
+    assert len(activity.calls) == 1
+    assert development.calls == []
+    assert trigger_store.completed[0][2] == "activity_transitioned"
+
+
+@pytest.mark.asyncio
+async def test_open_life_cadence_does_not_block_a_biographical_boundary() -> None:
+    event = _event("clock-biographical-boundary-during-development-cadence")
+    ledger = _Ledger(event)
+    ledger._projection.life_ecology_schedule = LifeEcologyScheduleProjection(
+        last_trigger_id="trigger:previous-no-op",
+        last_wake_event_ref="event:previous-clock",
+        last_outcome_ref="life-ecology:life_development_no_op",
+        last_completed_at=NOW - timedelta(minutes=1),
+        next_consideration_at=NOW + timedelta(hours=3),
+        consecutive_failures=0,
+    )
+    trigger_store, media = _TriggerStore(), _Media()
+    biography = _Biographical("transitioned")
+    development = _LifeDevelopment("no_op")
+    runtime = LifeEcologyRuntime(
+        ledger=ledger,
+        trigger_store=trigger_store,
+        media_followup=media,
+        biographical_followup=biography,
+        life_development_followup=development,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:biographical-boundary",
+        correlation_id="correlation:biographical-boundary",
+    )
+
+    assert result.status == "advanced"
+    assert result.biographical_followup_status == "transitioned"
+    assert len(biography.calls) == 1
+    assert development.calls == []
+    assert trigger_store.completed[0][2] == "biographical_transitioned"
 
 
 @pytest.mark.asyncio
@@ -392,6 +534,34 @@ async def test_life_ecology_persists_a_retryable_media_failure_code() -> None:
 
 
 @pytest.mark.asyncio
+async def test_contextual_inspiration_model_failure_does_not_mutate_global_backoff() -> None:
+    event = _event("clock-contextual-inspiration-failure")
+    trigger_store = _TriggerStore()
+    aspiration = _Aspiration(
+        status="deferred",
+        reason_code="contextual_life_inspiration.model_unavailable",
+    )
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=_Media(),
+        aspiration_followup=aspiration,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:contextual-inspiration-failure",
+        correlation_id="correlation:contextual-inspiration-failure",
+    )
+
+    assert result.status == "idle"
+    assert result.aspiration_followup_status == "deferred"
+    assert result.technical_failure_code is None
+    assert not trigger_store.completed[0][2].startswith("technical_failure.")
+
+
+@pytest.mark.asyncio
 async def test_life_ecology_does_not_claim_an_unpersisted_failure_code() -> None:
     event = _event("clock-media-failure-store-offline")
     trigger_store = _TriggerStore(complete_raises=True)
@@ -437,6 +607,139 @@ async def test_life_ecology_keeps_model_deferred_wake_recoverable_instead_of_ter
     assert result.open_world_followup_status == "deferred"
     assert media.calls == []
     assert trigger_store.completed == []
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_uses_one_open_development_followup_instead_of_legacy_story_lanes() -> None:
+    event = _event("clock-open-life-development")
+    trigger_store, media = _TriggerStore(), _Media()
+    development = _LifeDevelopment("occurrence_committed")
+    present_author = _LifeAuthor()
+    future_author = _LifeAuthor()
+    npc_initiative = _LifeAuthor()
+    aspiration = _Aspiration(status="no_op", reason_code="legacy")
+    open_world = _OpenWorld("committed")
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        life_development_followup=development,
+        life_author_followup=present_author,
+        future_life_author_followup=future_author,
+        npc_initiative_followup=npc_initiative,
+        aspiration_followup=aspiration,
+        open_world_followup=open_world,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:open-life-development",
+        correlation_id="correlation:open-life-development",
+    )
+
+    assert result.status == "advanced"
+    assert result.life_development_followup_status == "occurrence_committed"
+    assert development.calls == [{
+        "wake_event_ref": event.event_id,
+        "trace_id": "trace:open-life-development",
+        "correlation_id": "correlation:open-life-development",
+    }]
+    assert present_author.calls == []
+    assert future_author.calls == []
+    assert npc_initiative.calls == []
+    assert aspiration.calls == []
+    assert open_world.calls == []
+    assert len(media.calls) == 1
+    assert trigger_store.completed[0][2] == "life_development_occurrence_committed"
+
+
+@pytest.mark.asyncio
+async def test_life_development_technical_failure_schedules_retry_instead_of_idle_completion() -> None:
+    event = _event("clock-open-life-technical-failure")
+    trigger_store, media = _TriggerStore(), _Media()
+    development = _LifeDevelopment(
+        "technical_failure",
+        reason_code="life_development.world_author_unavailable",
+    )
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        life_development_followup=development,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:open-life-technical-failure",
+        correlation_id="correlation:open-life-technical-failure",
+    )
+
+    assert result.status == "deferred"
+    assert result.reason_code == "life_ecology.life_development_technical_failure"
+    assert result.life_development_followup_status == "technical_failure"
+    assert result.technical_failure_code == "life_development.world_author_unavailable"
+    assert trigger_store.completed[0][2] == (
+        "technical_failure.life_development.world_author_unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_aftermath_model_failure_keeps_its_precise_technical_retry_code() -> None:
+    event = _event("clock-aftermath-technical-failure")
+    trigger_store, media = _TriggerStore(), _Media()
+    aftermath = _Aftermath(
+        raises=LifeAftermathModelFailure(
+            "audited failure",
+            failure_code="corrective_invalid",
+        )
+    )
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        aftermath_followup=aftermath,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:aftermath-technical-failure",
+        correlation_id="correlation:aftermath-technical-failure",
+    )
+
+    assert result.status == "failed_safe"
+    assert result.technical_failure_code == "aftermath.corrective_invalid"
+    assert trigger_store.completed[0][2] == (
+        "technical_failure.aftermath.corrective_invalid"
+    )
+    assert media.calls == []
+
+
+@pytest.mark.asyncio
+async def test_aftermath_retry_wait_defers_other_life_lanes_without_calling_models() -> None:
+    event = _event("clock-aftermath-retry-wait")
+    trigger_store, media = _TriggerStore(), _Media()
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        aftermath_followup=_Aftermath(status="retry_wait"),
+        life_development_followup=_LifeDevelopment("occurrence_committed"),
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:aftermath-retry-wait",
+        correlation_id="correlation:aftermath-retry-wait",
+    )
+
+    assert result.status == "deferred"
+    assert result.aftermath_followup_status == "retry_wait"
+    assert trigger_store.completed[0][2] == "cooldown"
+    assert media.calls == []
 
 
 @pytest.mark.asyncio

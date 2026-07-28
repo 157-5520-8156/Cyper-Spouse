@@ -3,6 +3,33 @@
 world_id: zhizhi-world-v1
 logical_at: "2026-07-11T09:00:00+08:00"
 materialize_current_schedule: true
+# Operator-reviewed biographical chronology. Logical Time derives age and
+# academic availability from these dates; it never trusts a stale prose age or
+# year label. Voluntary work/travel Life Arcs are event-sourced separately and
+# contribute context tags only while their accepted episode is active.
+biographical_lifecycle:
+  version: biography.1
+  birth_date: 2005-04-12
+  baseline_context_tags: []
+  # Residence is a reviewed phase fact, separate from enrollment. Active
+  # residence-bearing Life Arcs may temporarily override this baseline.
+  residence:
+    before_enrollment: residence:family_home_jiaxing
+    term: residence:campus_dorm
+    winter_break: residence:family_home_jiaxing
+    summer_break: residence:family_home_jiaxing
+    graduated: residence:shanghai_home
+  academic:
+    enrolled_on: 2024-09-01
+    expected_graduation_on: 2028-06-30
+    term_windows:
+      - {opens_on: "09-01", closes_on: "01-15"}
+      - {opens_on: "02-20", closes_on: "06-29"}
+    winter_break_windows:
+      - {opens_on: "01-16", closes_on: "02-19"}
+    summer_break_windows:
+      - {opens_on: "06-30", closes_on: "08-31"}
+    enrollment_context_tags: []
 # Reviewed static possibility catalog for the World-v2 Life Author.  These are
 # reviewed possibilities only: a location/NPC may become a plan binding only
 # after its exact availability is checked and snapshotted at a committed clock
@@ -55,18 +82,27 @@ life_author_catalog:
   # self-authored front-camera/mirror facts P3 needs.  Five thin shareable
   # openings also gain one more picture-worthy outcome each.  The annex is
   # configuration only: no photo, candidate or delivery is asserted here.
-  version: reviewed-life.12
+  # reviewed-life.13 adds source-bound biography and phase-aware factual
+  # affordances. It does not add authored employment, travel or NPC plots.
+  version: reviewed-life.13
+  # Fixed openings, outcome prose, NPC-event variants and aspiration seeds
+  # below remain readable only for immutable ledger recovery and fixtures.
+  # Production life generation consumes facts, affordances and capability
+  # metadata instead of installing these lists as decision lanes.
+  story_candidate_role: legacy_replay_and_fixture
   locations:
     - id: dorm-room
       location_ref: location:ecnu-dorm-room
       privacy: private
       local_windows: ["00:00-23:59"]
       weekdays: [0, 1, 2, 3, 4, 5, 6]
+      requires_all_context_tags: [residence:campus_dorm]
     - id: dorm-building
       location_ref: location:ecnu-dorm-building
       privacy: personal
       local_windows: ["07:00-23:00"]
       weekdays: [0, 1, 2, 3, 4, 5, 6]
+      requires_all_context_tags: [residence:campus_dorm]
     - id: campus-library
       location_ref: location:ecnu-library
       privacy: shareable
@@ -82,6 +118,7 @@ life_author_catalog:
       privacy: shareable
       local_windows: ["08:00-21:30"]
       weekdays: [0, 1, 2, 3, 4, 5, 6]
+      requires_all_context_tags: [academic:enrolled]
     - id: campus-canteen
       location_ref: location:ecnu-canteen
       privacy: shareable
@@ -107,6 +144,19 @@ life_author_catalog:
       privacy: personal
       local_windows: ["09:00-20:00"]
       weekdays: [0, 1, 2, 3, 4, 5, 6]
+    - id: jiaxing-family-home
+      location_ref: location:jiaxing-family-home
+      privacy: private
+      local_windows: ["00:00-23:59"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      requires_all_context_tags: [residence:family_home_jiaxing]
+      future_entry_authorized: true
+    - id: shanghai-home
+      location_ref: location:shanghai-home
+      privacy: private
+      local_windows: ["00:00-23:59"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+      requires_all_context_tags: [residence:shanghai_home]
   npcs:
     - id: fan-yuan
       npc_id: literature-fan
@@ -124,6 +174,7 @@ life_author_catalog:
       location_id: dorm-room
       local_windows: ["18:30-23:30"]
       weekdays: [0, 1, 2, 3, 4, 5, 6]
+      requires_all_context_tags: [residence:campus_dorm]
   openings:
     - id: settle-morning-routine
       activity_kind: routine.morning_settle
@@ -343,6 +394,7 @@ life_author_catalog:
       weekdays: [0, 1, 2, 3, 4, 5, 6]
       duration_minutes: 45
       importance_bp: 5400
+      requires_all_context_tags: [academic:enrolled]
       outcomes:
         - id: reading-list-warm
           text: 和范予安把读书会书单顺了一遍，聊得比预想中轻松。
@@ -381,6 +433,7 @@ life_author_catalog:
       weekdays: [0, 1, 2, 3, 4]
       duration_minutes: 95
       importance_bp: 6600
+      requires_all_context_tags: [academic:enrolled, calendar:classes_open]
       outcomes:
         - {id: lecture-engaged, text: 这节课老师讲到一个她正好疑惑的问题，笔记边上画了三个星号。, privacy: personal}
         - {id: lecture-drowsy, text: 教室后排有点闷，撑着听完了课，重点抄了，例子得回去再补。, privacy: personal}
@@ -398,6 +451,7 @@ life_author_catalog:
       weekdays: [0, 1, 2, 3, 4]
       duration_minutes: 100
       importance_bp: 6800
+      requires_all_context_tags: [academic:enrolled]
       outcomes:
         - {id: essay-broke-through, text: 论文卡了几天的那一段今晚终于写顺了，保存时字数一下多了八百。, privacy: personal}
         - {id: essay-ground-out, text: 对着文献一点点磨，进度不算好看，但至少提纲下面不再是空的。, privacy: personal}
@@ -498,6 +552,7 @@ life_author_catalog:
       weekdays: [0, 1, 2, 3, 4, 5, 6]
       duration_minutes: 20
       importance_bp: 3000
+      requires_all_context_tags: [residence:campus_dorm]
       outcomes:
         - {id: parcel-awaited-book, text: 取到了等了一周的那本书，拆开在路上就先翻了目录。, privacy: shareable}
         - {id: parcel-wrong-size, text: 快递取回来发现买的收纳盒尺寸不对，站在驿站门口纠结要不要退。, privacy: shareable}
@@ -546,6 +601,7 @@ life_author_catalog:
       duration_minutes: 35
       importance_bp: 3600
       max_per_local_day: 2
+      requires_all_context_tags: [academic:enrolled]
       outcomes:
         - {id: canteen-new-window, text: 试了食堂新开的那个窗口，糖醋小排出乎意料，决定下次带室友来。, privacy: shareable}
         - {id: canteen-usual, text: 还是打了老三样，靠窗坐着慢慢吃完，看楼下人来人往。, privacy: shareable}
@@ -688,6 +744,7 @@ life_author_catalog:
       weekdays: [0, 1, 2, 3, 4]
       duration_minutes: 40
       importance_bp: 5100
+      requires_all_context_tags: [academic:enrolled]
       outcomes:
         - {id: club-admin-done, text: 和范予安把读书会的通知、场地和名单一口气理完，效率高得两个人都意外。, privacy: personal}
         - {id: club-admin-pushback, text: 社团活动的分工她多领了一块，回头想想有点后悔，但话已经说出去了。, privacy: personal}
@@ -727,6 +784,7 @@ life_author_catalog:
       weekdays: [0, 1, 2, 3, 4]
       duration_minutes: 20
       importance_bp: 3300
+      requires_all_context_tags: [academic:enrolled]
       outcomes:
         - {id: print-quick, text: 去打印店把课程材料装订好，店里的老猫照旧趴在裁纸机旁边。, privacy: shareable}
         - {id: print-reprint, text: 打印出来才发现页码设置错了，重排重印，多花了十分钟。, privacy: shareable}
@@ -970,6 +1028,7 @@ life_author_catalog:
       importance_bp: 6200
       advance_days_min: 1
       advance_days_max: 4
+      requires_all_context_tags: [academic:enrolled]
       outcomes:
         - id: meetup-went-well
           text: 和范予安按约碰了面，把文学社接下来的安排理出了个大概。
@@ -1134,6 +1193,7 @@ life_author_catalog:
       importance_bp: 5800
       advance_days_min: 1
       advance_days_max: 5
+      requires_all_context_tags: [academic:enrolled]
       outcomes:
         - id: seminar-room-focused
           text: 预约的研讨间只有她一个人，把课程展示的思路在白板上画了满满一面，拍照存档时挺有成就感。

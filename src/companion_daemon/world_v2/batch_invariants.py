@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 import hashlib
 import json
 
@@ -71,7 +72,17 @@ from .fact_accepted_contracts import (
     fact_commit_event_payload_hash,
     rehydrate_fact_commit_materialized_v2_json,
 )
-from .life_events import ActivityTransitionPayload, WorldOccurrenceSettledPayload
+from .life_events import (
+    ActivityPlannedPayload,
+    ActivityTransitionPayload,
+    OutcomeProposalRecordedPayload,
+    WorldOccurrenceCommittedPayload,
+    WorldOccurrenceSettledPayload,
+)
+from .life_development_draft import (
+    LifeDevelopmentCapabilityManifest,
+    LifeDevelopmentLocationCapability,
+)
 from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
@@ -124,6 +135,7 @@ from .media_v2 import (
 from .schemas import (
     Action,
     BudgetReservation,
+    DueWindow,
     ExperienceOccurrenceSettlementBinding,
     TriggerProcess,
     WorldEvent,
@@ -182,6 +194,7 @@ def validate_commit_batch(
         reject_social_deferred_manifest_without_recorder(events)
     _reject_new_private_impression_without_role_reflection(events)
     _validate_deliberation_audit_transaction(events)
+    _validate_life_development_location_authority_batch(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
         events,
@@ -539,6 +552,13 @@ def _validate_expression_receipt_lifecycle_batch(events: Sequence[WorldEvent]) -
 def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> None:
     """Keep Phase-4A provider lineage and its optional Proposal indivisible."""
 
+    context_v2_character_outcomes = [
+        event
+        for event in events
+        if event.event_type == "OutcomeProposalRecorded"
+        and event.payload().get("decision_authority") == "character_model"
+        and event.payload().get("context_identity_version") == "life-aftermath-context.2"
+    ]
     model_indexes = [
         index for index, event in enumerate(events) if event.event_type == "ModelResultRecorded"
     ]
@@ -549,11 +569,18 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         and event.payload().get("audit_contract") == "proposal-envelope-audit.1"
     ]
     if not model_indexes:
+        if context_v2_character_outcomes:
+            raise ValueError(
+                "Context v2 character outcome requires its complete pinned "
+                "model-to-settlement transaction"
+            )
         if v2_proposal_indexes:
             raise ValueError("ProposalRecorded v2 requires its complete model audit transaction")
         return
     if model_indexes[0] != 0:
         raise ValueError("model audit transaction must start the commit")
+    if len(context_v2_character_outcomes) > 1:
+        raise ValueError("model audit transaction cannot contain multiple character outcomes")
 
     first = ModelResultRecordedPayload.model_validate_json(events[0].payload_json)
     expected_model_indexes = list(range(first.attempt_count))
@@ -582,7 +609,9 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         return
 
     proposal_index = first.attempt_count
-    if len(events) != proposal_index + 1 or v2_proposal_indexes != [proposal_index]:
+    if len(events) not in {proposal_index + 1, proposal_index + 5} or v2_proposal_indexes != [
+        proposal_index
+    ]:
         raise ValueError("validated model audit transaction requires one adjacent Proposal")
     proposal = ProposalRecordedV2Payload.model_validate_json(events[proposal_index].payload_json)
     final = attempts[-1]
@@ -597,6 +626,305 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         or proposal.proposal_hash != final.proposal_hash
     ):
         raise ValueError("ProposalRecorded v2 does not bind the final model attempt")
+    if len(events) == proposal_index + 5:
+        outcome_event, acceptance_event, settlement_event, trigger_event = events[
+            proposal_index + 1 :
+        ]
+        if tuple(
+            item.event_type
+            for item in (
+                outcome_event,
+                acceptance_event,
+                settlement_event,
+                trigger_event,
+            )
+        ) != (
+            "OutcomeProposalRecorded",
+            "AcceptanceRecorded",
+            "WorldOccurrenceSettled",
+            "TriggerProcessOpened",
+        ):
+            raise ValueError("atomic character outcome transaction has invalid domain ordering")
+        outcome = OutcomeProposalRecordedPayload.model_validate_json(outcome_event.payload_json)
+        settlement = WorldOccurrenceSettledPayload.model_validate_json(
+            settlement_event.payload_json
+        )
+        acceptance = acceptance_event.payload()
+        if (
+            outcome.context_identity_version != "life-aftermath-context.2"
+            or outcome.decision_authority != "character_model"
+            or outcome.decision_model_result_ref != final.model_result_ref
+            or outcome.decision_model_result_event_ref != events[first.attempt_count - 1].event_id
+            or outcome.decision_audit_proposal_event_ref != events[proposal_index].event_id
+            or outcome.decision_audit_proposal_event_payload_hash
+            != events[proposal_index].payload_hash
+            or outcome.context_capsule_id != final.capsule_id
+            or outcome.context_cursor is None
+            or outcome.context_cursor.world_revision != final.evaluated_world_revision
+            or outcome.evaluated_world_revision != final.evaluated_world_revision
+            or outcome_event.causation_id != events[proposal_index].event_id
+            or acceptance_event.causation_id != outcome_event.event_id
+            or acceptance.get("proposal_id") != outcome.outcome_proposal_id
+            or acceptance.get("evaluated_world_revision") != outcome.evaluated_world_revision
+            or settlement_event.causation_id != acceptance_event.event_id
+            or settlement.outcome_proposal_id != outcome.outcome_proposal_id
+            or settlement.accepted_change_hash != outcome.proposed_change_hash
+            or settlement.adopt_proposed_life_direction != outcome.adopt_proposed_life_direction
+            or trigger_event.causation_id != settlement_event.event_id
+        ):
+            raise ValueError("atomic character outcome transaction is not fully pinned")
+
+
+_LIFE_DEVELOPMENT_PRIVACY_RANK = {
+    "public": 0,
+    "shareable": 1,
+    "personal": 2,
+    "private": 3,
+    "withhold": 4,
+}
+
+
+def _validate_life_development_location_authority_batch(
+    events: Sequence[WorldEvent],
+) -> None:
+    """Close every new life-development location effect over frozen authority."""
+
+    for proposal_event in events:
+        if proposal_event.event_type != "ProposalRecorded":
+            continue
+        proposal = proposal_event.payload()
+        if proposal.get("proposal_kind") != "life_development":
+            continue
+        possibility = proposal.get("possibility_authority")
+        if possibility is None:
+            continue
+        if not isinstance(possibility, dict):
+            raise ValueError("life-development possibility authority must be an object")
+        location_ref = possibility.get("location_ref")
+        capability_ref = possibility.get("location_capability_ref")
+        capability_value = possibility.get("location_capability")
+        if location_ref is None and capability_ref is None and capability_value is None:
+            effect_locations = [
+                ActivityPlannedPayload.model_validate_json(event.payload_json).plan.location_ref
+                for event in events
+                if event.event_type == "ActivityPlanned"
+                and event.causation_id == proposal_event.event_id
+            ]
+            effect_locations.extend(
+                WorldOccurrenceCommittedPayload.model_validate_json(
+                    event.payload_json
+                ).occurrence.location_ref
+                for event in events
+                if event.event_type == "WorldOccurrenceCommitted"
+                and event.causation_id == proposal_event.event_id
+            )
+            if any(value is not None for value in effect_locations):
+                raise ValueError("life-development bare location effect has no frozen capability")
+            continue
+        if (
+            proposal.get("possibility_authority_version") != "life-development-possibility.2"
+            or not isinstance(location_ref, str)
+            or not isinstance(capability_ref, str)
+            or not isinstance(capability_value, dict)
+        ):
+            raise ValueError("life-development location requires one frozen capability")
+        expected_possibility_hash = hashlib.sha256(
+            json.dumps(
+                possibility,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if proposal.get("possibility_authority_hash") != expected_possibility_hash:
+            raise ValueError("life-development location possibility authority hash is invalid")
+        try:
+            capability = LifeDevelopmentLocationCapability.model_validate_json(
+                json.dumps(
+                    capability_value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        except ValueError as exc:
+            raise ValueError("life-development location capability snapshot is invalid") from exc
+        if (
+            capability_value
+            != capability.model_dump(
+                mode="json",
+                exclude={"capability_ref"},
+            )
+            or capability.location_ref != location_ref
+            or capability.capability_ref != capability_ref
+        ):
+            raise ValueError("life-development location capability snapshot does not match its ref")
+        deliberation = proposal.get("world_author_deliberation")
+        manifest_value = (
+            deliberation.get("capability_manifest")
+            if isinstance(deliberation, dict)
+            else None
+        )
+        if not isinstance(manifest_value, dict):
+            raise ValueError(
+                "life-development location has no pinned capability manifest"
+            )
+        try:
+            manifest = LifeDevelopmentCapabilityManifest.model_validate_json(
+                json.dumps(
+                    manifest_value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "life-development pinned capability manifest is invalid"
+            ) from exc
+        if (
+            proposal.get("capability_manifest_version") != manifest.version
+            or proposal.get("capability_manifest_hash") != manifest.manifest_hash
+        ):
+            raise ValueError(
+                "life-development pinned capability manifest identity changed"
+            )
+        if not any(
+            item.capability_ref == capability_ref and item == capability
+            for item in manifest.location_capabilities
+        ):
+            raise ValueError(
+                "life-development location capability is absent from its pinned manifest"
+            )
+        timing_mode, offered_window = _life_development_offered_window(
+            proposal_event=proposal_event,
+            possibility=possibility,
+        )
+        proposal_privacy = possibility.get("privacy_class")
+        if (
+            not isinstance(proposal_privacy, str)
+            or proposal_privacy not in _LIFE_DEVELOPMENT_PRIVACY_RANK
+            or _LIFE_DEVELOPMENT_PRIVACY_RANK[proposal_privacy]
+            < _LIFE_DEVELOPMENT_PRIVACY_RANK[capability.privacy_class]
+        ):
+            raise ValueError("life-development location capability privacy is weakened")
+        if not capability.authorizes(
+            timing_mode=timing_mode,
+            window=offered_window,
+        ):
+            raise ValueError(
+                "life-development location capability does not authorize the proposed window"
+            )
+
+        effect_kind = proposal.get("effect_kind")
+        effect_ref = proposal.get("effect_ref")
+        if effect_kind is None and effect_ref is None:
+            continue
+        if effect_kind == "character_plan":
+            matching = [
+                event
+                for event in events
+                if event.event_type == "ActivityPlanned"
+                and event.causation_id == proposal_event.event_id
+            ]
+            if len(matching) != 1:
+                raise ValueError("life-development location Proposal requires one adjacent Plan")
+            effect = ActivityPlannedPayload.model_validate_json(matching[0].payload_json)
+            if effect.plan.plan_id != effect_ref or effect.plan.scheduled_window is None:
+                raise ValueError("life-development location Proposal and Plan are inconsistent")
+            effect_window = effect.plan.scheduled_window
+            effect_location_ref = effect.plan.location_ref
+            effect_privacy = effect.plan.privacy_class
+            if effect.plan.evidence_refs != effect.evidence_refs:
+                raise ValueError("life-development location Plan evidence is not closed")
+            if (
+                effect_window.opens_at < offered_window.opens_at
+                or effect_window.closes_at > offered_window.closes_at
+            ):
+                raise ValueError("life-development location Plan exceeds its offered window")
+        elif effect_kind == "world_occurrence":
+            matching = [
+                event
+                for event in events
+                if event.event_type == "WorldOccurrenceCommitted"
+                and event.causation_id == proposal_event.event_id
+            ]
+            if len(matching) != 1:
+                raise ValueError(
+                    "life-development location Proposal requires one adjacent occurrence"
+                )
+            effect = WorldOccurrenceCommittedPayload.model_validate_json(matching[0].payload_json)
+            if effect.occurrence.occurrence_id != effect_ref:
+                raise ValueError(
+                    "life-development location Proposal and occurrence are inconsistent"
+                )
+            effect_window = effect.occurrence.time_window
+            effect_location_ref = effect.occurrence.location_ref
+            effect_privacy = effect.occurrence.visibility
+            if effect_window != offered_window:
+                raise ValueError("life-development location occurrence changed its proposed window")
+        else:
+            raise ValueError("life-development location effect kind is invalid")
+
+        if effect_location_ref != location_ref:
+            raise ValueError("life-development location effect changed its authorized place")
+        if (
+            _LIFE_DEVELOPMENT_PRIVACY_RANK[effect_privacy]
+            < _LIFE_DEVELOPMENT_PRIVACY_RANK[capability.privacy_class]
+            or _LIFE_DEVELOPMENT_PRIVACY_RANK[effect_privacy]
+            < _LIFE_DEVELOPMENT_PRIVACY_RANK[proposal_privacy]
+        ):
+            raise ValueError("life-development location effect weakened its authorized privacy")
+        if not capability.authorizes(
+            timing_mode=timing_mode,
+            window=effect_window,
+        ):
+            raise ValueError("life-development location effect exceeds its capability window")
+        carried_authority_refs = {
+            *(item.ref_id for item in effect.evidence_refs),
+            *effect.policy_refs,
+        }
+        if not set(capability.authority_refs) <= carried_authority_refs:
+            raise ValueError(
+                "life-development location capability authority is absent "
+                "from effect evidence or policy refs"
+            )
+
+
+def _life_development_offered_window(
+    *,
+    proposal_event: WorldEvent,
+    possibility: dict[str, object],
+) -> tuple[str, DueWindow]:
+    timing = possibility.get("timing")
+    if not isinstance(timing, dict):
+        raise ValueError("life-development location timing is invalid")
+    mode = timing.get("mode")
+    if mode == "now":
+        duration_minutes = timing.get("duration_minutes")
+        if type(duration_minutes) is not int or duration_minutes <= 0:
+            raise ValueError("life-development location now timing is invalid")
+        return (
+            "now",
+            DueWindow(
+                opens_at=proposal_event.logical_time,
+                closes_at=proposal_event.logical_time + timedelta(minutes=duration_minutes),
+            ),
+        )
+    if mode != "later":
+        raise ValueError("life-development location timing mode is invalid")
+    opens_at = timing.get("opens_at")
+    closes_at = timing.get("closes_at")
+    if not isinstance(opens_at, str) or not isinstance(closes_at, str):
+        raise ValueError("life-development location later timing is invalid")
+    try:
+        window = DueWindow(
+            opens_at=datetime.fromisoformat(opens_at),
+            closes_at=datetime.fromisoformat(closes_at),
+        )
+    except ValueError as exc:
+        raise ValueError("life-development location later timing is invalid") from exc
+    return "later", window
 
 
 def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None:
@@ -948,8 +1276,7 @@ def reject_expression_plan_manifest_without_recorder(events: Sequence[WorldEvent
 def reject_social_deferred_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
     if any(
         event.event_type == "AcceptanceRecorded"
-        and event.payload().get("manifest_version")
-        in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
+        and event.payload().get("manifest_version") in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
         for event in events
     ):
         raise ValueError("social_deferred.recorder_capability_required")
@@ -962,8 +1289,7 @@ def _validate_authorized_social_deferred_manifest_batch(
         event
         for event in events
         if event.event_type == "AcceptanceRecorded"
-        and event.payload().get("manifest_version")
-        in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
+        and event.payload().get("manifest_version") in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
     ]
     if not manifests:
         return
@@ -971,9 +1297,7 @@ def _validate_authorized_social_deferred_manifest_batch(
         raise ValueError("social_deferred.recorder_capability_required")
     if len(manifests) != 1:
         raise ValueError("social_deferred.accepted_batch_shape_is_not_exact")
-    manifest = parse_social_deferred_acceptance_manifest(
-        manifests[0].payload_json
-    )
+    manifest = parse_social_deferred_acceptance_manifest(manifests[0].payload_json)
     expression = manifest.expression_manifest
     beat_count = len(expression.beats)
     expected_types = (
@@ -997,15 +1321,11 @@ def _validate_authorized_social_deferred_manifest_batch(
         for item in events[message_start:message_end]
     )
     plan_index = message_end
-    plan = ExpressionPlanAcceptedPayload.model_validate_json(
-        events[plan_index].payload_json
-    )
+    plan = ExpressionPlanAcceptedPayload.model_validate_json(events[plan_index].payload_json)
     effect_start = plan_index + 1
-    effect_events = events[effect_start:effect_start + beat_count * 3]
+    effect_events = events[effect_start : effect_start + beat_count * 3]
     beat_payloads = tuple(
-        ExpressionBeatAuthorizedPayload.model_validate_json(
-            effect_events[index].payload_json
-        )
+        ExpressionBeatAuthorizedPayload.model_validate_json(effect_events[index].payload_json)
         for index in range(0, len(effect_events), 3)
     )
     reservations = tuple(

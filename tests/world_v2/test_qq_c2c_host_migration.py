@@ -739,7 +739,65 @@ class _SelectingLifeEcologyModel:
 
     async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         del temperature
+        system = messages[0]["content"]
+        if "retrieval memory" in system:
+            return '{"retain":false}'
         capsule = json.loads(messages[-1]["content"])
+        if "You are the World Author" in system:
+            anchor = capsule["capability_manifest"]["anchor_refs"][0]
+            return json.dumps(
+                {
+                    "decision": "propose",
+                    "causal_authority": "character_choice",
+                    "outcome_resolution_authority": "world_contingency",
+                    "premise_scope": "external_opportunity",
+                    "premise": "今天出现了一段可以自由安排的散步时间。",
+                    "premise_claim_refs": ["local:claim:walk"],
+                    "claim_declarations": [
+                        {
+                            "claim_id": "local:claim:walk",
+                            "summary": "当前有一段可自由安排的散步时间。",
+                            "scope": "novel_world_generation",
+                            "subject_scope": "world_environment",
+                            "source_refs": [],
+                        }
+                    ],
+                    "timing": {"mode": "now", "duration_minutes": 5},
+                    "anchor_refs": [anchor],
+                    "location_ref": None,
+                    "entity_refs": [],
+                    "privacy_class": "shareable",
+                    "outcomes": [
+                        {
+                            "text": "散步平静结束了。",
+                            "privacy_class": "shareable",
+                            "relative_plausibility_weight": 1,
+                            "claim_refs": ["local:claim:walk"],
+                            "provisional_npcs": [],
+                            "dynamic_life_direction": None,
+                        },
+                        {
+                            "text": "走到一半下了小雨，于是提前回来了。",
+                            "privacy_class": "shareable",
+                            "relative_plausibility_weight": 1,
+                            "claim_refs": ["local:claim:walk"],
+                            "provisional_npcs": [],
+                            "dynamic_life_direction": None,
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        if "You are the Character Model" in system:
+            return json.dumps(
+                {
+                    "decision": "accept",
+                    "intention_summary": "我想出去走一小圈。",
+                    "importance_bp": 3500,
+                    "participant_refs": [],
+                },
+                ensure_ascii=False,
+            )
         if "candidate" in capsule:
             return json.dumps({
                 "decision": "select",
@@ -748,8 +806,14 @@ class _SelectingLifeEcologyModel:
         openings = capsule.get("openings", [])
         if not openings:
             return '{"decision":"no_op"}'
-        # planned => start/abandon; active => pause/complete/abandon.
-        selected = openings[1] if len(openings) >= 3 else openings[0]
+        selected = next(
+            (
+                item
+                for item in openings
+                if item["safe_summary"].startswith("finish ")
+            ),
+            openings[0],
+        )
         return json.dumps({
             "decision": "select",
             "opening_token": selected["opening_token"],
@@ -1659,6 +1723,36 @@ def test_qq_c2c_v2_host_has_no_legacy_chat_or_coalescer_imports() -> None:
         "companion_daemon.qq_websocket",
     )
     assert not any(module.startswith(prefix) for module in imports for prefix in forbidden)
+
+
+def test_qq_production_composes_role_bound_open_life_without_legacy_story_lanes(
+    tmp_path: Path,
+) -> None:
+    host = build_qq_c2c_host(
+        settings=Settings(database_path=tmp_path / "qq-open-life-wiring.sqlite"),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=FakeCompanionModel(),
+        delivery=_Delivery(),
+    )
+    try:
+        ecology = host._host._application._life_ecology  # type: ignore[attr-defined]
+        development = ecology._life_development_followup  # noqa: SLF001
+        assert development is not None
+        assert development._world_author.model.endswith(  # noqa: SLF001
+            "/life-development/world_author"
+        )
+        assert development._character_model.model.endswith(  # noqa: SLF001
+            "/life-development/character_model"
+        )
+        assert development._world_author.model != development._character_model.model  # noqa: SLF001
+        assert ecology._life_author_followup is None  # noqa: SLF001
+        assert ecology._future_life_author_followup is None  # noqa: SLF001
+        assert ecology._npc_initiative_followup is None  # noqa: SLF001
+        assert ecology._aspiration_followup is None  # noqa: SLF001
+        assert ecology._open_world_followup is None  # noqa: SLF001
+    finally:
+        host._host._application.close()  # type: ignore[attr-defined]
 
 
 def test_napcat_v2_branch_never_builds_legacy_engine_and_normalizes_supported_shapes(

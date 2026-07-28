@@ -415,8 +415,12 @@ def _resolve_evidence_source(
                 "character Experience lacks exact settled occurrence scene authority"
             )
         scene = (
-            f"scene:occurrence:{occurrence.location_ref}:"
-            f"{occurrence.time_window.opens_at.date().isoformat()}"
+            (
+                f"scene:occurrence:{occurrence.location_ref}:"
+                if occurrence.location_ref is not None
+                else "scene:occurrence-unlocated:"
+            )
+            + occurrence.time_window.opens_at.date().isoformat()
         )
         trigger = f"occurrence:{occurrence.trigger_ref}"
     else:

@@ -52,6 +52,27 @@ class LifeContentCompiler:
     def __init__(self, *, store: ImmutableLifeContentStore | None) -> None:
         self._store = store
 
+    def read_exact_bound_text(
+        self,
+        *,
+        content_ref: str,
+        content_payload_hash: str,
+        content_kind: str,
+        max_characters: int = 480,
+    ) -> str | None:
+        """Read sidecar prose only when its frozen ref, kind and bytes agree."""
+
+        if self._store is None:
+            return None
+        stored = self._store.read_exact(content_ref=content_ref)
+        if (
+            stored is None
+            or stored.content_kind != content_kind
+            or stored.content_payload_hash != content_payload_hash
+        ):
+            return None
+        return stored.text[:max_characters]
+
     def compile(
         self,
         *,

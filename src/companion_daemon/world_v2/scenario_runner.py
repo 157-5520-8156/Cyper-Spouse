@@ -88,7 +88,7 @@ class ScenarioVerificationError(AssertionError):
 # executable corpus; keeping the version while correcting the stale digest is
 # intentional and does not claim human-likeness evidence.
 # ``.10`` re-baselines after the inner-life coverage verticals landed: the
-# Change Phase advisory (and life-author-weight.4's phase prior), the per-NPC
+# Change Phase advisory (and life-author-weight.5's phase prior), the per-NPC
 # relationship reading (npc-initiative-weight.2), the pending shared_private
 # invitation advisory, the private-impression background producer, and the
 # aspiration crystallization seam.  Capsule advisory content and versioned
@@ -153,7 +153,7 @@ class ScenarioVerificationError(AssertionError):
 # hybrid recall seam.  The frozen scenarios do not change their outcomes, but
 # their pinned capsule and reducer identities now include those new authority
 # fields.
-# ``.25`` installs reducer bundle .40 for the source-bound
+# ``.25`` installs reducer bundle .41 for the source-bound
 # ExperienceMemoryDecisionRecorded audit. The event is deliberation-only and
 # changes no fixed scenario predicate, but the installed reducer identity is
 # intentionally part of every scenario manifest.
@@ -165,12 +165,16 @@ class ScenarioVerificationError(AssertionError):
 # call count, terminal state, trigger kind, room view, and scenario predicate
 # remained byte-identical.  This is mechanism/replay evidence, not a
 # human-likeness claim.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.28"
+# ``.29`` installs event-sourced Biographical Context and Life Arcs, including
+# contextual NPC lifecycle and reducer bundle .41. The fixed conversation
+# outputs remain fake-model evidence; changed replay/manifests are expected
+# because the authority grammar and bootstrap projection gained real fields.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.32"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "c5fdd7e15971c74708ba290b008da8fcccda3b0b4dfcaba1b231f584d3ead30b"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "639f3dd17a67c4f477d2ee9c0e271769712d83d0b643f9574f1ec833051426b0"
 
 
 class _FixedScenarioRouter:

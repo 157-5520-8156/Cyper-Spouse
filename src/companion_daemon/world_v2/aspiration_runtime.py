@@ -646,6 +646,7 @@ class AspirationRuntime:
                 instant=wake.logical_time,
                 plans=owner_plans,
                 npcs=projection.npcs,
+                life_arcs=projection.life_arcs,
             )
             if item.opening.id == seed.crystallizes_into
         )
@@ -859,6 +860,7 @@ class AspirationRuntime:
             catalog_version=self._catalog.version,
             catalog_hash=self._catalog.catalog_hash,
             owner_actor_ref=self._owner_actor_ref,
+            availability_scope="reviewed_future_slot",
             location_ref=slot.get("location_ref"),
             participant_refs=participant_refs,
             availability_hash=slot["availability_hash"],
@@ -969,6 +971,33 @@ class AspirationRuntime:
             commit_id="commit:aspiration:crystallize:" + suffix,
         )
         return True
+
+    def commit_reviewed_crystallization(
+        self,
+        *,
+        aspiration_id: str,
+        slot: dict,
+        wake,
+        check_event_ref: str,
+        trace_id: str,
+        correlation_id: str,
+    ) -> bool:
+        """Accept an already model-selected, reviewed future opening.
+
+        Contextual aspirations use a different deliberation seam from the
+        catalog-seeded aspiration lane, but must converge on the exact same
+        availability snapshot, ``ActivityPlanned`` and crystallization batch.
+        Keeping the authoritative write here prevents a second plan writer.
+        """
+
+        return self._commit_crystallization(
+            aspiration_id=aspiration_id,
+            slot=slot,
+            wake=wake,
+            check_event_ref=check_event_ref,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
 
     # -- maintenance --------------------------------------------------------
 

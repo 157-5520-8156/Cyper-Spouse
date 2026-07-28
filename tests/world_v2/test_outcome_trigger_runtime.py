@@ -102,7 +102,10 @@ class _OutcomeSelectionModel:
         self.calls += 1
         candidate = __import__("json").loads(messages[1]["content"])["candidates"][0]
         return __import__("json").dumps(
-            {"candidate_result_ref": candidate["candidate_result_ref"]}
+            {
+                "candidate_result_ref": candidate["candidate_result_ref"],
+                "adopt_proposed_life_direction": False,
+            }
         )
 
 

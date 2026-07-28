@@ -132,6 +132,8 @@ from .life_ecology_runtime import (
     LifeEcologyRuntime,
 )
 from .aspiration_runtime import AspirationRuntime
+from .contextual_life_inspiration import ContextualLifeInspirationRuntime
+from .contextual_life_source_material import ContextualLifeSourceMaterialCompiler
 from .private_impression_producer import (
     PrivateImpressionChatModel,
     PrivateImpressionDraftAdapter,
@@ -147,7 +149,14 @@ from .life_ecology_trigger_store import LedgerLifeEcologyTriggerStore
 from .future_life_author import FutureLifeAuthorRuntime
 from .life_author_runtime import LifeAuthorRuntime
 from .life_author_seed import ReviewedLifeSeedCatalog
+from .life_development_capability import ProjectionLifeCapabilityManifestCompiler
+from .life_development_runtime import LifeDevelopmentModel, LifeDevelopmentRuntime
 from .life_aftermath_runtime import LifeAftermathRuntime
+from .biographical_lifecycle import BiographicalLifecycleCatalog
+from .biographical_lifecycle_runtime import BiographicalLifecycleRuntime
+from .biographical_timeline_authority import (
+    BiographicalTimelineConfiguredPayload,
+)
 from .life_visual_evidence_author import LifeVisualEvidenceAuthor
 from .life_events import LIFE_PAYLOAD_MODELS, NpcRegisteredPayload
 from .event_identity import domain_idempotency_key
@@ -2202,8 +2211,11 @@ class WorldV2TurnApplication:
 
         # Registration and proposal/audit records prove infrastructure, not
         # that the character has actually lived through anything.
-        lived_world_event_types = frozenset(LIFE_PAYLOAD_MODELS) - {
+        lived_world_event_types = (
+            frozenset(LIFE_PAYLOAD_MODELS) | {"LifeArcChanged"}
+        ) - {
             "NpcRegistered",
+            "NpcStatusChanged",
             "ActivityLifecycleProposalRecorded",
             "OutcomeObservationRecorded",
             "OutcomeProposalRecorded",
@@ -2341,6 +2353,26 @@ class WorldV2TurnApplication:
                 "plans_by_status": dict(sorted(plans_by_status.items())),
                 "world_occurrence_count": occurrence_count,
                 "experience_count": experience_count,
+                "active_life_arc_count": sum(
+                    item.status == "active" for item in projection.life_arcs
+                ),
+                "life_arcs": [
+                    {
+                        "arc_id": item.arc_id,
+                        "arc_kind": item.arc_kind,
+                        "context_pack_ref": item.context_pack_ref,
+                        "context_tags": list(item.context_tags),
+                        "status": item.status,
+                        "started_at": item.started_at.isoformat(),
+                        "ends_at": (
+                            item.ends_at.isoformat()
+                            if item.ends_at is not None
+                            else None
+                        ),
+                        "source_event_ref": item.source_event_ref,
+                    }
+                    for item in projection.life_arcs[-8:]
+                ],
                 "schedule": (
                     projection.life_ecology_schedule.model_dump(mode="json")
                     if projection.life_ecology_schedule is not None
@@ -2378,6 +2410,8 @@ class WorldV2TurnApplication:
             },
             "npc": {
                 "registered_count": len(projection.npcs),
+                "active_count": sum(item.status == "active" for item in projection.npcs),
+                "retired_count": sum(item.status == "retired" for item in projection.npcs),
                 "world_appraisal_count": trigger_counts.get("npc_world_appraisal", 0),
             },
             "triggers": {
@@ -2811,6 +2845,8 @@ def build_sqlite_world_v2_turn_application(
     memory_model: FactMemoryDraftChatModel | None = None,
     activity_lifecycle_model: ActivityLifecycleDraftModel | None = None,
     open_world_event_model: OpenWorldEventModel | None = None,
+    life_world_author_model: LifeDevelopmentModel | None = None,
+    life_character_model: LifeDevelopmentModel | None = None,
     media_selection_model: MediaSelectionDraftModel | None = None,
     read_only_tool_model: DeliberationModelAdapter | None = None,
     read_only_tool_transport: ReadOnlyToolTransport | None = None,
@@ -2845,6 +2881,15 @@ def build_sqlite_world_v2_turn_application(
         raise ValueError(
             "inject either an outcome proposal adapter or an outcome draft model, not both"
         )
+    if (life_world_author_model is None) != (life_character_model is None):
+        raise ValueError(
+            "open life development requires both World Author and Character Model"
+        )
+    open_life_requested = (
+        life_world_author_model is not None and life_character_model is not None
+    )
+    if open_life_requested and config.life_ecology is None:
+        raise ValueError("open life development requires Life Ecology")
     # Refuse to start when the vertical registry and the scattered process-kind
     # enumerations disagree: a missing reviewer/owner must fail here by name,
     # not surface later as an Opened-only trigger backlog in the ledger.
@@ -2932,6 +2977,33 @@ def build_sqlite_world_v2_turn_application(
             if config.life_ecology is not None
             else None
         )
+        if (
+            open_life_requested
+            and life_seed_catalog is not None
+            and life_seed_catalog.story_candidate_role
+            != "legacy_replay_and_fixture"
+        ):
+            raise ValueError(
+                "production story candidates must be marked "
+                "legacy_replay_and_fixture before open life development is installed"
+            )
+        biographical_timeline = (
+            BiographicalTimelineConfiguredPayload.from_yaml(
+                path=config.life_ecology.seed_catalog_path,
+                timezone_name=config.local_timezone,
+            )
+            if config.life_ecology is not None
+            else None
+        )
+        biographical_context_catalog = (
+            BiographicalLifecycleCatalog.from_yaml(
+                path=config.life_ecology.seed_catalog_path,
+                timezone_name=config.local_timezone,
+            )
+            if config.life_ecology is not None
+            and biographical_timeline is not None
+            else None
+        )
         _bootstrap(
             ledger=ledger,
             config=config,
@@ -2940,6 +3012,7 @@ def build_sqlite_world_v2_turn_application(
             include_perception=perception_requested,
             include_proactive=proactive_model is not None,
             life_seed_catalog=life_seed_catalog,
+            biographical_timeline=biographical_timeline,
         )
         _LOG.warning(
             "world v2 application bootstrap ready world=%s duration_ms=%.1f",
@@ -2970,6 +3043,13 @@ def build_sqlite_world_v2_turn_application(
             # the reply lane; otherwise a character-chosen recall during the
             # paired call has no index despite having a valid Capsule.
             recall_coordinator=recall_coordinator,
+            biographical_catalog=biographical_context_catalog,
+            biographical_timezone_name=(
+                config.local_timezone
+                if biographical_context_catalog is not None
+                else None
+            ),
+            biographical_timeline=biographical_timeline,
         )
         chat_capsules = context_capsule_compiler_from_ledger(
             ledger=ledger,
@@ -2999,6 +3079,13 @@ def build_sqlite_world_v2_turn_application(
             perception_result_reader=perception_transport,
             expression_payload_store=expression_payload_store,
             recall_coordinator=recall_coordinator,
+            biographical_catalog=biographical_context_catalog,
+            biographical_timezone_name=(
+                config.local_timezone
+                if biographical_context_catalog is not None
+                else None
+            ),
+            biographical_timeline=biographical_timeline,
         )
         expression_episode_diagnostics = ExpressionEpisodeDiagnostics(
             mode=config.expression_episode_mode
@@ -3799,9 +3886,14 @@ def build_sqlite_world_v2_turn_application(
                 catalog=life_seed_catalog,
                 model=activity_lifecycle_model,
                 owner_actor_ref=config.companion_actor_ref,
+                capsule_compiler=capsules,
                 actor=config.life_ecology.worker_actor,
             )
-            if config.life_ecology is not None and activity_lifecycle_model is not None
+            if (
+                not open_life_requested
+                and config.life_ecology is not None
+                and activity_lifecycle_model is not None
+            )
             else None
         )
         future_life_author = (
@@ -3810,10 +3902,12 @@ def build_sqlite_world_v2_turn_application(
                 catalog=life_seed_catalog,
                 model=activity_lifecycle_model,
                 owner_actor_ref=config.companion_actor_ref,
+                capsule_compiler=capsules,
                 actor=config.life_ecology.worker_actor,
             )
             if (
                 config.life_ecology is not None
+                and not open_life_requested
                 and activity_lifecycle_model is not None
                 and config.future_life_author_enabled
             )
@@ -3826,6 +3920,7 @@ def build_sqlite_world_v2_turn_application(
                 occurrence_content=occurrence_content,
                 content_store=life_content_store,
                 owner_actor_ref=config.companion_actor_ref,
+                capsule_compiler=capsules,
                 actor=config.life_ecology.worker_actor,
                 experience_memory_lifecycle=(
                     ExperienceMemoryCandidateLifecycle(
@@ -3847,6 +3942,17 @@ def build_sqlite_world_v2_turn_application(
             if config.life_ecology is not None and life_seed_catalog is not None
             else None
         )
+        biographical_lifecycle = (
+            BiographicalLifecycleRuntime(
+                ledger=ledger,
+                catalog=life_seed_catalog,
+                owner_actor_ref=config.companion_actor_ref,
+                content_store=life_content_store,
+                actor=config.life_ecology.worker_actor,
+            )
+            if config.life_ecology is not None and life_seed_catalog is not None
+            else None
+        )
         npc_initiative = (
             NpcInitiativeRuntime(
                 ledger=ledger,
@@ -3857,7 +3963,8 @@ def build_sqlite_world_v2_turn_application(
                 actor=config.life_ecology.worker_actor,
             )
             if (
-                config.life_ecology is not None
+                not open_life_requested
+                and config.life_ecology is not None
                 and life_seed_catalog is not None
                 and activity_lifecycle_model is not None
                 and config.npc_initiative_enabled
@@ -3876,11 +3983,30 @@ def build_sqlite_world_v2_turn_application(
                 crystallize_chance_bp=config.aspiration_crystallize_chance_bp,
             )
             if (
-                config.life_ecology is not None
+                not open_life_requested
+                and config.life_ecology is not None
                 and life_seed_catalog is not None
                 and activity_lifecycle_model is not None
                 and config.aspiration_enabled
             )
+            else None
+        )
+        contextual_life_inspiration = (
+            ContextualLifeInspirationRuntime(
+                ledger=ledger,
+                catalog=life_seed_catalog,
+                model=activity_lifecycle_model,
+                capsule_compiler=capsules,
+                source_material_compiler=ContextualLifeSourceMaterialCompiler(
+                    ledger=ledger,
+                    life_content_store=life_content_store,
+                ),
+                plan_committer=aspiration,
+                reviewed_followup=aspiration,
+                owner_actor_ref=config.companion_actor_ref,
+                actor=config.life_ecology.worker_actor,
+            )
+            if aspiration is not None
             else None
         )
         shared_private_invitation = (
@@ -3894,7 +4020,8 @@ def build_sqlite_world_v2_turn_application(
                 invite_chance_bp=config.shared_private_invite_chance_bp,
             )
             if (
-                config.life_ecology is not None
+                not open_life_requested
+                and config.life_ecology is not None
                 and life_seed_catalog is not None
                 and activity_lifecycle_model is not None
                 and config.shared_private_invitation_enabled
@@ -3918,7 +4045,32 @@ def build_sqlite_world_v2_turn_application(
                 owner_actor_ref=config.companion_actor_ref,
                 actor=config.life_ecology.worker_actor,
             )
-            if config.life_ecology is not None and open_world_event_model is not None
+            if (
+                not open_life_requested
+                and config.life_ecology is not None
+                and open_world_event_model is not None
+            )
+            else None
+        )
+        life_development = (
+            LifeDevelopmentRuntime(
+                ledger=ledger,
+                content_store=life_content_store,
+                world_author=life_world_author_model,
+                character_model=life_character_model,
+                capsule_compiler=capsules,
+                capability_manifest_compiler=ProjectionLifeCapabilityManifestCompiler(
+                    owner_actor_ref=config.companion_actor_ref,
+                    catalog=life_seed_catalog,
+                ),
+                owner_actor_ref=config.companion_actor_ref,
+                actor=config.life_ecology.worker_actor,
+            )
+            if (
+                open_life_requested
+                and config.life_ecology is not None
+                and life_seed_catalog is not None
+            )
             else None
         )
         visual_evidence_author = (
@@ -3946,8 +4098,10 @@ def build_sqlite_world_v2_turn_application(
                 future_life_author_followup=future_life_author,
                 activity_followup=activity_lifecycle,
                 aftermath_followup=life_aftermath,
+                biographical_followup=biographical_lifecycle,
+                life_development_followup=life_development,
                 npc_initiative_followup=npc_initiative,
-                aspiration_followup=aspiration,
+                aspiration_followup=contextual_life_inspiration or aspiration,
                 shared_private_followup=shared_private_invitation,
                 open_world_followup=open_world_event,
                 visual_evidence_followup=visual_evidence_author,
@@ -4093,10 +4247,48 @@ def _bootstrap(
     include_perception: bool = False,
     include_proactive: bool = False,
     life_seed_catalog: ReviewedLifeSeedCatalog | None = None,
+    biographical_timeline: BiographicalTimelineConfiguredPayload | None = None,
 ) -> None:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("World v2 bootstrap time must be timezone-aware")
     projection = ledger.project()
+    timeline_refs = tuple(
+        item
+        for item in projection.committed_world_event_refs
+        if item.event_type == "BiographicalTimelineConfigured"
+    )
+    if len(timeline_refs) > 1:
+        raise ValueError("World v2 ledger has multiple biographical timeline authorities")
+    if timeline_refs:
+        if biographical_timeline is None:
+            raise ValueError(
+                "World v2 ledger has a biographical timeline but deployment "
+                "configuration does not"
+            )
+        located = ledger.lookup_event_commit(timeline_refs[0].event_id)
+        if located is None:
+            raise ValueError("biographical timeline authority is not readable")
+        timeline_event, timeline_commit = located
+        try:
+            recorded_timeline = (
+                BiographicalTimelineConfiguredPayload.model_validate_json(
+                    timeline_event.payload_json
+                )
+            )
+        except ValueError as exc:
+            raise ValueError("biographical timeline authority payload is invalid") from exc
+        if (
+            timeline_commit.world_revision < timeline_refs[0].world_revision
+            or timeline_event.event_id not in timeline_commit.event_ids
+            or timeline_event.payload_hash != timeline_refs[0].payload_hash
+            or recorded_timeline != biographical_timeline
+        ):
+            raise ValueError(
+                "configured biographical timeline differs from ledger authority"
+            )
+    missing_biographical_timeline = (
+        biographical_timeline is not None and not timeline_refs
+    )
     accounts = [
         BudgetAccount(
             account_id=config.chat_account_id,
@@ -4175,10 +4367,31 @@ def _bootstrap(
         ):
             raise ValueError("existing World v2 budget conflicts with composition config")
     existing_npcs = {item.npc_id: item for item in projection.npcs}
+    bootstrap_biography = (
+        life_seed_catalog.biographical_context_at(
+            instant=projection.logical_time or now,
+            life_arcs=projection.life_arcs,
+        )
+        if life_seed_catalog is not None
+        else None
+    )
     missing_npcs = (
         []
         if life_seed_catalog is None
-        else [item for item in life_seed_catalog.reviewed_npcs if item.npc_id not in existing_npcs]
+        else [
+            item
+            for item in life_seed_catalog.reviewed_npcs
+            if (
+                (
+                    not item.requires_all_context_tags
+                    or (
+                        bootstrap_biography is not None
+                        and item.eligible_in_context(bootstrap_biography)
+                    )
+                )
+                and item.npc_id not in existing_npcs
+            )
+        ]
     )
     if life_seed_catalog is not None:
         locations = {item.id: item for item in life_seed_catalog.reviewed_locations}
@@ -4192,10 +4405,23 @@ def _bootstrap(
                 or current.known_trait_refs != item.known_trait_refs
                 or current.privacy_class != item.privacy
                 or current.current_location_ref != expected_location
-                or current.status != "active"
+                or (
+                    current.status
+                    != (
+                        "active"
+                        if (
+                            not item.requires_all_context_tags
+                            or (
+                                bootstrap_biography is not None
+                                and item.eligible_in_context(bootstrap_biography)
+                            )
+                        )
+                        else current.status
+                    )
+                )
             ):
                 raise ValueError("existing reviewed NPC conflicts with life seed catalog")
-    if not missing and not missing_npcs:
+    if not missing and not missing_npcs and not missing_biographical_timeline:
         return
     if projection.world_revision and not any(
         item.event_type == "WorldStarted" for item in projection.committed_world_event_refs
@@ -4230,6 +4456,16 @@ def _bootstrap(
             claim_purpose="current_fact",
             source_world_revision=world_started.world_revision,
             immutable_hash=world_started.payload_hash,
+        )
+    if missing_biographical_timeline:
+        assert biographical_timeline is not None
+        events.append(
+            _bootstrap_event(
+                config=config,
+                now=projection.logical_time or now,
+                event_type="BiographicalTimelineConfigured",
+                payload=biographical_timeline.model_dump(mode="json"),
+            )
         )
     events.extend(
         _bootstrap_event(

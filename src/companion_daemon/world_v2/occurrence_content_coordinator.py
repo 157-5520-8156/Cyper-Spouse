@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -32,9 +33,12 @@ from .life_content_store import (
 from .schema_core import FrozenModel, PrivacyClass
 from .schemas import (
     CommitResult,
+    DynamicLifeArcContextDescriptor,
     EvidenceRef,
+    FrozenLifeArcEffectDescriptor,
     OutcomeCandidateDescriptor,
     ProjectionCursor,
+    ProvisionalNpcIntroductionDescriptor,
     WorldEvent,
     WorldOccurrenceProjection,
 )
@@ -53,6 +57,17 @@ class OutcomeCandidateContent(FrozenModel):
     privacy_class: PrivacyClass
     content_ref: str = Field(min_length=1)
     text: str = Field(min_length=1, max_length=12_000)
+    life_arc_effect: FrozenLifeArcEffectDescriptor | None = None
+    causal_authority: Literal[
+        "character_choice",
+        "world_contingency",
+        "external_observation",
+    ] = "character_choice"
+    relative_plausibility_weight: int = Field(default=1, ge=1, le=1_000_000)
+    provisional_npc_introductions: tuple[
+        ProvisionalNpcIntroductionDescriptor, ...
+    ] = ()
+    dynamic_life_arc_context: DynamicLifeArcContextDescriptor | None = None
 
     @property
     def content_payload_hash(self) -> str:
@@ -67,6 +82,11 @@ class OutcomeCandidateContent(FrozenModel):
             privacy_class=self.privacy_class,
             content_ref=self.content_ref,
             content_payload_hash=self.content_payload_hash,
+            causal_authority=self.causal_authority,
+            relative_plausibility_weight=self.relative_plausibility_weight,
+            life_arc_effect=self.life_arc_effect,
+            provisional_npc_introductions=self.provisional_npc_introductions,
+            dynamic_life_arc_context=self.dynamic_life_arc_context,
         )
 
     def sidecar_record(self) -> StoredLifeContent:

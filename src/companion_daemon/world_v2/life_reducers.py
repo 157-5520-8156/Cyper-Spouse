@@ -8,6 +8,7 @@ from .life_events import (
     ActivityPlannedPayload,
     ActivityTransitionPayload,
     NpcRegisteredPayload,
+    NpcStatusChangedPayload,
     OutcomeObservationRecordedPayload,
     OutcomeProposalRecordedPayload,
     WorldOccurrenceActivatedPayload,
@@ -54,6 +55,17 @@ def register_npc(
     if any(npc.stable_identity_ref == payload.npc.stable_identity_ref for npc in npcs):
         raise ValueError("NPC stable identity is already registered")
     return (*npcs, payload.npc)
+
+
+def transition_npc_status(
+    npcs: tuple[NpcProjection, ...], payload: NpcStatusChangedPayload
+) -> tuple[NpcProjection, ...]:
+    current = next((npc for npc in npcs if npc.npc_id == payload.npc_after.npc_id), None)
+    if current is None or current != payload.npc_before:
+        raise ValueError("NPC status before image does not match current projection")
+    return tuple(
+        payload.npc_after if npc.npc_id == current.npc_id else npc for npc in npcs
+    )
 
 
 def plan_activity(
@@ -373,6 +385,13 @@ def settle_occurrence(
         raise ValueError("settlement change ID does not match outcome proposal")
     if proposal.proposed_change_hash != payload.accepted_change_hash:
         raise ValueError("settlement mutation was not accepted from outcome proposal")
+    if (
+        proposal.adopt_proposed_life_direction
+        != payload.adopt_proposed_life_direction
+    ):
+        raise ValueError(
+            "settlement direction adoption does not match outcome proposal"
+        )
     if proposal.candidate_result_ref not in occurrence.candidate_outcome_refs:
         raise ValueError("outcome proposal is outside committed candidates")
     if proposal.candidate_result_ref != payload.candidate_result_ref:
@@ -416,6 +435,9 @@ def settle_occurrence(
             "settlement_event_ref": settlement_event_ref,
             "settlement_world_revision": settlement_world_revision,
             "settlement_payload_hash": settlement_payload_hash,
+            "settled_dynamic_life_direction_adopted": (
+                payload.adopt_proposed_life_direction
+            ),
         }
     )
     return _replace(occurrences, index, updated)

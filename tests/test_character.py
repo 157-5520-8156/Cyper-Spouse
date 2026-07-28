@@ -15,3 +15,10 @@ def test_character_profile_includes_rich_persona() -> None:
     assert "我刚刚在看一段课件" not in prompt
     assert "角色事实账本" in prompt
     assert "没有可验证的宠物饲养经历" in prompt
+    assert "20岁" not in prompt
+    assert "大二" not in prompt
+    assert "女大学生" not in prompt
+    assert "没课" not in prompt
+    assert "课表" not in prompt
+    assert "age" not in character.identity
+    assert "year" not in character.identity

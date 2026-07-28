@@ -24,7 +24,7 @@ def test_catalog_covers_every_reducer_event_with_stable_revision_metadata() -> N
         assert contract.producer
         assert contract.payload_contract
         assert contract.schema_version == "world-v2.1"
-        assert contract.reducer_bundle == "world-v2-reducers.40"
+        assert contract.reducer_bundle == "world-v2-reducers.43"
         assert contract.upcaster == "world-v2-upcasters.1"
         assert contract.idempotency_identity
         schema = contract.json_schema()
@@ -226,3 +226,19 @@ def test_character_core_catalog_closes_revision_and_compensation_lifecycle() -> 
     )
     assert compensated.compensations == ("CharacterCoreRevisionCompensated",)
     assert "CharacterCoreRevisionCompensated" in event_contracts()
+
+
+def test_biographical_catalog_closes_settlement_arc_and_contextual_npc_lineage() -> None:
+    settled = event_contract("WorldOccurrenceSettled")
+    life_arc = event_contract("LifeArcChanged")
+    npc_registered = event_contract("NpcRegistered")
+    npc_status = event_contract("NpcStatusChanged")
+
+    assert "LifeArcChanged" in settled.successors
+    assert {
+        "LifeArcChanged",
+        "NpcRegistered",
+        "NpcStatusChanged",
+    } <= set(life_arc.successors)
+    assert "LifeArcChanged" in npc_registered.allowed_predecessors
+    assert "LifeArcChanged" in npc_status.allowed_predecessors

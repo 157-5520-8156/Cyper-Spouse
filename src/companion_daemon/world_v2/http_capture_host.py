@@ -56,6 +56,7 @@ from .production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+from .life_development_model_adapter import RoleBoundLifeDevelopmentModelAdapter
 from .schemas import ProjectionRequest
 from .recall_embedding import configured_recall_embedding
 from .semantic_chat_composition import (
@@ -566,6 +567,14 @@ def build_http_v2_capture_host(
     )
     model = semantic_chat.flash_model
     background_model = semantic_chat.background_model
+    life_world_author = RoleBoundLifeDevelopmentModelAdapter(
+        model=background_model,
+        role="world_author",
+    )
+    life_character = RoleBoundLifeDevelopmentModelAdapter(
+        model=background_model,
+        role="character_model",
+    )
     primary_user_id = settings.primary_user_id
     transport = HttpCaptureTransport()
     world_id = f"world:companion-v2:{primary_user_id}"
@@ -671,6 +680,8 @@ def build_http_v2_capture_host(
         # A scheduler-only, bounded selection over already legal activities.
         # Invalid provider output terminates the ecology wake fail-safe.
         activity_lifecycle_model=background_model,
+        life_world_author_model=life_world_author,
+        life_character_model=life_character,
         media_selection_model=(
             media_preview.selection_model if media_preview is not None else None
         ),

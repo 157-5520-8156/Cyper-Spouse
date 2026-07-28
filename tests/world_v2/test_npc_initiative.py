@@ -82,6 +82,15 @@ class _LifeModel:
             })
         if "candidate" in capsule or "future_candidate" in capsule:
             return '{"decision":"no_op"}'
+        if "candidates" in capsule:
+            return json.dumps(
+                {
+                    "candidate_result_ref": capsule["candidates"][0][
+                        "candidate_result_ref"
+                    ],
+                    "adopt_proposed_life_direction": False,
+                }
+            )
         return '{"decision":"no_op"}'
 
 
@@ -209,7 +218,7 @@ def _build(
         config=_config(seed_path, **overrides),
         identities=_Identities(), router=_Router(), main_model=_MainModel(),
         quick_recovery=_QuickRecovery(), transport=_Transport(),
-        activity_lifecycle_model=model, now=now,
+        activity_lifecycle_model=model, outcome_draft_model=model, now=now,
     )
 
 

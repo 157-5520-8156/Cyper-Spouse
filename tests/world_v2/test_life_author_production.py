@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,12 +11,17 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from companion_daemon.world_v2.errors import IdempotencyConflict
+from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.life_author_seed import ReviewedLifeSeedCatalog
+from companion_daemon.world_v2.life_author_runtime import (
+    LifeAuthorDecisionRecordedPayload,
+)
 from companion_daemon.world_v2.experience_memory_decision import (
     experience_memory_decision_event_id,
 )
 from companion_daemon.world_v2.local_chronology import LocalChronology
 from companion_daemon.world_v2.random_authority import RandomDrawRecordedPayload
+from companion_daemon.world_v2.schemas import WorldEvent
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
     WorldV2TurnApplicationConfig,
@@ -68,9 +74,11 @@ class _NeverMemoryChat:
         raise AssertionError("durable Experience-memory decision must be rejoined")
 
 
-def test_production_seed_offers_a_real_clock_bound_sleep_wake_opening() -> None:
+def test_legacy_story_fixture_offers_a_real_clock_bound_sleep_wake_opening(
+    legacy_story_seed_path: Path,
+) -> None:
     catalog = ReviewedLifeSeedCatalog.from_yaml(
-        path=Path("configs/world_seed.yaml"),
+        path=legacy_story_seed_path,
         chronology=LocalChronology("Asia/Shanghai"),
     )
     local = datetime(2026, 7, 20, 23, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -85,18 +93,22 @@ def test_production_seed_offers_a_real_clock_bound_sleep_wake_opening() -> None:
     )
 
     sleep = next(
-        item for item in candidates if item.opening.activity_kind == "sleep.prepare_for_bed"
+        item
+        for item in candidates
+        if item.opening.activity_kind == "sleep.family_home_prepare_for_bed"
     )
     assert sleep.opening.source == "routine"
     assert sleep.opening.domain == "sleep_wake"
-    assert sleep.opening.visual_potential == "private_transition"
+    assert sleep.opening.visual_potential == "ambient"
     assert sleep.opening.privacy == "private"
     assert len(sleep.opening.outcomes) == 2
 
 
-def test_production_seed_has_continuous_reviewed_night_coverage_after_midnight() -> None:
+def test_legacy_story_fixture_has_continuous_reviewed_night_coverage_after_midnight(
+    legacy_story_seed_path: Path,
+) -> None:
     catalog = ReviewedLifeSeedCatalog.from_yaml(
-        path=Path("configs/world_seed.yaml"),
+        path=legacy_story_seed_path,
         chronology=LocalChronology("Asia/Shanghai"),
     )
     active_npcs = tuple(
@@ -118,13 +130,15 @@ def test_production_seed_has_continuous_reviewed_night_coverage_after_midnight()
         for hour in range(0, 8)
     }
 
-    assert "sleep.prepare_for_bed" in by_hour[0]
-    assert all("sleep.late_wind_down" in by_hour[hour] for hour in (1, 2, 3))
-    assert all("sleep.early_morning_wake" in by_hour[hour] for hour in (4, 5, 6))
-    assert "routine.morning_settle" in by_hour[7]
+    assert "sleep.family_home_prepare_for_bed" in by_hour[0]
+    assert all("sleep.family_home_late_wind_down" in by_hour[hour] for hour in (1, 2, 3))
+    assert all("sleep.family_home_early_wake" in by_hour[hour] for hour in (4, 5, 6))
+    assert "routine.family_home_morning_settle" in by_hour[7]
 
 
-def test_after_midnight_bedtime_does_not_consume_the_next_evenings_quota() -> None:
+def test_after_midnight_bedtime_does_not_consume_the_next_evenings_quota(
+    legacy_story_seed_path: Path,
+) -> None:
     """Last night's 00:01 bedtime must not freeze tonight's prepare-for-bed.
 
     The 22:30-00:30 window wraps midnight, so its acceptance often lands on
@@ -134,11 +148,11 @@ def test_after_midnight_bedtime_does_not_consume_the_next_evenings_quota() -> No
 
     tz = ZoneInfo("Asia/Shanghai")
     catalog = ReviewedLifeSeedCatalog.from_yaml(
-        path=Path("configs/world_seed.yaml"),
+        path=legacy_story_seed_path,
         chronology=LocalChronology("Asia/Shanghai"),
     )
     last_night_bedtime = SimpleNamespace(
-        activity_kind="sleep.prepare_for_bed",
+        activity_kind="sleep.family_home_prepare_for_bed",
         status="completed",
         scheduled_window=None,
         authority_origin=SimpleNamespace(
@@ -156,11 +170,11 @@ def test_after_midnight_bedtime_does_not_consume_the_next_evenings_quota() -> No
             npcs=(),
         )
     }
-    assert "sleep.prepare_for_bed" in offered
+    assert "sleep.family_home_prepare_for_bed" in offered
 
     # An acceptance genuinely made this evening still counts for today.
     tonight_bedtime = SimpleNamespace(
-        activity_kind="sleep.prepare_for_bed",
+        activity_kind="sleep.family_home_prepare_for_bed",
         status="completed",
         scheduled_window=None,
         authority_origin=SimpleNamespace(
@@ -176,17 +190,18 @@ def test_after_midnight_bedtime_does_not_consume_the_next_evenings_quota() -> No
             npcs=(),
         )
     }
-    assert "sleep.prepare_for_bed" not in still_offered
+    assert "sleep.family_home_prepare_for_bed" not in still_offered
 
 
 @pytest.mark.asyncio
 async def test_post_midnight_scheduler_ticks_produce_a_real_lived_sleep_event(
     tmp_path: Path,
+    legacy_story_seed_path: Path,
 ) -> None:
     start = datetime(2026, 7, 20, 0, 5, tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(UTC)
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "post-midnight-life.sqlite",
-        config=_config(Path("configs/world_seed.yaml")),
+        config=_config(legacy_story_seed_path),
         identities=_Identities(),
         router=_Router(),
         main_model=_MainModel(),
@@ -220,7 +235,7 @@ async def test_post_midnight_scheduler_ticks_produce_a_real_lived_sleep_event(
 
         projection = app._ledger.project()  # noqa: SLF001
         assert len(projection.plans) == 1
-        assert projection.plans[0].activity_kind == "sleep.late_wind_down"
+        assert projection.plans[0].activity_kind == "sleep.family_home_late_wind_down"
         assert projection.plans[0].status == "completed"
         assert len(projection.world_occurrences) == 1
         assert projection.world_occurrences[0].status == "settled"
@@ -294,6 +309,52 @@ class _FailingLifeModel(_SelectingLifeModel):
         raise self.failure
 
 
+class _CursorRacingLifeModel(_SelectingLifeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ledger = None
+        self.injected = False
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        capsule = json.loads(messages[-1]["content"])
+        if "candidate" in capsule and not self.injected:
+            assert self.ledger is not None
+            self.injected = True
+            projection = self.ledger.project()
+            payload = {
+                "observation_id": "operator:life-author-context-race",
+                "observation_hash": "a" * 64,
+            }
+            event = WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id="event:operator:life-author-context-race",
+                world_id=projection.world_id,
+                event_type="OperatorObservationRecorded",
+                logical_time=projection.logical_time,
+                created_at=projection.logical_time,
+                actor="operator:test",
+                source="test:life-author-context-race",
+                trace_id="trace:life-author-context-race",
+                causation_id="cause:life-author-context-race",
+                correlation_id="correlation:life-author-context-race",
+                idempotency_key=(
+                    domain_idempotency_key(
+                        event_type="OperatorObservationRecorded",
+                        world_id=projection.world_id,
+                        payload=payload,
+                    )
+                    or "operator-observation:life-author-context-race"
+                ),
+                payload=payload,
+            )
+            self.ledger.commit(
+                (event,),
+                expected_world_revision=projection.world_revision,
+                expected_deliberation_revision=projection.deliberation_revision,
+            )
+        return await super().complete(messages, temperature=temperature)
+
+
 class _SelectingAuthorAndLifecycleModel(_SelectingLifeModel):
     async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         capsule = json.loads(messages[-1]["content"])
@@ -317,7 +378,12 @@ class _SelectingOutcomeModel:
         del temperature
         self.calls += 1
         options = json.loads(messages[-1]["content"])["candidates"]
-        return json.dumps({"candidate_result_ref": options[-1]["candidate_result_ref"]})
+        return json.dumps(
+            {
+                "candidate_result_ref": options[-1]["candidate_result_ref"],
+                "adopt_proposed_life_direction": False,
+            }
+        )
 
 
 def _seed(path: Path) -> Path:
@@ -405,6 +471,90 @@ def _config(seed_path: Path) -> WorldV2TurnApplicationConfig:
     )
 
 
+def test_open_life_catalog_can_install_without_legacy_story_candidates(
+    tmp_path: Path,
+) -> None:
+    seed = tmp_path / "open-life-affordances.yaml"
+    seed.write_text(
+        """
+world_id: open-life-affordances
+life_author_catalog:
+  version: open-life.1
+  locations:
+    - id: shanghai-home
+      location_ref: location:shanghai-home
+      privacy: private
+      local_windows: ["00:00-23:59"]
+      weekdays: [0, 1, 2, 3, 4, 5, 6]
+  npcs: []
+  openings: []
+  future_openings: []
+  npc_initiated_events: []
+  aspiration_seeds: []
+""".strip(),
+        encoding="utf-8",
+    )
+
+    catalog = ReviewedLifeSeedCatalog.from_yaml(
+        path=seed,
+        chronology=LocalChronology("Asia/Shanghai"),
+    )
+
+    assert catalog.candidates_at(
+        instant=NOW,
+        wake_event_ref="event:clock:open-life",
+        plans=(),
+    ) == ()
+    assert catalog.reviewed_future_openings == ()
+    assert catalog.reviewed_npc_initiated_events == ()
+    assert catalog.reviewed_aspiration_seeds == ()
+    assert tuple(item.location_ref for item in catalog.reviewed_locations) == (
+        "location:shanghai-home",
+    )
+
+
+def test_production_story_candidates_are_explicitly_legacy_replay_fixtures() -> None:
+    import yaml
+
+    raw = yaml.safe_load(Path("configs/world_seed.yaml").read_text(encoding="utf-8"))
+    assert (
+        raw["life_author_catalog"]["story_candidate_role"]
+        == "legacy_replay_and_fixture"
+    )
+
+
+def test_production_seed_does_not_contain_new_authored_job_travel_or_home_plots() -> None:
+    import yaml
+
+    raw = yaml.safe_load(Path("configs/world_seed.yaml").read_text(encoding="utf-8"))
+    catalog = raw["life_author_catalog"]
+    ids = {
+        item["id"]
+        for field in ("openings", "future_openings")
+        for item in catalog[field]
+    }
+    assert not ids & {
+        "family-home-morning-settle",
+        "family-home-prepare-for-bed",
+        "family-home-late-wind-down",
+        "family-home-early-wake",
+        "shanghai-home-evening-settle",
+        "publishing-intern-shift",
+        "publishing-editor-check-in",
+        "publishing-intern-interview",
+        "graduate-job-search",
+        "junior-editor-workday",
+        "city-publisher-editor-workday",
+        "future-contextual-destination-research",
+        "future-jiaxing-homecoming",
+    }
+    assert {
+        "editor-qin",
+        "recruiter-he",
+        "senior-editor-luo",
+    }.isdisjoint(item["npc_id"] for item in catalog["npcs"])
+
+
 def test_reviewed_candidates_compile_soft_daypart_fit_from_local_window(
     tmp_path: Path,
 ) -> None:
@@ -428,24 +578,28 @@ def test_reviewed_candidates_compile_soft_daypart_fit_from_local_window(
     assert middle.daypart_fit_bp == 10_000
 
 
-def test_production_catalog_proves_every_opening_has_a_joint_availability_witness() -> None:
+def test_legacy_story_catalog_proves_every_opening_has_a_joint_availability_witness(
+    legacy_story_seed_path: Path,
+) -> None:
     catalog = ReviewedLifeSeedCatalog.from_yaml(
-        path=Path("configs/world_seed.yaml"),
+        path=legacy_story_seed_path,
         chronology=LocalChronology("Asia/Shanghai"),
     )
 
     report = catalog.reachability_report()
 
-    # reviewed-life.11: 34 present-moment openings, 9 future openings (one
+    # reviewed-life.16: 43 present-moment openings, 11 future openings (one
     # shared_private invitation), and 8 NPC-initiated events (each must have
     # a legal in-presence start).
-    assert len(report) == 51
+    assert len(report) == 64
     assert all(item.reachable for item in report)
     assert all(item.witness_weekday is not None for item in report)
     assert all(item.witness_minute is not None for item in report)
     assert {item.opening_id for item in report} == {
         "settle-morning-routine",
         "prepare-for-bed",
+        "family-home-morning-settle",
+        "family-home-prepare-for-bed",
         "focused-reading",
         "make-a-drink",
         "edit-photo-notes",
@@ -456,8 +610,17 @@ def test_production_catalog_proves_every_opening_has_a_joint_availability_witnes
         "literature-club-reading-list",
         "late-night-wind-down",
         "early-morning-wake",
+        "family-home-late-wind-down",
+        "family-home-early-wake",
+        "shanghai-home-evening-settle",
         "write-reading-notes",
         "attend-lecture",
+        "publishing-intern-shift",
+        "publishing-editor-check-in",
+        "publishing-intern-interview",
+        "graduate-job-search",
+        "junior-editor-workday",
+        "city-publisher-editor-workday",
         "essay-deadline-push",
         "library-self-study",
         "write-short-essay",
@@ -487,6 +650,8 @@ def test_production_catalog_proves_every_opening_has_a_joint_availability_witnes
         "future-bund-night-photo",
         "future-library-seminar-room",
         "future-book-market-hunt",
+        "future-contextual-destination-research",
+        "future-jiaxing-homecoming",
         "npc-fan-yuan-borrow-book",
         "npc-fan-yuan-impromptu-reading-list",
         "npc-fan-yuan-reading-list-disagreement",
@@ -496,6 +661,169 @@ def test_production_catalog_proves_every_opening_has_a_joint_availability_witnes
         "npc-lin-wan-late-snack",
         "npc-lin-wan-borrow-charger",
     }
+
+
+def test_phase_specific_work_npcs_participate_in_legacy_fixture_openings(
+    legacy_story_seed_path: Path,
+) -> None:
+    catalog = ReviewedLifeSeedCatalog.from_yaml(
+        path=legacy_story_seed_path,
+        chronology=LocalChronology("Asia/Shanghai"),
+    )
+    active_npcs = tuple(
+        SimpleNamespace(npc_id=item.npc_id, status="active")
+        for item in catalog.reviewed_npcs
+    )
+    internship_at = datetime(
+        2026, 7, 17, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai")
+    ).astimezone(UTC)
+    internship = catalog.candidates_at(
+        instant=internship_at,
+        wake_event_ref="event:clock:internship-npc",
+        plans=(),
+        npcs=active_npcs,
+        life_arcs=(
+            SimpleNamespace(
+                arc_id="life-arc:test:publishing",
+                status="active",
+                started_at=internship_at - timedelta(days=1),
+                ends_at=internship_at + timedelta(days=29),
+                context_tags=("role:intern", "workplace:publishing"),
+            ),
+        ),
+    )
+    editor_opening = next(
+        item
+        for item in internship
+        if item.opening.id == "publishing-editor-check-in"
+    )
+
+    assert editor_opening.participant_ref == "npc:editor-qin"
+    assert editor_opening.opening.requires_all_context_tags == (
+        "role:intern",
+        "workplace:publishing",
+    )
+
+    graduated_at = datetime(
+        2028, 7, 3, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai")
+    ).astimezone(UTC)
+    graduated = catalog.candidates_at(
+        instant=graduated_at,
+        wake_event_ref="event:clock:graduated-recruiter",
+        plans=(),
+        npcs=active_npcs,
+    )
+    recruiter_opening = next(
+        item for item in graduated if item.opening.id == "graduate-job-search"
+    )
+
+    assert recruiter_opening.participant_ref == "npc:recruiter-he"
+    assert recruiter_opening.opening.requires_all_context_tags == (
+        "academic:graduated",
+    )
+    assert recruiter_opening.opening.excludes_context_tags == (
+        "role:junior_editor",
+        "workplace:city_publisher",
+    )
+
+
+def test_legacy_fixture_can_plan_jiaxing_homecoming_without_already_being_there(
+    legacy_story_seed_path: Path,
+) -> None:
+    catalog = ReviewedLifeSeedCatalog.from_yaml(
+        path=legacy_story_seed_path,
+        chronology=LocalChronology("Asia/Shanghai"),
+    )
+    instant = datetime(
+        2028, 7, 6, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai")
+    ).astimezone(UTC)
+
+    present = catalog.candidates_at(
+        instant=instant,
+        wake_event_ref="event:clock:shanghai-homecoming",
+        plans=(),
+    )
+    future = catalog.future_candidates_at(
+        instant=instant,
+        plans=(),
+    )
+
+    assert all(
+        item.opening.id != "family-home-morning-settle" for item in present
+    )
+    homecoming = next(
+        item for item in future if item.opening.id == "future-jiaxing-homecoming"
+    )
+    assert homecoming.location_ref == "location:jiaxing-family-home"
+    assert homecoming.opening.location_id == "jiaxing-family-home"
+
+
+def test_legacy_fixture_has_a_graduated_shanghai_home_opening(
+    legacy_story_seed_path: Path,
+) -> None:
+    catalog = ReviewedLifeSeedCatalog.from_yaml(
+        path=legacy_story_seed_path,
+        chronology=LocalChronology("Asia/Shanghai"),
+    )
+    instant = datetime(
+        2028, 7, 3, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")
+    ).astimezone(UTC)
+
+    candidates = catalog.candidates_at(
+        instant=instant,
+        wake_event_ref="event:clock:graduated-shanghai-home",
+        plans=(),
+    )
+    home = next(
+        item for item in candidates if item.opening.id == "shanghai-home-evening-settle"
+    )
+
+    assert home.location_ref == "location:shanghai-home"
+    assert home.opening.requires_all_context_tags == ("residence:shanghai_home",)
+
+
+def test_legacy_fixture_continues_completed_junior_editor_stage(
+    legacy_story_seed_path: Path,
+) -> None:
+    catalog = ReviewedLifeSeedCatalog.from_yaml(
+        path=legacy_story_seed_path,
+        chronology=LocalChronology("Asia/Shanghai"),
+    )
+    instant = datetime(
+        2029, 1, 10, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai")
+    ).astimezone(UTC)
+    completed_arc = SimpleNamespace(
+        arc_id="life-arc:city-publisher-junior-editor",
+        status="completed",
+        context_pack_ref="life-context:city-publisher-junior-editor",
+        context_tags=("role:junior_editor", "workplace:city_publisher"),
+        started_at=instant - timedelta(days=181),
+        ends_at=instant - timedelta(days=1),
+        closed_at=instant - timedelta(days=1),
+    )
+    active_npcs = tuple(
+        SimpleNamespace(npc_id=item.npc_id, status="active")
+        for item in catalog.reviewed_npcs
+    )
+
+    context = catalog.biographical_context_at(
+        instant=instant,
+        life_arcs=(completed_arc,),
+    )
+    candidates = catalog.candidates_at(
+        instant=instant,
+        wake_event_ref="event:clock:post-junior-editor",
+        plans=(),
+        npcs=active_npcs,
+        life_arcs=(completed_arc,),
+    )
+    opening_ids = {item.opening.id for item in candidates}
+
+    assert {"role:editor", "workplace:city_publisher"} <= set(
+        context.context_tags
+    )
+    assert "graduate-job-search" not in opening_ids
+    assert "city-publisher-editor-workday" in opening_ids
 
 
 def test_catalog_reports_an_opening_whose_authorities_never_overlap(
@@ -596,9 +924,7 @@ async def test_production_life_author_creates_one_clock_bound_abstract_plan_and_
         assert plan.authority_origin is not None
         assert model.author_calls == 1
         assert "already verified its local-time window" in (model.last_author_system or "")
-        assert "not a choice between having a life and staying empty" in (
-            model.last_author_system or ""
-        )
+        assert "opportunity, not an instruction" in (model.last_author_system or "")
         assert model.last_author_payload is not None
         assert model.last_author_payload["authoritative_eligibility"]["logical_time"]
         assert projection.life_ecology_schedule is not None
@@ -608,6 +934,30 @@ async def test_production_life_author_creates_one_clock_bound_abstract_plan_and_
         events = app._ledger.export_replay_evidence().events  # noqa: SLF001
         assert [item.event.event_type for item in events].count("RandomDrawRecorded") == 1
         assert [item.event.event_type for item in events].count("LifeAuthorDecisionRecorded") == 1
+        decision_record = LifeAuthorDecisionRecordedPayload.model_validate_json(
+            next(
+                item.event.payload_json
+                for item in events
+                if item.event.event_type == "LifeAuthorDecisionRecorded"
+            )
+        )
+        assert decision_record.context_identity_version == "life-author-context.1"
+        assert decision_record.context_capsule_id is not None
+        assert decision_record.context_model_content_hash is not None
+        assert decision_record.context_snapshot_hash is not None
+        assert decision_record.context_cursor is not None
+        assert model.last_author_payload is not None
+        presented_context = json.dumps(
+            model.last_author_payload["current_character_context"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        assert (
+            decision_record.context_model_content_hash
+            == hashlib.sha256(presented_context.encode("utf-8")).hexdigest()
+        )
+        assert decision_record.context_cursor.ledger_sequence < projection.ledger_sequence
         draw_record = RandomDrawRecordedPayload.model_validate_json(
             next(
                 item.event.payload_json
@@ -616,7 +966,7 @@ async def test_production_life_author_creates_one_clock_bound_abstract_plan_and_
             )
         )
         assert draw_record.sampler_version == "random-authority.2"
-        assert draw_record.weight_policy_version == "life-author-weight.4"
+        assert draw_record.weight_policy_version == "life-author-weight.5"
         assert sum(item.weight_ppm for item in draw_record.weight_vector) == 1_000_000
         assert draw_record.weight_vector_hash is not None
         planned = next(item.event for item in events if item.event.event_type == "ActivityPlanned")
@@ -657,13 +1007,56 @@ async def test_production_life_author_creates_one_clock_bound_abstract_plan_and_
             trace_id="trace:life-author:restart",
             correlation_id="correlation:life-author",
         )
-        assert joined.status == "idle"
-        assert joined.reason_code == "life_ecology.cooldown"
+        assert joined.status == "joined_existing"
+        assert joined.reason_code == "life_ecology.run_completed"
         assert restarted_model.author_calls == 0
         assert len(restarted._ledger.project().plans) == 1  # noqa: SLF001
         assert restarted._ledger.project().semantic_hash == semantic_before_restart  # noqa: SLF001
     finally:
         restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_life_author_discards_model_result_when_pinned_context_cursor_changes(
+    tmp_path: Path,
+) -> None:
+    model = _CursorRacingLifeModel()
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "life-author-context-race.sqlite",
+        config=_config(_seed(tmp_path / "world-seed-context-race.yaml")),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=model,
+        now=NOW,
+    )
+    model.ledger = app._ledger  # noqa: SLF001 - deliberate concurrent writer
+    try:
+        await app.tick(
+            tick_id="life-author:context-race",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(hours=1),
+            observed_at=NOW + timedelta(hours=1),
+            trace_id="trace:life-author:context-race",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:life-author-context-race",
+            reason="production-test",
+        )
+
+        projection = app._ledger.project()  # noqa: SLF001
+        event_types = [
+            item.event.event_type
+            for item in app._ledger.export_replay_evidence().events  # noqa: SLF001
+        ]
+        assert model.author_calls == 1
+        assert model.injected is True
+        assert projection.plans == ()
+        assert "LifeAuthorDecisionRecorded" not in event_types
+        assert "ActivityPlanned" not in event_types
+    finally:
+        app.close()
 
 
 @pytest.mark.asyncio
@@ -952,9 +1345,22 @@ async def test_production_life_aftermath_requires_later_wake_and_survives_restar
         projection = app._ledger.project()  # noqa: SLF001
         occurrence = projection.world_occurrences[0]
         assert occurrence.status == "settled"
-        assert outcome_model.calls == 1
+        # Ordinary objective aftermath is a world contingency: its frozen
+        # weighted RandomAuthority draw is final and the character model
+        # cannot override the result.
+        assert outcome_model.calls == 0
+        assert projection.outcome_proposals[0].decision_authority == (
+            "recorded_world_draw"
+        )
         assert occurrence.result_payload_ref is not None
-        assert occurrence.result_payload_ref.endswith(":list-had-friction")
+        assert occurrence.settled_outcome_ref in {
+            item.candidate_result_ref for item in occurrence.candidate_outcomes
+        }
+        assert occurrence.result_payload_ref == next(
+            item.result_payload_ref
+            for item in occurrence.candidate_outcomes
+            if item.candidate_result_ref == occurrence.settled_outcome_ref
+        )
         assert occurrence.activated_at == NOW + timedelta(hours=1, minutes=1)
         assert occurrence.settled_at == NOW + timedelta(hours=1, minutes=46)
         assert len(projection.experiences) == 1
@@ -1030,13 +1436,14 @@ async def test_production_life_aftermath_requires_later_wake_and_survives_restar
         assert memory_chat.calls == 1
         assert restarted._ledger.project().memory_candidates == ()  # noqa: SLF001
         experience = restarted._ledger.project().experiences[0]  # noqa: SLF001
-        assert restarted._ledger.lookup_event_commit(  # noqa: SLF001
-            experience_memory_decision_event_id(
-                experience_authority_event_ref=(
-                    experience.origin.accepted_event_ref
+        assert (
+            restarted._ledger.lookup_event_commit(  # noqa: SLF001
+                experience_memory_decision_event_id(
+                    experience_authority_event_ref=(experience.origin.accepted_event_ref)
                 )
             )
-        ) is not None
+            is not None
+        )
     finally:
         restarted.close()
 
@@ -1148,14 +1555,11 @@ async def test_experience_memory_no_change_is_durable_and_never_reclassified(
             if (
                 not injected_conflict
                 and len(events) == 1
-                and events[0].event_type
-                == "ExperienceMemoryDecisionRecorded"
+                and events[0].event_type == "ExperienceMemoryDecisionRecorded"
             ):
                 injected_conflict = True
                 original_commit(events, **kwargs)
-                raise IdempotencyConflict(
-                    "simulated concurrent decision winner"
-                )
+                raise IdempotencyConflict("simulated concurrent decision winner")
             return original_commit(events, **kwargs)
 
         restarted._ledger.commit = commit_winner_then_raise  # type: ignore[method-assign] # noqa: SLF001
@@ -1196,22 +1600,16 @@ async def test_experience_memory_no_change_is_durable_and_never_reclassified(
         experience = restarted._ledger.project().experiences[0]  # noqa: SLF001
         decision_event, _ = restarted._ledger.lookup_event_commit(  # noqa: SLF001
             experience_memory_decision_event_id(
-                experience_authority_event_ref=(
-                    experience.origin.accepted_event_ref
-                )
+                experience_authority_event_ref=(experience.origin.accepted_event_ref)
             )
         )
         assert decision_event.payload()["decision_kind"] == "no_change"
-        memory_health = (await restarted.world_health_diagnostics())[
-            "mechanisms"
-        ]["memory"]
-        assert memory_health["experience_decision_counts"] == {
-            "no_change": 1
-        }
+        memory_health = (await restarted.world_health_diagnostics())["mechanisms"]["memory"]
+        assert memory_health["experience_decision_counts"] == {"no_change": 1}
         before_rebuild = restarted._ledger.project()  # noqa: SLF001
         rebuilt = restarted._ledger.rebuild()  # noqa: SLF001
         assert rebuilt.semantic_hash == before_rebuild.semantic_hash
-        assert rebuilt.reducer_bundle_version == "world-v2-reducers.40"
+        assert rebuilt.reducer_bundle_version == "world-v2-reducers.43"
     finally:
         restarted.close()
 

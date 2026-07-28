@@ -273,7 +273,7 @@ def test_life_author_weight_policy_senses_change_phase() -> None:
     rest = _candidate("rest", "rest_recovery")
     study = _candidate("study", "study_class")
     policy = LifeAuthorWeightPolicy()
-    assert policy.version == "life-author-weight.4"
+    assert policy.version == "life-author-weight.5"
 
     def _weights(last_stimulus: datetime, intensity: int, anchor: int) -> dict[str, int]:
         episodes = (

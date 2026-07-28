@@ -28,6 +28,87 @@ A sourced, confirmed fact about the user. A current User Fact may supersede an o
 
 An intention or scheduled future activity that has not happened. A Plan is never an Experience.
 
+## Biographical Context
+
+A source-bound reading of age, academic/calendar phase, current residence
+context, and active Life Arcs at one Logical Time. It is derived from reviewed
+timeline facts plus accepted World Events; it is not copied from a static
+persona prompt and does not decide what the companion should do.
+_Avoid_: Static age label, behavior script
+
+## Life Arc
+
+An accepted, long-lived chapter such as an internship, job, residence, trip,
+or sustained personal undertaking. A Life Arc contributes a reviewed Context
+Pack while active and may introduce or retire places, NPCs, and activity
+possibilities. It starts only from an authoritative settled consequence and
+ends through an explicit event; daily activities remain separate Plans and
+Experiences.
+_Avoid_: Daily activity, unsourced backstory, permanent persona rewrite
+
+## Context Pack
+
+A source-bound bundle of capabilities and environmental coordinates attached
+to a Life Arc or biographical phase. It says which resources, places, people,
+and effects are currently available; it neither supplies a finite activity
+menu nor instructs the character to choose a development.
+_Avoid_: Plot script, mandatory routine
+
+## Life Influence
+
+A sourced interaction, memory, relationship change, Affect episode, or
+unfinished matter made visible to life deliberation. It may change what the
+character notices or chooses, but the system never maps an influence directly
+to an activity. A user's place mention may become inspiration for a future
+Plan; it never proves that the companion visited.
+_Avoid_: Keyword-to-event rule, retroactive Experience
+
+## World Author
+
+A model authority that may propose fictional environmental opportunities,
+contingencies, provisional people, and objective outcomes inside the
+companion's World. It cannot decide the companion's motives or responses, and
+its output remains a Proposal until admitted and settled.
+_Avoid_: Plot director, character model, deterministic event table
+
+## Capability Manifest
+
+A revision-pinned declaration of the World effects currently available to a
+model, including their scope, consequence budget, and required evidence. It
+describes what may be proposed without suggesting what should happen. A
+location capability binds an opaque stable ref to the exact place, privacy
+floor, local schedule or accepted-Plan interval, admission kind, and authority
+source; a current-presence snapshot carries a finite wake-bound horizon rather
+than promising future presence. A bare location ID is never executable
+permission.
+_Avoid_: Plot menu, behavior recommendation
+
+## Provisional NPC
+
+A model-authored person that exists only inside a Proposal or unsettled
+occurrence. It becomes a referencable World NPC only after the introducing
+occurrence settles with sufficient evidence. Novel places may currently appear
+as scoped environmental claims, but only manifest-listed locations can become
+typed, reusable Plan coordinates; provisional-location materialization is not
+part of this version.
+_Avoid_: Pre-registered future acquaintance, invented historical fact
+
+## Outcome Resolution Envelope
+
+A frozen authorization for resolving an unsettled occurrence from later
+evidence within a bounded set of World capabilities. The current implementation
+stores a small set of possibilities authored afresh by the World Author for
+that exact context, including their relative plausibility and effect bounds.
+This is not an operator-authored plot catalog, but it is intentionally frozen
+before settlement so replay cannot silently change the past. A subjective
+long-term direction may only live in a character-resolved outcome; the
+Character Model sees it separately from the objective result and explicitly
+decides whether to adopt it. Objective world-contingency resolution cannot
+install one. The validated model audit, exact choice, direction decision,
+Outcome Proposal, Acceptance, Settlement, and appraisal trigger share one
+pinned CAS transaction; old Context is never carried across a later Clock.
+_Avoid_: Operator-authored ending list, predetermined selected result
+
 ## Proposal
 
 A candidate produced by a model, rule, or recorded draw that has not yet been accepted as a World Event.
