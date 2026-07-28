@@ -674,11 +674,10 @@ class ChatModelDeliberationAdapter:
                 raise ValueError("provisional author cannot settle the episode")
             episode_disposition = raw_disposition
             raw = json.dumps(episode_value, ensure_ascii=False, separators=(",", ":"))
-        # A provisional slot is the turn's second and final *author* call.
-        # It still crosses the configured semantic source-closure review, but
-        # an unsupported draft fails closed instead of spending another
-        # corrective author call. Full expression follows the same rule while
-        # the two episode author lanes are active.
+        # A provisional slot is the turn's second and final provider call.
+        # It therefore uses only deterministic parsing/claim/epistemic gates;
+        # semantic review or corrective completion would be a forbidden third
+        # call. Full expression keeps its established reviewers.
         # The general source-closure reviewer subsumes the old first-contact
         # identity/counterpart check. Running both made a grounded continuation
         # pay twice and allowed the narrower review to erase context-supported
@@ -690,7 +689,11 @@ class ChatModelDeliberationAdapter:
         ):
             raw = await self._review_identity_and_counterpart_if_needed(request=request, raw=raw)
         source_corrective_spent = False
-        if self._source_closure_reviewer is not None:
+        if (
+            not provisional
+            and not expression_episode_provider_slots_active()
+            and self._source_closure_reviewer is not None
+        ):
             review = await review_expression_source_closure(
                 reviewer=self._source_closure_reviewer,
                 request=request,
@@ -699,13 +702,6 @@ class ChatModelDeliberationAdapter:
             )
             if review is not None and review.decision == "unsupported":
                 violation = source_closure_violation(review)
-                # Both expression-episode authors run concurrently. Their
-                # complete candidate still crosses the same semantic truth
-                # review, but an unsupported candidate fails that lane instead
-                # of consuming a third corrective author call. The other
-                # independently reviewed candidate may still win.
-                if provisional or expression_episode_provider_slots_active():
-                    raise ValueError(violation)
                 repair_timeout = fit_secondary_call_timeout(
                     _WORLD_CLAIM_REPAIR_TIMEOUT_SECONDS
                 )
@@ -1071,19 +1067,9 @@ class ChatModelDeliberationAdapter:
                 else (
                     "Choose timing_choice now, later, or silent. Choose the number, modalities, "
                     "cadence, stance, and content of beats yourself. later needs delay_seconds "
-                    "and expires_after_seconds; silent has no beats. "
-                    + (
-                        "A separately validated first beat may already be sent while you finish. "
-                        "Choose episode_disposition as append only when this draft adds useful "
-                        "new expression after that beat; otherwise choose complete_without_more. "
-                        "A delivered beat cannot be cancelled or superseded."
-                        if expression_episode_provider_slots_active()
-                        else (
-                            "You may optionally set episode_disposition to "
-                            "complete_without_more, append, cancel_pending, or "
-                            "supersede_pending."
-                        )
-                    )
+                    "and expires_after_seconds; silent has no beats. You may optionally set "
+                    "episode_disposition to complete_without_more, append, cancel_pending, or "
+                    "supersede_pending."
                 )
             )
         )
