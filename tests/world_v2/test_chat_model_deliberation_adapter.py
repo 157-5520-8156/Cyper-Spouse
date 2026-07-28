@@ -1555,16 +1555,51 @@ def _source_closure_review(
     decision: str,
     unsupported_claim_indexes: tuple[int, ...] = (),
     undeclared_fact_fragments: tuple[str, ...] = (),
+    brief_reason: str = "Check semantic support and subject attribution.",
 ) -> str:
     return json.dumps(
         {
             "decision": decision,
             "unsupported_claim_indexes": list(unsupported_claim_indexes),
             "undeclared_fact_fragments": list(undeclared_fact_fragments),
-            "brief_reason": "Check semantic support and subject attribution.",
+            "brief_reason": brief_reason,
         },
         ensure_ascii=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_source_closure_diagnostic_reason_cannot_erase_a_supported_reply() -> None:
+    reply = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": "好，去吧。"}],
+            "stance": "warm",
+            "brief_rationale": "Respond naturally without a factual claim.",
+            "confidence": 7600,
+            "world_claims": [],
+        },
+        ensure_ascii=False,
+    )
+    reviewer = _SequenceJsonModel(
+        [
+            _source_closure_review(
+                decision="supported",
+                brief_reason=(
+                    "This reply contains no externally checkable claim and only "
+                    "acknowledges the current message. "
+                )
+                * 8,
+            )
+        ]
+    )
+
+    output = await ChatModelDeliberationAdapter(
+        model=_Model(reply),
+        source_closure_reviewer=reviewer,
+    ).propose(_qq_request())
+
+    assert "好，去吧。" in json.dumps(output.raw_proposal, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -1611,6 +1646,7 @@ async def test_source_closure_repairs_companion_hometown_used_as_user_premise() 
             _source_closure_review(
                 decision="unsupported",
                 undeclared_fact_fragments=("嘉兴最近天气不太好吗？",),
+                brief_reason="Unsupported premise remains unsupported. " * 12,
             ),
             _source_closure_review(decision="supported"),
         ]

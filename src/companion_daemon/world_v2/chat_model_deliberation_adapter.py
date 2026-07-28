@@ -219,6 +219,27 @@ class _ContextualClaimSupportReview(FrozenModel):
     brief_reason: str = Field(min_length=1, max_length=240)
 
 
+def _parse_contextual_claim_support_review(
+    raw: str,
+) -> _ContextualClaimSupportReview:
+    """Parse the authoritative verdict without promoting diagnostic prose.
+
+    The decision and rejection coordinates remain strict. ``brief_reason`` is
+    only bounded audit context, so a verbose provider must not erase an
+    otherwise valid supported/unsupported verdict and, transitively, silence
+    an inbound turn.
+    """
+
+    value = _parse_json_object(raw)
+    reason = value.get("brief_reason")
+    if isinstance(reason, str) and len(reason) > 240:
+        value = {**value, "brief_reason": reason[:240]}
+    return _ContextualClaimSupportReview.model_validate_json(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+        strict=True,
+    )
+
+
 async def review_expression_source_closure(
     *,
     reviewer: ChatCompletionModel,
@@ -309,14 +330,7 @@ async def review_expression_source_closure(
             messages,
             temperature=0.0,
         )
-    review = _ContextualClaimSupportReview.model_validate_json(
-        json.dumps(
-            _parse_json_object(reviewed_raw),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-        strict=True,
-    )
+    review = _parse_contextual_claim_support_review(reviewed_raw)
     indexes = review.unsupported_claim_indexes
     fragments = review.undeclared_fact_fragments
     if any(
@@ -849,14 +863,7 @@ class ChatModelDeliberationAdapter:
             messages,
             temperature=0.0,
         )
-        review = _ContextualClaimSupportReview.model_validate_json(
-            json.dumps(
-                _parse_json_object(reviewed_raw),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            strict=True,
-        )
+        review = _parse_contextual_claim_support_review(reviewed_raw)
         indexes = review.unsupported_claim_indexes
         undeclared = review.undeclared_fact_fragments
         if any(
