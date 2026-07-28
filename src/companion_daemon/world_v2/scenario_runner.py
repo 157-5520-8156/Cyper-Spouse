@@ -157,12 +157,20 @@ class ScenarioVerificationError(AssertionError):
 # ExperienceMemoryDecisionRecorded audit. The event is deliberation-only and
 # changes no fixed scenario predicate, but the installed reducer identity is
 # intentionally part of every scenario manifest.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.27"
+# ``.28`` records contextual short-utterance recall attention.  The automatic
+# query now includes the recent verified dialogue and withholds an isolated
+# sub-three-character lexical cue, preventing e.g. “来了” from outranking the
+# current topic merely because an old message contained “回来了”.  A clean
+# before/after run changed only six replay hashes; every output hash, model
+# call count, terminal state, trigger kind, room view, and scenario predicate
+# remained byte-identical.  This is mechanism/replay evidence, not a
+# human-likeness claim.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.28"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "a50a18f831be323a92466276013f6937de025804e3f97a045932b746dc3c4f8e"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "c5fdd7e15971c74708ba290b008da8fcccda3b0b4dfcaba1b231f584d3ead30b"
 
 
 class _FixedScenarioRouter:
