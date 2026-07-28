@@ -38,6 +38,7 @@ class SocialActionRunResult(FrozenModel):
     ]
     proposal_id: str | None = Field(default=None, min_length=1)
     action_id: str | None = Field(default=None, min_length=1)
+    action_ids: tuple[str, ...] = ()
     commitment_id: str | None = Field(default=None, min_length=1)
     reason_code: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -155,25 +156,26 @@ class SocialActionWorker:
                 proposal=proposal, outcome="reply_now", observation_event=observation_event
             )
             return SocialActionRunResult(status="reply_now_proposed", proposal_id=proposal.proposal_id)
-        if (
-            len(proposal.action_intents) != 1
-            or proposal.action_intents[0].kind != "followup"
+        if not proposal.action_intents or any(
+            item.kind != "followup" for item in proposal.action_intents
         ):
             return SocialActionRunResult(status="unavailable", proposal_id=proposal.proposal_id,
                 reason_code="social_action.unsupported_choice")
         projection = self._ledger.project()
-        existing = next(
-            (item for item in projection.actions if item.intent_ref.startswith(proposal.proposal_id + ":")),
-            None,
+        existing = tuple(
+            item for item in projection.actions
+            if item.intent_ref.startswith(proposal.proposal_id + ":")
         )
-        if existing is not None:
+        if existing:
+            existing_ids = tuple(item.action_id for item in existing)
             self._record_terminal_decision(
                 proposal=proposal, outcome="accepted_defer", observation_event=observation_event
             )
             commitment = next((item for item in projection.commitments
-                if item.values.fulfillment_contract.expected_action_id == existing.action_id), None)
+                if item.values.fulfillment_contract.expected_action_id in existing_ids), None)
             return SocialActionRunResult(status="duplicate", proposal_id=proposal.proposal_id,
-                action_id=existing.action_id,
+                action_id=existing_ids[-1],
+                action_ids=existing_ids,
                 commitment_id=commitment.commitment_id if commitment is not None else None)
         # Any intervening world change makes Acceptance stale.  In particular,
         # a newer user message must be reconsidered rather than authorizing old prose.
@@ -238,24 +240,26 @@ class SocialActionWorker:
             self._ledger.commit_accepted(handle, expected_cursor=cursor)
         except ConcurrencyConflict:
             raced = self._ledger.project()
-            existing = next(
-                (item for item in raced.actions
-                 if item.intent_ref.startswith(proposal.proposal_id + ":")),
-                None,
+            existing = tuple(
+                item for item in raced.actions
+                if item.intent_ref.startswith(proposal.proposal_id + ":")
             )
-            if existing is not None:
+            if existing:
+                existing_ids = tuple(item.action_id for item in existing)
                 self._record_terminal_decision(
                     proposal=proposal, outcome="accepted_defer",
                     observation_event=observation_event
                 )
                 commitment = next(
                     (item for item in raced.commitments
-                     if item.values.fulfillment_contract.expected_action_id == existing.action_id),
+                     if item.values.fulfillment_contract.expected_action_id
+                     in existing_ids),
                     None,
                 )
                 return SocialActionRunResult(
                     status="duplicate", proposal_id=proposal.proposal_id,
-                    action_id=existing.action_id,
+                    action_id=existing_ids[-1],
+                    action_ids=existing_ids,
                     commitment_id=commitment.commitment_id if commitment is not None else None,
                 )
             self._record_terminal_decision(
@@ -270,7 +274,10 @@ class SocialActionWorker:
         return SocialActionRunResult(
             status="deferred",
             proposal_id=proposal.proposal_id,
-            action_id=material.expression.beats[0].action.action_id,
+            action_id=material.expression.beats[-1].action.action_id,
+            action_ids=tuple(
+                item.action.action_id for item in material.expression.beats
+            ),
             commitment_id=material.commitment_payload.commitment_after.commitment_id,
         )
 

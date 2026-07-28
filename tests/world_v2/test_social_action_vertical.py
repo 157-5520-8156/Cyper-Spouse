@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import json
 
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.batch_invariants import validate_commit_batch
+from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+    ChatModelDeliberationAdapter,
+)
 from companion_daemon.world_v2.context_capsule import ContextCapsuleCompiler
 from companion_daemon.world_v2.action_pump import ActionPump
 from companion_daemon.world_v2.deferred_reply_runtime import DeferredReplyRuntime
 from companion_daemon.world_v2.deliberation import Deliberation, ModelRoute, RouteRequest
 from companion_daemon.world_v2.expression_plan_acceptance import ExpressionPlanBudgetPolicy
+from companion_daemon.world_v2.expression_draft import (
+    TEXT_ONLY_EXPRESSION_CAPABILITIES,
+)
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.ledger_context_resolver import context_capsule_compiler_from_ledger
@@ -23,8 +30,10 @@ from companion_daemon.world_v2.schemas import (
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.expression_reconsideration_runtime import ExpressionReconsiderationRuntime
 from companion_daemon.world_v2.social_action_acceptance import (
+    LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
     SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
     SocialDeferredPolicy,
+    parse_social_deferred_acceptance_manifest,
 )
 from companion_daemon.world_v2.social_action_acceptance import social_deferred_manifest_hash
 from companion_daemon.world_v2.social_action_draft import SocialActionDraftDeliberationAdapter
@@ -87,7 +96,9 @@ def _observation(*, suffix: str = "1", text: str = "你先忙，晚点再聊。"
     )
 
 
-async def _setup(*, output: str, budget_limit: int = 100):
+async def _setup(
+    *, output: str, budget_limit: int = 100, expression: bool = False
+):
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=WORLD, accepted_batch_issuer=issuer)
     ledger.commit((_event("event:start", "WorldStarted", {}),),
@@ -106,7 +117,11 @@ async def _setup(*, output: str, budget_limit: int = 100):
         expected_deliberation_revision=projection.deliberation_revision)
     await WorldRuntime(world_id=WORLD, ledger=ledger).ingest(_observation())
     model = _ChatModel(output)
-    worker = _make_worker(ledger=ledger, issuer=issuer, model=model)
+    worker = (
+        _make_expression_worker(ledger=ledger, issuer=issuer, model=model)
+        if expression
+        else _make_worker(ledger=ledger, issuer=issuer, model=model)
+    )
     return ledger, worker, model
 
 
@@ -128,18 +143,77 @@ def _make_worker(*, ledger, issuer: AcceptedLedgerBatchIssuer, model: _ChatModel
     )
 
 
+def _make_expression_worker(
+    *, ledger, issuer: AcceptedLedgerBatchIssuer, model: _ChatModel
+) -> SocialActionWorker:
+    adapter = ChatModelDeliberationAdapter(
+        model=model,
+        expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    )
+    capsules: ContextCapsuleCompiler = context_capsule_compiler_from_ledger(
+        ledger=ledger
+    )
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=capsules,
+        deliberation=Deliberation(
+            router=_Router(), main_model=adapter, quick_recovery=adapter
+        ),
+        companion_actor_ref="actor:companion",
+    )
+    return SocialActionWorker(
+        ledger=ledger,
+        pinned_turn=turn,
+        batch_issuer=issuer,
+        policy=SocialDeferredPolicy(
+            expression=ExpressionPlanBudgetPolicy(
+                account_id="account:chat",
+                amount_limit_per_action=3,
+                actor="actor:companion",
+                allowed_targets=("user:primary",),
+                recovery_policy="effect_once",
+            )
+        ),
+    )
+
+
 class _CancelReviewer:
     async def review(self, **_kwargs):
         return "cancel"
 
 
 class _DeliveredExecutor:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def dispatch(self, action):
+        self.sent.append(action.action_id)
+        return ProviderReceipt(
+            provider_receipt_id=f"receipt:{action.action_id}",
+            action_id=action.action_id,
+            idempotency_key=action.idempotency_key, provider="fixture:chat",
+            provider_ref=f"provider:{action.action_id}",
+            status="delivered", cost_actual=1,
+            received_at=NOW + timedelta(minutes=1), raw_payload_hash="f" * 64,
+        )
+
+    async def lookup_result(self, action):
+        del action
+        return None
+
+
+class _FailedExecutor:
     async def dispatch(self, action):
         return ProviderReceipt(
-            provider_receipt_id="receipt:social-followup", action_id=action.action_id,
-            idempotency_key=action.idempotency_key, provider="fixture:chat",
-            provider_ref="provider:social-followup", status="delivered", cost_actual=1,
-            received_at=NOW + timedelta(minutes=1), raw_payload_hash="f" * 64,
+            provider_receipt_id=f"receipt:failed:{action.action_id}",
+            action_id=action.action_id,
+            idempotency_key=action.idempotency_key,
+            provider="fixture:chat",
+            provider_ref=f"provider:failed:{action.action_id}",
+            status="failed",
+            cost_actual=1,
+            received_at=NOW + timedelta(minutes=1),
+            raw_payload_hash="e" * 64,
         )
 
     async def lookup_result(self, action):
@@ -163,7 +237,7 @@ async def test_model_defer_atomically_opens_commitment_expression_budget_and_fol
     duplicate = await worker.run_observation("observation:social:1")
     projection = ledger.project()
 
-    assert result.status == "deferred"
+    assert result.status == "deferred", result
     assert duplicate.status == "duplicate"
     assert model.calls == 1
     assert len(projection.commitments) == len(projection.expression_plans) == len(projection.threads) == 1
@@ -173,6 +247,175 @@ async def test_model_defer_atomically_opens_commitment_expression_budget_and_fol
     assert projection.commitments[0].values.fulfillment_contract.expected_action_id == result.action_id
     assert projection.threads[0].values.kind == "reply_reconsideration"
     assert projection.threads[0].values.due_window == projection.commitments[0].values.due_window
+
+
+@pytest.mark.asyncio
+async def test_expression_later_atomically_authorizes_every_model_chosen_beat() -> None:
+    ledger, worker, model = await _setup(
+        expression=True,
+        output=json.dumps(
+            {
+                "timing_choice": "later",
+                "delay_seconds": 60,
+                "expires_after_seconds": 600,
+                "beats": [
+                    {"modality": "text", "text": "我先把手里的事收个尾。"},
+                    {"modality": "text", "text": "刚才那段我没有忘。"},
+                    {"modality": "text", "text": "一会儿回来接着说。"},
+                ],
+                "world_claims": [],
+                "stance": "defer",
+                "brief_rationale": "The character chose a three-beat deferred expression.",
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    result = await worker.run_observation("observation:social:1")
+    duplicate = await worker.run_observation("observation:social:1")
+    projection = ledger.project()
+
+    assert result.status == "deferred", result
+    assert duplicate.status == "duplicate"
+    assert result.action_ids == duplicate.action_ids
+    assert len(result.action_ids) == 3
+    assert len(projection.expression_beats) == 3
+    assert len(projection.budget_reservations) == 3
+    assert tuple(item.action_id for item in projection.actions) == result.action_ids
+    assert tuple(item.kind for item in projection.actions) == (
+        "followup",
+        "followup",
+        "followup",
+    )
+    assert projection.expression_beats[1].dependency_beat_ids == (
+        projection.expression_beats[0].beat_id,
+    )
+    assert projection.expression_beats[2].dependency_beat_ids == (
+        projection.expression_beats[1].beat_id,
+    )
+    assert (
+        projection.commitments[0].values.fulfillment_contract.expected_action_id
+        == result.action_ids[-1]
+    )
+
+    runtime = WorldRuntime(world_id=WORLD, ledger=ledger)
+    await runtime.advance(
+        ClockObservation(
+            schema_version="world-v2.1",
+            tick_id="tick:multi-social-due",
+            world_id=WORLD,
+            logical_time=NOW + timedelta(minutes=1),
+            created_at=NOW + timedelta(minutes=1),
+            trace_id="trace:social",
+            causation_id="cause:multi-clock",
+            correlation_id="conversation:social",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(minutes=1),
+            reason="test",
+        )
+    )
+    executor = _DeliveredExecutor()
+    pump = ActionPump(
+        ledger=ledger,
+        executor=executor,
+        settle=runtime.settle,
+        owner_id="worker:multi-action",
+    )
+    for _ in range(12):
+        if all(
+            item.state == "delivered"
+            for item in ledger.project().actions
+            if item.action_id in result.action_ids
+        ):
+            break
+        await pump.drain_once()
+
+    assert tuple(executor.sent) == result.action_ids
+    assert all(
+        item.state == "delivered"
+        for item in ledger.project().actions
+        if item.action_id in result.action_ids
+    )
+    DeferredReplyRuntime(ledger=ledger).settle_terminal_action(
+        action_id=result.action_ids[-1],
+        logical_time=NOW + timedelta(minutes=1),
+        created_at=NOW + timedelta(minutes=1),
+        trace_id="trace:social",
+        causation_id="cause:multi-receipt",
+        correlation_id="conversation:social",
+    )
+    assert ledger.project().commitments[0].values.status == "fulfilled"
+
+
+@pytest.mark.asyncio
+async def test_failed_early_later_beat_breaks_the_plan_commitment() -> None:
+    ledger, worker, _model = await _setup(
+        expression=True,
+        output=json.dumps(
+            {
+                "timing_choice": "later",
+                "delay_seconds": 60,
+                "expires_after_seconds": 600,
+                "beats": [
+                    {"modality": "text", "text": "第一条。"},
+                    {"modality": "text", "text": "第二条。"},
+                    {"modality": "text", "text": "第三条。"},
+                ],
+                "world_claims": [],
+                "stance": "defer",
+                "brief_rationale": "A deferred multi-beat expression.",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    accepted = await worker.run_observation("observation:social:1")
+    assert accepted.status == "deferred"
+    runtime = WorldRuntime(world_id=WORLD, ledger=ledger)
+    await runtime.advance(
+        ClockObservation(
+            schema_version="world-v2.1",
+            tick_id="tick:multi-social-failure",
+            world_id=WORLD,
+            logical_time=NOW + timedelta(minutes=1),
+            created_at=NOW + timedelta(minutes=1),
+            trace_id="trace:social",
+            causation_id="cause:multi-failure-clock",
+            correlation_id="conversation:social",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(minutes=1),
+            reason="test",
+        )
+    )
+    pump = ActionPump(
+        ledger=ledger,
+        executor=_FailedExecutor(),
+        settle=runtime.settle,
+        owner_id="worker:multi-failure",
+    )
+    for _ in range(4):
+        if next(
+            item
+            for item in ledger.project().actions
+            if item.action_id == accepted.action_ids[0]
+        ).state == "failed":
+            break
+        await pump.drain_once()
+
+    first_action = next(
+        item
+        for item in ledger.project().actions
+        if item.action_id == accepted.action_ids[0]
+    )
+    assert first_action.state == "failed"
+    # Reconstructing the continuation runtime models a daemon restart after
+    # receipt settlement but before commitment settlement.
+    DeferredReplyRuntime(ledger=ledger).recover_one_terminal_commitment()
+    commitment = next(
+        item
+        for item in ledger.project().commitments
+        if item.commitment_id == accepted.commitment_id
+    )
+    assert commitment.values.status == "broken"
 
 
 @pytest.mark.asyncio
@@ -445,6 +688,36 @@ async def test_social_manifest_cannot_cross_bind_source_or_bypass_recorder() -> 
     )
     with pytest.raises(ValueError, match="source or policy separation"):
         clone.commit_accepted(handle, expected_cursor=cursor)
+
+
+@pytest.mark.asyncio
+async def test_legacy_single_action_social_manifest_keeps_its_exact_v1_schema() -> None:
+    ledger, worker, _model = await _setup(output=(
+        '{"choice":"defer","response_text":"晚点见。","delay_seconds":60,'
+        '"expires_after_seconds":600,"brief_rationale":"稍后接续","confidence":7000}'
+    ))
+    assert (await worker.run_observation("observation:social:1")).status == "deferred"
+    current = next(
+        item.event.payload()
+        for item in ledger._events
+        if item.event.event_type == "AcceptanceRecorded"
+        and item.event.payload().get("manifest_version")
+        == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+    )
+    legacy = {
+        **current,
+        "manifest_version": LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+    }
+    legacy.pop("action_ids")
+    legacy["manifest_hash"] = social_deferred_manifest_hash(legacy)
+
+    parsed = parse_social_deferred_acceptance_manifest(legacy)
+
+    assert (
+        parsed.manifest_version
+        == LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+    )
+    assert not hasattr(parsed, "action_ids")
 
 
 @pytest.mark.asyncio

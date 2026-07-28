@@ -169,6 +169,11 @@ class QQC2CHost:
         self._ingress_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._scheduled_work_lock = asyncio.Lock()
+        # ``_lock`` also serializes short scheduler clock commits.  Keep a
+        # separate signal for a genuinely visible ingress turn so scheduler
+        # CAS cannot masquerade as evidence that the user is continuing a
+        # volley and trigger the 650ms continuation hold.
+        self._visible_turn_depth = 0
         self._closed = False
         self._last_content_received_at: datetime | None = None
         self._last_content_text: str | None = None
@@ -182,6 +187,10 @@ class QQC2CHost:
         # the sender goes quiet.  Pure claim-timing courtesy: batch identity
         # and ledger state never depend on it.
         self._rhythm_holds = 0
+        # The durable matrix wait precedes the adaptive rhythm hold. A second
+        # bubble observed inside that first window is already real cadence
+        # evidence and must seed the rolling hold once the window closes.
+        self._coalescing_waits = 0
         action_due_projection = getattr(self._host, "action_due_projection", None)
         self._action_due_wake = (
             ActionDueWake(
@@ -259,13 +268,28 @@ class QQC2CHost:
                 canonical_user_id=self._canonical_user_id,
             )
         self._register_content_gap(
-            received_at=received_at, previous_received_at=previous_received_at
+            received_at=received_at,
+            previous_received_at=previous_received_at,
+            continuation_observed=(
+                burst_continuation
+                or self._rhythm_holds > 0
+                or self._coalescing_waits > 0
+            ),
         )
         self._last_content_received_at = received_at
         self._last_content_text = fragment.text
         delay = max(0.0, (submitted.due_at - self._ingress_now()).total_seconds())
         if delay:
-            await self._ingress_sleep(delay)
+            self._coalescing_waits += 1
+            try:
+                await self._ingress_sleep(delay)
+            finally:
+                self._coalescing_waits -= 1
+        # A sibling may have landed at the edge of the short observation
+        # window.  Yield once before testing quietness so that already-ready
+        # ingress tasks persist their fragment before this task can claim.
+        # This adds no timer and no production sleep.
+        await asyncio.sleep(0)
         await self._hold_for_sender_rhythm(
             fragment=fragment,
             received_at=received_at,
@@ -284,7 +308,7 @@ class QQC2CHost:
                     async with self._ingress_lock:
                         batch = self._ingress_store.claim_due(now=self._ingress_now())
                     if batch is not None:
-                        await self._process_ingress_batch_locked(batch)
+                        await self._run_visible_ingress_batch_locked(batch)
                 # else: a sibling's claim already answered this fragment
                 # while it waited for the lock.  It must not claim anything
                 # further: whatever is pending now belongs to a newer volley
@@ -308,17 +332,22 @@ class QQC2CHost:
 
     # Provider-local sender-rhythm pacing delays only the *claim*; it never
     # changes batch identity, ledger state, or replay.  Its adaptive hint is
-    # deliberately bounded inside the durable 400–800ms coalescing budget:
+    # deliberately bounded inside the durable 150–500ms coalescing budget:
     # message shape may choose when inside that opportunity to claim, but may
     # never add a second, multi-second wait before the model call.
     _TEMPO_WINDOW_SECONDS = 600.0
     _TEMPO_SAMPLE_CEILING_SECONDS = 8.0
-    # The durable coalescing matrix already absorbs 400–800ms of adjacent
+    # The durable coalescing matrix already absorbs 150–500ms of adjacent
     # bubbles.  Sender-rhythm courtesy must fit inside that same user-visible
     # budget instead of adding several more seconds before any model call.
-    _DEFAULT_QUIET_GAP_SECONDS = 0.65
-    _MIN_QUIET_GAP_SECONDS = 0.35
-    _MAX_QUIET_GAP_SECONDS = 0.8
+    _DEFAULT_QUIET_GAP_SECONDS = 0.15
+    _MIN_QUIET_GAP_SECONDS = 0.10
+    _MAX_QUIET_GAP_SECONDS = 0.42
+    # Only observed continuation earns the wider rolling window.  This keeps
+    # a single bubble fast while retaining multi-bubble turns at real typing
+    # cadences; the wider value is never charged speculatively.
+    _BURST_MAX_QUIET_GAP_SECONDS = 0.8
+    _BURST_CONTINUATION_QUIET_GAP_SECONDS = 0.65
     # Absolute per-fragment bound on burst absorption.  A person being
     # flooded keeps reading as long as bubbles keep landing, but after about
     # half a minute they interject anyway — so the hold keeps rolling while
@@ -326,11 +355,24 @@ class QQC2CHost:
     _BURST_HOLD_CAP_SECONDS = 30.0
 
     def _register_content_gap(
-        self, *, received_at: datetime, previous_received_at: datetime | None
+        self,
+        *,
+        received_at: datetime,
+        previous_received_at: datetime | None,
+        continuation_observed: bool,
     ) -> None:
         """Track the sender's live typing cadence for adaptive pacing."""
 
         if previous_received_at is None:
+            return
+        if not continuation_observed:
+            # A message arriving after the previous visible turn settled is a
+            # new exchange, however small the wall-clock gap happens to be.
+            # Treating that reply-to-reply interval as typing cadence made
+            # each successful fast turn enlarge the *next* speculative wait
+            # from the catalog window to 420ms. Only a bubble witnessed while
+            # another bubble is being held or answered is evidence of one volley.
+            self._recent_gap_seconds.clear()
             return
         gap = (received_at - previous_received_at).total_seconds()
         if gap > self._TEMPO_WINDOW_SECONDS:
@@ -373,8 +415,11 @@ class QQC2CHost:
         gap = min(max(base * bias, self._MIN_QUIET_GAP_SECONDS), self._MAX_QUIET_GAP_SECONDS)
         if burst and self._recent_gap_seconds:
             cadence = self._recent_gap_seconds[-1]
-            if cadence <= self._MAX_QUIET_GAP_SECONDS:
-                gap = max(gap, min(cadence * 1.2, self._MAX_QUIET_GAP_SECONDS))
+            if cadence <= self._BURST_MAX_QUIET_GAP_SECONDS:
+                gap = max(
+                    gap,
+                    min(cadence * 1.2, self._BURST_MAX_QUIET_GAP_SECONDS),
+                )
         return gap
 
     async def _hold_for_sender_rhythm(
@@ -402,7 +447,12 @@ class QQC2CHost:
         """
 
         quiet_gap = self._quiet_gap_seconds(fragment.text, burst=burst_continuation)
+        if burst_continuation:
+            quiet_gap = max(
+                quiet_gap, self._BURST_CONTINUATION_QUIET_GAP_SECONDS
+            )
         hard_cap = received_at + timedelta(seconds=self._BURST_HOLD_CAP_SECONDS)
+        yielded_at_quiet_edge = False
         self._rhythm_holds += 1
         try:
             while True:
@@ -422,11 +472,25 @@ class QQC2CHost:
                     latest = typing_at
                 quiet_for = (now - latest).total_seconds()
                 if quiet_for >= quiet_gap or now >= hard_cap:
+                    if not yielded_at_quiet_edge and now < hard_cap:
+                        # Let a fragment whose provider callback became ready
+                        # on this exact boundary persist before freezing batch
+                        # membership. This is a scheduler yield, not another
+                        # pacing timer.
+                        yielded_at_quiet_edge = True
+                        await asyncio.sleep(0)
+                        continue
                     return
                 await self._ingress_sleep(
                     min(
-                        max(quiet_gap - quiet_for, 0.05),
-                        max((hard_cap - now).total_seconds(), 0.05),
+                        # The old 50ms floor routinely charged one whole
+                        # scheduler quantum when the durable observation
+                        # window ended a fraction of a millisecond before the
+                        # adaptive quiet edge.  Five milliseconds is enough
+                        # to avoid a busy loop without turning rounding error
+                        # into visible reply latency.
+                        max(quiet_gap - quiet_for, 0.005),
+                        max((hard_cap - now).total_seconds(), 0.005),
                     )
                 )
         finally:
@@ -443,15 +507,15 @@ class QQC2CHost:
     def _visible_turn_in_flight(self) -> bool:
         """Report whether a user-visible turn currently owns the world lock.
 
-        ``self._lock`` is held for the whole visible ingress turn — context,
-        model call, and the reply's ledger record.  Background scheduler work
-        consults this signal between durable units so a waiting reply is never
-        starved by a long chain of background commits.  This is scheduling
-        courtesy only: ledger CAS and durable claims remain the correctness
-        authority whether or not background work defers.
+        A dedicated depth marker covers context, model call, and the reply's
+        ledger record.  The shared serialization lock alone is insufficient:
+        scheduler clock commits use it too and are not evidence of user
+        continuation. Background work consults this signal between durable
+        units so a waiting reply is never starved by a long chain of commits.
+        Ledger CAS and durable claims remain the correctness authority.
         """
 
-        return self._lock.locked()
+        return self._visible_turn_depth > 0
 
     async def drain_ingress_once(self) -> QQC2CIngressResult | None:
         """Resume one due or previously claimed batch after a restart."""
@@ -471,7 +535,18 @@ class QQC2CHost:
                 batch = self._ingress_store.claim_due(now=self._ingress_now())
             if batch is None:
                 return None
+            return await self._run_visible_ingress_batch_locked(batch)
+
+    async def _run_visible_ingress_batch_locked(
+        self, batch: QQIngressBatch
+    ) -> QQC2CIngressResult:
+        """Mark only context/model/reply work as a user-visible turn."""
+
+        self._visible_turn_depth += 1
+        try:
             return await self._process_ingress_batch_locked(batch)
+        finally:
+            self._visible_turn_depth -= 1
 
     def _pulse_typing(self) -> None:
         """Fire one best-effort provider typing pulse for a starting turn.

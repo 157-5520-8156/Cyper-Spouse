@@ -35,13 +35,13 @@ def test_qq_ingress_matrix_is_complete_machine_readable_and_bounded() -> None:
     catalog = QQIngressPolicyCatalog()
     manifest = catalog.manifest()
 
-    assert manifest["version"] == "world-v2-qq-ingress-matrix.1"
+    assert manifest["version"] == "world-v2-qq-ingress-matrix.2"
     assert len(manifest["rows"]) == 30  # type: ignore[arg-type]
     assert len(catalog.digest) == 64
     assert {
         row["batch_mode"] for row in manifest["rows"]  # type: ignore[union-attr]
     } == {"ordered_multimodal", "metadata_only"}
-    assert all(400 <= row["window_ms"] <= 800 for row in manifest["rows"])  # type: ignore[union-attr]
+    assert all(100 <= row["window_ms"] <= 500 for row in manifest["rows"])  # type: ignore[union-attr]
 
 
 def test_onebot_normalizer_retains_multimodal_quote_and_control_as_opaque_refs() -> None:
@@ -591,6 +591,38 @@ async def test_opening_rapid_burst_without_prior_context_still_joins_one_turn() 
     await host.aclose()
 
 
+@pytest.mark.asyncio
+async def test_real_wall_clock_pair_250ms_apart_joins_one_turn() -> None:
+    """Future ``observed_at`` metadata cannot fake a real batching interval."""
+
+    world = _WorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(),
+    )
+    first = asyncio.create_task(
+        host.inbound_fragment(_text("message:wall1", "今天要打比赛了"))
+    )
+    await asyncio.sleep(0.25)
+    second = asyncio.create_task(
+        host.inbound_fragment(
+            _text(
+                "message:wall2",
+                "还有点紧张",
+                observed_at=NOW + timedelta(milliseconds=250),
+            )
+        )
+    )
+    left, right = await asyncio.gather(first, second)
+
+    assert left == right
+    assert len(world.inbounds) == 1
+    assert world.inbounds[0].text == "今天要打比赛了\n还有点紧张"
+    await host.aclose()
+
+
 def _manual_clock(start: datetime):
     """A shared test clock that only the driving test moves.
 
@@ -601,8 +633,10 @@ def _manual_clock(start: datetime):
 
     clock = {"now": start}
 
-    async def idle_sleep(_delay: float) -> None:
-        await asyncio.sleep(0)
+    async def idle_sleep(delay: float) -> None:
+        target = clock["now"] + timedelta(seconds=max(delay, 0.0))
+        while clock["now"] < target:
+            await asyncio.sleep(0)
 
     async def drive(condition, *, step: float = 0.1, limit_seconds: float = 120.0) -> None:
         for _ in range(int(limit_seconds / step)):
@@ -718,8 +752,11 @@ async def test_sustained_rapid_burst_uses_one_turn_and_finishes_after_last_bubbl
     )
     tasks = []
     for index, text in enumerate(texts):
-        offset = index * 0.3
-        await drive(lambda: clock["now"] >= start + timedelta(seconds=offset))
+        offset = index * 0.2
+        await drive(
+            lambda: clock["now"] >= start + timedelta(seconds=offset),
+            step=0.005,
+        )
         tasks.append(
             asyncio.create_task(
                 host.inbound_fragment(
@@ -782,8 +819,11 @@ async def test_burst_answers_within_one_second_after_the_last_bubble() -> None:
     )
     tasks = []
     for index, text in enumerate(texts):
-        offset = index * 0.4
-        await drive(lambda: clock["now"] >= start + timedelta(seconds=offset))
+        offset = index * 0.25
+        await drive(
+            lambda: clock["now"] >= start + timedelta(seconds=offset),
+            step=0.005,
+        )
         tasks.append(
             asyncio.create_task(
                 host.inbound_fragment(
@@ -803,7 +843,7 @@ async def test_burst_answers_within_one_second_after_the_last_bubble() -> None:
     assert len(world.inbounds) == 1
     assert world.inbounds[0].text == "\n".join(texts)
     elapsed = (world.inbound_at[0] - start).total_seconds()
-    last_bubble_at = (len(texts) - 1) * 0.4
+    last_bubble_at = (len(texts) - 1) * 0.25
     assert last_bubble_at <= elapsed <= last_bubble_at + 1.0
     await host.aclose()
 
@@ -827,23 +867,27 @@ async def test_scheduler_ingress_pass_yields_while_a_rhythm_hold_absorbs_a_volle
         host.inbound_fragment(_text("message:hold1", "刚到家", observed_at=start))
     )
     await asyncio.sleep(0)
-    # The durable coalescing window is nearly closed, but the bounded rhythm
-    # hold still owns this rapid volley.
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=0.5))
-    assert host._rhythm_holds == 1
+    # Before the durable window closes, the scheduler cannot claim it.
+    await drive(
+        lambda: clock["now"] >= start + timedelta(seconds=0.275),
+        step=0.005,
+    )
+    assert host._rhythm_holds == 0
     assert await host.drain_ingress_once() is None
     assert world.inbounds == []
 
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=0.55))
     second = asyncio.create_task(
         host.inbound_fragment(
             _text(
                 "message:hold2",
                 "还买了奶茶",
-                observed_at=start + timedelta(seconds=0.55),
+                observed_at=start + timedelta(seconds=0.275),
             )
         )
     )
+    await drive(lambda: host._rhythm_holds >= 1, step=0.005)
+    assert host._rhythm_holds >= 1
+    assert await host.drain_ingress_once() is None
     await drive(lambda: first.done() and second.done())
     left, right = await asyncio.gather(first, second)
 
@@ -865,17 +909,17 @@ def test_adaptive_quiet_gap_follows_cadence_and_message_shape() -> None:
         ingress_store=MemoryQQIngressStore(),
     )
     # No cadence yet: the whole semantic pacing hint remains subsecond.
-    assert host._quiet_gap_seconds("今天要打比赛了") == pytest.approx(0.65)
-    assert host._quiet_gap_seconds("你吃饭了吗？") == pytest.approx(0.65 * 0.6)
-    assert host._quiet_gap_seconds("我跟你说，") == pytest.approx(0.8)
+    assert host._quiet_gap_seconds("今天要打比赛了") == pytest.approx(0.15)
+    assert host._quiet_gap_seconds("你吃饭了吗？") == pytest.approx(0.10)
+    assert host._quiet_gap_seconds("我跟你说，") == pytest.approx(0.255)
     # A fast typist shrinks the base; a slow one grows it, both bounded below
     # the one-second local budget.
     host._recent_gap_seconds.extend([0.1, 0.12, 0.11])
-    assert host._quiet_gap_seconds("随便说点什么") == pytest.approx(0.35)
+    assert host._quiet_gap_seconds("随便说点什么") == pytest.approx(0.11 * 1.3)
     host._recent_gap_seconds.clear()
     host._recent_gap_seconds.extend([2.0, 2.5, 3.0])
-    assert host._quiet_gap_seconds("嗯") == pytest.approx(0.7)
-    assert host._quiet_gap_seconds("而且") == pytest.approx(0.8)
+    assert host._quiet_gap_seconds("嗯") == pytest.approx(0.42)
+    assert host._quiet_gap_seconds("而且") == pytest.approx(0.42)
     # Burst continuation: the just-shown cadence floors the wait, so a fast
     # historical median and a closed tail cannot slice an ongoing volley.
     host._recent_gap_seconds.clear()
@@ -890,12 +934,44 @@ def test_adaptive_quiet_gap_follows_cadence_and_message_shape() -> None:
     # A last gap slower than the maximum is a lull, not a rhythm: no lift.
     host._recent_gap_seconds.clear()
     host._recent_gap_seconds.extend([2.0, 2.5, 3.0])
-    assert host._quiet_gap_seconds("嗯", burst=True) == pytest.approx(0.7)
+    assert host._quiet_gap_seconds("嗯", burst=True) == pytest.approx(0.42)
     # Without cadence samples the burst flag alone changes nothing.
     host._recent_gap_seconds.clear()
     assert host._quiet_gap_seconds("你吃饭了吗？", burst=True) == pytest.approx(
-        0.65 * 0.6
+        0.10
     )
+
+
+def test_settled_turn_gap_does_not_inflate_the_next_speculative_wait() -> None:
+    host = QQC2CHost(
+        host=_WorldHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(),
+    )
+    host._recent_gap_seconds.extend([0.31, 0.34])
+
+    host._register_content_gap(
+        received_at=NOW + timedelta(seconds=0.36),
+        previous_received_at=NOW,
+        continuation_observed=False,
+    )
+
+    assert tuple(host._recent_gap_seconds) == ()
+    assert host._quiet_gap_seconds("下一轮") == pytest.approx(0.15)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_serialization_lock_is_not_user_continuation_evidence() -> None:
+    host = QQC2CHost(
+        host=_WorldHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(),
+    )
+
+    async with host._lock:
+        assert not host._visible_turn_in_flight()
 
 
 @pytest.mark.asyncio

@@ -288,6 +288,32 @@ class DeferredReplyRuntime:
         target = next((item for item in projection.commitments if item.values.status in {"open", "due"}
             and item.values.fulfillment_contract.contract_kind == "execution_receipt"
             and item.values.fulfillment_contract.expected_action_id == action_id), None)
+        if (
+            target is None
+            and action.state in {"failed", "cancelled", "expired", "unknown"}
+            and action.expression_plan_id is not None
+        ):
+            # A deferred multi-beat promise is fulfilled only by its terminal
+            # Action, but an earlier terminal failure makes that Action
+            # unreachable. Close the same plan-bound commitment from the
+            # exact failed receipt instead of leaving it open until deadline.
+            plan_action_ids = {
+                item.action_id
+                for item in projection.actions
+                if item.expression_plan_id == action.expression_plan_id
+            }
+            target = next(
+                (
+                    item
+                    for item in projection.commitments
+                    if item.values.status in {"open", "due"}
+                    and item.values.fulfillment_contract.contract_kind
+                    == "execution_receipt"
+                    and item.values.fulfillment_contract.expected_action_id
+                    in plan_action_ids
+                ),
+                None,
+            )
         if target is None:
             return None
         operation = "fulfill" if action.state == "delivered" else ("break" if action.state in {"failed", "cancelled", "expired"} else "release")
@@ -321,6 +347,76 @@ class DeferredReplyRuntime:
             causation_id=causation_id,
             correlation_id=correlation_id,
         )
+
+    def recover_one_terminal_commitment(self):
+        """Join one receipt left between Action settlement and continuation.
+
+        A process may stop after the Action receipt commit but before
+        ``settle_terminal_action`` records the commitment transition.  Scan
+        only active reply-later commitments and their plan siblings so restart
+        recovery is bounded by live responsibility, not ledger history.
+        """
+
+        projection = self._ledger.project()
+        active = tuple(
+            item
+            for item in projection.commitments
+            if item.values.status in {"open", "due"}
+            and item.values.fulfillment_contract.contract_kind
+            == "execution_receipt"
+        )
+        actions_by_id = {item.action_id: item for item in projection.actions}
+        receipts_by_action = {
+            item.action_id: item
+            for item in projection.execution_receipts
+            if item.is_terminal
+        }
+        for commitment in active:
+            expected_id = (
+                commitment.values.fulfillment_contract.expected_action_id
+            )
+            expected = actions_by_id.get(expected_id)
+            candidate_ids = (expected_id,)
+            if (
+                expected is not None
+                and expected.state == "cancelled"
+                and expected.expression_plan_id is not None
+            ):
+                candidate_ids = (
+                    expected_id,
+                    *(
+                    item.action_id
+                    for item in projection.actions
+                    if item.expression_plan_id == expected.expression_plan_id
+                    and item.state
+                    in {"failed", "cancelled", "expired", "unknown"}
+                    and item.action_id != expected_id
+                    ),
+                )
+            receipt = next(
+                (
+                    receipts_by_action[action_id]
+                    for action_id in candidate_ids
+                    if action_id in receipts_by_action
+                ),
+                None,
+            )
+            action = (
+                actions_by_id.get(receipt.action_id)
+                if receipt is not None
+                else None
+            )
+            if receipt is None or action is None:
+                continue
+            return self.settle_terminal_action(
+                action_id=action.action_id,
+                logical_time=projection.logical_time or receipt.received_at,
+                created_at=receipt.received_at,
+                trace_id=action.trace_id,
+                causation_id=receipt.receipt_id,
+                correlation_id=action.correlation_id,
+            )
+        return None
 
     def release_interrupted_action(
         self,

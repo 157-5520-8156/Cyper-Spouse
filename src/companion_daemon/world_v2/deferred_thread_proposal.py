@@ -48,15 +48,20 @@ class DeferredThreadProposalCompiler:
         source_event: WorldEvent,
     ) -> tuple[ThreadChangedPayload, ProjectionCursor]:
         proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
+        intents = proposal.action_intents
+        due_windows = tuple(item.due_window for item in intents)
         if (
             audit.evaluated_world_revision != cursor.world_revision
             or proposal.evaluated_world_revision != cursor.world_revision
             or proposal.trigger_ref != source_event.event_id
-            or len(proposal.action_intents) != 1
-            or proposal.action_intents[0].kind != "followup"
-            or proposal.action_intents[0].due_window is None
+            or not intents
+            or any(item.kind != "followup" for item in intents)
+            or any(item is None for item in due_windows)
+            or len(set(due_windows)) != 1
         ):
-            raise ValueError("deferred thread compiler requires one current shared followup audit")
+            raise ValueError(
+                "deferred thread compiler requires one current shared followup plan"
+            )
         located = self.ledger.lookup_event_commit(source_event.event_id)
         committed_ref = self.ledger.resolve_committed_event_refs(
             (source_event.event_id,), at_world_revision=cursor.world_revision
@@ -70,12 +75,22 @@ class DeferredThreadProposalCompiler:
             or source_observation.event_payload_hash != source_event.payload_hash
         ):
             raise ValueError("deferred thread compiler source is not exact observation authority")
+        single_legacy_intent = len(intents) == 1
         root = {
-            "contract": "deferred-thread-proposal.1",
+            "contract": (
+                "deferred-thread-proposal.1"
+                if single_legacy_intent
+                else "deferred-thread-proposal.2"
+            ),
             "world": self.ledger.world_id,
             "decision_proposal": proposal.proposal_id,
             "proposal_hash": proposal.proposal_hash,
             "source_event": source_event.event_id,
+            **(
+                {}
+                if single_legacy_intent
+                else {"intent_ids": tuple(item.intent_id for item in intents)}
+            ),
         }
         typed_id = "proposal:deferred-thread:" + _digest(root)
         projection = self.ledger.project_at(cursor)
@@ -91,7 +106,7 @@ class DeferredThreadProposalCompiler:
             source_world_revision=source_observation.world_revision,
             immutable_hash=source_event.payload_hash,
         )
-        due = proposal.action_intents[0].due_window
+        due = intents[0].due_window
         assert due is not None
         thread_id = "thread:reply-reconsideration:" + _digest(root)
         change_id = "change:deferred-thread:" + _digest({**root, "role": "change"})
@@ -109,7 +124,12 @@ class DeferredThreadProposalCompiler:
             importance_bp=5_000,
             due_window={"opens_at": due[0], "closes_at": due[1]},
             expires_at=due[1],
-            resolution_contract_ref="resolution:followup-receipt:" + _digest(proposal.action_intents[0].intent_id),
+            resolution_contract_ref=(
+                "resolution:followup-receipt:" + _digest(intents[0].intent_id)
+                if single_legacy_intent
+                else "resolution:followup-plan-receipt:"
+                + _digest(tuple(item.intent_id for item in intents))
+            ),
             privacy_class="private", status="open",
         )
         origin = ThreadOrigin(

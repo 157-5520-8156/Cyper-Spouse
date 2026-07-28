@@ -24,7 +24,9 @@ from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANI
 from .media_continuation_acceptance_manifest import (
     MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
 )
-from .social_action_acceptance import SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+from .social_action_acceptance import (
+    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
+)
 
 
 def domain_idempotency_key(
@@ -81,7 +83,7 @@ def _life_identity_components(
             *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
             MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
-            SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+            *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -359,7 +361,8 @@ def _life_identity_components(
         )
     if (
         event_type == "AcceptanceRecorded"
-        and payload.get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+        and payload.get("manifest_version")
+        in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
     ):
         return (
             world_id,

@@ -127,7 +127,7 @@ def shape_repair_instruction(violation: str, *, shape_line: str | None = None) -
     """Corrective prompt for a non-claim structural draft violation.
 
     Covers the measured rejection classes that arrive attached to an
-    otherwise sound reply: ExpressionDraft field/beat shape, the one-beat
+    otherwise sound reply: ExpressionDraft field/beat shape, the bounded
     later contract, timing_choice values, and malformed JSON wrappers.
     """
 
@@ -138,7 +138,8 @@ def shape_repair_instruction(violation: str, *, shape_line: str | None = None) -
         f"Return {shape} that fixes only this problem while preserving the visible "
         "reply text as closely as possible. "
         + expression_draft_shape_contract()
-        + " later carries exactly one text beat plus delay_seconds and "
+        + " later carries one or more text beats within expression_capabilities plus "
+        "delay_seconds and "
         "expires_after_seconds; silent carries an empty beats array; world_claims is always "
         "present (an empty array when there are none). "
         "Return raw JSON only, never Markdown fences or commentary."
@@ -1476,43 +1477,6 @@ def _draft_texts(draft: dict[str, object]) -> tuple[str, ...]:
     )
 
 
-def _merge_overflowing_later_beats(
-    value: dict[str, object], *, capabilities: ExpressionDraftCapabilities
-) -> dict[str, object]:
-    """Join an all-text later expression into the installed one-beat contract.
-
-    A deferred reply arrives as one message when she comes back to the phone,
-    so several drafted bubbles legitimately collapse into one text.  This is
-    a structural normalization only — it never changes prose, timing, claims,
-    or any other field, and anything but the exact overflow shape (later plus
-    purely-text beats) is left for the ordinary validators to judge.
-    """
-
-    if value.get("timing_choice") != "later":
-        return value
-    beats = value.get("beats")
-    if not isinstance(beats, list) or len(beats) <= capabilities.max_later_beats:
-        return value
-    texts: list[str] = []
-    for beat in beats:
-        if (
-            not isinstance(beat, dict)
-            or beat.get("modality") != "text"
-            or not isinstance(beat.get("text"), str)
-            or not beat["text"]
-        ):
-            return value
-        texts.append(beat["text"])
-    merged = "\n".join(texts)
-    if len(merged) > 4_096:
-        return value
-    logger.warning(
-        "later expression merged %d drafted text beats into the one-beat deferred contract",
-        len(texts),
-    )
-    return {**value, "beats": [{"modality": "text", "text": merged}]}
-
-
 def _replace_draft_text(
     draft: dict[str, object], *, text: str, world_claims: list[dict[str, object]]
 ) -> str:
@@ -1603,7 +1567,6 @@ def _proposal_from_model_text(
             ),
             **value,
         }
-    value = _merge_overflowing_later_beats(value, capabilities=capabilities)
     if not quick_recovery and ("beats" in value or "timing_choice" in value):
         return materialize_expression_draft(
             value=value,

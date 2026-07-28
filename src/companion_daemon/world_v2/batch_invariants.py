@@ -104,8 +104,9 @@ from .expression_plan_atomic_recorder import (
     expression_plan_idempotency_key,
 )
 from .social_action_acceptance import (
-    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
-    SocialDeferredAcceptanceManifest,
+    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
+    parse_social_deferred_acceptance_manifest,
+    social_deferred_authority_event_types,
 )
 from .appraisal_events import (
     AppraisalAcceptedPayload,
@@ -620,7 +621,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
-            SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+            *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
         }
     ]
     if unknown:
@@ -947,7 +948,8 @@ def reject_expression_plan_manifest_without_recorder(events: Sequence[WorldEvent
 def reject_social_deferred_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
     if any(
         event.event_type == "AcceptanceRecorded"
-        and event.payload().get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+        and event.payload().get("manifest_version")
+        in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
         for event in events
     ):
         raise ValueError("social_deferred.recorder_capability_required")
@@ -960,47 +962,80 @@ def _validate_authorized_social_deferred_manifest_batch(
         event
         for event in events
         if event.event_type == "AcceptanceRecorded"
-        and event.payload().get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+        and event.payload().get("manifest_version")
+        in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
     ]
     if not manifests:
         return
     if not authorized:
         raise ValueError("social_deferred.recorder_capability_required")
-    if len(manifests) != 1 or tuple(item.event_type for item in events) != (
-        "AcceptanceRecorded",
-        "PrivateCommitmentOpened",
-        "MessagePayloadStored",
-        "ExpressionPlanAccepted",
-        "ExpressionBeatAuthorized",
-        "BudgetReserved",
-        "ActionAuthorized",
+    if len(manifests) != 1:
+        raise ValueError("social_deferred.accepted_batch_shape_is_not_exact")
+    manifest = parse_social_deferred_acceptance_manifest(
+        manifests[0].payload_json
+    )
+    expression = manifest.expression_manifest
+    beat_count = len(expression.beats)
+    expected_types = (
+        *social_deferred_authority_event_types(beat_count),
         "AcceptanceRecorded",
         "ThreadOpened",
-    ):
+    )
+    if tuple(item.event_type for item in events) != expected_types:
         raise ValueError("social_deferred.accepted_batch_shape_is_not_exact")
-    manifest = SocialDeferredAcceptanceManifest.model_validate_json(manifests[0].payload_json)
     if manifest.evaluated_world_revision != expected_world_revision:
         raise ValueError("social_deferred.accepted_batch_authority_is_not_pinned")
     if manifests[0].causation_id != manifest.proposal_event_ref or any(
         current.causation_id != previous.event_id for previous, current in zip(events, events[1:])
     ):
         raise ValueError("social_deferred.accepted_batch_causation_is_not_exact")
-    expression = manifest.expression_manifest
-    beat = expression.beats[0]
     commitment = CommitmentChangedPayload.model_validate_json(events[1].payload_json)
-    message = MessagePayloadStoredPayload.model_validate_json(events[2].payload_json)
-    plan = ExpressionPlanAcceptedPayload.model_validate_json(events[3].payload_json)
-    beat_payload = ExpressionBeatAuthorizedPayload.model_validate_json(events[4].payload_json)
-    reservation = BudgetReservation.model_validate_json(
-        json.dumps(events[5].payload()["reservation"], ensure_ascii=False, sort_keys=True)
+    message_start = 2
+    message_end = message_start + beat_count
+    messages = tuple(
+        MessagePayloadStoredPayload.model_validate_json(item.payload_json)
+        for item in events[message_start:message_end]
     )
-    action = Action.model_validate_json(
-        json.dumps(events[6].payload()["action"], ensure_ascii=False, sort_keys=True)
+    plan_index = message_end
+    plan = ExpressionPlanAcceptedPayload.model_validate_json(
+        events[plan_index].payload_json
     )
-    thread_acceptance = events[7].payload()
-    thread = ThreadChangedPayload.model_validate_json(events[8].payload_json)
+    effect_start = plan_index + 1
+    effect_events = events[effect_start:effect_start + beat_count * 3]
+    beat_payloads = tuple(
+        ExpressionBeatAuthorizedPayload.model_validate_json(
+            effect_events[index].payload_json
+        )
+        for index in range(0, len(effect_events), 3)
+    )
+    reservations = tuple(
+        BudgetReservation.model_validate_json(
+            json.dumps(
+                effect_events[index + 1].payload()["reservation"],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        for index in range(0, len(effect_events), 3)
+    )
+    actions = tuple(
+        Action.model_validate_json(
+            json.dumps(
+                effect_events[index + 2].payload()["action"],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        for index in range(0, len(effect_events), 3)
+    )
+    thread_acceptance_index = effect_start + beat_count * 3
+    thread_acceptance = events[thread_acceptance_index].payload()
+    thread = ThreadChangedPayload.model_validate_json(
+        events[thread_acceptance_index + 1].payload_json
+    )
     commitment_after = commitment.commitment_after
     anchor = next(iter(commitment_after.values.anchor_evidence_refs), None)
+    expression_action_ids = tuple(item.action.action_id for item in expression.beats)
     if (
         canonical_expression_plan_value_hash(commitment.model_dump(mode="json"))
         != manifest.commitment_payload_hash
@@ -1021,19 +1056,32 @@ def _validate_authorized_social_deferred_manifest_batch(
         or anchor.ref_id != manifest.source_observation_id
         or anchor.evidence_type != "observed_message"
         or anchor.immutable_hash != manifest.source_observation_event_hash
-        or message.acceptance_id != manifest.acceptance_id
-        or message.proposal_id != manifest.proposal_id
-        or message.message != beat.beat.payload
+        or any(
+            message.acceptance_id != manifest.acceptance_id
+            or message.proposal_id != manifest.proposal_id
+            or message.message != beat.beat.payload
+            for message, beat in zip(messages, expression.beats, strict=True)
+        )
         or plan.acceptance_id != manifest.acceptance_id
         or plan.proposal_id != manifest.proposal_id
         or plan.expression_change_id != expression.expression_change_id
         or plan.plan_id != expression.plan_id
-        or beat_payload.acceptance_id != manifest.acceptance_id
-        or beat_payload.beat != beat.beat
-        or reservation != beat.reservation
-        or action != beat.action
-        or action.action_id != manifest.action_id
-        or action.kind != "followup"
+        or any(
+            beat_payload.acceptance_id != manifest.acceptance_id
+            or beat_payload.beat != beat.beat
+            or reservation != beat.reservation
+            or action != beat.action
+            or action.kind != "followup"
+            for beat_payload, reservation, action, beat in zip(
+                beat_payloads,
+                reservations,
+                actions,
+                expression.beats,
+                strict=True,
+            )
+        )
+        or tuple(action.action_id for action in actions) != expression_action_ids
+        or expression_action_ids[-1] != manifest.action_id
     ):
         raise ValueError("social_deferred.accepted_batch_does_not_match_manifest")
 

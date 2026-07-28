@@ -1,4 +1,4 @@
-"""Opaque accepted-batch materializer for one deferred social followup."""
+"""Opaque accepted-batch materializer for one deferred social expression."""
 
 from __future__ import annotations
 
@@ -58,38 +58,63 @@ class SocialDeferredAtomicRecorder:
             "trace_id": item.action.trace_id,
             "correlation_id": item.action.correlation_id,
         }
-        raw = (
+        raw: list[tuple[str, str, str, dict[str, object], bool]] = [
             ("AcceptanceRecorded", "acceptance", material.acceptance_id,
              manifest.model_dump(mode="json"), True),
-            ("PrivateCommitmentOpened", "commitment", material.commitment_payload.commitment_after.commitment_id,
+            ("PrivateCommitmentOpened", "commitment",
+             material.commitment_payload.commitment_after.commitment_id,
              material.commitment_payload.model_dump(mode="json"), True),
-            ("MessagePayloadStored", "message", item.beat.payload.payload_ref,
-             MessagePayloadStoredPayload(acceptance_id=material.acceptance_id,
-                 proposal_id=expression.proposal_id, message=item.beat.payload).model_dump(mode="json"), True),
-            ("ExpressionPlanAccepted", "plan", expression.plan_id,
-             ExpressionPlanAcceptedPayload(acceptance_id=material.acceptance_id,
-                 proposal_id=expression.proposal_id, expression_change_id=expression.expression_change_id,
-                 plan_id=expression.plan_id).model_dump(mode="json"), True),
-            ("ExpressionBeatAuthorized", "beat", item.beat.beat_id,
-             ExpressionBeatAuthorizedPayload(acceptance_id=material.acceptance_id,
-                 proposal_id=expression.proposal_id, expression_change_id=expression.expression_change_id,
-                 beat=item.beat).model_dump(mode="json"), True),
-            ("BudgetReserved", "reservation", item.reservation.reservation_id,
-             {"reservation": item.reservation.model_dump(mode="json")}, False),
-            ("ActionAuthorized", "action", item.action.action_id,
-             {"action": item.action.model_dump(mode="json")}, False),
-            ("AcceptanceRecorded", "thread-acceptance", material.thread_payload.acceptance_id,
+        ]
+        for beat in expression.beats:
+            raw.append((
+                "MessagePayloadStored", "message", beat.beat.payload.payload_ref,
+                MessagePayloadStoredPayload(
+                    acceptance_id=material.acceptance_id,
+                    proposal_id=expression.proposal_id,
+                    message=beat.beat.payload,
+                ).model_dump(mode="json"),
+                True,
+            ))
+        raw.append((
+            "ExpressionPlanAccepted", "plan", expression.plan_id,
+            ExpressionPlanAcceptedPayload(
+                acceptance_id=material.acceptance_id,
+                proposal_id=expression.proposal_id,
+                expression_change_id=expression.expression_change_id,
+                plan_id=expression.plan_id,
+            ).model_dump(mode="json"),
+            True,
+        ))
+        for beat in expression.beats:
+            raw.extend((
+                ("ExpressionBeatAuthorized", "beat", beat.beat.beat_id,
+                 ExpressionBeatAuthorizedPayload(
+                     acceptance_id=material.acceptance_id,
+                     proposal_id=expression.proposal_id,
+                     expression_change_id=expression.expression_change_id,
+                     beat=beat.beat,
+                 ).model_dump(mode="json"), True),
+                ("BudgetReserved", "reservation", beat.reservation.reservation_id,
+                 {"reservation": beat.reservation.model_dump(mode="json")}, False),
+                ("ActionAuthorized", "action", beat.action.action_id,
+                 {"action": beat.action.model_dump(mode="json")}, False),
+            ))
+        raw.extend((
+            ("AcceptanceRecorded", "thread-acceptance",
+             material.thread_payload.acceptance_id,
              {
                  "acceptance_id": material.thread_payload.acceptance_id,
                  "status": "accepted",
                  "proposal_id": material.thread_payload.proposal_id,
-                 "evaluated_world_revision": material.thread_payload.evaluated_world_revision,
+                 "evaluated_world_revision":
+                     material.thread_payload.evaluated_world_revision,
                  "accepted_change_id": material.thread_payload.change_id,
                  "accepted_change_hash": material.thread_payload.accepted_change_hash,
              }, True),
-            ("ThreadOpened", "thread", material.thread_payload.thread_after.thread_id,
+            ("ThreadOpened", "thread",
+             material.thread_payload.thread_after.thread_id,
              material.thread_payload.model_dump(mode="json"), True),
-        )
+        ))
         events: list[WorldEvent] = []
         for index, (event_type, role, stable_id, payload, domain_identity) in enumerate(raw):
             identity = (

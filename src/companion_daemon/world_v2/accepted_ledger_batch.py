@@ -34,7 +34,9 @@ from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .expression_plan_manifest import EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
 from .interaction_bid_acceptance_manifest import INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
 from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
-from .social_action_acceptance import SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+from .social_action_acceptance import (
+    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
+)
 
 
 class AcceptedLedgerBatchError(ValueError):
@@ -157,7 +159,7 @@ class AcceptedLedgerBatchIssuer:
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
-            SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+            *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
         }:
             raise AcceptedLedgerBatchError("accepted batch must begin with an accepted manifest")
         for name, value in {

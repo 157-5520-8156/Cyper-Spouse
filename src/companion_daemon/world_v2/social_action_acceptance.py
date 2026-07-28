@@ -35,7 +35,14 @@ from .schemas import (
 from .thread_events import ThreadChangedPayload
 
 
-SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION = "social-deferred-acceptance.1"
+LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION = (
+    "social-deferred-acceptance.1"
+)
+SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION = "social-deferred-acceptance.2"
+SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS = (
+    LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+)
 SOCIAL_DEFERRED_POLICY_VERSION = "social-deferred-policy.1"
 _POLICY_REFS = ("policy:commitment-v1",)
 
@@ -51,6 +58,25 @@ def _digest(value: object) -> str:
 def social_deferred_commitment_event_id(*, world_id: str, acceptance_id: str) -> str:
     return "event:social-deferred:commitment:" + _digest(
         {"contract": "social-deferred-commitment-event.1", "world_id": world_id, "acceptance_id": acceptance_id}
+    )
+
+
+def social_deferred_authority_event_types(
+    beat_count: int,
+) -> tuple[str, ...]:
+    """Exact variable prefix committed before deferred-thread Acceptance."""
+
+    if not 1 <= beat_count <= 32:
+        raise ValueError("social deferred beat count is out of bounds")
+    return (
+        "AcceptanceRecorded",
+        "PrivateCommitmentOpened",
+        *(("MessagePayloadStored",) * beat_count),
+        "ExpressionPlanAccepted",
+        *(
+            ("ExpressionBeatAuthorized", "BudgetReserved", "ActionAuthorized")
+            * beat_count
+        ),
     )
 
 
@@ -77,9 +103,17 @@ class SocialDeferredAcceptanceMaterial(FrozenModel):
 
     @model_validator(mode="after")
     def effects_are_one_closed_defer(self) -> "SocialDeferredAcceptanceMaterial":
-        if len(self.expression.beats) != 1:
-            raise ValueError("social defer requires exactly one expression beat")
-        action = self.expression.beats[0].action
+        if not self.expression.beats:
+            raise ValueError("social defer requires at least one expression beat")
+        terminal = self.expression.beats[-1]
+        action = terminal.action
+        if any(
+            item.action.kind != "followup"
+            or item.action.not_before != action.not_before
+            or item.action.expires_at != action.expires_at
+            for item in self.expression.beats
+        ):
+            raise ValueError("social defer requires one closed followup plan")
         commitment = self.commitment_payload.commitment_after
         contract = commitment.values.fulfillment_contract
         thread = self.thread_payload.thread_after
@@ -107,8 +141,7 @@ class SocialDeferredAcceptanceMaterial(FrozenModel):
         return self
 
 
-class SocialDeferredAcceptanceManifest(FrozenModel):
-    manifest_version: str = SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+class _SocialDeferredAcceptanceManifestBase(FrozenModel):
     acceptance_id: str = Field(min_length=1, max_length=256)
     proposal_id: str = Field(min_length=1, max_length=256)
     status: str = "accepted"
@@ -130,11 +163,22 @@ class SocialDeferredAcceptanceManifest(FrozenModel):
     action_id: str = Field(min_length=1, max_length=512)
     manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
+
+class LegacySocialDeferredAcceptanceManifest(
+    _SocialDeferredAcceptanceManifestBase
+):
+    """Exact immutable schema of the historical single-Action contract."""
+
+    manifest_version: str = LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+
     @model_validator(mode="after")
-    def manifest_is_self_bound(self) -> "SocialDeferredAcceptanceManifest":
+    def manifest_is_self_bound(
+        self,
+    ) -> "LegacySocialDeferredAcceptanceManifest":
         expression = self.expression_manifest
         if (
-            self.manifest_version != SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+            self.manifest_version
+            != LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
             or expression.acceptance_id != self.acceptance_id
             or expression.proposal_id != self.proposal_id
             or expression.proposal_event_ref != self.proposal_event_ref
@@ -152,11 +196,69 @@ class SocialDeferredAcceptanceManifest(FrozenModel):
         return self
 
 
+class SocialDeferredAcceptanceManifest(_SocialDeferredAcceptanceManifestBase):
+    """V2 closure for one dependency-ordered deferred expression plan."""
+
+    manifest_version: str = SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+    action_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def manifest_is_self_bound(self) -> "SocialDeferredAcceptanceManifest":
+        expression = self.expression_manifest
+        expression_action_ids = tuple(
+            item.action.action_id for item in expression.beats
+        )
+        if (
+            self.manifest_version != SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+            or expression.acceptance_id != self.acceptance_id
+            or expression.proposal_id != self.proposal_id
+            or expression.proposal_event_ref != self.proposal_event_ref
+            or expression.proposal_event_payload_hash
+            != self.proposal_event_payload_hash
+            or expression.evaluated_world_revision
+            != self.evaluated_world_revision
+            or expression_action_ids != self.action_ids
+            or expression_action_ids[-1] != self.action_id
+            or any(item.action.kind != "followup" for item in expression.beats)
+            or self.status != "accepted"
+            or not self.thread_proposal_id.startswith(
+                "proposal:deferred-thread:"
+            )
+            or not self.thread_id.startswith(
+                "thread:reply-reconsideration:"
+            )
+            or self.manifest_hash
+            != social_deferred_manifest_hash(self.model_dump(mode="json"))
+        ):
+            raise ValueError("social deferred manifest is not closed")
+        return self
+
+
 def social_deferred_manifest_hash(value: dict[str, object]) -> str:
     material = dict(value)
     material.pop("manifest_hash", None)
     material.setdefault("manifest_version", SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION)
     return _digest(material)
+
+
+def parse_social_deferred_acceptance_manifest(
+    value: dict[str, object] | str,
+) -> (
+    LegacySocialDeferredAcceptanceManifest
+    | SocialDeferredAcceptanceManifest
+):
+    raw = json.loads(value) if isinstance(value, str) else value
+    version = raw.get("manifest_version")
+    encoded = _canonical_json(raw)
+    if version == LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION:
+        return LegacySocialDeferredAcceptanceManifest.model_validate_json(
+            encoded, strict=True
+        )
+    if version == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION:
+        return SocialDeferredAcceptanceManifest.model_validate_json(
+            encoded, strict=True
+        )
+    raise ValueError("social deferred manifest version is unsupported")
 
 
 def derive_social_deferred_material(
@@ -188,10 +290,13 @@ def derive_social_deferred_material(
         trace_id=trace_id,
         correlation_id=correlation_id,
     )
-    if len(expression.beats) != 1 or expression.beats[0].action.kind != "followup":
-        raise ValueError("social deferred acceptance requires one followup proposal")
+    if not expression.beats or any(
+        item.action.kind != "followup" for item in expression.beats
+    ):
+        raise ValueError("social deferred acceptance requires a followup plan")
     item = expression.beats[0]
-    action = item.action
+    terminal = expression.beats[-1]
+    action = terminal.action
     if action.not_before is None or action.expires_at is None or logical_time >= action.expires_at:
         raise ValueError("social deferred acceptance requires a live delayed window")
     evidence = EvidenceRef(
@@ -201,8 +306,16 @@ def derive_social_deferred_material(
         source_world_revision=source_observation.world_revision,
         immutable_hash=source_observation.event_payload_hash,
     )
-    root = {"contract": "social-deferred-acceptance.1", "world_id": world_id, "proposal_id": audit.proposal_id,
-            "proposal_hash": audit.proposal_hash, "action_id": action.action_id, "policy_digest": policy.digest}
+    root = {
+        "contract": "social-deferred-acceptance.2",
+        "world_id": world_id,
+        "proposal_id": audit.proposal_id,
+        "proposal_hash": audit.proposal_hash,
+        "action_ids": tuple(
+            beat.action.action_id for beat in expression.beats
+        ),
+        "policy_digest": policy.digest,
+    }
     commitment_id = "commitment:social-deferred:" + _digest(root)
     change_id = "change:social-deferred:" + _digest({**root, "role": "change"})
     transition_id = "transition:social-deferred:" + _digest({**root, "role": "transition"})
@@ -305,19 +418,27 @@ def build_social_deferred_manifest(material: SocialDeferredAcceptanceMaterial) -
         "thread_payload_hash": canonical_expression_plan_value_hash(
             material.thread_payload.model_dump(mode="json")
         ),
-        "action_id": material.expression.beats[0].action.action_id,
+        "action_ids": tuple(
+            item.action.action_id for item in material.expression.beats
+        ),
+        "action_id": material.expression.beats[-1].action.action_id,
     }
     values["manifest_hash"] = social_deferred_manifest_hash(values)
     return SocialDeferredAcceptanceManifest.model_validate_json(_canonical_json(values), strict=True)
 
 
 __all__ = [
+    "LEGACY_SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION",
     "SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION",
+    "SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS",
+    "LegacySocialDeferredAcceptanceManifest",
     "SocialDeferredAcceptanceManifest",
     "SocialDeferredAcceptanceMaterial",
     "SocialDeferredPolicy",
     "build_social_deferred_manifest",
     "derive_social_deferred_material",
+    "parse_social_deferred_acceptance_manifest",
+    "social_deferred_authority_event_types",
     "social_deferred_commitment_event_id",
     "social_deferred_manifest_hash",
 ]

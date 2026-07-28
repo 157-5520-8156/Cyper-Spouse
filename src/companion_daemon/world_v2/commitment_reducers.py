@@ -409,15 +409,38 @@ def _validate_evidence_bound_failure(
         None,
     )
     action = next((item for item in actions if item.action_id == contract.expected_action_id), None)
+    receipt_action = next(
+        (
+            item
+            for item in actions
+            if receipt is not None and item.action_id == receipt.action_id
+        ),
+        None,
+    )
+    direct_failure = (
+        receipt is not None
+        and action is not None
+        and receipt.action_id == contract.expected_action_id
+        and action.state in {"failed", "cancelled", "expired"}
+        and action.state == receipt.observed_state
+    )
+    plan_predecessor_failure = (
+        receipt is not None
+        and action is not None
+        and receipt_action is not None
+        and receipt_action.expression_plan_id is not None
+        and receipt_action.expression_plan_id == action.expression_plan_id
+        and receipt_action.state in {"failed", "cancelled", "expired"}
+        and receipt_action.state == receipt.observed_state
+        and action.state == "cancelled"
+    )
     if (
         receipt is None
         or action is None
-        or receipt.action_id != contract.expected_action_id
         or action.payload_hash != contract.expected_action_payload_hash
-        or action.state not in {"failed", "cancelled", "expired"}
-        or action.state != receipt.observed_state
         or receipt.observed_state not in {"failed", "cancelled", "expired"}
         or receipt.received_at < commitment.opened_at
+        or not (direct_failure or plan_predecessor_failure)
     ):
         raise ValueError("commitment break evidence does not match its target action")
 

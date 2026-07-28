@@ -367,10 +367,8 @@ def test_expression_prompt_exposes_attention_without_prescribing_timing() -> Non
     assert "This is a recovery attempt" in recovery
 
 
-def test_overflowing_later_text_beats_merge_into_the_one_beat_contract() -> None:
-    """A model that drafts several bubbles for a deferred return must not lose
-    the turn to the deployment's one-followup limit: purely-text later beats
-    join into one text, while any other shape still fails honestly."""
+def test_later_text_beats_preserve_the_models_multi_message_expression() -> None:
+    """A deferred return keeps the model's chosen message count and wording."""
 
     import json as _json
 
@@ -427,8 +425,10 @@ def test_overflowing_later_text_beats_merge_into_the_one_beat_contract() -> None
     assert proposal["timing_choice"] == "later"
     payload = _json.loads(proposal["proposed_changes"][0]["payload"]["canonical_json"])
     drafts = payload["beat_drafts"]
-    assert len(drafts) == 1
-    assert drafts[0]["inline_text"] == "现在才看到手机\n昨晚睡得太死了，怎么啦？"
+    assert [item["inline_text"] for item in drafts] == [
+        "现在才看到手机",
+        "昨晚睡得太死了，怎么啦？",
+    ]
     assert proposal["action_intents"][0]["kind"] == "followup"
 
     with pytest.raises(ValueError, match="deferred-effect limit|text modality"):

@@ -78,9 +78,10 @@ class ExpressionDraftCapabilities(FrozenModel):
     reaction_options: tuple[ExpressionOption, ...] = ()
     sticker_options: tuple[ExpressionOption, ...] = ()
     max_beats: int = Field(default=8, ge=1, le=16)
-    # Deferred commitment settlement currently owns one future effect.  This
-    # is an installed execution limit, not a judgement about when to defer.
-    max_later_beats: int = Field(default=1, ge=1, le=16)
+    # Deferred settlement closes over the whole dependency-ordered plan.  The
+    # model therefore owns the same one-to-many message-count choice for
+    # ``later`` as it does for ``now``.
+    max_later_beats: int = Field(default=8, ge=1, le=16)
     recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
     cadence_policy_version: Literal["expression-cadence.1"] = CADENCE_POLICY_VERSION
 

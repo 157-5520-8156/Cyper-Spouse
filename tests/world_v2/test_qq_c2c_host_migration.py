@@ -935,7 +935,7 @@ async def test_qq_c2c_host_runs_text_ingress_and_restart_recovery_without_a_lega
         "onebot-message-1"
     ]
     assert observation["coalescing_metadata"]["policy_version"] == (
-        "world-v2-qq-ingress-matrix.1"
+        "world-v2-qq-ingress-matrix.2"
     )
 
     # OneBot only acknowledged acceptance.  A fresh process cannot prove the

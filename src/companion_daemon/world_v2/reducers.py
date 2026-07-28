@@ -236,8 +236,11 @@ from .expression_plan_manifest import (
     canonical_expression_plan_value_hash,
 )
 from .social_action_acceptance import (
-    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+    LegacySocialDeferredAcceptanceManifest,
+    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
     SocialDeferredAcceptanceManifest,
+    parse_social_deferred_acceptance_manifest,
+    social_deferred_authority_event_types,
 )
 from .proposal_envelope import (
     ContinuationProposal,
@@ -3699,7 +3702,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
         INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
         MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
-        SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+        *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
     }:
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
     if raw.get("manifest_version") == "acceptance-manifest.2":
@@ -3710,8 +3713,13 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _minimal_reply_manifest_recorded(state, event)
     if raw.get("manifest_version") == EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION:
         return _expression_plan_manifest_recorded(state, event)
-    if raw.get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION:
-        manifest = SocialDeferredAcceptanceManifest.model_validate_json(event.payload_json)
+    if (
+        raw.get("manifest_version")
+        in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
+    ):
+        manifest = parse_social_deferred_acceptance_manifest(
+            event.payload_json
+        )
         source = next(
             (
                 item
@@ -3741,7 +3749,10 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
             or source_event.event_type != "ObservationRecorded"
             or source_event.payload_hash != manifest.source_observation_event_hash
             or manifest.expression_manifest.policy_digest == manifest.policy_digest
-            or manifest.expression_manifest.beats[0].action.kind != "followup"
+            or any(
+                item.action.kind != "followup"
+                for item in manifest.expression_manifest.beats
+            )
         ):
             raise ValueError("social deferred manifest source or policy separation is invalid")
         return _expression_plan_manifest_recorded(
@@ -3886,24 +3897,43 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
             )
         )
     thread_proposal = next(
-        (item for item in state.thread_proposals if item.proposal_id == proposal_id), None
+        (item for item in state.thread_proposals if item.proposal_id == proposal_id),
+        None,
     )
+    social_bridge_plan = next(
+        (
+            item
+            for item in reversed(state.expression_plan_manifests)
+            if item.social_commitment_id is not None
+        ),
+        None,
+    )
+    social_bridge_beat_count = (
+        len(social_bridge_plan.beats)
+        if social_bridge_plan is not None
+        else 0
+    )
+    social_bridge_types = (
+        social_deferred_authority_event_types(social_bridge_beat_count)
+        if social_bridge_beat_count
+        else ()
+    )
+    social_bridge_event_count = len(social_bridge_types)
     if (
         status == "accepted"
         and thread_proposal is not None
         and thread_proposal.transition_kind == "open"
-        and current_world_revision == evaluated_world_revision + 7
-        and len(state.committed_world_event_refs) >= 7
-        and tuple(item.event_type for item in state.committed_world_event_refs[-7:])
-        == (
-            "AcceptanceRecorded",
-            "PrivateCommitmentOpened",
-            "MessagePayloadStored",
-            "ExpressionPlanAccepted",
-            "ExpressionBeatAuthorized",
-            "BudgetReserved",
-            "ActionAuthorized",
+        and social_bridge_plan is not None
+        and current_world_revision
+        == evaluated_world_revision + social_bridge_event_count
+        and len(state.committed_world_event_refs) >= social_bridge_event_count
+        and tuple(
+            item.event_type
+            for item in state.committed_world_event_refs[
+                -social_bridge_event_count:
+            ]
         )
+        == social_bridge_types
         and state.commitments
         and state.actions
     ):
@@ -3913,15 +3943,21 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         commitment = state.commitments[-1]
         action = state.actions[-1]
         deferred_thread_bridge = (
-            proposed_thread.thread_after.values.kind == "reply_reconsideration"
-            and proposed_thread.thread_after.values.subject_ref == commitment.values.subject_ref
+            proposed_thread.thread_after.values.kind
+            == "reply_reconsideration"
+            and proposed_thread.thread_after.values.subject_ref
+            == commitment.values.subject_ref
             and proposed_thread.thread_after.values.anchor_evidence_refs
             == commitment.values.anchor_evidence_refs
-            and proposed_thread.thread_after.values.due_window == commitment.values.due_window
-            and action.action_id == commitment.values.fulfillment_contract.expected_action_id
+            and proposed_thread.thread_after.values.due_window
+            == commitment.values.due_window
+            and action.action_id
+            == commitment.values.fulfillment_contract.expected_action_id
             and action.kind == "followup"
-            and action.not_before == commitment.values.due_window.opens_at
-            and action.expires_at == commitment.values.due_window.closes_at
+            and action.not_before
+            == commitment.values.due_window.opens_at
+            and action.expires_at
+            == commitment.values.due_window.closes_at
         )
     if status in {"accepted", "rejected"} and (
         evaluated_world_revision != current_world_revision
@@ -4283,7 +4319,11 @@ def _expression_plan_manifest_recorded(
     event: WorldEvent,
     *,
     manifest_override: ExpressionPlanAcceptanceManifest | None = None,
-    social_manifest: SocialDeferredAcceptanceManifest | None = None,
+    social_manifest: (
+        LegacySocialDeferredAcceptanceManifest
+        | SocialDeferredAcceptanceManifest
+        | None
+    ) = None,
 ) -> ReducerState:
     """Index a normal multi-beat ExpressionPlan before any effects exist."""
 
@@ -10602,14 +10642,15 @@ def _require_authorized_commitment(
             for item in state.expression_plan_manifests
             if item.acceptance_id == payload.acceptance_id
             and item.proposal_id == payload.proposal_id
-            and len(item.beats) == 1
-            and item.beats[0].action.kind == "followup"
+            and item.beats
+            and all(beat.action.kind == "followup" for beat in item.beats)
             and item.social_commitment_id is not None
         ),
         None,
     )
     if social_expression is not None:
-        beat = social_expression.beats[0]
+        first_beat = social_expression.beats[0]
+        terminal_beat = social_expression.beats[-1]
         after = payload.commitment_after
         if (
             not state.committed_world_event_refs
@@ -10625,13 +10666,17 @@ def _require_authorized_commitment(
             or payload.evaluated_world_revision != social_expression.evaluated_world_revision
             or after.values.subject_ref
             not in {item.observation_id for item in state.message_observations}
-            or after.values.content_ref != beat.payload_ref
-            or after.values.content_hash != beat.payload_hash.removeprefix("sha256:")
-            or after.values.fulfillment_contract.expected_action_id != beat.action.action_id
+            or after.values.content_ref != first_beat.payload_ref
+            or after.values.content_hash
+            != first_beat.payload_hash.removeprefix("sha256:")
+            or after.values.fulfillment_contract.expected_action_id
+            != terminal_beat.action.action_id
             or after.values.fulfillment_contract.expected_action_payload_hash
-            != beat.action.payload_hash
-            or after.values.due_window.opens_at != beat.action.not_before
-            or after.values.due_window.closes_at != beat.action.expires_at
+            != terminal_beat.action.payload_hash
+            or after.values.due_window.opens_at
+            != terminal_beat.action.not_before
+            or after.values.due_window.closes_at
+            != terminal_beat.action.expires_at
         ):
             raise ValueError("social deferred commitment does not match accepted expression")
         # The social manifest itself is the persisted proposal authority; do

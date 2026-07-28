@@ -1249,6 +1249,12 @@ class WorldV2TurnApplication:
         """
 
         if result is None or result.action_id is None:
+            if self._ledger.blocks_event_loop:
+                await asyncio.to_thread(
+                    self._deferred_replies.recover_one_terminal_commitment
+                )
+            else:
+                self._deferred_replies.recover_one_terminal_commitment()
             return
         projection = (
             await asyncio.to_thread(self._ledger.project)

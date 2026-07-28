@@ -66,16 +66,20 @@ class QQIngressPolicyRow:
 class QQIngressPolicyCatalog:
     """Machine-readable categories; rows guide batching, never reply content."""
 
-    version = "world-v2-qq-ingress-matrix.1"
+    version = "world-v2-qq-ingress-matrix.2"
 
     def __init__(self, rows: Sequence[QQIngressPolicyRow] | None = None) -> None:
         if rows is None:
             windows = {
-                "unknown": 600,
-                "complete_thought": 450,
-                "possible_continuation": 750,
-                "long_narration": 800,
-                "new_interjection": 400,
+                # A first bubble gets a short observation opportunity.  Once
+                # another bubble actually arrives, QQC2CHost's sender-rhythm
+                # hold rolls from that newer evidence; a hypothetical second
+                # bubble must not tax every ordinary turn by 600–800ms.
+                "unknown": 280,
+                "complete_thought": 280,
+                "possible_continuation": 280,
+                "long_narration": 280,
+                "new_interjection": 280,
             }
             rows = tuple(
                 QQIngressPolicyRow(shape, signal, window, "ordered_multimodal")
@@ -89,7 +93,7 @@ class QQIngressPolicyCatalog:
         if len(self._rows) != 30:
             raise ValueError("QQ ingress catalog must cover every shape/signal coordinate")
         for row in self._rows.values():
-            if not 400 <= row.window_ms <= 800 or not 1 <= row.max_fragments <= 16:
+            if not 100 <= row.window_ms <= 500 or not 1 <= row.max_fragments <= 16:
                 raise ValueError("QQ ingress row exceeds the frozen latency/batch bounds")
         self.digest = _digest(self.manifest())
 

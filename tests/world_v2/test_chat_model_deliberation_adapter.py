@@ -3735,6 +3735,8 @@ async def test_expression_draft_later_choice_freezes_relative_window_on_every_be
                     "expires_after_seconds": 600,
                     "beats": [
                         {"modality": "text", "text": "等我一下，我晚点认真听你说。"},
+                        {"modality": "text", "text": "刚才那段我不想随便糊弄过去。"},
+                        {"modality": "text", "text": "等我回来。"},
                     ],
                     "stance": "defer",
                     "brief_rationale": "The current activity makes an immediate full response implausible.",
@@ -3749,7 +3751,17 @@ async def test_expression_draft_later_choice_freezes_relative_window_on_every_be
 
     assert output.raw_proposal["timing_choice"] == "later"
     intents = output.raw_proposal["action_intents"]
-    assert [item["kind"] for item in intents] == ["followup"]
+    assert [item["kind"] for item in intents] == ["followup", "followup", "followup"]
+    change = json.loads(
+        output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+    assert [
+        item["inline_text"] for item in change["beat_drafts"]
+    ] == [
+        "等我一下，我晚点认真听你说。",
+        "刚才那段我不想随便糊弄过去。",
+        "等我回来。",
+    ]
     assert all(
         item["due_window"] == ["2026-07-16T12:01:00Z", "2026-07-16T12:10:00Z"] for item in intents
     )

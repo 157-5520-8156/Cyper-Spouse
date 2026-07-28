@@ -85,6 +85,13 @@ class _FastInfrastructureModel:
         raise AssertionError(f"unexpected infrastructure prompt: {system[:120]}")
 
 
+class _FastQuickReactionModel:
+    model = "fixture:fast-quick-reaction"
+
+    async def complete(self, _messages, **_kwargs) -> str:  # type: ignore[no-untyped-def]
+        return '{"react":false}'
+
+
 @pytest.mark.asyncio
 async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_path) -> None:
     background = _BlockingBackgroundModel()
@@ -101,6 +108,7 @@ async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_pa
         advisory_model=background,
         immediate_emotion_gate_model=infrastructure,
         source_closure_model=infrastructure,
+        quick_reaction_model=_FastQuickReactionModel(),
         delivery=delivery,
         use_configured_recall_embedding=False,
     )
@@ -123,8 +131,8 @@ async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_pa
 
         started = asyncio.get_running_loop().time()
         # The API fixtures return immediately, so the public inbound path must
-        # spend less than one second on local pacing, storage, Context and
-        # dispatch even while background cognition is indefinitely blocked.
+        # keep its entire non-provider hot path inside the 500ms production
+        # target even while background cognition is indefinitely blocked.
         second = await asyncio.wait_for(
             host.inbound_text(
                 message_id="message:two",
@@ -137,7 +145,7 @@ async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_pa
         elapsed = asyncio.get_running_loop().time() - started
 
         assert first.status == second.status == "action_authorized"
-        assert elapsed < 1
+        assert elapsed < 0.5
         assert delivery.sent == ["收到。", "收到。"]
         assert not background_task.done()
     finally:
@@ -170,6 +178,7 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
         advisory_model=background,
         immediate_emotion_gate_model=infrastructure,
         source_closure_model=infrastructure,
+        quick_reaction_model=_FastQuickReactionModel(),
         delivery=delivery,
         use_configured_recall_embedding=False,
     )
@@ -187,8 +196,8 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
         await asyncio.wait_for(background.started.wait(), timeout=2)
 
         started = asyncio.get_running_loop().time()
-        # The regular drain entrypoint has the same sub-second local budget as
-        # the scheduler variant above.
+        # The regular drain entrypoint has the same 500ms local budget as the
+        # scheduler variant above.
         second = await asyncio.wait_for(
             host.inbound_text(
                 message_id="message:two",
@@ -201,7 +210,7 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
         elapsed = asyncio.get_running_loop().time() - started
 
         assert first.status == second.status == "action_authorized"
-        assert elapsed < 1
+        assert elapsed < 0.5
         assert delivery.sent == ["收到。", "收到。"]
         assert not drain_task.done()
     finally:

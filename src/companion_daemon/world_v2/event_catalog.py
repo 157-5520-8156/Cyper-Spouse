@@ -109,8 +109,8 @@ from .expression_plan_manifest import (
     ExpressionPlanAcceptanceManifest,
 )
 from .social_action_acceptance import (
-    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
-    SocialDeferredAcceptanceManifest,
+    SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
+    parse_social_deferred_acceptance_manifest,
 )
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .private_impression_events import PRIVATE_IMPRESSION_PAYLOAD_MODELS
@@ -199,7 +199,7 @@ class EventContract:
                 ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
                 *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
                 MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
-                SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION,
+                *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
@@ -255,12 +255,10 @@ class EventContract:
             return
         if (
             self.event_type == "AcceptanceRecorded"
-            and payload.get("manifest_version") == SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSION
+            and payload.get("manifest_version")
+            in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
         ):
-            SocialDeferredAcceptanceManifest.model_validate_json(
-                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                strict=True,
-            )
+            parse_social_deferred_acceptance_manifest(dict(payload))
             return
         if (
             self.event_type == "AcceptanceRecorded"
