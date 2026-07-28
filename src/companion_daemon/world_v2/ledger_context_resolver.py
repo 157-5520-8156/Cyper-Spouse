@@ -1401,8 +1401,24 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     None,
                 )
                 if trigger_dialogue is not None:
+                    recent_attention_dialogue = tuple(
+                        item.model_dump(mode="json")
+                        for item in sorted(
+                            (
+                                candidate
+                                for candidate in dialogue_candidates
+                                if candidate.dialogue_id != trigger_dialogue.dialogue_id
+                            ),
+                            key=lambda candidate: (
+                                candidate.occurred_at,
+                                candidate.sequence,
+                                candidate.dialogue_id,
+                            ),
+                        )[-4:]
+                    )
                     attention_request = build_automatic_recall_request(
                         observation_text=trigger_dialogue.text,
+                        recent_dialogue_values=recent_attention_dialogue,
                         affect_values=tuple(
                             item.model_dump(mode="json") for item in scoped_affect or ()
                         ),

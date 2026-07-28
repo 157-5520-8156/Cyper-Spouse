@@ -24,6 +24,8 @@ _MAX_APPRAISALS = 3
 _MAX_RELATIONSHIPS = 2
 _MAX_ACTIVITIES = 3
 _MAX_THREADS = 3
+_MAX_RECENT_DIALOGUE_ITEMS = 4
+_MAX_RECENT_DIALOGUE_TEXT_CHARACTERS = 240
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -142,9 +144,41 @@ def _thread_summary(values: Sequence[Mapping[str, object]]) -> list[dict[str, ob
     ]
 
 
+def _dialogue_summary(values: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for value in values[-_MAX_RECENT_DIALOGUE_ITEMS:]:
+        speaker = value.get("speaker")
+        text = value.get("text")
+        if not isinstance(speaker, str) or not isinstance(text, str) or not text.strip():
+            continue
+        summaries.append(
+            {
+                "speaker": speaker,
+                "text": text.strip()[:_MAX_RECENT_DIALOGUE_TEXT_CHARACTERS],
+            }
+        )
+    return summaries
+
+
+def _lexical_attention_cue(text: str) -> str | None:
+    """Keep exact matching only when the inbound wording carries enough shape.
+
+    The dense query still receives every non-empty Observation. A one- or
+    two-character cue has only one CJK bigram, so query-coverage scoring can
+    award an unrelated containing phrase a perfect lexical score (for example
+    ``来了`` inside ``回来了``). Withholding only that brittle channel leaves
+    semantic/contextual attention available without classifying what the user
+    meant or hard-coding conversational phrases.
+    """
+
+    semantic_characters = tuple(character for character in text if character.isalnum())
+    return text if len(semantic_characters) >= 3 else None
+
+
 def build_automatic_recall_request(
     *,
     observation_text: str,
+    recent_dialogue_values: Sequence[Mapping[str, object]] = (),
     affect_values: Sequence[Mapping[str, object]] = (),
     appraisal_values: Sequence[Mapping[str, object]] = (),
     relationship_values: Sequence[Mapping[str, object]] = (),
@@ -169,6 +203,9 @@ def build_automatic_recall_request(
     lexical = lexical[:_MAX_LEXICAL_CHARACTERS]
     parts: list[str] = []
     _append_bounded(parts, f"用户刚说：{lexical[:_MAX_DENSE_OBSERVATION_CHARACTERS]}")
+    dialogue = _dialogue_summary(recent_dialogue_values)
+    if dialogue:
+        _append_bounded(parts, "最近对话：" + _compact_json(dialogue))
     affect = _affect_summary(affect_values)
     if affect:
         _append_bounded(parts, "当前感受：" + _compact_json(affect))
@@ -189,7 +226,7 @@ def build_automatic_recall_request(
     canonical_kinds = tuple(sorted(set(memory_kinds)))
     return CharacterRecallRequest(
         query_text=query_text,
-        lexical_text=lexical,
+        lexical_text=_lexical_attention_cue(lexical),
         occurred_from=occurred_from,
         occurred_to=occurred_to,
         link_refs=canonical_links,

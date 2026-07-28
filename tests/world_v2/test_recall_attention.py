@@ -87,3 +87,29 @@ def test_automatic_attention_packet_is_bounded_before_request_validation() -> No
     assert request.occurred_from == datetime(2026, 7, 28, 0, tzinfo=UTC)
     assert request.occurred_to == datetime(2026, 7, 28, 4, tzinfo=UTC)
     assert request.memory_kinds == ("episodic", "semantic")
+
+
+def test_short_return_message_uses_verified_recent_dialogue_as_semantic_attention() -> None:
+    request = build_automatic_recall_request(
+        observation_text="来了",
+        recent_dialogue_values=(
+            {
+                "speaker": "counterpart",
+                "text": "好累，下午又要学雅思了",
+                "occurred_at": "2026-07-28T08:41:50Z",
+            },
+            {
+                "speaker": "companion",
+                "text": "雅思啊，确实挺磨人的。下午加油吧。",
+                "occurred_at": "2026-07-28T08:43:50Z",
+            },
+        ),
+    )
+
+    assert "最近对话" in request.query_text
+    assert "下午又要学雅思了" in request.query_text
+    assert "下午加油吧" in request.query_text
+    # A lone two-character overlap made “来了” score 10,000 against the old
+    # and unrelated “回来了”.  Dense attention still sees the exact inbound
+    # text above; only the brittle lexical-only lane is withheld.
+    assert request.lexical_text is None

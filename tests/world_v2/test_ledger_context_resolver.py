@@ -292,6 +292,12 @@ def test_context_compilation_schedules_a_bounded_state_aware_recall_request() ->
             _event(world_id),
             _message_observation(
                 world_id,
+                0,
+                "好累，下午又要学雅思了",
+                received_at=NOW - timedelta(hours=3),
+            ),
+            _message_observation(
+                world_id,
                 1,
                 long_message,
                 received_at=NOW,
@@ -318,6 +324,7 @@ def test_context_compilation_schedules_a_bounded_state_aware_recall_request() ->
     assert len(recall.scheduled) == 1
     scheduled = recall.scheduled[0]
     assert len(str(scheduled["query_text"])) <= 1_024
+    assert "下午又要学雅思了" in str(scheduled["query_text"])
     assert str(scheduled["lexical_text"]).startswith("上午那件事后来怎么样了？")
     assert len(str(scheduled["lexical_text"])) <= 1_024
 
