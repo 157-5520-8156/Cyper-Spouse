@@ -66,9 +66,29 @@ class _BlockingBackgroundModel:
         return '{"decision":"no_change"}'
 
 
+class _FastInfrastructureModel:
+    model = "fixture:fast-infrastructure"
+
+    async def complete(self, messages, **_kwargs) -> str:  # type: ignore[no-untyped-def]
+        system = str(messages[0]["content"])
+        if "情绪信号初筛器" in system:
+            return '{"immediate":false}'
+        if "Audit only factual source closure" in system:
+            return json.dumps(
+                {
+                    "decision": "supported",
+                    "unsupported_claim_indexes": [],
+                    "undeclared_fact_fragments": [],
+                    "brief_reason": "No unsupported factual claim.",
+                }
+            )
+        raise AssertionError(f"unexpected infrastructure prompt: {system[:120]}")
+
+
 @pytest.mark.asyncio
 async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_path) -> None:
     background = _BlockingBackgroundModel()
+    infrastructure = _FastInfrastructureModel()
     delivery = _Delivery()
     host = build_qq_c2c_host(
         settings=Settings(
@@ -79,7 +99,10 @@ async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_pa
         bootstrap_at=NOW,
         model=_FastReplyModel(),
         advisory_model=background,
+        immediate_emotion_gate_model=infrastructure,
+        source_closure_model=infrastructure,
         delivery=delivery,
+        use_configured_recall_embedding=False,
     )
     background_task: asyncio.Task[object] | None = None
     try:
@@ -99,10 +122,9 @@ async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_pa
         await asyncio.wait_for(background.started.wait(), timeout=2)
 
         started = asyncio.get_running_loop().time()
-        # The second message follows the first within the live exchange, so it
-        # deliberately pays the bounded sender-rhythm composure pause (~4s)
-        # before its turn starts.  The guarantee under test is unchanged: the
-        # indefinitely blocked background model must not add to that bound.
+        # The API fixtures return immediately, so the public inbound path must
+        # spend less than one second on local pacing, storage, Context and
+        # dispatch even while background cognition is indefinitely blocked.
         second = await asyncio.wait_for(
             host.inbound_text(
                 message_id="message:two",
@@ -110,12 +132,12 @@ async def test_slow_background_model_does_not_hold_the_inbound_world_lock(tmp_pa
                 text="还在吗？",
                 observed_at=NOW + timedelta(minutes=1),
             ),
-            timeout=10,
+            timeout=3,
         )
         elapsed = asyncio.get_running_loop().time() - started
 
         assert first.status == second.status == "action_authorized"
-        assert elapsed < 8
+        assert elapsed < 1
         assert delivery.sent == ["收到。", "收到。"]
         assert not background_task.done()
     finally:
@@ -135,6 +157,7 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
     """
 
     background = _BlockingBackgroundModel()
+    infrastructure = _FastInfrastructureModel()
     delivery = _Delivery()
     host = build_qq_c2c_host(
         settings=Settings(
@@ -145,7 +168,10 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
         bootstrap_at=NOW,
         model=_FastReplyModel(),
         advisory_model=background,
+        immediate_emotion_gate_model=infrastructure,
+        source_closure_model=infrastructure,
         delivery=delivery,
+        use_configured_recall_embedding=False,
     )
     drain_task: asyncio.Task[object] | None = None
     try:
@@ -161,8 +187,8 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
         await asyncio.wait_for(background.started.wait(), timeout=2)
 
         started = asyncio.get_running_loop().time()
-        # Same bounded sender-rhythm pause as the scheduler variant above; the
-        # drain entrypoint must still never add its blocked background wait.
+        # The regular drain entrypoint has the same sub-second local budget as
+        # the scheduler variant above.
         second = await asyncio.wait_for(
             host.inbound_text(
                 message_id="message:two",
@@ -170,12 +196,12 @@ async def test_regular_host_drain_does_not_hold_the_inbound_world_lock(tmp_path)
                 text="还在吗？",
                 observed_at=NOW + timedelta(minutes=1),
             ),
-            timeout=10,
+            timeout=3,
         )
         elapsed = asyncio.get_running_loop().time() - started
 
         assert first.status == second.status == "action_authorized"
-        assert elapsed < 8
+        assert elapsed < 1
         assert delivery.sent == ["收到。", "收到。"]
         assert not drain_task.done()
     finally:

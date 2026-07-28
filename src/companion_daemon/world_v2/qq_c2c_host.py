@@ -306,17 +306,19 @@ class QQC2CHost:
             canonical_user_id=self._canonical_user_id,
         )
 
-    # Provider-local sender-rhythm pacing, deliberately outside the frozen
-    # 400-800ms coalescing matrix: it delays only the *claim*, never changes
-    # batch identity, ledger state, or replay.  Nothing here is a fixed
-    # session rule — the quiet gap adapts to the sender's own measured typing
-    # cadence and to the shape of the message itself, because a person's
-    # conversation can be continuous at any tempo.
+    # Provider-local sender-rhythm pacing delays only the *claim*; it never
+    # changes batch identity, ledger state, or replay.  Its adaptive hint is
+    # deliberately bounded inside the durable 400–800ms coalescing budget:
+    # message shape may choose when inside that opportunity to claim, but may
+    # never add a second, multi-second wait before the model call.
     _TEMPO_WINDOW_SECONDS = 600.0
-    _TEMPO_SAMPLE_CEILING_SECONDS = 45.0
-    _DEFAULT_QUIET_GAP_SECONDS = 3.5
-    _MIN_QUIET_GAP_SECONDS = 1.2
-    _MAX_QUIET_GAP_SECONDS = 12.0
+    _TEMPO_SAMPLE_CEILING_SECONDS = 8.0
+    # The durable coalescing matrix already absorbs 400–800ms of adjacent
+    # bubbles.  Sender-rhythm courtesy must fit inside that same user-visible
+    # budget instead of adding several more seconds before any model call.
+    _DEFAULT_QUIET_GAP_SECONDS = 0.65
+    _MIN_QUIET_GAP_SECONDS = 0.35
+    _MAX_QUIET_GAP_SECONDS = 0.8
     # Absolute per-fragment bound on burst absorption.  A person being
     # flooded keeps reading as long as bubbles keep landing, but after about
     # half a minute they interject anyway — so the hold keeps rolling while
@@ -349,19 +351,16 @@ class QQC2CHost:
         than a closed question.  Everything stays bounded and deterministic.
 
         ``burst`` marks a message that provably continues an ongoing volley
-        (it landed during her turn, or during another bubble's hold).  Then
-        the *latest* observed gap sets a floor on the wait: someone who just
-        demonstrated an X-seconds-per-bubble rhythm has not finished talking
-        after less than ~1.2X of silence, however short the median of earlier,
-        faster gaps is and however closed the sentence looks.  The floor
-        never exceeds the ordinary maximum, and gaps slower than that maximum
-        are a lull rather than a rhythm, so they raise nothing.
+        (it landed during her turn, or during another bubble's hold).  The
+        latest observed subsecond gap can then move the claim toward the back
+        of the same opportunity.  A slower gap is a lull, not live typing
+        cadence, so it cannot add latency.
         """
 
         if self._recent_gap_seconds:
             ordered = sorted(self._recent_gap_seconds)
             median = ordered[len(ordered) // 2]
-            base = min(max(median * 1.3, 1.5), 8.0)
+            base = min(max(median * 1.3, self._MIN_QUIET_GAP_SECONDS), 0.7)
         else:
             base = self._DEFAULT_QUIET_GAP_SECONDS
         stripped = (text or "").rstrip()
@@ -395,15 +394,11 @@ class QQC2CHost:
         provider "peer is typing" pulse; whatever arrives during the pause
         joins the same batch and gets one reply.
 
-        While bubbles keep landing the hold keeps rolling: each newer bubble
-        re-sizes the remaining wait from *its* shape and the live cadence
-        (a volley whose tail trails off earns more patience than one that
-        just closed), and any bubble arriving during a hold is by definition
-        a burst continuation, so the burst floor applies.  A person being
-        flooded does not answer sentence three of six mid-stream — but they
-        do interject after about half a minute, which is what the absolute
-        ``_BURST_HOLD_CAP_SECONDS`` cap (anchored to this fragment's own
-        arrival, and also bounding endless "typing…" pulses) reproduces.
+        While rapid bubbles keep landing the hold keeps rolling: each newer
+        bubble re-sizes the remaining subsecond wait from *its* shape and live
+        cadence.  The absolute ``_BURST_HOLD_CAP_SECONDS`` remains only as a
+        safety bound for a genuinely continuous stream or endless provider
+        "typing…" pulses; it is never a post-input delay.
         """
 
         quiet_gap = self._quiet_gap_seconds(fragment.text, burst=burst_continuation)
@@ -545,61 +540,75 @@ class QQC2CHost:
             coalescing_metadata=metadata,
         )
         outcome = await self._host.inbound(inbound)
-        action_id = next(
-            iter((*outcome.authorized_action_ids, *outcome.scheduled_action_ids)), None
-        )
-        if action_id is not None:
-            dispatch_seconds = (
-                turn_budget.remaining(include_reserve=True) if turn_budget is not None else None
+        action_ids = tuple(
+            dict.fromkeys(
+                (*outcome.authorized_action_ids, *outcome.scheduled_action_ids)
             )
-            if (
-                dispatch_seconds is not None
-                and turn_budget is not None
-                and dispatch_seconds < turn_budget.acceptance_dispatch_reserve_seconds
-            ):
-                # Cognition may consume the absolute turn deadline, but an
-                # already-authorized visible reply must still get one bounded
-                # provider attempt in this user-owned lane.  Deferring here
-                # strands the reply behind periodic background cognition:
-                # the API reports ``action_authorized`` while QQ only shows
-                # "typing…" and may not receive the message for tens of
-                # seconds.  The policy's reserved interval is therefore a
-                # delivery grace once a concrete Action exists, not grounds
-                # for skipping delivery altogether.
-                dispatch_seconds = turn_budget.acceptance_dispatch_reserve_seconds
-                _LOG.warning(
-                    "world v2 dispatch grace trace=%s reason=turn_budget_exhausted "
-                    "grace_seconds=%.3f",
-                    inbound.trace_id,
-                    dispatch_seconds,
+        )
+        action_id = next(iter(action_ids), None)
+        if action_id is not None:
+            visible_reply_recorded = False
+            for candidate_action_id in action_ids:
+                dispatch_seconds = (
+                    turn_budget.remaining(include_reserve=True)
+                    if turn_budget is not None
+                    else None
                 )
-            if dispatch_seconds is None:
-                result = await self._host.drain_action(action_id)
-            else:
-                try:
-                    async with asyncio.timeout(dispatch_seconds):
-                        result = await self._host.drain_action(action_id)
-                except TimeoutError:
-                    # The authorized Action remains durable.  ActionPump
-                    # recovery owns any dispatch-started ambiguity; the host
-                    # never fabricates a receipt merely to meet latency.
-                    result = None
-                    _LOG.warning(
-                        "world v2 dispatch deferred trace=%s reason=turn_budget_exhausted",
-                        inbound.trace_id,
+                if (
+                    dispatch_seconds is not None
+                    and turn_budget is not None
+                    and dispatch_seconds
+                    < turn_budget.acceptance_dispatch_reserve_seconds
+                ):
+                    # Cognition may consume the absolute turn deadline, but an
+                    # already-authorized visible reply must still get one
+                    # bounded provider attempt in this user-owned lane.
+                    dispatch_seconds = (
+                        turn_budget.acceptance_dispatch_reserve_seconds
                     )
-            if result is not None and result.action_id not in {None, action_id}:
-                raise RuntimeError("targeted QQ C2C drain returned a different Action")
-            if (
-                outcome.status == "action_authorized"
-                and result is not None
-                and result.status == "settled"
-                and result.provider_status in {"provider_accepted", "delivered"}
-            ):
-                # Denominator for the /health failsafe rate: count a visible
-                # reply only after the platform accepted it, never merely
-                # because cognition authorized an Action.
-                record_visible_reply()
+                    _LOG.warning(
+                        "world v2 dispatch grace trace=%s "
+                        "reason=turn_budget_exhausted grace_seconds=%.3f",
+                        inbound.trace_id,
+                        dispatch_seconds,
+                    )
+                if dispatch_seconds is None:
+                    result = await self._host.drain_action(candidate_action_id)
+                else:
+                    try:
+                        async with asyncio.timeout(dispatch_seconds):
+                            result = await self._host.drain_action(candidate_action_id)
+                    except TimeoutError:
+                        # The authorized Action remains durable. ActionPump
+                        # recovery owns any dispatch-started ambiguity.
+                        result = None
+                        _LOG.warning(
+                            "world v2 dispatch deferred trace=%s "
+                            "reason=turn_budget_exhausted action_id=%s",
+                            inbound.trace_id,
+                            candidate_action_id,
+                        )
+                if (
+                    result is not None
+                    and result.action_id not in {None, candidate_action_id}
+                ):
+                    raise RuntimeError(
+                        "targeted QQ C2C drain returned a different Action"
+                    )
+                if (
+                    not visible_reply_recorded
+                    and outcome.status == "action_authorized"
+                    and result is not None
+                    and result.status == "settled"
+                    and result.provider_status in {
+                        "provider_accepted",
+                        "delivered",
+                    }
+                ):
+                    # Count at most one visible reply per inbound plan even
+                    # when the model chose typing plus several text beats.
+                    record_visible_reply()
+                    visible_reply_recorded = True
             # User-perceived audit line: first fragment arrival to the visible
             # reply's provider dispatch.  The quick-reaction counterpart is
             # logged by the runtime turn as user_perceived_quick_reaction_ms.

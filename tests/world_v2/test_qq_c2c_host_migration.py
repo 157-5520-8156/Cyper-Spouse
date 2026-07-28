@@ -266,6 +266,65 @@ async def test_qq_visible_reply_still_reaches_delivery_after_cognition_exhausts_
 
 
 @pytest.mark.asyncio
+async def test_qq_inbound_drains_every_immediately_due_beat_from_its_expression_plan(
+    tmp_path: Path,
+) -> None:
+    drained: list[str] = []
+    clock = {"now": NOW}
+
+    class _MultiBeatHost:
+        async def inbound(self, _inbound):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                status="action_authorized",
+                authorized_action_ids=(
+                    "action:typing",
+                    "action:text:opening",
+                    "action:text:substantive",
+                ),
+                scheduled_action_ids=(),
+            )
+
+        async def drain_action(self, action_id: str) -> ActionPumpResult:
+            drained.append(action_id)
+            return ActionPumpResult(
+                action_id=action_id,
+                status="settled",
+                provider_status="provider_accepted",
+            )
+
+        def close(self) -> None:
+            return None
+
+    async def advance(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    host = QQC2CHost(
+        host=_MultiBeatHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "multi-beat-inline-drain.sqlite"),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=advance,
+    )
+    try:
+        result = await host.inbound_text(
+            message_id="multi-beat-inline-drain",
+            recipient_id="10001",
+            text="想到什么就连着说。",
+            observed_at=NOW,
+        )
+    finally:
+        await host.aclose()
+
+    assert result.status == "action_authorized"
+    assert drained == [
+        "action:typing",
+        "action:text:opening",
+        "action:text:substantive",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_qq_authorized_action_without_provider_acceptance_is_not_counted_visible(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

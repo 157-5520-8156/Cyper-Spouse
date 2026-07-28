@@ -502,8 +502,8 @@ async def test_host_concurrent_fragments_join_one_world_observation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_burst_bubbles_within_one_exchange_join_one_turn_via_rhythm_hold() -> None:
-    """Consecutive bubbles seconds apart become one turn, not one reply each."""
+async def test_rapid_burst_bubbles_join_one_turn_inside_subsecond_budget() -> None:
+    """Rapid consecutive bubbles still become one turn without seconds of hold."""
 
     clock = {"now": NOW}
 
@@ -530,14 +530,14 @@ async def test_burst_bubbles_within_one_exchange_join_one_turn_via_rhythm_hold()
     first = asyncio.create_task(
         host.inbound_fragment(_text("message:b1", "被快递员吵醒了", observed_at=burst_started))
     )
-    for _ in range(4):
+    for _ in range(1):
         await asyncio.sleep(0)
     second = asyncio.create_task(
         host.inbound_fragment(
             _text(
                 "message:b2",
                 "本来不想起这么早的",
-                observed_at=burst_started + timedelta(seconds=2),
+                observed_at=burst_started + timedelta(milliseconds=200),
             )
         )
     )
@@ -551,13 +551,8 @@ async def test_burst_bubbles_within_one_exchange_join_one_turn_via_rhythm_hold()
 
 
 @pytest.mark.asyncio
-async def test_opening_burst_without_prior_context_still_joins_one_turn() -> None:
-    """Even a session-opening pair of bubbles seconds apart gets one reply.
-
-    Production 10:44 case: "今天要打比赛了" then "还有点紧张" three seconds
-    later were answered separately because only mid-session messages paid a
-    composure pause.  The adaptive hold now applies to every content message.
-    """
+async def test_opening_rapid_burst_without_prior_context_still_joins_one_turn() -> None:
+    """A session-opening pair inside the transport window gets one reply."""
 
     clock = {"now": NOW}
 
@@ -577,11 +572,15 @@ async def test_opening_burst_without_prior_context_still_joins_one_turn() -> Non
     first = asyncio.create_task(
         host.inbound_fragment(_text("message:o1", "今天要打比赛了", observed_at=NOW))
     )
-    for _ in range(4):
+    for _ in range(1):
         await asyncio.sleep(0)
     second = asyncio.create_task(
         host.inbound_fragment(
-            _text("message:o2", "还有点紧张", observed_at=NOW + timedelta(seconds=3))
+            _text(
+                "message:o2",
+                "还有点紧张",
+                observed_at=NOW + timedelta(milliseconds=300),
+            )
         )
     )
     left, right = await asyncio.gather(first, second)
@@ -620,16 +619,7 @@ def _manual_clock(start: datetime):
 
 @pytest.mark.asyncio
 async def test_burst_continuing_through_her_turn_is_not_sliced_by_stale_cadence() -> None:
-    """Replicates the 2026-07-20 13:05 production slice: one volley, one turn.
-
-    A fast opening pair (2s apart) becomes one batch and its turn runs for
-    several seconds.  The third bubble lands mid-turn at a 7s cadence and the
-    fourth follows 7s after the third.  The fast pair used to pollute the
-    cadence median and the closed "…啦" tail shortened it further, so bubbles
-    three and four were answered as two separate turns.  The burst floor now
-    keeps bubble three waiting ~1.2x the just-shown 7s rhythm, and the pair's
-    fragments (already committed) no longer claim the volley early.
-    """
+    """A rapid pair landing during her turn joins the next bounded batch."""
 
     start = NOW
     clock, idle_sleep, drive = _manual_clock(start)
@@ -646,36 +636,45 @@ async def test_burst_continuing_through_her_turn_is_not_sliced_by_stale_cadence(
         host.inbound_fragment(_text("message:v1", "早上打了羽毛球", observed_at=start))
     )
     await asyncio.sleep(0)
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=2))
+    await drive(lambda: clock["now"] >= start + timedelta(milliseconds=200))
     second = asyncio.create_task(
         host.inbound_fragment(
-            _text("message:v2", "中午就比完啦", observed_at=start + timedelta(seconds=2))
+            _text(
+                "message:v2",
+                "中午就比完啦",
+                observed_at=start + timedelta(milliseconds=200),
+            )
         )
     )
     await asyncio.sleep(0)
     await drive(lambda: world.first_turn_started.is_set())
     assert host._visible_turn_in_flight()
 
-    # Third bubble: 7s after the second, while her turn still owns the lock.
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=9))
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=1.5))
     third = asyncio.create_task(
         host.inbound_fragment(
-            _text("message:v3", "对了教练夸我进步啦", observed_at=start + timedelta(seconds=9))
+            _text(
+                "message:v3",
+                "对了教练夸我进步啦",
+                observed_at=start + timedelta(seconds=1.5),
+            )
         )
     )
     await asyncio.sleep(0)
 
-    # The first turn ends inside the old danger window (after the third
-    # bubble's coalescing due, before the fourth bubble arrives).
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=12))
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=1.8))
     world.release_first_turn.set()
     await drive(lambda: first.done() and second.done())
     assert len(world.inbounds) == 1
 
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=16))
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=2.0))
     fourth = asyncio.create_task(
         host.inbound_fragment(
-            _text("message:v4", "晚上一起打游戏呀", observed_at=start + timedelta(seconds=16))
+            _text(
+                "message:v4",
+                "晚上一起打游戏呀",
+                observed_at=start + timedelta(seconds=2.0),
+            )
         )
     )
     await drive(lambda: third.done() and fourth.done())
@@ -693,8 +692,8 @@ async def test_burst_continuing_through_her_turn_is_not_sliced_by_stale_cadence(
 
 
 @pytest.mark.asyncio
-async def test_sustained_burst_rolls_past_the_old_deadline_into_one_turn() -> None:
-    """A ~3s-cadence volley lasting >18s is absorbed whole, not deadline-cut."""
+async def test_sustained_rapid_burst_uses_one_turn_and_finishes_after_last_bubble() -> None:
+    """A sustained subsecond volley is absorbed without a fixed multi-second tax."""
 
     start = NOW
     clock, idle_sleep, drive = _manual_clock(start)
@@ -719,7 +718,7 @@ async def test_sustained_burst_rolls_past_the_old_deadline_into_one_turn() -> No
     )
     tasks = []
     for index, text in enumerate(texts):
-        offset = index * 3
+        offset = index * 0.3
         await drive(lambda: clock["now"] >= start + timedelta(seconds=offset))
         tasks.append(
             asyncio.create_task(
@@ -736,8 +735,6 @@ async def test_sustained_burst_rolls_past_the_old_deadline_into_one_turn() -> No
     await drive(lambda: all(task.done() for task in tasks))
     results = await asyncio.gather(*tasks)
 
-    # The old per-fragment deadline (8-18s) would have claimed a partial
-    # batch mid-volley; the rolling hold answers the 21s volley exactly once.
     assert all(item.status == "observed_only" for item in results)
     assert len(world.inbounds) == 1
     assert world.inbounds[0].text == "\n".join(texts)
@@ -749,8 +746,8 @@ async def test_sustained_burst_rolls_past_the_old_deadline_into_one_turn() -> No
 
 
 @pytest.mark.asyncio
-async def test_burst_hold_hard_cap_answers_a_never_quiet_volley_at_thirty_seconds() -> None:
-    """However long bubbles keep landing, the first one speaks by +30s."""
+async def test_burst_answers_within_one_second_after_the_last_bubble() -> None:
+    """A continuous rapid volley adds no fixed 30-second post-input wait."""
 
     start = NOW
     clock, idle_sleep, drive = _manual_clock(start)
@@ -773,8 +770,6 @@ async def test_burst_hold_hard_cap_answers_a_never_quiet_volley_at_thirty_second
         ingress_now=lambda: clock["now"],
         ingress_sleep=idle_sleep,
     )
-    # Every tail trails off, so the adaptive quiet gap (~8.8s) always exceeds
-    # the 4s cadence and quiet alone would never end the hold.
     texts = (
         "刚才那个事我还没说完，",
         "就是上次说的那个比赛，",
@@ -787,7 +782,7 @@ async def test_burst_hold_hard_cap_answers_a_never_quiet_volley_at_thirty_second
     )
     tasks = []
     for index, text in enumerate(texts):
-        offset = index * 4
+        offset = index * 0.4
         await drive(lambda: clock["now"] >= start + timedelta(seconds=offset))
         tasks.append(
             asyncio.create_task(
@@ -807,8 +802,9 @@ async def test_burst_hold_hard_cap_answers_a_never_quiet_volley_at_thirty_second
 
     assert len(world.inbounds) == 1
     assert world.inbounds[0].text == "\n".join(texts)
-    cap_elapsed = (world.inbound_at[0] - start).total_seconds()
-    assert 30.0 <= cap_elapsed <= 31.5
+    elapsed = (world.inbound_at[0] - start).total_seconds()
+    last_bubble_at = (len(texts) - 1) * 0.4
+    assert last_bubble_at <= elapsed <= last_bubble_at + 1.0
     await host.aclose()
 
 
@@ -831,17 +827,21 @@ async def test_scheduler_ingress_pass_yields_while_a_rhythm_hold_absorbs_a_volle
         host.inbound_fragment(_text("message:hold1", "刚到家", observed_at=start))
     )
     await asyncio.sleep(0)
-    # The coalescing window has closed (the batch is claim-due), but the
-    # fragment is still holding for the sender's rhythm.
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=1.5))
+    # The durable coalescing window is nearly closed, but the bounded rhythm
+    # hold still owns this rapid volley.
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=0.5))
     assert host._rhythm_holds == 1
     assert await host.drain_ingress_once() is None
     assert world.inbounds == []
 
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=2.5))
+    await drive(lambda: clock["now"] >= start + timedelta(seconds=0.55))
     second = asyncio.create_task(
         host.inbound_fragment(
-            _text("message:hold2", "还买了奶茶", observed_at=start + timedelta(seconds=2.5))
+            _text(
+                "message:hold2",
+                "还买了奶茶",
+                observed_at=start + timedelta(seconds=0.55),
+            )
         )
     )
     await drive(lambda: first.done() and second.done())
@@ -864,35 +864,38 @@ def test_adaptive_quiet_gap_follows_cadence_and_message_shape() -> None:
         canonical_user_id="geoff",
         ingress_store=MemoryQQIngressStore(),
     )
-    # No cadence yet: default base, biased by the message's own shape.
-    assert host._quiet_gap_seconds("今天要打比赛了") == pytest.approx(3.5)
-    assert host._quiet_gap_seconds("你吃饭了吗？") == pytest.approx(3.5 * 0.6)
-    assert host._quiet_gap_seconds("我跟你说，") == pytest.approx(3.5 * 1.7)
-    # A fast typist shrinks the base; a slow one grows it, both bounded.
-    host._recent_gap_seconds.extend([1.0, 1.2, 1.1])
-    assert host._quiet_gap_seconds("随便说点什么") == pytest.approx(1.5)
+    # No cadence yet: the whole semantic pacing hint remains subsecond.
+    assert host._quiet_gap_seconds("今天要打比赛了") == pytest.approx(0.65)
+    assert host._quiet_gap_seconds("你吃饭了吗？") == pytest.approx(0.65 * 0.6)
+    assert host._quiet_gap_seconds("我跟你说，") == pytest.approx(0.8)
+    # A fast typist shrinks the base; a slow one grows it, both bounded below
+    # the one-second local budget.
+    host._recent_gap_seconds.extend([0.1, 0.12, 0.11])
+    assert host._quiet_gap_seconds("随便说点什么") == pytest.approx(0.35)
     host._recent_gap_seconds.clear()
-    host._recent_gap_seconds.extend([20.0, 25.0, 30.0])
-    assert host._quiet_gap_seconds("嗯") == pytest.approx(8.0)
-    assert host._quiet_gap_seconds("而且") == pytest.approx(12.0)
+    host._recent_gap_seconds.extend([2.0, 2.5, 3.0])
+    assert host._quiet_gap_seconds("嗯") == pytest.approx(0.7)
+    assert host._quiet_gap_seconds("而且") == pytest.approx(0.8)
     # Burst continuation: the just-shown cadence floors the wait, so a fast
     # historical median and a closed tail cannot slice an ongoing volley.
     host._recent_gap_seconds.clear()
-    host._recent_gap_seconds.extend([2.0, 7.0])
-    assert host._quiet_gap_seconds("中午就比完啦") == pytest.approx(8.0 * 0.6)
-    assert host._quiet_gap_seconds("中午就比完啦", burst=True) == pytest.approx(7.0 * 1.2)
+    host._recent_gap_seconds.extend([0.2, 0.7])
+    assert host._quiet_gap_seconds("中午就比完啦") == pytest.approx(0.7 * 0.6)
+    assert host._quiet_gap_seconds("中午就比完啦", burst=True) == pytest.approx(0.8)
     # The floor is a floor, not a discount: a trailing-off tail still waits.
-    assert host._quiet_gap_seconds("而且", burst=True) == pytest.approx(12.0)
+    assert host._quiet_gap_seconds("而且", burst=True) == pytest.approx(0.8)
     # The floor never exceeds the bounded maximum.
-    host._recent_gap_seconds.append(11.0)
-    assert host._quiet_gap_seconds("好啦", burst=True) == pytest.approx(12.0)
+    host._recent_gap_seconds.append(0.75)
+    assert host._quiet_gap_seconds("好啦", burst=True) == pytest.approx(0.8)
     # A last gap slower than the maximum is a lull, not a rhythm: no lift.
     host._recent_gap_seconds.clear()
-    host._recent_gap_seconds.extend([20.0, 25.0, 30.0])
-    assert host._quiet_gap_seconds("嗯", burst=True) == pytest.approx(8.0)
+    host._recent_gap_seconds.extend([2.0, 2.5, 3.0])
+    assert host._quiet_gap_seconds("嗯", burst=True) == pytest.approx(0.7)
     # Without cadence samples the burst flag alone changes nothing.
     host._recent_gap_seconds.clear()
-    assert host._quiet_gap_seconds("你吃饭了吗？", burst=True) == pytest.approx(3.5 * 0.6)
+    assert host._quiet_gap_seconds("你吃饭了吗？", burst=True) == pytest.approx(
+        0.65 * 0.6
+    )
 
 
 @pytest.mark.asyncio
@@ -920,10 +923,10 @@ async def test_peer_typing_pulse_extends_the_rhythm_hold_until_bubble_lands() ->
     first = asyncio.create_task(
         host.inbound_fragment(_text("message:t1", "跟你说件事", observed_at=burst_started))
     )
-    for _ in range(4):
+    for _ in range(1):
         await asyncio.sleep(0)
-    # 3.5s later (quiet gap nearly elapsed) QQ reports the peer still typing.
-    clock["now"] = burst_started + timedelta(seconds=3.5)
+    # Before the subsecond hold elapses QQ reports the peer still typing.
+    clock["now"] = burst_started + timedelta(seconds=0.5)
     typing = await host.inbound_fragment(
         QQIngressFragment(
             source_event_id="qq-input-status:t",
@@ -934,11 +937,14 @@ async def test_peer_typing_pulse_extends_the_rhythm_hold_until_bubble_lands() ->
         )
     )
     assert typing.status == "deferred"
-    # The slow bubble lands 7s after the burst began; without the typing
-    # pulse the hold would have claimed at ~4s and answered without it.
+    # The next bubble lands inside the same bounded transport opportunity.
     second = asyncio.create_task(
         host.inbound_fragment(
-            _text("message:t2", "昨晚做了个特别长的梦", observed_at=burst_started + timedelta(seconds=7))
+            _text(
+                "message:t2",
+                "昨晚做了个特别长的梦",
+                observed_at=burst_started + timedelta(seconds=0.7),
+            )
         )
     )
     left, right = await asyncio.gather(first, second)
