@@ -125,6 +125,37 @@ A traceable attempt to produce an observable online or external effect. An Actio
 
 A recorded outcome from a model, random draw, media generator, tool, network, clock, or platform receipt that replay must not invoke again.
 
+## External Signal
+
+A source-bound, versioned claim that something outside the World may be
+happening or becoming salient. It records what a source reported, with time,
+place, confidence, evidence, expiry, and correction lineage; it is neither a
+World Event nor proof that the companion perceived or believed it.
+_Avoid_: News fact, World Event, character knowledge
+
+## World Perception Hub
+
+The bounded context that acquires, normalizes, clusters, and retrieves
+External Signals from replaceable sources. It may offer a sourced perception
+opportunity, but it cannot decide the companion's attention, interpretation,
+life response, or communication.
+_Avoid_: News engine, event generator, behavior trigger
+
+## Perception Candidate
+
+An ephemeral, source-bound External Signal that is plausibly accessible or
+relevant to the companion at one Pinned Turn. It is advisory input to
+attention and may expire without entering the World ledger.
+_Avoid_: Perceived fact, mandatory stimulus
+
+## External Perception
+
+An accepted World Event recording that the companion encountered a particular
+revision of an External Signal through a plausible channel. It proves the
+perceptual experience and its evidence lineage, not that every source claim
+was objectively correct or that the companion must act on it.
+_Avoid_: Internet truth, automatic life event, mandatory response
+
 ## Photo Candidate
 
 A rebuildable Projection entry indicating that a Committed Experience may have enough visual and sharing value to become media. It is not permission to generate or send anything.
