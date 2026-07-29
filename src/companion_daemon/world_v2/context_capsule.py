@@ -1940,6 +1940,11 @@ def _compile_resolved_context(
         # Without this floor the global envelope kept only the first Fact even
         # when the fact slice itself had ample budget.
         "relevant_facts": 2,
+        # A companion with committed autobiographical history must keep at
+        # least one exact, source-bound recent Experience in the model packet.
+        # Otherwise emergency global compaction can make a healthy ledger look
+        # as though she has no recent life at all.
+        "recent_experiences": 1,
         "world_life": 1,
         "active_memory_candidates": 2,
         # An advisory overlay is the semantic decision matrix explicitly
@@ -1967,6 +1972,10 @@ def _compile_resolved_context(
     # explicitly rather than silently making a received message disappear.
     terminal_minimum_items: dict[SliceName, int] = {
         "recent_dialogue": len(required_dialogue_ids),
+        # Preserve one recent self Experience all the way through emergency
+        # compaction. Required head previews may shrink, but accepted history
+        # is not silently replaced by an empty provider view.
+        "recent_experiences": 1 if slices["recent_experiences"].items else 0,
     }
     # Character-truncation state for the mandatory head slices (final tier).
     # ``None`` means the head still shows its ordinary whole-item view; a

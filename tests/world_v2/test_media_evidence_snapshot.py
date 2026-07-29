@@ -155,6 +155,121 @@ def test_compiler_freezes_evidence_from_a_declaration_not_from_its_life_event_pa
     assert image.evidence_index["/activity/description"].source_event_ref == declaration.event_id
 
 
+def test_compiler_freezes_source_declared_biographical_context_for_the_planner() -> None:
+    source = _event("summer-source", {})
+    timeline = _event(
+        "summer-biographical-timeline",
+        {},
+        event_type="BiographicalTimelineConfigured",
+    )
+    declaration = _event(
+        "summer-declaration",
+        ImageEvidenceDeclaredPayload(
+            source_event_ref=source.event_id,
+            source_event_payload_hash=source.payload_hash,
+            source_event_type=source.event_type,
+            source_privacy_ceiling="shareable",
+            image_evidence=ImageEvidenceV1(
+                visibility="shareable",
+                activity={
+                    "evidence_visibility": "shareable",
+                    "id": "activity:market",
+                    "kind": "browse_market",
+                    "description": "暑假在校外旧书市闲逛",
+                },
+                situational_context={
+                    "season": "summer",
+                    "academic_phase": "summer_break",
+                    "academic_year": 2,
+                    "calendar_context_tags": ("calendar:summer_break",),
+                    "current_residence_context_tags": (
+                        "residence:family_home_jiaxing",
+                    ),
+                    "life_arc_context_tags": ("life_arc:summer_internship",),
+                    "active_life_arc_ids": ("life-arc:summer-internship",),
+                    "source_event_refs": (timeline.event_id,),
+                },
+            ),
+            declared_at=NOW,
+        ).model_dump(mode="json"),
+        event_type="ImageEvidenceDeclared",
+    )
+    ledger = _Ledger(source, timeline, declaration)
+    candidate = PhotoCandidate(
+        candidate_id="candidate:summer",
+        source_event_refs=tuple(sorted((source.event_id, declaration.event_id))),
+        family="life_share",
+        privacy_ceiling="shareable",
+    )
+
+    compiled = MediaEvidenceSnapshotCompiler(ledger=ledger).compile(
+        _request(candidate, ledger)
+    )
+
+    image = compiled.snapshot.image_event_snapshot
+    assert image is not None
+    assert image.situational_context == {
+        "season": "summer",
+        "academic_phase": "summer_break",
+        "academic_year": 2,
+        "calendar_context_tags": ("calendar:summer_break",),
+        "current_residence_context_tags": ("residence:family_home_jiaxing",),
+        "life_arc_context_tags": ("life_arc:summer_internship",),
+        "active_life_arc_ids": ("life-arc:summer-internship",),
+        "source_event_refs": (timeline.event_id,),
+    }
+    assert timeline.event_id in {
+        item.event_ref for item in compiled.snapshot.source_events
+    }
+    assert (
+        image.evidence_index["/situational_context/season"].source_event_ref
+        == declaration.event_id
+    )
+
+
+def test_compiler_rejects_private_life_arc_in_public_situational_context() -> None:
+    source = _event("public-source", {})
+    private_arc = _event(
+        "private-life-arc",
+        {"arc_after": {"privacy_class": "private"}},
+        event_type="LifeArcChanged",
+    )
+    declaration = _event(
+        "public-declaration-with-private-context",
+        ImageEvidenceDeclaredPayload(
+            source_event_ref=source.event_id,
+            source_event_payload_hash=source.payload_hash,
+            source_event_type=source.event_type,
+            source_privacy_ceiling="public",
+            image_evidence=ImageEvidenceV1(
+                visibility="public",
+                activity={"id": "activity:walk", "kind": "walk"},
+                situational_context={
+                    "season": "summer",
+                    "source_event_refs": (private_arc.event_id,),
+                },
+            ),
+            declared_at=NOW,
+        ).model_dump(mode="json"),
+        event_type="ImageEvidenceDeclared",
+    )
+    ledger = _Ledger(source, private_arc, declaration)
+    candidate = PhotoCandidate(
+        candidate_id="candidate:private-arc-leak",
+        source_event_refs=tuple(sorted((source.event_id, declaration.event_id))),
+        family="life_share",
+        privacy_ceiling="public",
+    )
+
+    with pytest.raises(
+        MediaEvidenceNotRenderable,
+        match="situational_context_source_unavailable",
+    ):
+        MediaEvidenceSnapshotCompiler(ledger=ledger).compile(
+            _request(candidate, ledger)
+        )
+
+
 def test_compiler_never_resolves_value_refs_or_infers_a_visual_description() -> None:
     event = _event("opaque-fact", {
         "values": {"predicate_code": "meal.visible_food", "value_ref": "fact-value:noodles", "value_hash": "a" * 64},

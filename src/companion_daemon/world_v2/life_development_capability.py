@@ -200,6 +200,7 @@ class ProjectionLifeCapabilityManifestCompiler:
         )
         return LifeDevelopmentCapabilityManifest(
             version="life-development-capability.production.1",
+            owner_actor_ref=self._owner,
             pinned_cursor=ProjectionCursor(
                 world_revision=getattr(projection, "world_revision"),
                 deliberation_revision=getattr(projection, "deliberation_revision"),

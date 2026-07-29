@@ -519,6 +519,11 @@ class EventMediaPlannerAdapter:
             "event", "source", "location", "activity", "environment", "character",
             "visual_requirements", "evidence_index",
         )
+        if (
+            "situational_context" in snapshot
+            and not isinstance(snapshot.get("situational_context"), dict)
+        ):
+            return "malformed_image_event_snapshot"
         expected_schema = (
             _P0_IMAGE_EVENT_SCHEMA if lane == "p0" else _P2_IMAGE_EVENT_SCHEMA
             if lane == "p2" else _P3_IMAGE_EVENT_SCHEMA

@@ -525,7 +525,8 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.43"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.43"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.44"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -572,6 +573,7 @@ def _experience_semantic_dump(
         "world-v2-reducers.20",
         "world-v2-reducers.21",
         "world-v2-reducers.24",
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
         dumped.pop("authority_contract_version", None)
@@ -592,6 +594,7 @@ def _actor_authority_transition_semantic_dump(
         "world-v2-reducers.19",
         "world-v2-reducers.20",
         "world-v2-reducers.21",
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("accepted_event_ref", None)
@@ -608,6 +611,7 @@ def _life_arc_semantic_dump(
     dumped = arc.model_dump(mode="json")
     if reducer_bundle_version not in {
         "world-v2-reducers.42",
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("accepted_event_ref", None)
@@ -620,7 +624,10 @@ def _npc_semantic_dump(
     reducer_bundle_version: str,
 ) -> dict[str, Any]:
     dumped = npc.model_dump(mode="json")
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
+        REDUCER_BUNDLE_VERSION,
+    }:
         dumped.pop("source_event_ref", None)
         dumped.pop("effect_descriptor_hash", None)
         dumped.pop("accepted_event_ref", None)
@@ -639,6 +646,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         "world-v2-reducers.28",
         "world-v2-reducers.29",
         "world-v2-reducers.30",
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("expression_plan_id", None)
@@ -650,10 +658,14 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         "world-v2-reducers.28",
         "world-v2-reducers.29",
         "world-v2-reducers.30",
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("provider_media_grant", None)
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
+        REDUCER_BUNDLE_VERSION,
+    }:
         dumped.pop("media_delivery_approval", None)
     return dumped
 
@@ -672,6 +684,7 @@ def _expression_plan_semantic_dump(
         "world-v2-reducers.25",
         "world-v2-reducers.26",
         "world-v2-reducers.27",
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("state", None)
@@ -693,6 +706,7 @@ def _expression_beat_semantic_dump(
         "world-v2-reducers.25",
         "world-v2-reducers.26",
         "world-v2-reducers.27",
+        PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("action_id", None)
@@ -1405,6 +1419,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.40",
             "world-v2-reducers.41",
             "world-v2-reducers.42",
+            PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
             # semantic field feature set is otherwise the current one.
@@ -1531,6 +1546,7 @@ class ReducerState(FrozenModel):
                                 "world-v2-reducers.39",
                                 "world-v2-reducers.40",
                                 "world-v2-reducers.41",
+                                PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
                             else None
@@ -1594,7 +1610,10 @@ class ReducerState(FrozenModel):
                             (
                                 None
                                 if declared_reducer_bundle_version
-                                == REDUCER_BUNDLE_VERSION
+                                in {
+                                    PREVIOUS_REDUCER_BUNDLE_VERSION,
+                                    REDUCER_BUNDLE_VERSION,
+                                }
                                 else {
                                     "settled_dynamic_life_direction_adopted": True,
                                     "candidate_outcomes": {
@@ -1702,6 +1721,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.39",
             "world-v2-reducers.40",
             "world-v2-reducers.41",
+            PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
             payload["provider_media_grants"] = tuple(
@@ -1725,6 +1745,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.39",
                 "world-v2-reducers.40",
                 "world-v2-reducers.41",
+                PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_declined_candidate_revisions"] = tuple(
@@ -1745,6 +1766,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.39",
             "world-v2-reducers.40",
             "world-v2-reducers.41",
+            PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_artifacts"] = tuple(
@@ -1764,6 +1786,7 @@ class ReducerState(FrozenModel):
                     "world-v2-reducers.39",
                     "world-v2-reducers.40",
                     "world-v2-reducers.41",
+                    PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
                 else item.model_dump(mode="json", exclude={"repairable", "repair_scope"})
@@ -1785,6 +1808,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.39",
             "world-v2-reducers.40",
             "world-v2-reducers.41",
+            PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
             payload["media_delivery_approvals"] = tuple(
@@ -1807,6 +1831,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.39",
                 "world-v2-reducers.40",
                 "world-v2-reducers.41",
+                PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["media_thread_proposals"] = tuple(
@@ -1991,6 +2016,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.39",
                 "world-v2-reducers.40",
                 "world-v2-reducers.41",
+                PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["expression_plan_manifests"] = tuple(
@@ -2004,6 +2030,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.39",
                 "world-v2-reducers.40",
                 "world-v2-reducers.41",
+                PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
                 payload["response_expectation_assessments"] = tuple(

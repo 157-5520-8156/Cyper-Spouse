@@ -1609,7 +1609,7 @@ async def test_experience_memory_no_change_is_durable_and_never_reclassified(
         before_rebuild = restarted._ledger.project()  # noqa: SLF001
         rebuilt = restarted._ledger.rebuild()  # noqa: SLF001
         assert rebuilt.semantic_hash == before_rebuild.semantic_hash
-        assert rebuilt.reducer_bundle_version == "world-v2-reducers.43"
+        assert rebuilt.reducer_bundle_version == "world-v2-reducers.44"
     finally:
         restarted.close()
 

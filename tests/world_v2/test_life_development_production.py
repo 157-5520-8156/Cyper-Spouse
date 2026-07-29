@@ -129,6 +129,7 @@ class _PlanWorldAuthor:
         return json.dumps(
             {
                 "decision": "propose",
+                "authored_subject_ref": "actor:companion",
                 "causal_authority": "character_choice",
                 "outcome_resolution_authority": "world_contingency",
                 "premise_scope": "external_opportunity",
@@ -150,6 +151,7 @@ class _PlanWorldAuthor:
                 "privacy_class": "shareable",
                 "outcomes": [
                     {
+                        "experienced_by_ref": "actor:companion",
                         "text": "电影放完时风有点凉，人群慢慢散了。",
                         "privacy_class": "shareable",
                         "relative_plausibility_weight": 1,
@@ -165,6 +167,7 @@ class _PlanWorldAuthor:
                         "dynamic_life_direction": None,
                     },
                     {
+                        "experienced_by_ref": "actor:companion",
                         "text": "中途下了一点小雨，放映比预计早结束。",
                         "privacy_class": "shareable",
                         "relative_plausibility_weight": 2,

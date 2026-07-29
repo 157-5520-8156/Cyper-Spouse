@@ -47,11 +47,16 @@ from companion_daemon.world_v2.schemas import (
     CharacterCoreSlowEvolving,
     CharacterCoreValuePriority,
     CharacterCoreValues,
+    ExperienceOccurrenceSettlementBinding,
+    ExperienceOrigin,
+    ExperienceProjection,
+    ExperienceValues,
     FactProjection,
     MemoryCandidateProjection,
     PrivateImpressionProjection,
     ThreadProjection,
     character_core_semantic_fingerprint,
+    experience_semantic_fingerprint,
 )
 from companion_daemon.world_v2.situation_compiler import (
     AttentionSlice,
@@ -114,6 +119,7 @@ def _item_ref(value) -> str:
         "episode_id",
         "thread_id",
         "fact_id",
+        "experience_id",
         "grant_id",
         "impression_id",
         "core_id",
@@ -1172,6 +1178,122 @@ def _character_core_bound():
     )
 
 
+def _experience(index: int) -> ExperienceProjection:
+    values = ExperienceValues(
+        summary_ref=f"content:experience:{index}",
+        summary_payload_hash=hashlib.sha256(f"summary:{index}".encode()).hexdigest(),
+        occurred_from=NOW - timedelta(hours=index + 1),
+        occurred_to=NOW - timedelta(hours=index),
+        participant_refs=("actor:companion",),
+        source_bindings=(
+            ExperienceOccurrenceSettlementBinding(
+                authority_event_ref=f"event:occurrence:settled:{index}",
+                authority_world_revision=7,
+                authority_payload_hash=hashlib.sha256(
+                    f"settlement:{index}".encode()
+                ).hexdigest(),
+                occurrence_id=f"occurrence:{index}",
+                occurrence_entity_revision=3,
+                result_id=f"result:{index}",
+                result_payload_ref=f"content:occurrence:{index}",
+                result_payload_hash=hashlib.sha256(
+                    f"result:{index}".encode()
+                ).hexdigest(),
+            ),
+        ),
+        privacy_class="personal",
+    )
+    origin = ExperienceOrigin(
+        change_id=f"change:experience:{index}",
+        transition_id=f"transition:experience:{index}",
+        policy_refs=("policy:experience-v1",),
+        accepted_event_ref=f"event:experience:{index}",
+    )
+    return ExperienceProjection(
+        experience_id=f"experience:{index}",
+        semantic_fingerprint=experience_semantic_fingerprint(
+            values=values,
+            policy_refs=origin.policy_refs,
+        ),
+        values=values,
+        origin=origin,
+    )
+
+
+def _experience_bound(
+    experiences: tuple[ExperienceProjection, ...],
+    *,
+    ranks: tuple[int, ...],
+) -> ResolvedSlice:
+    metadata = []
+    for item, rank in zip(experiences, ranks, strict=True):
+        settlement = item.values.source_bindings[0]
+        bindings = (
+            ResolvedSourceBinding(
+                source_kind="committed_event",
+                authority_type="ExperienceCommitted",
+                ref=item.origin.accepted_event_ref,
+                source_world_revision=7,
+                immutable_hash=HASH_B,
+            ),
+            ResolvedSourceBinding(
+                source_kind="committed_event",
+                authority_type="WorldOccurrenceSettled",
+                ref=settlement.authority_event_ref,
+                source_world_revision=settlement.authority_world_revision,
+                immutable_hash=settlement.authority_payload_hash,
+            ),
+        )
+        metadata.append(
+            ResolvedItemMetadata(
+                item_ref=item.experience_id,
+                rank_score_bp=rank,
+                privacy_class="personal",
+                source_bindings=bindings,
+                source_hash=source_bindings_hash(bindings),
+                value_hash=canonical_value_hash(item),
+            )
+        )
+    metadata_tuple = tuple(metadata)
+    authority_refs = tuple(
+        sorted(
+            {
+                binding.ref
+                for item_metadata in metadata_tuple
+                for binding in item_metadata.source_bindings
+            }
+        )
+    )
+    return ResolvedSlice.model_construct(
+        world_id="world:capsule",
+        snapshot_id="snapshot:7",
+        snapshot_hash=HASH_A,
+        pinned_world_revision=7,
+        value=experiences,
+        resolver_proof=ResolverProof(
+            resolver_id="context-capsule-resolver",
+            resolver_version="context-capsule-resolver.1",
+            policy_digest=RESOLUTION_POLICY_DIGEST,
+            world_id="world:capsule",
+            snapshot_id="snapshot:7",
+            snapshot_hash=HASH_A,
+            pinned_world_revision=7,
+            slice_name="recent_experiences",
+            query_ref="query:test",
+            window_ref="window:test",
+            policy_version="context-capsule-resolution-policy.1",
+            completeness="complete",
+            privacy_floor="personal",
+            explicit_authority_refs=authority_refs,
+            authority_refs_digest=authority_refs_digest(authority_refs),
+            result_set_hash=resolved_result_set_hash(
+                "recent_experiences", metadata_tuple
+            ),
+        ),
+        item_metadata=metadata_tuple,
+    )
+
+
 def test_tiny_budget_truncates_both_mandatory_heads_and_keeps_authority() -> None:
     """With a real character core present, an extreme budget truncates both
     mandatory head views while their trusted items keep complete payloads."""
@@ -1194,6 +1316,42 @@ def test_tiny_budget_truncates_both_mandatory_heads_and_keeps_authority() -> Non
     core_view = json.loads(capsule.character_core.model_content_json)
     assert core_view["truncated"] is True
     assert core_view["items"][0]["value_preview"]
+
+
+def test_global_compaction_keeps_one_source_bound_recent_self_experience() -> None:
+    experiences = (_experience(0), _experience(1))
+    bound = _experience_bound(experiences, ranks=(9_000, 8_000))
+    single_bound = _experience_bound(
+        (experiences[0],),
+        ranks=(9_000,),
+    )
+    single = compile_context_capsule(
+        _request(
+            character_core=_character_core_bound(),
+            recent_experiences=single_bound,
+        )
+    )
+
+    capsule = compile_context_capsule(
+        _request(
+            character_core=_character_core_bound(),
+            recent_experiences=bound,
+        ),
+        policy=ContextCapsuleBudgetPolicy(
+            hard_max_characters=single.budget.used_characters - 200
+        ),
+    )
+
+    assert [item.item_ref for item in capsule.recent_experiences.items] == [
+        "experience:0"
+    ]
+    model_view = json.loads(capsule.model_content_json)
+    retained = model_view["slices"]["recent_experiences"]["items"][0]
+    assert retained["item_ref"] == "experience:0"
+    assert set(model_view["slices"]["recent_experiences"]["source_refs"]) == {
+        "event:experience:0",
+        "event:occurrence:settled:0",
+    }
 
 
 def test_budget_below_structural_floor_terminates_with_explicit_error() -> None:

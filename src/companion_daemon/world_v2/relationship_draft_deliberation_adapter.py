@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 
 from .chat_model_deliberation_adapter import ChatCompletionModel
 from .deliberation import ModelInput, ModelOutput
@@ -21,9 +22,11 @@ from .proposal_envelope import (
     TypedChange,
 )
 from .relationship_evaluation_draft import (
+    RelationshipContinuitySourceItem,
     RelationshipEvaluationDraft,
     RelationshipEvaluationDraftAdapter,
     RelationshipEvaluationDraftCapsule,
+    RelationshipInteractionContinuity,
 )
 
 
@@ -208,7 +211,7 @@ def _lenient_slice_values(
 
 def _context_summaries(
     *, material: dict[str, object], trigger_ref: str
-) -> dict[str, tuple[str, ...]]:
+) -> dict[str, object]:
     """Harvest bounded, read-only conversational texture from capsule slices.
 
     Everything here is already resolver-verified capsule material; this only
@@ -259,7 +262,99 @@ def _context_summaries(
         "recent_dialogue_summaries": tuple(dialogue[-12:]),
         "recent_appraisal_summaries": tuple(appraisal_lines[-8:]),
         "active_affect_summaries": tuple(affect_lines[-8:]),
+        "interaction_continuity": _interaction_continuity(material),
     }
+
+
+def _interaction_continuity(
+    material: dict[str, object],
+) -> RelationshipInteractionContinuity | None:
+    """Aggregate only source identity and temporal/turn shape.
+
+    The Context Capsule already verified each item's full authority closure.
+    This model-facing view retains the stable item/source/value hashes so the
+    neutral aggregate remains tied to that exact pinned material.  It never
+    infers whether the pattern is warm, cold, intimate, or relationship-
+    changing; that semantic decision belongs to the relationship model.
+    """
+
+    slices = material.get("slices")
+    if not isinstance(slices, dict):
+        return None
+    slice_ = slices.get("recent_dialogue")
+    if not isinstance(slice_, dict) or slice_.get("availability") != "available":
+        return None
+    raw_items = slice_.get("items")
+    if not isinstance(raw_items, list):
+        return None
+    items: list[tuple[int, str, datetime, str, str, str, str]] = []
+    for outer in raw_items:
+        if not isinstance(outer, dict):
+            continue
+        value = outer.get("value")
+        item_ref = outer.get("item_ref")
+        source_hash = outer.get("source_hash")
+        value_hash = outer.get("value_hash")
+        if (
+            not isinstance(value, dict)
+            or not isinstance(item_ref, str)
+            or not item_ref
+            or not isinstance(source_hash, str)
+            or len(source_hash) != 64
+            or not isinstance(value_hash, str)
+            or len(value_hash) != 64
+        ):
+            continue
+        speaker = value.get("speaker")
+        sequence = value.get("sequence")
+        occurred_at = value.get("occurred_at")
+        delivery_state = value.get("delivery_state")
+        if (
+            speaker not in {"counterpart", "companion"}
+            or isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or not isinstance(occurred_at, str)
+            or not occurred_at
+            or not isinstance(delivery_state, str)
+        ):
+            continue
+        try:
+            parsed_at = datetime.fromisoformat(occurred_at)
+        except ValueError:
+            continue
+        if parsed_at.tzinfo is None or parsed_at.utcoffset() is None:
+            continue
+        items.append(
+            (
+                sequence,
+                speaker,
+                parsed_at,
+                delivery_state,
+                item_ref,
+                source_hash,
+                value_hash,
+            )
+        )
+    if not items:
+        return None
+    items.sort(key=lambda item: (item[0], item[4]))
+    return RelationshipInteractionContinuity(
+        counterpart_turn_count=sum(item[1] == "counterpart" for item in items),
+        companion_turn_count=sum(item[1] == "companion" for item in items),
+        delivered_companion_turn_count=sum(
+            item[1] == "companion" and item[3] == "delivered" for item in items
+        ),
+        first_occurred_at=items[0][2],
+        last_occurred_at=items[-1][2],
+        source_items=tuple(
+            RelationshipContinuitySourceItem(
+                item_ref=item[4],
+                source_hash=item[5],
+                value_hash=item[6],
+            )
+            for item in items
+        ),
+    )
 
 
 def _counterpart_subject(
@@ -318,7 +413,7 @@ def _draft_capsule(
     *,
     material: dict[str, object],
     request: ModelInput,
-    context: dict[str, tuple[str, ...]],
+    context: dict[str, object],
 ) -> RelationshipEvaluationDraftCapsule:
     relationships = _slice_items(material, "relationship_slice")
     appraisals = _slice_items(material, "appraisals")

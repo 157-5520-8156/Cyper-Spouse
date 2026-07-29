@@ -97,6 +97,22 @@ async def test_adapter_materializes_a_bound_fallible_appraisal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_appraisal_prompt_allows_model_to_notice_sustained_ordinary_interaction() -> None:
+    model = _Model(
+        '{"appraise":false,"brief_rationale":"Nothing changed for her.",'
+        '"behavior_tendency":"continue","stance":"present","display_strategy":"natural",'
+        '"confidence":5000}'
+    )
+
+    await AppraisalDraftDeliberationAdapter(model=model).propose(_request())
+
+    system = model.calls[0][0]["content"]
+    assert "sustained ordinary interaction" in system
+    assert "no message count" in system
+    assert "may still choose appraise=false" in system
+
+
+@pytest.mark.asyncio
 async def test_fast_adapter_expands_only_its_small_enumerated_result() -> None:
     model = _Model(
         json.dumps(

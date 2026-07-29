@@ -28,6 +28,7 @@ from .life_ecology_contract import (
     LifeEcologyRunClaim,
     LifeEcologyRunKey,
 )
+from .fact_memory_draft import FactMemoryDraftTechnicalFailure
 from .life_aftermath_runtime import LifeAftermathModelFailure
 from .schema_core import FrozenModel
 
@@ -366,6 +367,7 @@ class LifeEcologyRuntime:
                 )
 
         aftermath_status: str | None = None
+        memory_postprocess_failure_code: str | None = None
         if self._aftermath_followup is not None and author_status != "planned":
             try:
                 aftermath_result = self._aftermath_followup.advance_once(
@@ -410,6 +412,26 @@ class LifeEcologyRuntime:
                         )
                     if followup_status == "transitioned":
                         biographical_status = followup_status
+            except FactMemoryDraftTechnicalFailure as exc:
+                # Experience-memory classification is post-processing of an
+                # already durable lived event.  A provider/parse failure must
+                # remain visible and retryable on a later wake, but it must not
+                # discard this ecology opportunity or prevent unrelated life
+                # and media lanes from advancing.
+                normalized = re.sub(
+                    r"[^a-z0-9._-]+",
+                    "_",
+                    exc.failure_code.lower(),
+                ).strip("._-")
+                memory_postprocess_failure_code = "memory." + (
+                    normalized[:80] or "unknown"
+                )
+                aftermath_status = "memory_technical_failure"
+                _LOG.warning(
+                    "life ecology memory postprocess deferred wake=%s failure=%s",
+                    wake_event_ref,
+                    memory_postprocess_failure_code,
+                )
             except LifeAftermathModelFailure as exc:
                 normalized = re.sub(
                     r"[^a-z0-9._-]+",
@@ -849,7 +871,10 @@ class LifeEcologyRuntime:
                 if life_development_failure_code is not None
                 else None
             ),
-            technical_failure_code=life_development_failure_code,
+            technical_failure_code=(
+                life_development_failure_code
+                or memory_postprocess_failure_code
+            ),
         )
 
     def _validated_wake(self, *, wake_event_ref: str) -> datetime | None:

@@ -219,10 +219,12 @@ def _location_bound_world_draft(
     dynamic_direction: dict[str, object] | None = None,
     causal_authority: str = "world_contingency",
     outcome_resolution_authority: str = "world_contingency",
+    visual_evidence: dict[str, object] | None = None,
 ) -> str:
     return json.dumps(
         {
             "decision": "propose",
+            "authored_subject_ref": OWNER,
             "causal_authority": causal_authority,
             "outcome_resolution_authority": outcome_resolution_authority,
             "premise_scope": "external_opportunity",
@@ -245,25 +247,206 @@ def _location_bound_world_draft(
             "privacy_class": privacy_class,
             "outcomes": [
                 {
+                    "experienced_by_ref": OWNER,
                     "text": "变化留下了一些影响。",
                     "privacy_class": privacy_class,
                     "relative_plausibility_weight": 1,
                     "claim_refs": ["local:claim:location-change"],
                     "provisional_npcs": [],
                     "dynamic_life_direction": dynamic_direction,
+                    "visual_evidence": visual_evidence,
                 },
                 {
+                    "experienced_by_ref": OWNER,
                     "text": "变化很快过去了。",
                     "privacy_class": privacy_class,
                     "relative_plausibility_weight": 1,
                     "claim_refs": ["local:claim:location-change"],
                     "provisional_npcs": [],
                     "dynamic_life_direction": None,
+                    "visual_evidence": None,
                 },
             ],
         },
         ensure_ascii=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_world_author_optional_visual_evidence_is_claim_closed_and_persisted() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = _location_bound_world_draft(
+        wake=wake,
+        capability=capability,
+        timing={"mode": "now", "duration_minutes": 30},
+        privacy_class="shareable",
+        visual_evidence={
+            "claim_refs": ["local:claim:location-change"],
+            "activity_description": "暑假实习下班后在校外院子里避一阵急雨",
+            "location": {
+                "location_ref": capability.location_ref,
+                "kind": "off_campus_courtyard",
+                "city": "上海",
+                "publicness": "public",
+            },
+            "environment": {
+                "weather": "summer shower",
+                "structure": "open courtyard outside the internship office",
+            },
+            "objects": [],
+        },
+    )
+    runtime, _store = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(model="world-author", outputs=(raw,)),
+        character_model=_SequenceModel(model="character", outputs=()),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:visual",
+        correlation_id="correlation:visual",
+    )
+
+    assert result.status == "occurrence_committed"
+    proposal = ledger.lookup_event_commit(result.proposal_event_ref)[0]
+    visual = proposal.payload()["possibility_authority"]["outcomes"][0][
+        "visual_evidence"
+    ]
+    assert visual["claim_refs"] == ["local:claim:location-change"]
+    assert visual["location"]["location_ref"] == capability.location_ref
+    assert visual["environment"]["weather"] == "summer shower"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("claim_refs", ["local:claim:not-in-outcome"]),
+        (
+            "location",
+            {
+                "location_ref": "location:unavailable-trip",
+                "kind": "unreviewed_place",
+            },
+        ),
+    ],
+)
+def test_world_author_visual_evidence_cannot_escape_claim_or_location_authority(
+    field: str,
+    value: object,
+) -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = json.loads(
+        _location_bound_world_draft(
+            wake=wake,
+            capability=capability,
+            timing={"mode": "now", "duration_minutes": 30},
+            privacy_class="shareable",
+            visual_evidence={
+                "claim_refs": ["local:claim:location-change"],
+                "activity_description": "在院子里避雨",
+                "location": {
+                    "location_ref": capability.location_ref,
+                    "kind": "courtyard",
+                },
+                "objects": [],
+            },
+        )
+    )
+    raw["outcomes"][0]["visual_evidence"][field] = value
+
+    with pytest.raises(LifeDevelopmentDraftError, match="invalid_shape"):
+        parse_world_author_draft(
+            raw=json.dumps(raw, ensure_ascii=False),
+            manifest=_manifest(
+                wake,
+                pinned_cursor=_projection_cursor(ledger),
+                location_capability=capability,
+            ),
+            logical_time=NOW,
+        )
+
+
+def test_legacy_world_author_shape_reports_actionable_schema_paths() -> None:
+    """A production-shaped stale response must tell the corrective model what changed."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    raw = json.dumps(
+        {
+            "causal_authority": "character_choice",
+            "premise": "暑假清晨出现了一段空闲时间。",
+            "outcomes": [
+                {
+                    "outcome_id": "outcome:legacy",
+                    "description": "她决定读一会儿书。",
+                    "outcome_resolution_authority": "character_choice",
+                    "visual_evidence": {
+                        "claim_refs": [],
+                        "description": "窗边摊着一本书。",
+                    },
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    with pytest.raises(LifeDevelopmentDraftError) as raised:
+        parse_world_author_draft(
+            raw=raw,
+            manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger)),
+            logical_time=NOW,
+        )
+
+    assert raised.value.code == "invalid_shape"
+    assert "decision" in raised.value.detail
+    assert "claim_declarations" in raised.value.detail
+    assert "outcomes.0.outcome_id" in raised.value.detail
+
+
+def test_world_author_accepts_one_pure_json_markdown_transport_envelope() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+
+    parsed = parse_world_author_draft(
+        raw='```json\n{"decision":"no_op"}\n```',
+        manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger)),
+        logical_time=NOW,
+    )
+
+    assert parsed.decision == "no_op"
+
+
+def test_world_author_cannot_bind_character_life_outcomes_to_the_user() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = json.loads(
+        _location_bound_world_draft(
+            wake=wake,
+            capability=capability,
+            timing={"mode": "now", "duration_minutes": 30},
+            privacy_class="shareable",
+        )
+    )
+    raw["authored_subject_ref"] = "user:geoff"
+    for outcome in raw["outcomes"]:
+        outcome["experienced_by_ref"] = "user:geoff"
+
+    with pytest.raises(
+        LifeDevelopmentDraftError,
+        match="unauthorized_authored_subject",
+    ):
+        parse_world_author_draft(
+            raw=json.dumps(raw, ensure_ascii=False),
+            manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger)),
+            logical_time=NOW,
+        )
 
 
 def _manifest(
@@ -274,6 +457,7 @@ def _manifest(
 ) -> LifeDevelopmentCapabilityManifest:
     return LifeDevelopmentCapabilityManifest(
         version="life-development-capability.test.1",
+        owner_actor_ref=OWNER,
         pinned_cursor=pinned_cursor,
         anchor_refs=(wake.event_id,),
         grounding_refs=(wake.event_id,),
@@ -281,6 +465,26 @@ def _manifest(
         entity_refs=(),
         max_future_days=30,
         max_window_minutes=12 * 60,
+    )
+
+
+def test_legacy_capability_manifest_hash_excludes_decoded_owner_sentinel() -> None:
+    manifest = LifeDevelopmentCapabilityManifest(
+        version="life-development-capability.production.1",
+        pinned_cursor=ProjectionCursor(
+            world_revision=1,
+            deliberation_revision=2,
+            ledger_sequence=3,
+        ),
+        anchor_refs=("event:legacy-anchor",),
+        grounding_refs=("event:legacy-anchor",),
+        max_future_days=30,
+        max_window_minutes=720,
+    )
+
+    assert manifest.owner_actor_ref == "legacy:unknown-owner"
+    assert manifest.manifest_hash == _hash_json(
+        manifest.model_dump(mode="json", exclude={"owner_actor_ref"})
     )
 
 
@@ -334,6 +538,7 @@ def test_location_capability_enforces_privacy_and_complete_local_window() -> Non
     )
     private_manifest = LifeDevelopmentCapabilityManifest(
         version="life-development-capability.test.location",
+        owner_actor_ref=OWNER,
         pinned_cursor=_projection_cursor(ledger),
         anchor_refs=(wake.event_id,),
         grounding_refs=(wake.event_id,),
@@ -509,6 +714,7 @@ def _location_bound_occurrence_batch(
     }
     manifest = LifeDevelopmentCapabilityManifest(
         version="life-development-capability.batch-test.1",
+        owner_actor_ref=OWNER,
         pinned_cursor=ProjectionCursor(
             world_revision=1,
             deliberation_revision=0,
@@ -824,6 +1030,7 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
     wake = _seed_clock(ledger)
     adverse = {
         "decision": "propose",
+        "authored_subject_ref": OWNER,
         "causal_authority": "world_contingency",
         "outcome_resolution_authority": "world_contingency",
         "premise_scope": "external_opportunity",
@@ -846,6 +1053,7 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
         "privacy_class": "personal",
         "outcomes": [
             {
+                "experienced_by_ref": OWNER,
                 "text": "她赶到时还是有几页洇开了，字迹糊成一团。",
                 "privacy_class": "personal",
                 "relative_plausibility_weight": 1,
@@ -861,6 +1069,7 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
                 "dynamic_life_direction": None,
             },
             {
+                "experienced_by_ref": OWNER,
                 "text": "她及时收回了手账，只湿了封面和边角。",
                 "privacy_class": "personal",
                 "relative_plausibility_weight": 3,
@@ -947,7 +1156,11 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
     location_capability = _location_capability()
     assert proposal_payload["causal_authority"] == "world_contingency"
     assert proposal_payload["model_role"] == "world_author"
-    assert proposal_payload["possibility_authority_version"] == "life-development-possibility.2"
+    assert proposal_payload["possibility_authority_version"] == "life-development-possibility.3"
+    assert possibility_authority["authored_subject_ref"] == OWNER
+    assert {
+        item["experienced_by_ref"] for item in possibility_authority["outcomes"]
+    } == {OWNER}
     assert possibility_authority["location_capability_ref"] == location_capability.capability_ref
     assert possibility_authority["location_capability"] == (
         location_capability.model_dump(
@@ -959,6 +1172,46 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
         "policy:life-development-v1",
         "policy:test-location",
     }
+    tampered_payload = json.loads(json.dumps(proposal_payload))
+    tampered_possibility = tampered_payload["possibility_authority"]
+    tampered_possibility["outcomes"][0]["experienced_by_ref"] = "user:geoff"
+    tampered_payload["possibility_authority_hash"] = _hash_json(
+        tampered_possibility
+    )
+    tampered_proposal = WorldEvent.from_payload(
+        payload=tampered_payload,
+        **proposal_event.model_dump(
+            mode="python",
+            exclude={"payload_json", "payload_hash"},
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="outcomes do not close over their authored subject",
+    ):
+        validate_commit_batch(
+            (tampered_proposal, occurrence_event),
+            expected_world_revision=0,
+            accepted_manifest_v3_authorized=True,
+        )
+    tampered_occurrence_payload = occurrence_event.payload()
+    tampered_occurrence_payload["occurrence"]["participant_refs"] = ["user:geoff"]
+    tampered_occurrence = WorldEvent.from_payload(
+        payload=tampered_occurrence_payload,
+        **occurrence_event.model_dump(
+            mode="python",
+            exclude={"payload_json", "payload_hash"},
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="occurrence participants exceed authored subject authority",
+    ):
+        validate_commit_batch(
+            (proposal_event, tampered_occurrence),
+            expected_world_revision=0,
+            accepted_manifest_v3_authorized=True,
+        )
     assert occurrence_event.causation_id == proposal_event.event_id
     assert proposal_commit == occurrence_commit
     assert proposal_commit.event_ids == (
@@ -1132,6 +1385,7 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
     chosen_closes = NOW + timedelta(hours=3, minutes=30)
     opportunity = {
         "decision": "propose",
+        "authored_subject_ref": OWNER,
         "causal_authority": "character_choice",
         "outcome_resolution_authority": "character_choice",
         "premise_scope": "external_opportunity",
@@ -1158,6 +1412,7 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
         "privacy_class": "shareable",
         "outcomes": [
             {
+                "experienced_by_ref": OWNER,
                 "text": "电影放完时风有点凉，院子里的人慢慢散了。",
                 "privacy_class": "shareable",
                 "relative_plausibility_weight": 1,
@@ -1169,8 +1424,23 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
                     "duration_days": 14,
                     "privacy_class": "personal",
                 },
+                "visual_evidence": {
+                    "claim_refs": ["local:claim:screening"],
+                    "activity_description": "在校外院子里看临时露天电影",
+                    "location": {
+                        "location_ref": "location:campus-courtyard",
+                        "kind": "open_courtyard",
+                        "publicness": "public",
+                    },
+                    "environment": {
+                        "light": "projector light after sunset",
+                        "structure": "temporary outdoor screen and folding chairs",
+                    },
+                    "objects": [],
+                },
             },
             {
+                "experienced_by_ref": OWNER,
                 "text": "中途下了一点小雨，放映比预计早结束。",
                 "privacy_class": "shareable",
                 "relative_plausibility_weight": 1,
@@ -1182,6 +1452,7 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
                     "duration_days": 10,
                     "privacy_class": "personal",
                 },
+                "visual_evidence": None,
             },
         ],
     }
@@ -1280,6 +1551,12 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
     assert [item.text for item in material.outcomes] == [
         item["text"] for item in opportunity["outcomes"]
     ]
+    assert material.outcomes[0].visual_evidence is not None
+    assert (
+        material.outcomes[0].visual_evidence.activity_description
+        == "在校外院子里看临时露天电影"
+    )
+    assert material.outcomes[1].visual_evidence is None
     assert {item.descriptor.causal_authority for item in material.outcomes} == {"character_choice"}
     assert all(item.descriptor.dynamic_life_arc_context is not None for item in material.outcomes)
 
@@ -1301,6 +1578,69 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
         "policy:life-development-v1",
         "policy:test-location",
     }
+    tampered_plan_payload = plan_event.payload()
+    tampered_plan_payload["plan"]["owner_actor_ref"] = "user:geoff"
+    tampered_plan = WorldEvent.from_payload(
+        payload=tampered_plan_payload,
+        **plan_event.model_dump(
+            mode="python",
+            exclude={"payload_json", "payload_hash"},
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="Plan owner exceeds authored subject authority",
+    ):
+        validate_commit_batch(
+            (proposal_event, tampered_plan),
+            expected_world_revision=0,
+            accepted_manifest_v3_authorized=True,
+        )
+    tampered_participants_payload = plan_event.payload()
+    tampered_participants_payload["plan"]["participant_refs"] = ["user:geoff"]
+    tampered_participants = WorldEvent.from_payload(
+        payload=tampered_participants_payload,
+        **plan_event.model_dump(
+            mode="python",
+            exclude={"payload_json", "payload_hash"},
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="Plan participants exceed character choice authority",
+    ):
+        validate_commit_batch(
+            (proposal_event, tampered_participants),
+            expected_world_revision=0,
+            accepted_manifest_v3_authorized=True,
+        )
+    coordinated_proposal_payload = json.loads(json.dumps(proposal))
+    coordinated_possibility = coordinated_proposal_payload["possibility_authority"]
+    coordinated_possibility["entity_refs"] = ["user:geoff"]
+    coordinated_proposal_payload["possibility_authority_hash"] = _hash_json(
+        coordinated_possibility
+    )
+    coordinated_choice = coordinated_proposal_payload["character_choice"]
+    coordinated_choice["participant_refs"] = ["user:geoff"]
+    coordinated_proposal_payload["character_choice_hash"] = _hash_json(
+        coordinated_choice
+    )
+    coordinated_proposal = WorldEvent.from_payload(
+        payload=coordinated_proposal_payload,
+        **proposal_event.model_dump(
+            mode="python",
+            exclude={"payload_json", "payload_hash"},
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="possibility entities exceed pinned manifest authority",
+    ):
+        validate_commit_batch(
+            (coordinated_proposal, tampered_participants),
+            expected_world_revision=0,
+            accepted_manifest_v3_authorized=True,
+        )
     assert plan_event.causation_id == proposal_event.event_id
     assert proposal_commit == plan_commit
     assert proposal_commit.event_ids == (
@@ -1315,6 +1655,7 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
     wake = _seed_clock(ledger)
     invalid = {
         "decision": "propose",
+        "authored_subject_ref": OWNER,
         "causal_authority": "world_contingency",
         "outcome_resolution_authority": "world_contingency",
         "premise_scope": "external_opportunity",
@@ -1337,6 +1678,7 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
         "privacy_class": "personal",
         "outcomes": [
             {
+                "experienced_by_ref": OWNER,
                 "text": "变化持续了一会儿。",
                 "privacy_class": "personal",
                 "relative_plausibility_weight": 1,
@@ -1345,6 +1687,7 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
                 "dynamic_life_direction": None,
             },
             {
+                "experienced_by_ref": OWNER,
                 "text": "变化很快结束。",
                 "privacy_class": "personal",
                 "relative_plausibility_weight": 1,
@@ -1380,9 +1723,20 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
 
     assert result.status == "no_op"
     assert world_author.calls == 2
+    primary_request = json.loads(world_author.messages[0][-1]["content"])
+    assert primary_request["authored_subject"] == {
+        "owner_actor_ref": OWNER,
+        "user_authority": "context_only",
+    }
+    assert primary_request["output_contract"]["no_op"] == {"decision": "no_op"}
+    assert (
+        primary_request["output_contract"]["propose"]["properties"]["decision"]["const"]
+        == "propose"
+    )
     repair_request = json.loads(world_author.messages[1][-1]["content"])
     assert repair_request["validation_failure"]["code"] == "unsupported_location_window"
     assert "same pinned Context and capability manifest" in repair_request["instruction"]
+    assert "never author the user's choices" in world_author.messages[0][0]["content"]
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
     assert proposal["repair_ordinal"] == 1
     audits = [

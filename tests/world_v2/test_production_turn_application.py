@@ -486,6 +486,35 @@ class _RelationshipSignalChat:
         )
 
 
+class _ContinuityAwareRelationshipChat(_RelationshipSignalChat):
+    """Fixture role model that chooses a change only from verified continuity."""
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.2
+        self.messages.append(messages)
+        capsule = json.loads(messages[1]["content"])
+        continuity = capsule.get("interaction_continuity")
+        if not isinstance(continuity, dict) or continuity.get("counterpart_turn_count", 0) < 2:
+            return '{"decision":"no_change"}'
+        return json.dumps(
+            {
+                "decision": "signal",
+                "signal_code": "ongoing_exchange_mattered",
+                "confidence_bp": 6800,
+                "persistence": "session",
+                "rationale_code": "character_interpreted_continuity",
+                "suggested_deltas": {
+                    "trust_bp": 0,
+                    "closeness_bp": 80,
+                    "respect_bp": 0,
+                    "reliability_bp": 0,
+                    "mutuality_bp": 100,
+                    "repair_confidence_bp": 0,
+                },
+            }
+        )
+
+
 class _RelationshipStrongSignalChat(_RelationshipSignalChat):
     """Fixture-only evidence whose bounded accumulation crosses each stage gate."""
 
@@ -2651,6 +2680,61 @@ async def test_production_application_builds_first_relationship_from_appraisal(
     assert projection.relationship_signals[0].subject_ref == "user:user.1"
     assert projection.relationship_states[0].stage == "stranger"
     assert projection.relationship_states[0].variables.trust_bp == 240
+
+
+@pytest.mark.asyncio
+async def test_sustained_interaction_is_source_bound_context_for_model_owned_relationship_change(
+    tmp_path: Path,
+) -> None:
+    """Ordinary turns create evidence; only the role model assigns meaning."""
+
+    path = tmp_path / "world-v2-continuous-relationship.sqlite"
+    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
+    relationship_chat = _ContinuityAwareRelationshipChat()
+    app = build_sqlite_world_v2_turn_application(
+        path=path,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=reply_model,
+        quick_recovery=reply_model,
+        appraisal_model=AppraisalDraftDeliberationAdapter(model=_AppraisingChat()),
+        relationship_model=RelationshipDraftDeliberationAdapter(model=relationship_chat),
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        for index, text in enumerate(("今天随便聊聊。", "嗯，我还在。"), start=1):
+            await app.respond(
+                InboundTurn(
+                    platform="test",
+                    platform_user_id="user.1",
+                    platform_message_id=f"message:continuity:{index}",
+                    text=text,
+                    observed_at=NOW + timedelta(minutes=index),
+                    trace_id=f"trace:continuity:{index}",
+                )
+            )
+        for _ in range(16):
+            await app.drain_background_once()
+            projection = app._ledger.project()  # noqa: SLF001 - production seam evidence
+            if projection.relationship_adjustments:
+                break
+        else:
+            pytest.fail("sustained interaction never reached relationship projection")
+    finally:
+        app.close()
+
+    assert projection.relationship_states[0].variables.closeness_bp == 80
+    assert projection.relationship_states[0].variables.mutuality_bp == 100
+    model_capsule = json.loads(relationship_chat.messages[0][1]["content"])
+    continuity = model_capsule["interaction_continuity"]
+    assert continuity["counterpart_turn_count"] == 2
+    assert len(continuity["source_items"]) >= 2
+    assert all(item["item_ref"].startswith("dialogue:") for item in continuity["source_items"])
+    assert set(continuity).isdisjoint(
+        {"sentiment", "polarity", "relationship_delta", "suggested_stage"}
+    )
 
 
 @pytest.mark.asyncio

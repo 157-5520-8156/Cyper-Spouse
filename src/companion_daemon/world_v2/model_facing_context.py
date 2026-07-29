@@ -306,6 +306,81 @@ def _core_state_entry(item: dict[str, object]) -> dict[str, object] | None:
     return {"slow_evolving": slow, "source_ref": source_ref}
 
 
+def _recent_experience_state_entry(
+    item: dict[str, object],
+    *,
+    lane: str,
+) -> dict[str, object] | None:
+    """Keep a small semantic, source-bound view of the companion's own past.
+
+    ``recent_experiences`` contains the committed Experience projection while
+    ``world_life`` can additionally carry descriptor-bound prose from the
+    immutable life-content store. Neither lane is interpreted here: this view
+    only removes proof/accounting material and retains the Capsule item token.
+    """
+
+    source_ref = item.get("source_ref")
+    value = item.get("value")
+    if (
+        not isinstance(source_ref, str)
+        or not source_ref
+        or not isinstance(value, dict)
+    ):
+        return None
+    if lane == "world_life":
+        if value.get("context_kind") == "biographical_context":
+            return None
+        fields = (
+            "occurrence_id",
+            "occurrence_entity_revision",
+            "participant_refs",
+            "location_ref",
+            "result_id",
+            "settled_at",
+            "privacy_class",
+            "content",
+        )
+        semantic = {key: value[key] for key in fields if key in value}
+    else:
+        values = value.get("values")
+        if not isinstance(values, dict):
+            return None
+        fields = (
+            "summary_ref",
+            "occurred_from",
+            "occurred_to",
+            "participant_refs",
+            "privacy_class",
+        )
+        semantic = {
+            **(
+                {"experience_id": value["experience_id"]}
+                if isinstance(value.get("experience_id"), str)
+                else {}
+            ),
+            **{key: values[key] for key in fields if key in values},
+        }
+    if not semantic:
+        return None
+    return {**semantic, "source_ref": source_ref}
+
+
+def _state_source_refs(state: dict[str, object]) -> list[str]:
+    """Collect only the semantic Capsule item refs represented in this view."""
+
+    refs: set[str] = set()
+    for value in state.values():
+        candidates: object = value
+        if isinstance(value, dict) and isinstance(value.get("items"), list):
+            candidates = value["items"]
+        if not isinstance(candidates, list):
+            continue
+        for item in candidates:
+            if isinstance(item, dict) and isinstance(item.get("source_ref"), str):
+                refs.add(item["source_ref"])
+    return sorted(refs)
+
+
 def _build_current_self_state(
     *,
     slices: dict[str, object],
@@ -459,6 +534,24 @@ def _build_current_self_state(
     ]
     if affect:
         state["affect"] = affect
+    recent_self_experiences = [
+        entry
+        for lane in ("world_life", "recent_experiences")
+        for item in _slice_items(slices, lane)
+        for entry in (_recent_experience_state_entry(item, lane=lane),)
+        if entry is not None
+    ][:2]
+    state["recent_self_experiences"] = (
+        {
+            "availability": "available",
+            "items": recent_self_experiences,
+        }
+        if recent_self_experiences
+        else {"availability": "unavailable"}
+    )
+    source_refs = _state_source_refs(state)
+    state["source_refs"] = source_refs
+    state["availability"] = "available" if source_refs else "unavailable"
     return state
 
 

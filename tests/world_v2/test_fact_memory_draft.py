@@ -111,6 +111,38 @@ class _ExperienceChat:
         return '{"retain":false}'
 
 
+class _ProviderRejectsStructuredJsonChat:
+    model = "provider-with-incompatible-json-mode"
+
+    def __init__(self) -> None:
+        self.complete_calls = 0
+        self.complete_json_calls = 0
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        del messages, temperature
+        self.complete_calls += 1
+        return '{"retain":false}'
+
+    async def complete_json(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        del messages, temperature
+        self.complete_json_calls += 1
+        raise RuntimeError("provider rejected response_format=json_object")
+
+
+@pytest.mark.asyncio
+async def test_memory_classification_uses_locally_validated_plain_completion() -> None:
+    model = _ProviderRejectsStructuredJsonChat()
+
+    result = await ExperienceMemoryDraftAdapter(model=model).classify(
+        predicate_code="world.experience",
+        source_text="她下班路上遇见一场很急的夏雨。",
+    )
+
+    assert result is None
+    assert model.complete_calls == 1
+    assert model.complete_json_calls == 0
+
+
 @pytest.mark.asyncio
 async def test_experience_adapter_leaves_lived_retention_to_the_character() -> None:
     result = await ExperienceMemoryDraftAdapter(model=_ExperienceChat()).classify(

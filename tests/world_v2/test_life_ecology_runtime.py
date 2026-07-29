@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from companion_daemon.world_v2.fact_memory_draft import (
+    FactMemoryDraftTechnicalFailure,
+)
 from companion_daemon.world_v2.life_ecology_runtime import (
     LifeEcologyAvailability,
     LifeEcologyRunClaim,
@@ -715,6 +718,34 @@ async def test_aftermath_model_failure_keeps_its_precise_technical_retry_code() 
         "technical_failure.aftermath.corrective_invalid"
     )
     assert media.calls == []
+
+
+@pytest.mark.asyncio
+async def test_memory_postprocess_failure_does_not_abort_the_life_ecology_round() -> None:
+    event = _event("clock-memory-postprocess-failure")
+    trigger_store, media = _TriggerStore(), _Media()
+    aftermath = _Aftermath(
+        raises=FactMemoryDraftTechnicalFailure("provider_exception")
+    )
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        aftermath_followup=aftermath,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:memory-postprocess-failure",
+        correlation_id="correlation:memory-postprocess-failure",
+    )
+
+    assert result.status == "idle"
+    assert result.aftermath_followup_status == "memory_technical_failure"
+    assert result.technical_failure_code == "memory.provider_exception"
+    assert len(media.calls) == 1
+    assert trigger_store.completed[0][2] == "idle"
 
 
 @pytest.mark.asyncio

@@ -745,9 +745,11 @@ class _SelectingLifeEcologyModel:
         capsule = json.loads(messages[-1]["content"])
         if "You are the World Author" in system:
             anchor = capsule["capability_manifest"]["anchor_refs"][0]
+            owner_actor_ref = capsule["authored_subject"]["owner_actor_ref"]
             return json.dumps(
                 {
                     "decision": "propose",
+                    "authored_subject_ref": owner_actor_ref,
                     "causal_authority": "character_choice",
                     "outcome_resolution_authority": "world_contingency",
                     "premise_scope": "external_opportunity",
@@ -769,6 +771,7 @@ class _SelectingLifeEcologyModel:
                     "privacy_class": "shareable",
                     "outcomes": [
                         {
+                            "experienced_by_ref": owner_actor_ref,
                             "text": "散步平静结束了。",
                             "privacy_class": "shareable",
                             "relative_plausibility_weight": 1,
@@ -777,6 +780,7 @@ class _SelectingLifeEcologyModel:
                             "dynamic_life_direction": None,
                         },
                         {
+                            "experienced_by_ref": owner_actor_ref,
                             "text": "走到一半下了小雨，于是提前回来了。",
                             "privacy_class": "shareable",
                             "relative_plausibility_weight": 1,

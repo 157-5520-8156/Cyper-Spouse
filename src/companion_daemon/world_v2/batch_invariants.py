@@ -700,6 +700,90 @@ def _validate_life_development_location_authority_batch(
             continue
         if not isinstance(possibility, dict):
             raise ValueError("life-development possibility authority must be an object")
+        possibility_version = proposal.get("possibility_authority_version")
+        if possibility_version not in {
+            "life-development-possibility.2",
+            "life-development-possibility.3",
+        }:
+            raise ValueError("life-development possibility authority version is unknown")
+        if possibility_version == "life-development-possibility.3":
+            expected_possibility_hash = hashlib.sha256(
+                json.dumps(
+                    possibility,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if proposal.get("possibility_authority_hash") != expected_possibility_hash:
+                raise ValueError(
+                    "life-development possibility subject authority hash is invalid"
+                )
+            authored_subject_ref = possibility.get("authored_subject_ref")
+            outcomes = possibility.get("outcomes")
+            if (
+                not isinstance(authored_subject_ref, str)
+                or not isinstance(outcomes, list)
+                or not outcomes
+                or any(
+                    not isinstance(outcome, dict)
+                    or outcome.get("experienced_by_ref") != authored_subject_ref
+                    for outcome in outcomes
+                )
+            ):
+                raise ValueError(
+                    "life-development outcomes do not close over their authored subject"
+                )
+            deliberation = proposal.get("world_author_deliberation")
+            manifest_value = (
+                deliberation.get("capability_manifest")
+                if isinstance(deliberation, dict)
+                else None
+            )
+            if not isinstance(manifest_value, dict):
+                raise ValueError(
+                    "life-development subject has no pinned capability manifest"
+                )
+            try:
+                subject_manifest = LifeDevelopmentCapabilityManifest.model_validate_json(
+                    json.dumps(
+                        manifest_value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "life-development subject capability manifest is invalid"
+                ) from exc
+            if (
+                subject_manifest.owner_actor_ref != authored_subject_ref
+                or proposal.get("capability_manifest_version")
+                != subject_manifest.version
+                or proposal.get("capability_manifest_hash")
+                != subject_manifest.manifest_hash
+            ):
+                raise ValueError(
+                    "life-development authored subject exceeds its pinned authority"
+                )
+            possibility_entity_refs = possibility.get("entity_refs")
+            if (
+                not isinstance(possibility_entity_refs, list)
+                or any(not isinstance(ref, str) for ref in possibility_entity_refs)
+                or not set(possibility_entity_refs)
+                <= set(subject_manifest.entity_refs)
+            ):
+                raise ValueError(
+                    "life-development possibility entities exceed pinned manifest authority"
+                )
+            _validate_life_development_subject_effect(
+                events=events,
+                proposal_event=proposal_event,
+                proposal=proposal,
+                possibility=possibility,
+                authored_subject_ref=authored_subject_ref,
+            )
         location_ref = possibility.get("location_ref")
         capability_ref = possibility.get("location_capability_ref")
         capability_value = possibility.get("location_capability")
@@ -722,7 +806,11 @@ def _validate_life_development_location_authority_batch(
                 raise ValueError("life-development bare location effect has no frozen capability")
             continue
         if (
-            proposal.get("possibility_authority_version") != "life-development-possibility.2"
+            possibility_version
+            not in {
+                "life-development-possibility.2",
+                "life-development-possibility.3",
+            }
             or not isinstance(location_ref, str)
             or not isinstance(capability_ref, str)
             or not isinstance(capability_value, dict)
@@ -889,6 +977,91 @@ def _validate_life_development_location_authority_batch(
                 "life-development location capability authority is absent "
                 "from effect evidence or policy refs"
             )
+
+
+def _validate_life_development_subject_effect(
+    *,
+    events: Sequence[WorldEvent],
+    proposal_event: WorldEvent,
+    proposal: dict[str, object],
+    possibility: dict[str, object],
+    authored_subject_ref: str,
+) -> None:
+    """Close `.3` subject authority through the adjacent executable effect."""
+
+    effect_kind = proposal.get("effect_kind")
+    effect_ref = proposal.get("effect_ref")
+    if effect_kind is None and effect_ref is None:
+        return
+    if not isinstance(effect_ref, str):
+        raise ValueError("life-development subject effect identity is incomplete")
+    if effect_kind == "character_plan":
+        matching = [
+            event
+            for event in events
+            if event.event_type == "ActivityPlanned"
+            and event.causation_id == proposal_event.event_id
+        ]
+        if len(matching) != 1:
+            raise ValueError(
+                "life-development subject authority requires one adjacent Plan"
+            )
+        effect = ActivityPlannedPayload.model_validate_json(matching[0].payload_json)
+        if (
+            effect.plan.plan_id != effect_ref
+            or effect.plan.owner_actor_ref != authored_subject_ref
+        ):
+            raise ValueError(
+                "life-development Plan owner exceeds authored subject authority"
+            )
+        character_choice = proposal.get("character_choice")
+        chosen_participants = (
+            character_choice.get("participant_refs")
+            if isinstance(character_choice, dict)
+            else None
+        )
+        entity_refs = possibility.get("entity_refs")
+        if (
+            not isinstance(chosen_participants, list)
+            or any(not isinstance(ref, str) for ref in chosen_participants)
+            or not isinstance(entity_refs, list)
+            or any(not isinstance(ref, str) for ref in entity_refs)
+            or not set(chosen_participants) <= set(entity_refs)
+            or effect.plan.participant_refs != tuple(chosen_participants)
+        ):
+            raise ValueError(
+                "life-development Plan participants exceed character choice authority"
+            )
+        return
+    if effect_kind == "world_occurrence":
+        matching = [
+            event
+            for event in events
+            if event.event_type == "WorldOccurrenceCommitted"
+            and event.causation_id == proposal_event.event_id
+        ]
+        if len(matching) != 1:
+            raise ValueError(
+                "life-development subject authority requires one adjacent occurrence"
+            )
+        effect = WorldOccurrenceCommittedPayload.model_validate_json(
+            matching[0].payload_json
+        )
+        entity_refs = possibility.get("entity_refs")
+        if not isinstance(entity_refs, list) or any(
+            not isinstance(ref, str) for ref in entity_refs
+        ):
+            raise ValueError("life-development possibility entity refs are invalid")
+        expected_participants = (authored_subject_ref, *entity_refs)
+        if (
+            effect.occurrence.occurrence_id != effect_ref
+            or effect.occurrence.participant_refs != expected_participants
+        ):
+            raise ValueError(
+                "life-development occurrence participants exceed authored subject authority"
+            )
+        return
+    raise ValueError("life-development subject effect kind is invalid")
 
 
 def _life_development_offered_window(

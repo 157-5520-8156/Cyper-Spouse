@@ -192,8 +192,30 @@ def _rich_request() -> ModelInput:
     material["slices"]["recent_dialogue"] = {
         "availability": "available",
         "items": [
-            {"value": {"speaker": "counterpart", "text": "那你会心疼我嘛", "sequence": 1}},
-            {"value": {"speaker": "companion", "text": "会呀，怎么突然这么问", "sequence": 2}},
+            {
+                "item_ref": "dialogue:observation:1",
+                "source_hash": "1" * 64,
+                "value_hash": "2" * 64,
+                "value": {
+                    "speaker": "counterpart",
+                    "text": "那你会心疼我嘛",
+                    "sequence": 1,
+                    "delivery_state": "observed",
+                    "occurred_at": "2026-07-20T09:00:00+08:00",
+                },
+            },
+            {
+                "item_ref": "dialogue:expression:1",
+                "source_hash": "3" * 64,
+                "value_hash": "4" * 64,
+                "value": {
+                    "speaker": "companion",
+                    "text": "会呀，怎么突然这么问",
+                    "sequence": 2,
+                    "delivery_state": "delivered",
+                    "occurred_at": "2026-07-20T09:00:05+08:00",
+                },
+            },
         ],
     }
     material["slices"]["affect_episodes"] = {
@@ -237,6 +259,38 @@ async def test_draft_capsule_carries_bounded_dialogue_and_affect_context() -> No
 
 
 @pytest.mark.asyncio
+async def test_draft_capsule_exposes_source_bound_interaction_continuity_without_semantic_score() -> None:
+    model = _CapturingModel()
+
+    await RelationshipDraftDeliberationAdapter(model=model).propose(_rich_request())
+
+    capsule = json.loads(model.messages[0][1]["content"])
+    continuity = capsule["interaction_continuity"]
+    assert continuity == {
+        "counterpart_turn_count": 1,
+        "companion_turn_count": 1,
+        "delivered_companion_turn_count": 1,
+        "first_occurred_at": "2026-07-20T09:00:00+08:00",
+        "last_occurred_at": "2026-07-20T09:00:05+08:00",
+        "source_items": [
+            {
+                "item_ref": "dialogue:observation:1",
+                "source_hash": "1" * 64,
+                "value_hash": "2" * 64,
+            },
+            {
+                "item_ref": "dialogue:expression:1",
+                "source_hash": "3" * 64,
+                "value_hash": "4" * 64,
+            },
+        ],
+    }
+    assert set(continuity).isdisjoint(
+        {"sentiment", "warmth", "polarity", "relationship_delta", "suggested_stage"}
+    )
+
+
+@pytest.mark.asyncio
 async def test_missing_optional_slices_still_produce_a_draft() -> None:
     model = _CapturingModel()
 
@@ -247,6 +301,7 @@ async def test_missing_optional_slices_still_produce_a_draft() -> None:
     capsule = json.loads(model.messages[0][1]["content"])
     assert capsule["recent_dialogue_summaries"] == []
     assert capsule["active_affect_summaries"] == []
+    assert capsule["interaction_continuity"] is None
 
 
 @pytest.mark.asyncio

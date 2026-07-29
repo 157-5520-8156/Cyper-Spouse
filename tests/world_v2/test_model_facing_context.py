@@ -363,6 +363,106 @@ def test_current_self_state_omits_entries_without_a_capsule_source_token() -> No
     assert "affect" not in current
 
 
+def test_chat_view_keeps_source_bound_recent_self_experience_in_current_self_state() -> None:
+    raw = json.dumps(
+        {
+            "logical_time": "2026-07-28T08:00:00+08:00",
+            "slices": {
+                "character_core": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "character-core:1",
+                            "value": {
+                                "values": {
+                                    "slow_evolving": {
+                                        "trait_axes": [
+                                            {"axis_code": "curiosity", "value_bp": 6400}
+                                        ],
+                                        "autonomy_style": "self_directed",
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                },
+                "recent_experiences": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "experience:walk",
+                            "value": {
+                                "experience_id": "experience:walk",
+                                "values": {
+                                    "summary_ref": "content:experience:walk",
+                                    "occurred_from": "2026-07-28T06:30:00+08:00",
+                                    "occurred_to": "2026-07-28T07:00:00+08:00",
+                                    "participant_refs": ["actor:companion"],
+                                    "privacy_class": "personal",
+                                },
+                            },
+                        }
+                    ],
+                },
+                "world_life": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "occurrence:walk",
+                            "value": {
+                                "occurrence_id": "occurrence:walk",
+                                "settled_at": "2026-07-28T07:00:00+08:00",
+                                "location_ref": "location:riverside",
+                                "content": {
+                                    "content_ref": "content:experience:walk",
+                                    "text": "沿河走了一会儿，看到雨后积水反光。",
+                                },
+                            },
+                        }
+                    ],
+                },
+            },
+        }
+    )
+
+    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+
+    assert current["availability"] == "available"
+    assert current["source_refs"] == [
+        "character-core:1",
+        "experience:walk",
+        "occurrence:walk",
+    ]
+    recent = current["recent_self_experiences"]
+    assert recent["availability"] == "available"
+    assert recent["items"][0]["source_ref"] == "occurrence:walk"
+    assert (
+        recent["items"][0]["content"]["text"]
+        == "沿河走了一会儿，看到雨后积水反光。"
+    )
+    assert recent["items"][1]["source_ref"] == "experience:walk"
+    assert current["stable_self"][0]["source_ref"] == "character-core:1"
+
+
+def test_current_self_state_reports_unavailable_without_sourced_persona_or_experience() -> None:
+    raw = json.dumps(
+        {
+            "logical_time": "2026-07-28T08:00:00+08:00",
+            "slices": {
+                "character_core": {"availability": "unavailable"},
+                "recent_experiences": {"availability": "unavailable"},
+                "world_life": {"availability": "unavailable"},
+            },
+        }
+    )
+
+    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+
+    assert current["availability"] == "unavailable"
+    assert current["source_refs"] == []
+    assert current["recent_self_experiences"] == {"availability": "unavailable"}
+
+
 def test_recalled_dialogue_supplements_without_evicting_latest_working_turns() -> None:
     ordinary = [
         {

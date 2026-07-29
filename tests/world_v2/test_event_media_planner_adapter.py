@@ -326,6 +326,52 @@ async def test_bridge_maps_only_frozen_public_life_preview_and_preserves_both_ha
 
 
 @pytest.mark.asyncio
+async def test_bridge_passes_source_bound_situational_context_to_the_planner() -> None:
+    snapshot = _image_snapshot()
+    snapshot["situational_context"] = {
+        "season": "summer",
+        "academic_phase": "summer_break",
+        "current_residence_context_tags": ["residence:family_home_jiaxing"],
+        "life_arc_context_tags": ["life_arc:summer_internship"],
+    }
+    for pointer in (
+        "/situational_context/season",
+        "/situational_context/academic_phase",
+        "/situational_context/current_residence_context_tags/0",
+        "/situational_context/life_arc_context_tags/0",
+    ):
+        snapshot["evidence_index"][pointer] = {  # type: ignore[index]
+            "source_event_ref": SOURCE_REF,
+            "source_payload_hash": SOURCE_HASH,
+            "visibility": "shareable",
+        }
+    sidecar, opportunity = _sidecar(snapshot=snapshot)
+    legacy = _LegacyPlanner(
+        event_media.PlannedMedia(
+            _legacy_plan(opportunity=opportunity, snapshot=snapshot)
+        )
+    )
+    adapter = EventMediaPlannerAdapter(
+        sidecar=sidecar,
+        legacy_planner=legacy,
+        result_store=_ResultStore(),
+    )
+
+    result = await adapter.plan(
+        opportunity=opportunity,
+        planning_request_id=planning_request_id(opportunity.opportunity_id),
+    )
+
+    assert result.plan is not None
+    assert legacy.calls[0].event_snapshot["situational_context"] == {
+        "season": "summer",
+        "academic_phase": "summer_break",
+        "current_residence_context_tags": ["residence:family_home_jiaxing"],
+        "life_arc_context_tags": ["life_arc:summer_internship"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_bridge_admits_only_the_outer_authorized_ordinary_character_preview() -> None:
     sidecar, opportunity, snapshot = _character_sidecar()
     legacy_plan = replace(

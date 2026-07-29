@@ -131,3 +131,15 @@ async def test_adapter_uses_chat_model_protocol_and_only_exposes_safe_summaries(
     assert "revision" not in rendered
     assert "evidence" not in rendered
     assert "accepted_event" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_prompt_leaves_sustained_interaction_meaning_to_the_relationship_model() -> None:
+    model = _Model('{"decision":"no_change"}')
+
+    await RelationshipEvaluationDraftAdapter(model=model).deliberate(capsule=_capsule())
+
+    system = model.calls[0][0][0]["content"]
+    assert "interaction_continuity" in system
+    assert "does not itself imply" in system
+    assert "no fixed count" in system

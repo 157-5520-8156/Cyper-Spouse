@@ -27,7 +27,8 @@ DECLARABLE_SOURCE_EVENT_TYPES = frozenset({
 })
 _ALLOWED_EVIDENCE_KEYS = frozenset({
     "visibility", "summary", "outcome", "location", "activity", "participants",
-    "objects", "environment", "existing_media", "requires_readable_text",
+    "objects", "environment", "situational_context", "existing_media",
+    "requires_readable_text",
 })
 
 CharacterCaptureCapability = Literal[
@@ -82,6 +83,45 @@ class CharacterMediaEvidenceV1(FrozenModel):
         return self
 
 
+class MediaSituationalContextV1(FrozenModel):
+    """Source-declared life coordinates that keep a picture in its real phase.
+
+    These values describe the already-current environment.  They are neither
+    a scene menu nor an instruction to render or share anything.
+    """
+
+    season: Literal["spring", "summer", "autumn", "winter"]
+    academic_phase: str | None = Field(default=None, min_length=1, max_length=64)
+    academic_year: int | None = Field(default=None, ge=1, le=12)
+    calendar_context_tags: tuple[str, ...] = Field(default=(), max_length=16)
+    current_residence_context_tags: tuple[str, ...] = Field(
+        default=(), max_length=4
+    )
+    life_arc_context_tags: tuple[str, ...] = Field(default=(), max_length=32)
+    active_life_arc_ids: tuple[str, ...] = Field(default=(), max_length=16)
+    source_event_refs: tuple[str, ...] = Field(min_length=1, max_length=17)
+
+    @model_validator(mode="after")
+    def context_coordinates_are_canonical(self) -> "MediaSituationalContextV1":
+        groups = (
+            (self.calendar_context_tags, ("calendar:", "academic:")),
+            (self.current_residence_context_tags, ("residence:",)),
+            (self.life_arc_context_tags, ("life_arc:", "narrative:", "work:", "travel:")),
+        )
+        for values, prefixes in groups:
+            if values != tuple(sorted(set(values))):
+                raise ValueError("media situational context tags must be sorted and unique")
+            if any(not item.startswith(prefixes) for item in values):
+                raise ValueError("media situational context tag has an invalid namespace")
+        if self.active_life_arc_ids != tuple(sorted(set(self.active_life_arc_ids))):
+            raise ValueError("media active Life Arc ids must be sorted and unique")
+        if self.source_event_refs != tuple(sorted(set(self.source_event_refs))):
+            raise ValueError(
+                "media situational context source refs must be sorted and unique"
+            )
+        return self
+
+
 class ImageEvidenceV1(FrozenModel):
     """A typed envelope; leaf-level planner checks remain fail-closed downstream."""
 
@@ -93,6 +133,7 @@ class ImageEvidenceV1(FrozenModel):
     participants: tuple[dict[str, object], ...] = Field(default=(), max_length=32)
     objects: tuple[dict[str, object], ...] = Field(default=(), max_length=32)
     environment: dict[str, object] | None = None
+    situational_context: MediaSituationalContextV1 | None = None
     existing_media: tuple[dict[str, object], ...] = Field(default=(), max_length=16)
     requires_readable_text: Literal[False] = False
     character_media: CharacterMediaEvidenceV1 | None = None
@@ -147,5 +188,6 @@ __all__ = [
     "IMAGE_EVIDENCE_PAYLOAD_MODELS",
     "ImageEvidenceDeclaredPayload",
     "ImageEvidenceV1",
+    "MediaSituationalContextV1",
     "NonSensitiveBodyRegion",
 ]

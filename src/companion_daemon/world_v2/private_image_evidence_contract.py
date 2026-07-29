@@ -17,6 +17,7 @@ from pydantic import Field, model_validator
 from .image_evidence_contract import (
     CharacterMediaEvidenceV1,
     DECLARABLE_SOURCE_EVENT_TYPES,
+    MediaSituationalContextV1,
 )
 from .schema_core import FrozenModel
 
@@ -24,7 +25,8 @@ from .schema_core import FrozenModel
 RecipientScopedEvidenceVisibility = Literal["personal", "private"]
 _ALLOWED_EVIDENCE_KEYS = frozenset({
     "visibility", "summary", "outcome", "location", "activity", "participants",
-    "objects", "environment", "existing_media", "requires_readable_text",
+    "objects", "environment", "situational_context", "existing_media",
+    "requires_readable_text",
 })
 
 
@@ -43,6 +45,7 @@ class RecipientScopedImageEvidenceV1(FrozenModel):
     participants: tuple[dict[str, object], ...] = Field(default=(), max_length=32)
     objects: tuple[dict[str, object], ...] = Field(default=(), max_length=32)
     environment: dict[str, object] | None = None
+    situational_context: MediaSituationalContextV1 | None = None
     existing_media: tuple[dict[str, object], ...] = Field(default=(), max_length=16)
     requires_readable_text: Literal[False] = False
     character_media: CharacterMediaEvidenceV1 | None = None

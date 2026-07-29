@@ -33,7 +33,11 @@ from types import MappingProxyType
 from typing import Literal, Mapping, Protocol
 
 from .character_media_fact_binder import CharacterMediaCandidateRuntime
-from .image_evidence_contract import CharacterMediaEvidenceV1, ImageEvidenceV1
+from .image_evidence_contract import (
+    CharacterMediaEvidenceV1,
+    ImageEvidenceV1,
+    MediaSituationalContextV1,
+)
 from .image_evidence_runtime import (
     ImageEvidenceDeclarationCommand,
     ImageEvidenceDeclarationRuntime,
@@ -43,6 +47,8 @@ from .life_author_seed import (
     ReviewedLifeSeedOpening,
     ReviewedOpeningVisualEvidence,
 )
+from .life_development_draft import LifeDevelopmentVisualEvidenceDraft
+from .life_development_runtime import LifeDevelopmentProposalReader
 from .mood_view import active_mood_intensities
 from .private_image_evidence_contract import RecipientScopedImageEvidenceV1
 from .private_image_evidence_runtime import (
@@ -59,6 +65,13 @@ _DECLARATION_EVENT_TYPES = frozenset({
     "ImageEvidenceDeclared", "RecipientScopedImageEvidenceDeclared",
 })
 _PUBLIC_VISIBILITIES = frozenset({"public", "shareable"})
+_PRIVACY_RANK = {
+    "public": 0,
+    "shareable": 1,
+    "personal": 2,
+    "private": 3,
+    "withhold": 4,
+}
 _POSITIVE_MOODS = ("warmth", "joy")
 _NEGATIVE_MOODS = ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
 # 40 recorded buckets of 250bp keep the whole chance draw inside one stable
@@ -150,6 +163,7 @@ class LifeVisualEvidenceAuthor:
         image_evidence: ImageEvidenceDeclarationRuntime | None = None,
         recipient_scoped: RecipientScopedImageEvidenceDeclarationRuntime | None = None,
         character_candidates: CharacterMediaCandidateRuntime | None = None,
+        life_development_proposals=None,  # LifeDevelopmentProposalReader-compatible
         actor: str = "worker:world-v2:life-visual-evidence",
     ) -> None:
         if not character_ref or not actor:
@@ -168,6 +182,14 @@ class LifeVisualEvidenceAuthor:
         )
         self._character_candidates = character_candidates or CharacterMediaCandidateRuntime(
             ledger=ledger
+        )
+        self._life_development_proposals = (
+            life_development_proposals
+            if life_development_proposals is not None
+            else LifeDevelopmentProposalReader(
+                ledger=ledger,
+                content_store=content_store,
+            )
         )
         self._random = RandomAuthority(ledger=ledger, source="world-v2:life-visual-evidence-random")
         self._actor = actor
@@ -201,9 +223,36 @@ class LifeVisualEvidenceAuthor:
         eligible = self._eligible_occurrences(
             projection=projection, logical_time=logical_time, declared_sources=declared_sources,
         )
-        if not eligible:
+        open_life = self._eligible_open_life_occurrences(
+            projection=projection,
+            logical_time=logical_time,
+            declared_sources=declared_sources,
+        )
+        if not eligible and not open_life:
             return VisualEvidenceAuthorResult(
                 status="idle", reason_code="visual_evidence.no_eligible_settled_occurrence"
+            )
+        for occurrence, activity_kind, visual in open_life:
+            threshold = min(
+                self._policy.threshold_cap_bp,
+                self._policy.base_share_chance_bp["activity"]
+                * mood_multiplier
+                // 10_000,
+            )
+            bucket = self._chance_bucket(
+                occurrence=occurrence,
+                logical_time=logical_time,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+            if bucket * _BUCKET_WIDTH_BP + _BUCKET_WIDTH_BP // 2 >= threshold:
+                continue
+            return self._declare_open_life(
+                occurrence=occurrence,
+                activity_kind=activity_kind,
+                visual=visual,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
             )
         for occurrence, opening, annex, lane in eligible:
             if lane == "private":
@@ -273,6 +322,74 @@ class LifeVisualEvidenceAuthor:
             ):
                 rows.append((occurrence, opening, annex, "private"))
         rows.sort(key=lambda row: (getattr(row[0], "settled_at"), getattr(row[0], "occurrence_id", "")), reverse=True)
+        return tuple(rows)
+
+    def _eligible_open_life_occurrences(
+        self,
+        *,
+        projection: _ProjectionLike,
+        logical_time: datetime,
+        declared_sources: frozenset[str],
+    ) -> tuple[tuple[object, str, LifeDevelopmentVisualEvidenceDraft], ...]:
+        plans = {
+            plan_id: item
+            for item in getattr(projection, "plans", ())
+            if (plan_id := getattr(item, "plan_id", None))
+        }
+        rows: list[tuple[object, str, LifeDevelopmentVisualEvidenceDraft]] = []
+        for occurrence in getattr(projection, "world_occurrences", ()):
+            settled_at = getattr(occurrence, "settled_at", None)
+            settlement_ref = getattr(occurrence, "settlement_event_ref", None)
+            if (
+                getattr(occurrence, "status", None) != "settled"
+                or getattr(occurrence, "visibility", None) not in _PUBLIC_VISIBILITIES
+                or not isinstance(settled_at, datetime)
+                or settlement_ref is None
+                or settlement_ref in declared_sources
+                or settled_at > logical_time
+                or logical_time - settled_at > self._policy.lookback
+            ):
+                continue
+            plan = plans.get(getattr(occurrence, "trigger_ref", None))
+            activity_kind = getattr(plan, "activity_kind", None)
+            plan_id = getattr(plan, "plan_id", None)
+            if (
+                not isinstance(activity_kind, str)
+                or not activity_kind.startswith("open_life.")
+                or not isinstance(plan_id, str)
+            ):
+                continue
+            try:
+                material = self._life_development_proposals.read_for_plan(
+                    plan_id=plan_id
+                )
+            except ValueError:
+                _LOG.warning(
+                    "open Life visual evidence authority is unavailable plan=%s",
+                    plan_id,
+                )
+                continue
+            if material is None:
+                continue
+            selected_ref = getattr(occurrence, "settled_outcome_ref", None)
+            selected = next(
+                (
+                    item
+                    for item in material.outcomes
+                    if item.descriptor.candidate_result_ref == selected_ref
+                ),
+                None,
+            )
+            if selected is None or selected.visual_evidence is None:
+                continue
+            rows.append((occurrence, activity_kind, selected.visual_evidence))
+        rows.sort(
+            key=lambda row: (
+                getattr(row[0], "settled_at"),
+                getattr(row[0], "occurrence_id", ""),
+            ),
+            reverse=True,
+        )
         return tuple(rows)
 
     def _declaration_ledger_view(
@@ -362,6 +479,11 @@ class LifeVisualEvidenceAuthor:
         summary = self._settled_summary(occurrence)
         location = self._location_facts(annex)
         environment = self._environment_facts(annex)
+        situational_context = self._situational_context(
+            projection=self._ledger.project(),
+            logical_time=getattr(occurrence, "settled_at"),
+            privacy_ceiling=getattr(occurrence, "visibility"),
+        )
         objects = tuple(
             {
                 key: value
@@ -397,6 +519,7 @@ class LifeVisualEvidenceAuthor:
                 activity=activity,
                 location=location,
                 environment=environment,
+                situational_context=situational_context,
                 character_media=character_media,
             )
             assert self._recipient_ref is not None
@@ -417,6 +540,7 @@ class LifeVisualEvidenceAuthor:
                 activity=activity,
                 location=location,
                 environment=environment,
+                situational_context=situational_context,
                 objects=objects,
                 character_media=character_media,
             )
@@ -452,6 +576,87 @@ class LifeVisualEvidenceAuthor:
             declared_source_ref=settlement_ref,
             lane=lane,  # type: ignore[arg-type]
             opened_candidate_ids=opened,
+        )
+
+    def _declare_open_life(
+        self,
+        *,
+        occurrence,
+        activity_kind: str,
+        visual: LifeDevelopmentVisualEvidenceDraft,
+        trace_id: str,
+        correlation_id: str,
+    ) -> VisualEvidenceAuthorResult:
+        """Declare only the World Author's accepted, claim-closed visual bytes."""
+
+        settlement_ref = getattr(occurrence, "settlement_event_ref")
+        projection = self._ledger.project()
+        logical_time = projection.logical_time
+        location = (
+            {
+                ("id" if key == "location_ref" else key): value
+                for key, value in visual.location.model_dump(
+                    mode="json", exclude_none=True
+                ).items()
+            }
+            if visual.location is not None
+            else None
+        )
+        environment = (
+            visual.environment.model_dump(mode="json", exclude_none=True)
+            if visual.environment is not None
+            else None
+        )
+        objects = tuple(
+            {
+                ("id" if key == "local_ref" else key): value
+                for key, value in item.model_dump(mode="json").items()
+            }
+            for item in visual.objects
+        )
+        evidence = ImageEvidenceV1(
+            visibility=getattr(occurrence, "visibility"),
+            summary=self._settled_summary(occurrence),
+            activity=(
+                {
+                    "id": getattr(occurrence, "trigger_ref", activity_kind),
+                    "kind": activity_kind,
+                    "description": visual.activity_description,
+                }
+                if visual.activity_description is not None
+                else None
+            ),
+            location=location,
+            environment=environment,
+            objects=objects,
+            situational_context=self._situational_context(
+                projection=projection,
+                logical_time=getattr(occurrence, "settled_at"),
+                privacy_ceiling=getattr(occurrence, "visibility"),
+            ),
+        )
+        command_id = "visual-evidence:" + _digest(
+            [self._ledger.world_id, settlement_ref, "open-life"]
+        )
+        commit = self._image_evidence.declare(
+            ImageEvidenceDeclarationCommand(
+                command_id=command_id,
+                source_event_ref=settlement_ref,
+                image_evidence=evidence,
+            ),
+            logical_time=logical_time,
+            created_at=logical_time,
+            actor=self._actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        declared_ref = next(iter(getattr(commit, "event_ids", ())), None)
+        return VisualEvidenceAuthorResult(
+            status="declared",
+            reason_code="visual_evidence.declared",
+            declared_event_ref=declared_ref,
+            declared_source_ref=settlement_ref,
+            lane="public",
         )
 
     def _settled_summary(self, occurrence) -> str | None:  # type: ignore[no-untyped-def]
@@ -494,6 +699,88 @@ class LifeVisualEvidenceAuthor:
             if value is not None
         }
         return facts or None
+
+    def _situational_context(
+        self,
+        *,
+        projection: _ProjectionLike,
+        logical_time: datetime,
+        privacy_ceiling: str,
+    ) -> MediaSituationalContextV1 | None:
+        biography = self._catalog.biographical_context_at(
+            instant=logical_time,
+            life_arcs=tuple(getattr(projection, "life_arcs", ())),
+        )
+        tags = biography.context_tags
+        season = next(
+            (item.removeprefix("season:") for item in tags if item.startswith("season:")),
+            None,
+        )
+        if season not in {"spring", "summer", "autumn", "winter"}:
+            return None
+        timeline_refs = tuple(
+            item.event_id
+            for item in getattr(projection, "committed_world_event_refs", ())
+            if getattr(item, "event_type", None) == "BiographicalTimelineConfigured"
+            and getattr(item, "logical_time", logical_time) <= logical_time
+        )
+        if len(timeline_refs) != 1:
+            _LOG.warning(
+                "media situational context requires one biographical timeline source"
+            )
+            return None
+        active_arc_ids = set(biography.active_life_arc_ids)
+        active_arcs = tuple(
+            item
+            for item in getattr(projection, "life_arcs", ())
+            if getattr(item, "arc_id", None) in active_arc_ids
+        )
+        ceiling_rank = _PRIVACY_RANK.get(privacy_ceiling)
+        if (
+            ceiling_rank is None
+            or len(active_arcs) != len(active_arc_ids)
+            or any(
+                not getattr(item, "accepted_event_ref", None)
+                or _PRIVACY_RANK.get(getattr(item, "privacy_class", None), 99)
+                > ceiling_rank
+                for item in active_arcs
+            )
+        ):
+            _LOG.warning(
+                "media situational context has an unbound or more-private active Life Arc"
+            )
+            return None
+        source_event_refs = tuple(
+            sorted(
+                {
+                    *timeline_refs,
+                    *(
+                        str(item.accepted_event_ref)
+                        for item in active_arcs
+                    ),
+                }
+            )
+        )
+        return MediaSituationalContextV1(
+            season=season,
+            academic_phase=biography.academic_phase,
+            academic_year=biography.academic_year,
+            calendar_context_tags=tuple(
+                item
+                for item in tags
+                if item.startswith(("calendar:", "academic:"))
+            ),
+            current_residence_context_tags=tuple(
+                item for item in tags if item.startswith("residence:")
+            ),
+            life_arc_context_tags=tuple(
+                item
+                for item in tags
+                if item.startswith(("life_arc:", "narrative:", "work:", "travel:"))
+            ),
+            active_life_arc_ids=biography.active_life_arc_ids,
+            source_event_refs=source_event_refs,
+        )
 
     def _recipient_relationship_ready(self, projection: _ProjectionLike) -> bool:
         """P3 evidence only makes sense once the relationship carries it.

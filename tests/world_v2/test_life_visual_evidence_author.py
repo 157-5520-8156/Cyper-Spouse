@@ -9,12 +9,29 @@ import pytest
 
 from companion_daemon.world_v2.life_author_seed import ReviewedLifeSeedCatalog
 from companion_daemon.world_v2.life_content_store import life_content_payload_hash
+from companion_daemon.world_v2.life_development_draft import (
+    LifeDevelopmentVisualEvidenceDraft,
+)
+from companion_daemon.world_v2.life_development_runtime import (
+    LifeDevelopmentPlanMaterial,
+    LifeDevelopmentReadableOutcome,
+)
+from companion_daemon.world_v2.media_evidence_snapshot import (
+    MediaEvidenceCompileRequest,
+    MediaEvidenceSnapshotCompiler,
+)
+from companion_daemon.world_v2.media_v2 import PhotoCandidate
 from companion_daemon.world_v2.life_visual_evidence_author import (
     LifeVisualEvidenceAuthor,
     VisualEvidenceAuthorPolicy,
 )
 from companion_daemon.world_v2.local_chronology import LocalChronology
-from companion_daemon.world_v2.schemas import CommittedWorldEventRef, WorldEvent
+from companion_daemon.world_v2.schemas import (
+    CommittedWorldEventRef,
+    OutcomeCandidateDescriptor,
+    ProjectionCursor,
+    WorldEvent,
+)
 
 
 NOW = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
@@ -24,6 +41,27 @@ RECIPIENT = "user:geoff"
 
 _SEED = dedent(
     """
+    biographical_lifecycle:
+      version: biography.test.1
+      birth_date: 2005-04-12
+      baseline_context_tags: []
+      residence:
+        before_enrollment: residence:family_home_jiaxing
+        term: residence:campus_dorm
+        winter_break: residence:family_home_jiaxing
+        summer_break: residence:family_home_jiaxing
+        graduated: residence:shanghai_home
+      academic:
+        enrolled_on: 2024-09-01
+        expected_graduation_on: 2028-06-30
+        term_windows:
+          - {opens_on: "09-01", closes_on: "01-15"}
+          - {opens_on: "02-20", closes_on: "06-29"}
+        winter_break_windows:
+          - {opens_on: "01-16", closes_on: "02-19"}
+        summer_break_windows:
+          - {opens_on: "06-30", closes_on: "08-31"}
+        enrollment_context_tags: []
     life_author_catalog:
       version: reviewed-test-visual.1
       locations:
@@ -101,13 +139,21 @@ def _event(*, event_id: str, event_type: str, at: datetime = NOW) -> WorldEvent:
     )
 
 
+def _timeline_event() -> WorldEvent:
+    return _event(
+        event_id="event:biographical-timeline:test",
+        event_type="BiographicalTimelineConfigured",
+        at=NOW - timedelta(days=100),
+    )
+
+
 class _Ledger:
     world_id = WORLD
     blocks_event_loop = False
 
     def __init__(
         self, *events: WorldEvent, plans=(), occurrences=(), affect_episodes=(),
-        relationship_states=(),
+        relationship_states=(), life_arcs=(),
     ) -> None:
         self._events: dict[str, WorldEvent] = {}
         self._refs: list[CommittedWorldEventRef] = []
@@ -116,6 +162,7 @@ class _Ledger:
         self.occurrences = tuple(occurrences)
         self.affect_episodes = tuple(affect_episodes)
         self.relationship_states = tuple(relationship_states)
+        self.life_arcs = tuple(life_arcs)
         for event in events:
             self._append(event)
 
@@ -136,6 +183,7 @@ class _Ledger:
             plans=self.plans, world_occurrences=self.occurrences,
             affect_episodes=self.affect_episodes,
             relationship_states=self.relationship_states,
+            life_arcs=self.life_arcs,
             photo_candidates=(), experiences=(), facts=(),
         )
 
@@ -192,8 +240,18 @@ def _walk_world(**overrides):  # type: ignore[no-untyped-def]
         result_payload_hash=life_content_payload_hash(text),
     )
     plan = SimpleNamespace(plan_id="plan:walk", activity_kind="commute.short_walk")
+    life_arcs = tuple(overrides.pop("life_arcs", ()))
+    arc_events = tuple(
+        _event(
+            event_id=arc.accepted_event_ref,
+            event_type="LifeArcChanged",
+            at=arc.started_at,
+        )
+        for arc in life_arcs
+    )
     ledger = _Ledger(
-        settlement, plans=(plan,), occurrences=(occurrence,),
+        _timeline_event(), *arc_events, settlement,
+        plans=(plan,), occurrences=(occurrence,), life_arcs=life_arcs,
         **overrides,
     )
     return ledger, settlement
@@ -215,7 +273,7 @@ def _bed_world(*, relationship_states=()):  # type: ignore[no-untyped-def]
     )
     plan = SimpleNamespace(plan_id="plan:bed", activity_kind="sleep.prepare_for_bed")
     ledger = _Ledger(
-        settlement, plans=(plan,), occurrences=(occurrence,),
+        _timeline_event(), settlement, plans=(plan,), occurrences=(occurrence,),
         relationship_states=relationship_states,
     )
     return ledger, settlement, text
@@ -236,6 +294,182 @@ def _force_bucket(monkeypatch: pytest.MonkeyPatch, bucket: int) -> None:
         LifeVisualEvidenceAuthor, "_chance_bucket",
         lambda self, **kwargs: bucket,
     )
+
+
+class _OpenLifeProposalReader:
+    def __init__(
+        self, visual_evidence: LifeDevelopmentVisualEvidenceDraft | None
+    ) -> None:
+        self._visual_evidence = visual_evidence
+
+    def read_for_plan(self, *, plan_id: str) -> LifeDevelopmentPlanMaterial:
+        descriptor = OutcomeCandidateDescriptor(
+            candidate_result_ref="candidate:open-life:1",
+            result_id="result:open-life:1",
+            result_payload_ref="content:open-life:1",
+            result_payload_hash="a" * 64,
+            privacy_class="shareable",
+        )
+        alternate = OutcomeCandidateDescriptor(
+            candidate_result_ref="candidate:open-life:2",
+            result_id="result:open-life:2",
+            result_payload_ref="content:open-life:2",
+            result_payload_hash="b" * 64,
+            privacy_class="shareable",
+        )
+        return LifeDevelopmentPlanMaterial(
+            plan_id=plan_id,
+            proposal_event_ref="event:proposal:open-life",
+            causal_authority="character_choice",
+            premise="暑假实习下班后临时去了校外的河边市集。",
+            claim_declarations=(),
+            outcomes=(
+                LifeDevelopmentReadableOutcome(
+                    descriptor=descriptor,
+                    text="她在河边市集逛了一会儿，买到一束向日葵。",
+                    visual_evidence=self._visual_evidence,
+                ),
+                LifeDevelopmentReadableOutcome(
+                    descriptor=alternate,
+                    text="她到河边才发现市集临时取消，很快就回去了。",
+                    visual_evidence=None,
+                ),
+            ),
+            character_intention="下班以后想换换空气。",
+        )
+
+
+def _open_life_world() -> tuple[_Ledger, WorldEvent]:
+    settlement = _event(
+        event_id="event:settlement:open-life",
+        event_type="WorldOccurrenceSettled",
+        at=NOW - timedelta(hours=1),
+    )
+    text = "她在河边市集逛了一会儿，买到一束向日葵。"
+    occurrence = SimpleNamespace(
+        occurrence_id="occurrence:open-life",
+        status="settled",
+        settled_at=NOW - timedelta(hours=1),
+        settlement_event_ref=settlement.event_id,
+        settled_outcome_ref="candidate:open-life:1",
+        trigger_ref="plan:open-life",
+        visibility="shareable",
+        result_payload_ref="content:open-life-result",
+        result_payload_hash=life_content_payload_hash(text),
+    )
+    plan = SimpleNamespace(
+        plan_id="plan:open-life",
+        activity_kind="open_life.market_after_internship",
+    )
+    return (
+        _Ledger(
+            _timeline_event(),
+            settlement,
+            plans=(plan,),
+            occurrences=(occurrence,),
+        ),
+        settlement,
+    )
+
+
+def test_open_life_world_author_visual_claim_enters_the_existing_media_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger, settlement = _open_life_world()
+    _force_bucket(monkeypatch, 0)
+    visual = LifeDevelopmentVisualEvidenceDraft(
+        claim_refs=("local:claim:market-visit",),
+        activity_description="实习下班后在河边市集闲逛",
+        location={
+            "location_ref": "location:off-campus-riverside-market",
+            "kind": "outdoor_market",
+            "city": "上海",
+            "publicness": "public",
+        },
+        environment={
+            "light": "summer sunset",
+            "structure": "riverside stalls outside the campus",
+        },
+        objects=(
+            {
+                "local_ref": "local:object:sunflowers",
+                "kind": "flowers",
+                "description": "刚买的一束向日葵",
+            },
+        ),
+    )
+    author = LifeVisualEvidenceAuthor(
+        ledger=ledger,
+        catalog=_catalog(tmp_path),
+        content_store=_ContentStore("她在河边市集逛了一会儿，买到一束向日葵。"),
+        character_ref=CHARACTER,
+        recipient_ref=RECIPIENT,
+        life_development_proposals=_OpenLifeProposalReader(visual),
+    )
+
+    result = author.advance_once(
+        wake_event_ref=settlement.event_id,
+        trace_id="trace",
+        correlation_id="corr",
+    )
+
+    assert result.status == "declared"
+    evidence = ledger.events_of_type("ImageEvidenceDeclared")[0].payload()[
+        "image_evidence"
+    ]
+    assert evidence["activity"]["description"] == "实习下班后在河边市集闲逛"
+    assert evidence["location"]["id"] == "location:off-campus-riverside-market"
+    assert evidence["objects"][0]["description"] == "刚买的一束向日葵"
+    assert evidence["situational_context"]["academic_phase"] == "summer_break"
+    declaration = ledger.events_of_type("ImageEvidenceDeclared")[0]
+    projection = ledger.project()
+    compiled = MediaEvidenceSnapshotCompiler(ledger=ledger).compile(
+        MediaEvidenceCompileRequest(
+            candidate=PhotoCandidate(
+                candidate_id="candidate:open-life",
+                source_event_refs=tuple(
+                    sorted((settlement.event_id, declaration.event_id))
+                ),
+                family="life_share",
+                privacy_ceiling="shareable",
+            ),
+            category="activity_result",
+            cursor=ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            ),
+        )
+    )
+    snapshot = compiled.snapshot.image_event_snapshot
+    assert snapshot is not None
+    assert snapshot.location["id"] == "location:off-campus-riverside-market"
+    assert snapshot.situational_context is not None
+    assert snapshot.situational_context["season"] == "summer"
+
+
+def test_open_life_outcome_may_choose_to_supply_no_visual_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger, settlement = _open_life_world()
+    _force_bucket(monkeypatch, 0)
+    author = LifeVisualEvidenceAuthor(
+        ledger=ledger,
+        catalog=_catalog(tmp_path),
+        content_store=_ContentStore("她在河边市集逛了一会儿，买到一束向日葵。"),
+        character_ref=CHARACTER,
+        recipient_ref=RECIPIENT,
+        life_development_proposals=_OpenLifeProposalReader(None),
+    )
+
+    result = author.advance_once(
+        wake_event_ref=settlement.event_id,
+        trace_id="trace",
+        correlation_id="corr",
+    )
+
+    assert result.status == "idle"
+    assert ledger.events_of_type("ImageEvidenceDeclared") == ()
 
 
 def test_author_declares_public_evidence_and_opens_character_candidates(
@@ -268,6 +502,82 @@ def test_author_declares_public_evidence_and_opens_character_candidates(
     assert candidate["family"] == "character_media"
     assert candidate["character_media_contract"]["kind"] == "selfie"
     assert result.opened_candidate_ids == (candidate["candidate_id"],)
+
+
+def test_author_copies_current_season_calendar_residence_and_life_arc_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_arc = SimpleNamespace(
+        arc_id="life-arc:summer-internship",
+        accepted_event_ref="event:life-arc:summer-internship",
+        privacy_class="shareable",
+        status="active",
+        started_at=NOW - timedelta(days=10),
+        ends_at=NOW + timedelta(days=20),
+        context_tags=(
+            "life_arc:summer_internship",
+            "residence:temporary_internship_flat",
+        ),
+    )
+    ledger, settlement = _walk_world(life_arcs=(active_arc,))
+    _force_bucket(monkeypatch, 0)
+
+    result = _author(ledger, tmp_path).advance_once(
+        wake_event_ref=settlement.event_id,
+        trace_id="trace",
+        correlation_id="corr",
+    )
+
+    assert result.status == "declared"
+    evidence = ledger.events_of_type("ImageEvidenceDeclared")[0].payload()[
+        "image_evidence"
+    ]
+    assert evidence["situational_context"] == {
+        "season": "summer",
+        "academic_phase": "summer_break",
+        "academic_year": 2,
+        "calendar_context_tags": ["academic:enrolled", "calendar:summer_break"],
+        "current_residence_context_tags": [
+            "residence:temporary_internship_flat"
+        ],
+        "life_arc_context_tags": ["life_arc:summer_internship"],
+        "active_life_arc_ids": ["life-arc:summer-internship"],
+        "source_event_refs": [
+            "event:biographical-timeline:test",
+            "event:life-arc:summer-internship",
+        ],
+    }
+
+
+def test_public_visual_context_does_not_leak_a_private_active_life_arc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_arc = SimpleNamespace(
+        arc_id="life-arc:private-trip",
+        accepted_event_ref="event:life-arc:private-trip",
+        privacy_class="private",
+        status="active",
+        started_at=NOW - timedelta(days=2),
+        ends_at=NOW + timedelta(days=2),
+        context_tags=(
+            "travel:private_trip",
+            "residence:private_temporary_stay",
+        ),
+    )
+    ledger, settlement = _walk_world(life_arcs=(private_arc,))
+    _force_bucket(monkeypatch, 0)
+
+    result = _author(ledger, tmp_path).advance_once(
+        wake_event_ref=settlement.event_id,
+        trace_id="trace",
+        correlation_id="corr",
+    )
+
+    assert result.status == "declared"
+    evidence = ledger.events_of_type("ImageEvidenceDeclared")[0].payload()[
+        "image_evidence"
+    ]
+    assert evidence["situational_context"] is None
 
 
 def test_author_keeps_the_moment_quiet_when_the_ticket_sits_above_the_threshold(

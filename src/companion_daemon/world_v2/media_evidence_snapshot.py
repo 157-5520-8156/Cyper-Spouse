@@ -43,11 +43,25 @@ _SUPPORTED_EVENT_TYPES = frozenset({
     "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted", "FactCorrected",
     "FactCommitMaterializedV2", "ImageEvidenceDeclared", "AppearanceStateRecorded",
     "VisiblePhysicalStateRecorded", "VisualFactRecorded",
+    "BiographicalTimelineConfigured", "LifeArcChanged",
 })
+_SITUATIONAL_CONTEXT_SOURCE_EVENT_TYPES = frozenset(
+    {"BiographicalTimelineConfigured", "LifeArcChanged"}
+)
 _SECTION_FIELDS: dict[str, frozenset[str]] = {
     "location": frozenset({"id", "kind", "country", "region", "city", "publicness", "mirror_available"}),
     "activity": frozenset({"id", "kind", "description", "phase", "intensity", "private_transition"}),
     "environment": frozenset({"light", "weather", "structure", "region"}),
+    "situational_context": frozenset({
+        "season",
+        "academic_phase",
+        "academic_year",
+        "calendar_context_tags",
+        "current_residence_context_tags",
+        "life_arc_context_tags",
+        "active_life_arc_ids",
+        "source_event_refs",
+    }),
     "participant": frozenset({"id", "role", "present", "visibility_permission"}),
     "object": frozenset({"id", "kind", "description", "ownership", "visibility"}),
     "existing_media": frozenset({"artifact_ref", "artifact_hash", "accessible", "reuse_authorized", "source"}),
@@ -120,9 +134,18 @@ def _plain_leaf(value: object, *, reason: str) -> str | int | float | bool | Non
     raise MediaEvidenceNotRenderable(reason)
 
 
+def _plain_context_value(
+    value: object, *, reason: str
+) -> str | int | float | bool | None | tuple[str, ...]:
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    return _plain_leaf(value, reason=reason)
+
+
 def _clean_mapping(
     value: object, *, fields: frozenset[str], reason: str,
     fallback_visibility: PrivacyClass, allowed_visibilities: frozenset[str] = _PUBLIC_VISIBILITIES,
+    allow_string_sequences: bool = False,
 ) -> tuple[dict[str, object], PrivacyClass]:
     if not isinstance(value, dict):
         raise MediaEvidenceNotRenderable(reason)
@@ -134,7 +157,15 @@ def _clean_mapping(
         allowed=allowed_visibilities,
     )
     return (
-        {key: _plain_leaf(item, reason=reason) for key, item in value.items() if key != "evidence_visibility"},
+        {
+            key: (
+                _plain_context_value(item, reason=reason)
+                if allow_string_sequences
+                else _plain_leaf(item, reason=reason)
+            )
+            for key, item in value.items()
+            if key != "evidence_visibility"
+        },
         visibility,
     )
 
@@ -162,10 +193,20 @@ class MediaEvidenceSnapshotCompiler:
             raise MediaEvidenceNotRenderable("character_media_contract_missing")
         projection = self._ledger.project_at(request.cursor)
         self._require_exact_cursor(projection, request.cursor)
-        events = self._load_sources(candidate=candidate, projection=projection, cursor=request.cursor)
+        events = self._load_sources(
+            candidate=candidate,
+            projection=projection,
+            cursor=request.cursor,
+        )
         life_events = tuple(
             item for item in events
-            if item.event_type not in {"ImageEvidenceDeclared", "AppearanceStateRecorded", "VisiblePhysicalStateRecorded"}
+            if item.event_type
+            not in {
+                "ImageEvidenceDeclared",
+                "AppearanceStateRecorded",
+                "VisiblePhysicalStateRecorded",
+                *_SITUATIONAL_CONTEXT_SOURCE_EVENT_TYPES,
+            }
         )
         if not life_events:
             raise MediaEvidenceNotRenderable("image_evidence_has_no_life_source")
@@ -181,6 +222,7 @@ class MediaEvidenceSnapshotCompiler:
             },
             "source": {"channel": "direct_experience", "person": "character"},
             "location": {}, "activity": {}, "participants": (), "objects": (), "environment": {},
+            "situational_context": None,
             "character": {}, "existing_media": (),
             "visual_requirements": {"requires_readable_text": False},
             "relationship_media_context": None,
@@ -251,7 +293,9 @@ class MediaEvidenceSnapshotCompiler:
             ImageEventSnapshotV2(
                 event=body["event"], source=body["source"], location=body["location"],
                 activity=body["activity"], participants=body["participants"], objects=body["objects"],
-                environment=body["environment"], character=body["character"],
+                environment=body["environment"],
+                situational_context=body["situational_context"],
+                character=body["character"],
                 existing_media=body["existing_media"], visual_requirements=body["visual_requirements"],
                 relationship_media_context=None,
                 evidence_index=evidence_index,
@@ -260,7 +304,9 @@ class MediaEvidenceSnapshotCompiler:
             else ImageEventSnapshot(
                 event=body["event"], source=body["source"], location=body["location"],
                 activity=body["activity"], participants=body["participants"], objects=body["objects"],
-                environment=body["environment"], character=body["character"],
+                environment=body["environment"],
+                situational_context=body["situational_context"],
+                character=body["character"],
                 existing_media=body["existing_media"], visual_requirements=body["visual_requirements"],
                 relationship_media_context=None, evidence_index=evidence_index,
             )
@@ -321,7 +367,101 @@ class MediaEvidenceSnapshotCompiler:
             events.append(event)
         if not events:
             raise MediaEvidenceNotRenderable("candidate_has_no_sources")
-        return tuple(events)
+        return self._expand_situational_context_sources(
+            events=tuple(events),
+            projection=projection,
+            cursor=cursor,
+            reason="situational_context_source_unavailable",
+        )
+
+    def _expand_situational_context_sources(
+        self,
+        *,
+        events: tuple[WorldEvent, ...],
+        projection: _ProjectionLike,
+        cursor: ProjectionCursor,
+        reason: str,
+    ) -> tuple[WorldEvent, ...]:
+        """Resolve the explicit biography/Life Arc manifest at the same cursor."""
+
+        projection_refs = {
+            getattr(item, "event_id", None): item
+            for item in projection.committed_world_event_refs
+        }
+        expanded = {event.event_id: event for event in events}
+        for declaration in events:
+            if declaration.event_type not in {
+                "ImageEvidenceDeclared",
+                "RecipientScopedImageEvidenceDeclared",
+            }:
+                continue
+            raw = declaration.payload().get("image_evidence")
+            context = (
+                raw.get("situational_context")
+                if isinstance(raw, dict)
+                else None
+            )
+            context_visibility = (
+                raw.get("visibility")
+                if isinstance(raw, dict)
+                else None
+            )
+            source_refs = (
+                context.get("source_event_refs")
+                if isinstance(context, dict)
+                else None
+            )
+            if context is None:
+                continue
+            if (
+                not isinstance(source_refs, list)
+                or not source_refs
+                or not all(isinstance(item, str) and item for item in source_refs)
+                or source_refs != sorted(set(source_refs))
+                or context_visibility not in _PRIVACY_RANK
+            ):
+                raise MediaEvidenceNotRenderable(reason)
+            for source_ref in source_refs:
+                committed = projection_refs.get(source_ref)
+                located = self._ledger.lookup_event_commit(source_ref)
+                if (
+                    committed is None
+                    or getattr(
+                        committed,
+                        "world_revision",
+                        cursor.world_revision + 1,
+                    )
+                    > cursor.world_revision
+                    or located is None
+                ):
+                    raise MediaEvidenceNotRenderable(reason)
+                event, _commit = located
+                if (
+                    event.event_id != source_ref
+                    or event.event_type
+                    not in _SITUATIONAL_CONTEXT_SOURCE_EVENT_TYPES
+                    or event.payload_hash != getattr(committed, "payload_hash", None)
+                    or event.logical_time > projection.logical_time
+                ):
+                    raise MediaEvidenceNotRenderable(reason)
+                if event.event_type == "LifeArcChanged":
+                    arc_after = event.payload().get("arc_after")
+                    arc_privacy = (
+                        arc_after.get("privacy_class")
+                        if isinstance(arc_after, dict)
+                        else None
+                    )
+                    if (
+                        arc_privacy not in _PRIVACY_RANK
+                        or _PRIVACY_RANK[arc_privacy]
+                        > _PRIVACY_RANK[context_visibility]
+                    ):
+                        raise MediaEvidenceNotRenderable(reason)
+                expanded[event.event_id] = event
+        return tuple(
+            expanded[event_ref]
+            for event_ref in sorted(expanded)
+        )
 
     def _merge_explicit_evidence(
         self, *, target: dict[str, object], origins: dict[str, tuple[WorldEvent, PrivacyClass]],
@@ -338,7 +478,19 @@ class MediaEvidenceSnapshotCompiler:
             return
         if not isinstance(raw, dict):
             raise MediaEvidenceNotRenderable("malformed_image_evidence")
-        allowed = {"visibility", "summary", "outcome", "location", "activity", "participants", "objects", "environment", "existing_media", "requires_readable_text"}
+        allowed = {
+            "visibility",
+            "summary",
+            "outcome",
+            "location",
+            "activity",
+            "participants",
+            "objects",
+            "environment",
+            "situational_context",
+            "existing_media",
+            "requires_readable_text",
+        }
         if set(raw) - allowed:
             raise MediaEvidenceNotRenderable("malformed_image_evidence")
         visibility = _visibility(
@@ -349,12 +501,13 @@ class MediaEvidenceSnapshotCompiler:
             if key in raw:
                 target["event"][key] = _plain_leaf(raw[key], reason="malformed_image_evidence")  # type: ignore[index]
                 origins["/event/" + key] = (event, visibility)
-        for section in ("location", "activity", "environment"):
+        for section in ("location", "activity", "environment", "situational_context"):
             if section not in raw:
                 continue
             cleaned, section_visibility = _clean_mapping(
                 raw[section], fields=_SECTION_FIELDS[section], reason="malformed_image_evidence",
                 fallback_visibility=visibility, allowed_visibilities=allowed_visibilities,
+                allow_string_sequences=(section == "situational_context"),
             )
             if target[section]:
                 raise MediaEvidenceNotRenderable("ambiguous_image_evidence")
@@ -625,6 +778,8 @@ class MediaEvidenceSnapshotCompiler:
             "event", "source", "location", "activity", "participants", "objects", "environment",
             "character", "existing_media", "visual_requirements",
         ]
+        if body.get("situational_context") is not None:
+            roots.append("situational_context")
         if body.get("relationship_media_context") is not None:
             roots.append("relationship_media_context")
         for root in roots:

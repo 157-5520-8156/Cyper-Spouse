@@ -169,12 +169,17 @@ class ScenarioVerificationError(AssertionError):
 # contextual NPC lifecycle and reducer bundle .41. The fixed conversation
 # outputs remain fake-model evidence; changed replay/manifests are expected
 # because the authority grammar and bootstrap projection gained real fields.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.32"
+# ``.33`` installs reducer bundle .44. It repairs the replay-derived
+# contextual-life work index during .43 migration; the index is deliberately
+# absent from the semantic payload, so all scenario predicates and visible
+# output hashes remain governed by the existing assertions while the installed
+# reducer identity changes every replay hash.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.33"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "639f3dd17a67c4f477d2ee9c0e271769712d83d0b643f9574f1ec833051426b0"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "2aefc25c5fa68ec4d04404f726b68a2e316336895aa966a853f3664dc76d30a6"
 
 
 class _FixedScenarioRouter:

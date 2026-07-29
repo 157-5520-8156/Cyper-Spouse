@@ -11,6 +11,7 @@ growth proportional to the commit's delta rather than to world age.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 import sqlite3
 
@@ -35,8 +36,12 @@ from companion_daemon.world_v2.media_v2 import (
     media_payload_hash,
 )
 from companion_daemon.world_v2.qq_ingress_policy import QQIngressFragment, SQLiteQQIngressStore
-from companion_daemon.world_v2.reducers import ReducerState
-from companion_daemon.world_v2.schemas import WorldEvent
+from companion_daemon.world_v2.reducers import (
+    PREVIOUS_REDUCER_BUNDLE_VERSION,
+    REDUCER_BUNDLE_VERSION,
+    ReducerState,
+)
+from companion_daemon.world_v2.schemas import ProjectionCursor, WorldEvent
 from companion_daemon.world_v2.sqlite_ledger import (
     _HEAD_STATE_SENTINEL,
     SQLiteWorldLedger,
@@ -66,6 +71,24 @@ def event(event_id: str, observation_id: str, world_id: str = WORLD) -> WorldEve
     )
 
 
+def user_event(event_id: str, observation_id: str, world_id: str = WORLD) -> WorldEvent:
+    return WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=event_id,
+        world_id=world_id,
+        event_type="ObservationRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="user:primary",
+        source="test",
+        trace_id="trace-contextual-life",
+        causation_id="cause-contextual-life",
+        correlation_id="correlation-contextual-life",
+        idempotency_key=event_id,
+        payload={"observation_id": observation_id},
+    )
+
+
 def commit_one(ledger: SQLiteWorldLedger, index: int, world_id: str = WORLD) -> None:
     head = ledger.project()
     ledger.commit(
@@ -73,6 +96,116 @@ def commit_one(ledger: SQLiteWorldLedger, index: int, world_id: str = WORLD) -> 
         expected_world_revision=head.world_revision,
         expected_deliberation_revision=head.deliberation_revision,
     )
+
+
+def test_contextual_life_pending_index_incrementally_matches_cold_replay(tmp_path) -> None:
+    path = tmp_path / "split-contextual-life-index.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    for index in range(3):
+        head = ledger.project()
+        ledger.commit(
+            [user_event(f"event-user-{index}", f"obs-user-{index}")],
+            expected_world_revision=head.world_revision,
+            expected_deliberation_revision=head.deliberation_revision,
+        )
+
+    hot = ledger.project()
+    assert tuple(
+        item.source_event_ref for item in hot.pending_contextual_life_sources
+    ) == tuple(f"event-user-{index}" for index in range(3))
+    with sqlite3.connect(path) as connection:
+        persisted = ReducerState.model_validate_json(
+            load_head_state_json(connection, WORLD)
+        )
+    assert persisted.pending_contextual_life_sources == hot.pending_contextual_life_sources
+    assert ledger.rebuild() == hot
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.project() == reopened.rebuild()
+    assert (
+        reopened.project().pending_contextual_life_sources
+        == hot.pending_contextual_life_sources
+    )
+    reopened.close()
+
+
+def test_v43_head_migration_replays_contextual_life_pending_index(tmp_path) -> None:
+    path = tmp_path / "split-contextual-life-v43-migration.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    for index in range(3):
+        head = ledger.project()
+        ledger.commit(
+            [user_event(f"event-v43-user-{index}", f"obs-v43-user-{index}")],
+            expected_world_revision=head.world_revision,
+            expected_deliberation_revision=head.deliberation_revision,
+        )
+    current = ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=current.world_revision,
+        deliberation_revision=current.deliberation_revision,
+        ledger_sequence=current.ledger_sequence,
+    )
+    broken_v43_state = ledger._state_from_projection(current).model_copy(  # noqa: SLF001
+        update={"pending_contextual_life_sources": ()}
+    )
+    broken_v43_json = ledger._encode_state(broken_v43_state)  # noqa: SLF001
+    canonical_v43_json = json.dumps(
+        json.loads(broken_v43_json),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    broken_v43_state_hash = hashlib.sha256(
+        ledger._state_hash_material(  # noqa: SLF001
+            canonical_state=canonical_v43_json,
+            cursor=cursor,
+            reducer_bundle_version=PREVIOUS_REDUCER_BUNDLE_VERSION,
+        )
+    ).hexdigest()
+    broken_v43_semantic_hash = hashlib.sha256(
+        json.dumps(
+            broken_v43_state.semantic_payload(
+                world_id=WORLD,
+                world_revision=current.world_revision,
+                reducer_bundle_version=PREVIOUS_REDUCER_BUNDLE_VERSION,
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "DELETE FROM world_v2_head_state_items WHERE world_id = ?",
+            (WORLD,),
+        )
+        connection.execute(
+            """
+            UPDATE world_v2_heads
+            SET state_json = ?, state_hash = ?, semantic_hash = ?,
+                reducer_bundle_version = ?
+            WHERE world_id = ?
+            """,
+            (
+                broken_v43_json,
+                broken_v43_state_hash,
+                broken_v43_semantic_hash,
+                PREVIOUS_REDUCER_BUNDLE_VERSION,
+                WORLD,
+            ),
+        )
+
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
+    projection = migrated.project()
+    assert projection.reducer_bundle_version == REDUCER_BUNDLE_VERSION
+    assert tuple(
+        item.source_event_ref for item in projection.pending_contextual_life_sources
+    ) == tuple(f"event-v43-user-{index}" for index in range(3))
+    assert migrated.rebuild() == projection
+    migrated.close()
 
 
 def test_commits_persist_split_items_under_the_exact_state_hash(tmp_path) -> None:

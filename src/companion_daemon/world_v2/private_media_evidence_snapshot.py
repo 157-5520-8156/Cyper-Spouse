@@ -92,6 +92,7 @@ class PrivateMediaEvidenceSnapshotCompiler:
             },
             "source": {"channel": "direct_experience", "person": "character"},
             "location": {}, "activity": {}, "participants": (), "objects": (), "environment": {},
+            "situational_context": None,
             "character": {"subject_ref": contract.subject_ref, "presence": {"present": True}},
             "existing_media": (),
             "visual_requirements": {"requires_readable_text": False},
@@ -131,7 +132,9 @@ class PrivateMediaEvidenceSnapshotCompiler:
         snapshot = ImageEventSnapshotV3(
             event=body["event"], source=body["source"], location=body["location"],
             activity=body["activity"], participants=body["participants"], objects=body["objects"],
-            environment=body["environment"], character=body["character"],
+            environment=body["environment"],
+            situational_context=body["situational_context"],
+            character=body["character"],
             existing_media=body["existing_media"], visual_requirements=body["visual_requirements"],
             relationship_media_context=context, evidence_index=evidence_index,
         )
@@ -195,7 +198,12 @@ class PrivateMediaEvidenceSnapshotCompiler:
             events.append(located[0])
         if not events:
             raise MediaEvidenceNotRenderable("p3_candidate_has_no_sources")
-        return tuple(events)
+        return self._public_helpers._expand_situational_context_sources(
+            events=tuple(events),
+            projection=projection,
+            cursor=cursor,
+            reason="p3_situational_context_source_unavailable",
+        )
 
     @staticmethod
     def _recipient_declaration(*, events: tuple[WorldEvent, ...], candidate: PhotoCandidate, recipient_ref: str):

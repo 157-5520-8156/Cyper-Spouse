@@ -204,6 +204,12 @@ class ImageEventSnapshot(FrozenModel):
     participants: tuple[dict[str, object], ...]
     objects: tuple[dict[str, object], ...]
     environment: dict[str, object]
+    # Absent on historical v1-v3 bytes. ``exclude_if`` preserves their exact
+    # serialization while new declarations may freeze this planner-readable
+    # source context without mutating replayed snapshots.
+    situational_context: dict[str, object] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     character: dict[str, object]
     existing_media: tuple[dict[str, object], ...]
     visual_requirements: dict[str, object]
@@ -249,6 +255,8 @@ class ImageEventSnapshot(FrozenModel):
         }
         if self.relationship_media_context is not None:
             readable["relationship_media_context"] = self.relationship_media_context
+        if self.situational_context is not None:
+            readable["situational_context"] = self.situational_context
         expected = set().union(*(leaves(value, "/" + key) for key, value in readable.items()))
         supplied = set(self.evidence_index)
         if expected != supplied:

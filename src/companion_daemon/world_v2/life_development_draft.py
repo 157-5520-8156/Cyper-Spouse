@@ -14,7 +14,7 @@ import re
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, computed_field, model_validator
+from pydantic import Field, ValidationError, computed_field, model_validator
 
 from .schema_core import FrozenModel, PrivacyClass
 from .schemas import DueWindow, ProjectionCursor
@@ -171,6 +171,11 @@ class LifeDevelopmentCapabilityManifest(FrozenModel):
     """Pinned-input capability facts, never a menu of story choices."""
 
     version: str = Field(min_length=1, max_length=128)
+    owner_actor_ref: str = Field(
+        default="legacy:unknown-owner",
+        min_length=1,
+        max_length=512,
+    )
     pinned_cursor: ProjectionCursor
     anchor_refs: tuple[str, ...] = ()
     grounding_refs: tuple[str, ...] = ()
@@ -212,7 +217,13 @@ class LifeDevelopmentCapabilityManifest(FrozenModel):
 
     @property
     def manifest_hash(self) -> str:
-        return _digest(self.model_dump(mode="json"))
+        material = self.model_dump(mode="json")
+        if self.owner_actor_ref == "legacy:unknown-owner":
+            # `.1` manifests were committed before subject authority became
+            # explicit.  The decoded sentinel is not part of those immutable
+            # bytes and therefore must not alter their historical identity.
+            material.pop("owner_actor_ref", None)
+        return _digest(material)
 
 
 class LifeDevelopmentCapabilityManifestCompiler(Protocol):
@@ -289,13 +300,77 @@ class DynamicLifeDirectionDraft(FrozenModel):
         return self
 
 
+class LifeDevelopmentVisualLocationDraft(FrozenModel):
+    """Claim-bound visible coordinates, not a request to create a picture."""
+
+    location_ref: str = Field(min_length=1, max_length=512)
+    kind: str | None = Field(default=None, min_length=1, max_length=128)
+    country: str | None = Field(default=None, min_length=1, max_length=128)
+    region: str | None = Field(default=None, min_length=1, max_length=128)
+    city: str | None = Field(default=None, min_length=1, max_length=128)
+    publicness: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class LifeDevelopmentVisualEnvironmentDraft(FrozenModel):
+    light: str | None = Field(default=None, min_length=1, max_length=480)
+    weather: str | None = Field(default=None, min_length=1, max_length=480)
+    structure: str | None = Field(default=None, min_length=1, max_length=480)
+    region: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def has_visible_environment(self) -> "LifeDevelopmentVisualEnvironmentDraft":
+        if not any((self.light, self.weather, self.structure, self.region)):
+            raise ValueError("life-development visual environment cannot be empty")
+        return self
+
+
+class LifeDevelopmentVisualObjectDraft(FrozenModel):
+    local_ref: str = Field(pattern=r"^local:object:[a-z0-9][a-z0-9._-]{0,63}$")
+    kind: str = Field(min_length=1, max_length=128)
+    description: str = Field(min_length=1, max_length=1_000)
+
+
+class LifeDevelopmentVisualEvidenceDraft(FrozenModel):
+    """Optional visual facts authored with one outcome in the same model call.
+
+    ``claim_refs`` binds every field to claims already used by that outcome.
+    Absence means the World Author supplied no safe visual interpretation;
+    downstream code must not infer one from prose.
+    """
+
+    claim_refs: tuple[str, ...] = Field(min_length=1, max_length=16)
+    activity_description: str | None = Field(
+        default=None, min_length=1, max_length=1_000
+    )
+    location: LifeDevelopmentVisualLocationDraft | None = None
+    environment: LifeDevelopmentVisualEnvironmentDraft | None = None
+    objects: tuple[LifeDevelopmentVisualObjectDraft, ...] = Field(
+        default=(), max_length=16
+    )
+
+    @model_validator(mode="after")
+    def is_claim_closed_and_concrete(self) -> "LifeDevelopmentVisualEvidenceDraft":
+        if self.claim_refs != tuple(sorted(set(self.claim_refs))):
+            raise ValueError("life-development visual claim refs must be sorted and unique")
+        if not any(
+            (self.activity_description, self.location, self.environment, self.objects)
+        ):
+            raise ValueError("life-development visual evidence cannot be empty")
+        refs = tuple(item.local_ref for item in self.objects)
+        if len(refs) != len(set(refs)):
+            raise ValueError("life-development visual object refs must be unique")
+        return self
+
+
 class LifeDevelopmentOutcomeDraft(FrozenModel):
+    experienced_by_ref: str = Field(min_length=1, max_length=512)
     text: str = Field(min_length=1, max_length=12_000)
     privacy_class: PrivacyClass
     relative_plausibility_weight: int = Field(ge=1, le=1_000_000)
     claim_refs: tuple[str, ...] = Field(min_length=1, max_length=16)
     provisional_npcs: tuple[ProvisionalNpcDraft, ...] = Field(default=(), max_length=4)
     dynamic_life_direction: DynamicLifeDirectionDraft | None = None
+    visual_evidence: LifeDevelopmentVisualEvidenceDraft | None = None
 
     @model_validator(mode="after")
     def local_refs_are_unique(self) -> "LifeDevelopmentOutcomeDraft":
@@ -304,6 +379,15 @@ class LifeDevelopmentOutcomeDraft(FrozenModel):
         refs = tuple(item.local_ref for item in self.provisional_npcs)
         if len(refs) != len(set(refs)):
             raise ValueError("outcome provisional NPC refs must be unique")
+        if self.visual_evidence is not None:
+            if not set(self.visual_evidence.claim_refs) <= set(self.claim_refs):
+                raise ValueError(
+                    "outcome visual evidence must close over outcome claim refs"
+                )
+            if self.privacy_class not in {"public", "shareable"}:
+                raise ValueError(
+                    "recipient-unbound life-development visual evidence must be public or shareable"
+                )
         return self
 
 
@@ -367,6 +451,7 @@ class LifeDevelopmentTimingDraft(FrozenModel):
 
 class LifeDevelopmentPossibilityDraft(FrozenModel):
     decision: Literal["propose"]
+    authored_subject_ref: str = Field(min_length=1, max_length=512)
     causal_authority: Literal["world_contingency", "character_choice"]
     outcome_resolution_authority: Literal[
         "character_choice",
@@ -393,6 +478,13 @@ class LifeDevelopmentPossibilityDraft(FrozenModel):
 
     @model_validator(mode="after")
     def refs_are_canonical(self) -> "LifeDevelopmentPossibilityDraft":
+        if any(
+            outcome.experienced_by_ref != self.authored_subject_ref
+            for outcome in self.outcomes
+        ):
+            raise ValueError(
+                "every life-development outcome must bind the authored subject"
+            )
         for refs in (
             self.anchor_refs,
             self.entity_refs,
@@ -415,6 +507,16 @@ class LifeDevelopmentPossibilityDraft(FrozenModel):
             raise ValueError(
                 "location_ref and location_capability_ref must be supplied together"
             )
+        for outcome in self.outcomes:
+            visual = outcome.visual_evidence
+            if (
+                visual is not None
+                and visual.location is not None
+                and visual.location.location_ref != self.location_ref
+            ):
+                raise ValueError(
+                    "outcome visual location must equal the authorized proposal location"
+                )
         if any(
             _PRIVACY_RANK[item.privacy_class] < _PRIVACY_RANK[self.privacy_class]
             for item in self.outcomes
@@ -491,8 +593,17 @@ def parse_world_author_draft(
         raise LifeDevelopmentDraftError(
             "invalid_model_output", "World Author output must be bounded JSON text"
         )
+    json_text = raw.strip()
+    if json_text.startswith("```") and json_text.endswith("```"):
+        first_newline = json_text.find("\n")
+        opening = json_text[:first_newline].strip().casefold()
+        if first_newline > 0 and opening in {"```", "```json"}:
+            # Tolerate only a single pure transport envelope.  Nothing inside
+            # is repaired or trusted: the extracted JSON still passes the
+            # complete strict schema and authority validation below.
+            json_text = json_text[first_newline + 1 : -3].strip()
     try:
-        decoded = json.loads(raw)
+        decoded = json.loads(json_text)
     except json.JSONDecodeError as exc:
         raise LifeDevelopmentDraftError(
             "invalid_json", "World Author output is not valid JSON"
@@ -501,19 +612,66 @@ def parse_world_author_draft(
         raise LifeDevelopmentDraftError(
             "invalid_shape", "World Author output must be one JSON object"
         )
+    if (
+        decoded.get("decision") != "no_op"
+        and manifest.owner_actor_ref == "legacy:unknown-owner"
+    ):
+        # Historical immutable audits predate explicit subject authority.
+        # Decode them only under an equally explicit legacy manifest identity;
+        # every newly compiled production manifest names the real owner and
+        # therefore cannot enter this compatibility path.
+        decoded = dict(decoded)
+        decoded.setdefault("authored_subject_ref", manifest.owner_actor_ref)
+        outcomes = decoded.get("outcomes")
+        if isinstance(outcomes, list):
+            decoded["outcomes"] = [
+                (
+                    {
+                        **outcome,
+                        "experienced_by_ref": outcome.get(
+                            "experienced_by_ref",
+                            manifest.owner_actor_ref,
+                        ),
+                    }
+                    if isinstance(outcome, dict)
+                    else outcome
+                )
+                for outcome in outcomes
+            ]
+        json_text = json.dumps(
+            decoded,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     try:
         if decoded.get("decision") == "no_op":
             draft: LifeDevelopmentWorldDraft = LifeDevelopmentNoOpDraft.model_validate_json(
-                raw
+                json_text
             )
         else:
-            draft = LifeDevelopmentPossibilityDraft.model_validate_json(raw)
+            draft = LifeDevelopmentPossibilityDraft.model_validate_json(json_text)
     except ValueError as exc:
+        detail = "World Author output violates the possibility schema"
+        if isinstance(exc, ValidationError):
+            violations = []
+            for error in exc.errors(include_url=False, include_input=False):
+                location = ".".join(str(part) for part in error["loc"]) or "<root>"
+                violations.append(
+                    f"{location}: {error['msg']} [{error['type']}]"
+                )
+            if violations:
+                detail = f"{detail}: {'; '.join(violations)}"
         raise LifeDevelopmentDraftError(
-            "invalid_shape", "World Author output violates the possibility schema"
+            "invalid_shape",
+            detail[:8_000],
         ) from exc
     if isinstance(draft, LifeDevelopmentNoOpDraft):
         return draft
+    if draft.authored_subject_ref != manifest.owner_actor_ref:
+        raise LifeDevelopmentDraftError(
+            "unauthorized_authored_subject",
+            "authored_subject_ref must equal the pinned life owner_actor_ref",
+        )
     if not set(draft.anchor_refs) <= set(manifest.anchor_refs):
         raise LifeDevelopmentDraftError(
             "unsupported_anchor_ref",
@@ -683,6 +841,10 @@ __all__ = [
     "LifeDevelopmentDraftError",
     "LifeDevelopmentNoOpDraft",
     "LifeDevelopmentOutcomeDraft",
+    "LifeDevelopmentVisualEnvironmentDraft",
+    "LifeDevelopmentVisualEvidenceDraft",
+    "LifeDevelopmentVisualLocationDraft",
+    "LifeDevelopmentVisualObjectDraft",
     "LifeDevelopmentPossibilityDraft",
     "LifeDevelopmentTimingDraft",
     "LifeDevelopmentWorldDraft",

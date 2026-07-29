@@ -35,6 +35,7 @@ from .life_development_draft import (
     LifeDevelopmentLocationCapability,
     LifeDevelopmentNoOpDraft,
     LifeDevelopmentPossibilityDraft,
+    LifeDevelopmentVisualEvidenceDraft,
     LifeDevelopmentWorldDraft,
     parse_character_choice,
     parse_world_author_draft,
@@ -198,6 +199,7 @@ class _PinnedIdentity:
 class LifeDevelopmentReadableOutcome(FrozenModel):
     descriptor: OutcomeCandidateDescriptor
     text: str = Field(min_length=1, max_length=12_000)
+    visual_evidence: LifeDevelopmentVisualEvidenceDraft | None = None
 
 
 class LifeDevelopmentPlanMaterial(FrozenModel):
@@ -291,6 +293,18 @@ class LifeDevelopmentProposalReader:
                 LifeDevelopmentReadableOutcome(
                     descriptor=descriptor,
                     text=text,
+                    visual_evidence=(
+                        LifeDevelopmentVisualEvidenceDraft.model_validate_json(
+                            json.dumps(
+                                item["visual_evidence"],
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                        )
+                        if item.get("visual_evidence") is not None
+                        else None
+                    ),
                 )
             )
         return LifeDevelopmentPlanMaterial(
@@ -2017,7 +2031,18 @@ class LifeDevelopmentRuntime:
                     "premise and 2-4 free outcome texts. Use only manifest-listed "
                     "existing refs. When using a location, copy both its location_ref "
                     "and the exact capability_ref whose privacy and complete time "
-                    "window cover the proposal. Provisional NPC local refs are allowed. "
+                    "window cover the proposal. An outcome may optionally include "
+                    "visual_evidence when its settled result would contain concrete "
+                    "visible facts. Bind every visual field through visual_evidence."
+                    "claim_refs to claims already used by that outcome, and copy the "
+                    "authorized location_ref exactly. Omit visual_evidence when the "
+                    "outcome has no defensible visual slice; never infer one merely "
+                    "because a picture might be appealing. Provisional NPC local refs "
+                    "are allowed. "
+                    "Author only the life possibilities of the owner_actor_ref named "
+                    "in authored_subject. The user and user facts are context that may "
+                    "affect that life; never author the user's choices, actions, inner "
+                    "state, activities, commitments, or life direction. "
                     "A long direction is allowed only when outcome_resolution_authority "
                     "is character_choice, because only her later choice may establish "
                     "it. Do not decide the character's motive or "
@@ -2033,6 +2058,16 @@ class LifeDevelopmentRuntime:
                     {
                         "logical_time": logical_time.isoformat(),
                         "pinned_world_context": context,
+                        "authored_subject": {
+                            "owner_actor_ref": self._owner,
+                            "user_authority": "context_only",
+                        },
+                        "output_contract": {
+                            "no_op": {"decision": "no_op"},
+                            "propose": LifeDevelopmentPossibilityDraft.model_json_schema(
+                                mode="validation"
+                            ),
+                        },
                         "capability_manifest": {
                             **manifest.model_dump(mode="json"),
                             "manifest_hash": manifest.manifest_hash,
@@ -2132,7 +2167,7 @@ class LifeDevelopmentRuntime:
             "capability_manifest_version": manifest.version,
             "capability_manifest_hash": manifest.manifest_hash,
             "possibility_authority_version": (
-                "life-development-possibility.2" if possibility_authority is not None else None
+                "life-development-possibility.3" if possibility_authority is not None else None
             ),
             "possibility_authority": possibility_authority,
             "possibility_authority_hash": (
@@ -2190,6 +2225,7 @@ class LifeDevelopmentRuntime:
             manifest=manifest,
         )
         return {
+            "authored_subject_ref": draft.authored_subject_ref,
             "causal_authority": draft.causal_authority,
             "outcome_resolution_authority": draft.outcome_resolution_authority,
             "premise": {
@@ -2216,8 +2252,14 @@ class LifeDevelopmentRuntime:
             "privacy_class": draft.privacy_class,
             "outcomes": [
                 {
+                    "experienced_by_ref": outcome.experienced_by_ref,
                     "claim_refs": list(outcome.claim_refs),
                     "descriptor": descriptor.model_dump(mode="json"),
+                    "visual_evidence": (
+                        outcome.visual_evidence.model_dump(mode="json")
+                        if outcome.visual_evidence is not None
+                        else None
+                    ),
                 }
                 for outcome, descriptor in zip(
                     draft.outcomes,

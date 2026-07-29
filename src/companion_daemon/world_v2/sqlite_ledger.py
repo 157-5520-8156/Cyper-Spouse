@@ -58,6 +58,7 @@ from .ledger_prefix_proof import (
 )
 from .replay_evidence import ReplayCommitEvidence, ReplayEvidence, ReplayEventEvidence
 from .reducers import (
+    PREVIOUS_REDUCER_BUNDLE_VERSION,
     REDUCER_BUNDLE_VERSION,
     ReducerState,
     RevisionClass,
@@ -2920,6 +2921,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.40",
                 "world-v2-reducers.41",
                 "world-v2-reducers.42",
+                PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -2937,6 +2939,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.40",
                     "world-v2-reducers.41",
                     "world-v2-reducers.42",
+                    PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     canonical_legacy_state = json.dumps(
                         json.loads(legacy_state_json),
@@ -2984,7 +2987,6 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.37",
                     "world-v2-reducers.38",
                     "world-v2-reducers.39",
-                    "world-v2-reducers.40",
                 }:
                     # .37 added optional non-factual reflection prose and .38
                     # adds optional reflection/audit lineage to the pending
@@ -3255,6 +3257,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.39",
                 "world-v2-reducers.40",
                 "world-v2-reducers.41",
+                PREVIOUS_REDUCER_BUNDLE_VERSION,
             }:
                 state = ReducerState.model_validate_json(
                     json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
