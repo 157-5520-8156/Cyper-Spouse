@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from companion_daemon.config import Settings
 from companion_daemon.llm import FailoverChatModel, FakeCompanionModel
 from companion_daemon.world_v2.action_due_wake import ActionDueWake
+import companion_daemon.world_v2.qq_c2c_host as qq_c2c_host_module
 from companion_daemon.world_v2.qq_c2c_host import (
     QQC2CDrainResult,
     QQC2CHost,
@@ -93,6 +94,7 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
 ) -> None:
     author = _NamedNoCallModel("qq-proactive-author")
     reviewer = _NamedStrictCoverageNoCallModel("qq-independent-source-reviewer")
+    life_reviewer = _NamedNoCallModel("qq-isolated-life-source-reviewer")
     inventory = _NamedStrictInventoryNoCallModel("qq-candidate-inventory")
     host = build_qq_c2c_host(
         settings=Settings(database_path=tmp_path / "qq-proactive-source-authority.sqlite"),
@@ -100,6 +102,7 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
         bootstrap_at=NOW,
         model=author,
         source_closure_model=reviewer,
+        life_source_closure_model=life_reviewer,
         candidate_external_proposition_inventory_model=inventory,
         use_configured_recall_embedding=False,
     )
@@ -122,10 +125,13 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
             development._world_author_source_rewriter.authority_origin is author
         )
         assert (  # noqa: SLF001
-            development._source_closure_reviewer.authority_origin is reviewer
+            development._source_closure_reviewer.authority_origin is life_reviewer
         )
         assert development._source_closure_reviewer_is_independent is True  # noqa: SLF001
         assert host.proactive_source_authority_health()["status"] == "ready"
+        assert host.life_source_authority_health()["status"] == (
+            "operational_unqualified"
+        )
     finally:
         await host.aclose()
 
@@ -1019,6 +1025,82 @@ async def test_qq_scheduler_advances_all_exact_due_boundaries_before_expression_
 
 
 @pytest.mark.asyncio
+async def test_qq_scheduler_advances_exactly_to_proactive_technical_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry_due = NOW + timedelta(minutes=10)
+
+    class _ProactiveRetryHost:
+        def __init__(self) -> None:
+            self.logical_time = NOW
+            self.tick_reasons: list[tuple[datetime, str]] = []
+            self.background_logical_times: list[datetime] = []
+
+        async def current_logical_time(self):  # type: ignore[no-untyped-def]
+            return self.logical_time
+
+        async def action_due_projection(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(logical_time=self.logical_time, actions=())
+
+        async def tick(self, tick):  # type: ignore[no-untyped-def]
+            self.tick_reasons.append((tick.logical_time_to, tick.reason))
+            self.logical_time = tick.logical_time_to
+            return SimpleNamespace(status="observed_only", authorized_action_ids=())
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.background_logical_times.append(self.logical_time)
+            if self.logical_time < retry_due:
+                raise AssertionError("proactive retry work ran before its durable deadline")
+            return SimpleNamespace(
+                status="failed_safe",
+                work_status="proactive-technical-retry",
+                authorized_action_ids=(),
+            )
+
+        async def drain_scheduled_work(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(action_statuses=(), background_statuses=())
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        qq_c2c_host_module,
+        "next_expression_retry_due",
+        lambda _projection: None,
+    )
+    monkeypatch.setattr(
+        qq_c2c_host_module,
+        "next_proactive_retry_due",
+        lambda _projection: retry_due,
+        raising=False,
+    )
+    platform = _ProactiveRetryHost()
+    host = QQC2CHost(
+        host=platform,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=SQLiteQQIngressStore(tmp_path / "proactive-retry-wake.sqlite"),
+        ingress_now=lambda: NOW,
+        idle_heartbeat_seconds=3_600,
+    )
+    try:
+        drained = await host.scheduler_once(
+            observed_at=NOW + timedelta(minutes=11),
+            max_action_units=0,
+            max_background_units=1,
+        )
+    finally:
+        await host.aclose()
+
+    assert platform.tick_reasons == [
+        (retry_due, "qq_c2c_proactive_retry_wake")
+    ]
+    assert platform.background_logical_times == [retry_due]
+    assert drained.background_statuses == ("proactive-technical-retry",)
+
+
+@pytest.mark.asyncio
 async def test_qq_scheduler_preserves_retry_unit_when_slow_background_crosses_due(
     tmp_path: Path,
 ) -> None:
@@ -1669,12 +1751,15 @@ async def test_qq_production_composition_ticks_life_from_plan_through_experience
 ) -> None:
     """The actual QQ host installs and advances the complete life vertical."""
 
+    conversation_reviewer = _SupportingLifeSourceReviewer()
+    life_reviewer = _SupportingLifeSourceReviewer()
     host = build_qq_c2c_host(
         settings=Settings(database_path=tmp_path / "qq-life-vertical.sqlite"),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=_SelectingLifeEcologyModel(),
-        source_closure_model=_SupportingLifeSourceReviewer(),
+        source_closure_model=conversation_reviewer,
+        life_source_closure_model=life_reviewer,
         delivery=_Delivery(),
     )
     previous = NOW
@@ -2792,6 +2877,7 @@ def test_onebot_entry_accepts_explicit_distinct_test_authorities_without_provide
 ) -> None:
     author = _NamedNoCallModel("isolated-explicit-author")
     reviewer = _NamedStrictFullReviewNoCallModel("isolated-explicit-reviewer")
+    life_reviewer = _NamedNoCallModel("isolated-explicit-life-reviewer")
 
     app = create_qq_c2c_onebot_app(
         adapter="napcat",
@@ -2806,6 +2892,7 @@ def test_onebot_entry_accepts_explicit_distinct_test_authorities_without_provide
         _test_only_model=author,
         _test_only_advisory_model=author,
         _test_only_source_closure_model=reviewer,
+        _test_only_life_source_closure_model=life_reviewer,
     )
 
     try:
@@ -2813,6 +2900,9 @@ def test_onebot_entry_accepts_explicit_distinct_test_authorities_without_provide
         assert health["status"] == "ready"
         assert health["author_model"] == "isolated-explicit-author"
         assert health["reviewer_model"] == "isolated-explicit-reviewer"
+        assert app.state.qq_c2c_host.life_source_authority_health()["status"] == (
+            "operational_unqualified"
+        )
     finally:
         asyncio.run(app.state.qq_c2c_host.aclose())
 
@@ -2973,6 +3063,8 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
         "redundancy_state": "unavailable",
         "source_review_authority": None,
     }
+    assert scheduler["life_source_authority"]["status"] == "unavailable"
+    assert scheduler["life_source_authority"]["last_transport_winner"] is None
     if scheduler["recall_semantic"]["enabled"]:
         assert scheduler["recall_semantic"]["embedding_version"].startswith("openai-compatible:")
 

@@ -24,6 +24,9 @@ from companion_daemon.world_v2.http_capture_host import (
 from companion_daemon.world_v2.errors import IdempotencyConflict, LedgerIntegrityError
 from companion_daemon.world_v2.platform_action_executor import MediaProviderTransport
 from companion_daemon.world_v2.production_turn_application import MediaPreviewDeployment
+from companion_daemon.world_v2.semantic_chat_composition import (
+    unavailable_life_source_authority_health,
+)
 from companion_daemon.world_v2.world_v2_dashboard_ui import (
     DASHBOARD_APP_JS,
     DASHBOARD_HTML,
@@ -468,6 +471,12 @@ async def health(request: Request) -> dict[str, object]:
     if capture is not None:
         response["proactive_source_authority"] = (
             capture.proactive_source_authority_health()
+        )
+        life_health = getattr(capture, "life_source_authority_health", None)
+        response["life_source_authority"] = (
+            life_health()
+            if callable(life_health)
+            else unavailable_life_source_authority_health()
         )
     return response
 

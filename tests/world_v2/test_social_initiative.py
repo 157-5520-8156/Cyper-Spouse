@@ -5,6 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
+from companion_daemon.world_v2.expression_plan_acceptance import (
+    ExpressionPlanBudgetPolicy,
+)
+from companion_daemon.world_v2.proactive_action import ProactiveActionRuntime
 from companion_daemon.world_v2.social_initiative import (
     SocialInitiativeCompiler,
     SocialInitiativeContextPolicy,
@@ -110,6 +115,7 @@ def _compiler_fixture(*, receptive: bool):
     stored = {source.event_id: source}
     committed = []
     projection = SimpleNamespace(
+        world_id="world:social-context-test",
         world_revision=1,
         deliberation_revision=0,
         ledger_sequence=1,
@@ -150,6 +156,13 @@ def _compiler_fixture(*, receptive: bool):
             else ()
         ),
         plans=(),
+        trigger_processes=(),
+        model_result_audits=(),
+        world_occurrences=(),
+        threads=(),
+        commitments=(),
+        thread_transitions=(),
+        commitment_transitions=(),
     )
 
     def commit_at_cursor(events, *, expected_cursor, commit_id):  # type: ignore[no-untyped-def]
@@ -237,6 +250,13 @@ async def test_each_due_epoch_reaches_the_model_owned_opportunity() -> None:
         "delay:7200",
     )
     assert str(draws[0]["attempt_id"]).startswith("social-initiative:")
+    assert (
+        await compiler.next_opportunity(
+            projection,
+            excluded_consideration_ids=frozenset({opportunity.consideration_id}),
+        )
+        is None
+    )
     del committed
 
 
@@ -481,6 +501,239 @@ async def test_failed_situation_consideration_retains_its_stimulus_on_retry() ->
 
 
 @pytest.mark.asyncio
+async def test_technical_retry_precedes_cooldown_from_another_successful_contact() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    occurred_at = NOW + timedelta(minutes=30)
+    stimulus = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:experience:retry-before-contact-cooldown",
+        world_id="world:social-context-test",
+        event_type="ExperienceCommitted",
+        logical_time=occurred_at,
+        created_at=occurred_at,
+        actor="actor:companion",
+        source="test",
+        trace_id="trace:retry-before-contact-cooldown",
+        causation_id="cause:retry-before-contact-cooldown",
+        correlation_id="conversation:retry-before-contact-cooldown",
+        idempotency_key="experience:retry-before-contact-cooldown",
+        payload={},
+    )
+    compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
+        (stimulus, SimpleNamespace(world_revision=2))
+        if event_id == stimulus.event_id
+        else None
+    )
+    stimulus_ref = SimpleNamespace(
+        event_id=stimulus.event_id,
+        event_type=stimulus.event_type,
+        logical_time=stimulus.logical_time,
+        world_revision=2,
+    )
+    projection.committed_world_event_refs = (stimulus_ref,)
+    projection.logical_time = occurred_at + timedelta(minutes=3)
+    compiler._random = SimpleNamespace(  # noqa: SLF001
+        draw=lambda **_kwargs: SimpleNamespace(
+            selected_candidate_ref="delay:120",
+            draw_id="draw:retry-before-contact-cooldown",
+        )
+    )
+    failed_opportunity = await compiler.next_opportunity(projection)
+    assert failed_opportunity is not None
+
+    failed_at = occurred_at + timedelta(minutes=4)
+    failure_ref = SimpleNamespace(
+        event_id="event:model-result:retry-before-contact-cooldown",
+        event_type="ModelResultRecorded",
+        logical_time=failed_at,
+        world_revision=4,
+    )
+    projection.committed_world_event_refs = (stimulus_ref, failure_ref)
+    projection.model_result_audits = (
+        SimpleNamespace(
+            model_result_ref="model-result:retry-before-contact-cooldown",
+            proposal_hash=None,
+            event_ref=failure_ref.event_id,
+            evaluated_world_revision=2,
+        ),
+    )
+    projection.trigger_processes = (
+        SimpleNamespace(
+            process_kind="proactive_action_deliberation",
+            state="terminal",
+            trigger_ref=(
+                "proactive-consideration:" + failed_opportunity.consideration_id
+            ),
+            runtime_outcome_ref=(
+                "proactive:deliberation-failed:"
+                "model-result:retry-before-contact-cooldown"
+            ),
+            source_evidence_ref=stimulus.event_id,
+            claim_lease=SimpleNamespace(acquired_at=failed_at),
+        ),
+    )
+    # Another consideration successfully contacted the user two minutes before
+    # this failure's ten-minute retry deadline. That ordinary contact starts a
+    # cadence cooldown, but it does not semantically settle or supersede the
+    # failed consideration.
+    projection.actions = (
+        SimpleNamespace(
+            kind="proactive_message",
+            state="delivered",
+            logical_time=failed_at + timedelta(minutes=8),
+        ),
+    )
+    projection.logical_time = failed_at + timedelta(minutes=10)
+
+    retry = await compiler.next_opportunity(projection)
+
+    assert retry is not None
+    assert retry.consideration_id == failed_opportunity.consideration_id
+    assert retry.cadence_reason_codes == ("technical_failure:retry",)
+
+    # Only a newer user Observation invalidates the old pinned social context.
+    projection.message_observations = (
+        *projection.message_observations,
+        SimpleNamespace(observation_id="message:new-context", world_revision=5),
+    )
+    assert await compiler.next_opportunity(projection) is None
+
+
+@pytest.mark.asyncio
+async def test_not_due_retry_does_not_starve_an_independent_due_situation() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    first_at = NOW + timedelta(minutes=10)
+    second_at = first_at + timedelta(minutes=11)
+    first_event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:experience:failed-situation",
+        world_id=projection.world_id,
+        event_type="ExperienceCommitted",
+        logical_time=first_at,
+        created_at=first_at,
+        actor="actor:companion",
+        source="test",
+        trace_id="trace:retry-independent-situation",
+        causation_id="cause:retry-independent-situation",
+        correlation_id="conversation:retry-independent-situation",
+        idempotency_key="experience:failed-situation",
+        payload={},
+    )
+    second_event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:experience:independent-situation",
+        world_id=projection.world_id,
+        event_type="ExperienceCommitted",
+        logical_time=second_at,
+        created_at=second_at,
+        actor="actor:companion",
+        source="test",
+        trace_id="trace:retry-independent-situation",
+        causation_id=first_event.event_id,
+        correlation_id="conversation:retry-independent-situation",
+        idempotency_key="experience:independent-situation",
+        payload={},
+    )
+    stored = {item.event_id: item for item in (first_event, second_event)}
+    compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
+        (stored[event_id], SimpleNamespace(world_revision=2))
+        if event_id in stored
+        else None
+    )
+    compiler._random = SimpleNamespace(  # noqa: SLF001
+        draw=lambda **_kwargs: SimpleNamespace(
+            selected_candidate_ref="delay:120",
+            draw_id="draw:retry-independent-situation",
+        )
+    )
+    first_ref = SimpleNamespace(
+        event_id=first_event.event_id,
+        event_type=first_event.event_type,
+        logical_time=first_event.logical_time,
+        world_revision=2,
+    )
+    projection.committed_world_event_refs = (first_ref,)
+    projection.logical_time = first_at + timedelta(minutes=3)
+    first = await compiler.next_opportunity(projection)
+    assert first is not None
+
+    failed_at = first_at + timedelta(minutes=5)
+    failure_ref = SimpleNamespace(
+        event_id="event:model-result:failed-situation",
+        event_type="ModelResultRecorded",
+        logical_time=failed_at,
+        world_revision=4,
+    )
+    second_ref = SimpleNamespace(
+        event_id=second_event.event_id,
+        event_type=second_event.event_type,
+        logical_time=second_event.logical_time,
+        world_revision=5,
+    )
+    trigger_ref = "proactive-consideration:" + first.consideration_id
+    projection.trigger_processes = (
+        SimpleNamespace(
+            trigger_id=ProactiveActionRuntime._trigger_id_for_world(  # noqa: SLF001
+                world_id=projection.world_id,
+                consideration_id=first.consideration_id,
+                retry_ordinal=0,
+            ),
+            process_kind=ProactiveActionRuntime.PROCESS_KIND,
+            state="terminal",
+            trigger_ref=trigger_ref,
+            runtime_outcome_ref="proactive:deliberation-failed:model-result:failed-situation",
+            source_evidence_ref=first_event.event_id,
+            claim_lease=SimpleNamespace(acquired_at=failed_at),
+        ),
+    )
+    projection.model_result_audits = (
+        SimpleNamespace(
+            attempt_id=ProactiveActionRuntime._model_attempt_id(  # noqa: SLF001
+                consideration_id=first.consideration_id,
+                retry_ordinal=0,
+            ),
+            model_result_ref="model-result:failed-situation",
+            proposal_hash=None,
+            parent_model_call_id=None,
+            audit_json='{"status":"recovery_failed","failure_code":"quick_invalid_output"}',
+            event_ref=failure_ref.event_id,
+            evaluated_world_revision=2,
+        ),
+    )
+    projection.committed_world_event_refs = (first_ref, failure_ref, second_ref)
+    projection.logical_time = second_at + timedelta(minutes=2)
+
+    runtime = ProactiveActionRuntime(
+        ledger=compiler._ledger,  # noqa: SLF001
+        turn=SimpleNamespace(),
+        batch_issuer=AcceptedLedgerBatchIssuer(),
+        policy=ExpressionPlanBudgetPolicy(
+            account_id="account:proactive",
+            amount_limit_per_action=10,
+            actor="actor:companion",
+            allowed_targets=("user:primary",),
+            recovery_policy="effect_once",
+            category="proactive",
+        ),
+        owner_id="worker:test-social-alternate",
+        social_initiative=compiler,
+    )
+    opened = []
+
+    async def capture_open(**kwargs):  # type: ignore[no-untyped-def]
+        opened.append(kwargs["opportunity"])
+
+    runtime._open = capture_open  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = await runtime.drain_one()
+
+    assert result.status == "opened"
+    assert len(opened) == 1
+    assert opened[0].source_event_ref == second_event.event_id
+    assert opened[0].consideration_id != first.consideration_id
+
+
+@pytest.mark.asyncio
 async def test_successful_retry_terminally_settles_the_failed_consideration() -> None:
     compiler, projection, _committed = _compiler_fixture(receptive=True)
     occurred_at = NOW + timedelta(minutes=30)
@@ -611,16 +864,24 @@ async def test_each_situation_window_survives_a_newer_window_until_considered() 
     assert newer is not None
     assert newer.source_event_ref == events[1].event_id
 
+    older = await compiler.next_opportunity(
+        projection,
+        excluded_consideration_ids=frozenset({newer.consideration_id}),
+    )
+    assert older is not None
+    assert older.source_event_ref == events[0].event_id
+
     projection.trigger_processes = (
         SimpleNamespace(
             process_kind="proactive_action_deliberation",
             trigger_ref="proactive-consideration:" + newer.consideration_id,
             state="terminal",
+            runtime_outcome_ref="proactive:silent",
         ),
     )
-    older = await compiler.next_opportunity(projection)
-    assert older is not None
-    assert older.source_event_ref == events[0].event_id
+    terminal_fallback = await compiler.next_opportunity(projection)
+    assert terminal_fallback is not None
+    assert terminal_fallback.source_event_ref == events[0].event_id
 
 
 @pytest.mark.asyncio
@@ -683,6 +944,7 @@ async def test_new_stimulus_in_a_settled_window_reuses_draw_but_gets_a_new_epoch
             process_kind="proactive_action_deliberation",
             trigger_ref="proactive-consideration:" + first.consideration_id,
             state="terminal",
+            runtime_outcome_ref="proactive:silent",
         ),
     )
     projection.committed_world_event_refs = tuple(

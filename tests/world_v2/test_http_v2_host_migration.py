@@ -119,12 +119,14 @@ async def test_http_composition_wires_proactive_identity_reviewer_and_inventory(
 ) -> None:
     author = _NamedNoCallModel("http-proactive-author")
     reviewer = _NamedStrictCoverageNoCallModel("http-independent-source-reviewer")
+    life_reviewer = _NamedNoCallModel("http-isolated-life-source-reviewer")
     inventory = _NamedStrictInventoryNoCallModel("http-candidate-inventory")
     host = build_http_v2_capture_host(
         settings=Settings(database_path=tmp_path / "http-proactive-source-authority.sqlite"),
         bootstrap_at=NOW,
         model=author,
         source_closure_model=reviewer,
+        life_source_closure_model=life_reviewer,
         candidate_external_proposition_inventory_model=inventory,
     )
     try:
@@ -146,10 +148,13 @@ async def test_http_composition_wires_proactive_identity_reviewer_and_inventory(
             development._world_author_source_rewriter.authority_origin is author
         )
         assert (  # noqa: SLF001
-            development._source_closure_reviewer.authority_origin is reviewer
+            development._source_closure_reviewer.authority_origin is life_reviewer
         )
         assert development._source_closure_reviewer_is_independent is True  # noqa: SLF001
         assert host.proactive_source_authority_health()["status"] == "ready"
+        assert host.life_source_authority_health()["status"] == (
+            "operational_unqualified"
+        )
     finally:
         await host.aclose()
 
@@ -766,6 +771,7 @@ def test_explicit_message_retries_failed_health_warmup_and_restores_ready_status
     assert ready.json()["status"] == "ok"
     assert ready.json()["world_v2_capture"] == {"status": "ready"}
     assert ready.json()["proactive_source_authority"] == {"status": "ready"}
+    assert ready.json()["life_source_authority"]["status"] == "unavailable"
 
 
 def test_health_reports_running_warmup_without_starting_another_build(

@@ -260,7 +260,12 @@ class SocialInitiativeCompiler:
             ledger=ledger, source="world-v2:social-initiative-random"
         )
 
-    async def next_opportunity(self, projection) -> SocialInitiativeOpportunity | None:
+    async def next_opportunity(
+        self,
+        projection,
+        *,
+        excluded_consideration_ids: frozenset[str] = frozenset(),
+    ) -> SocialInitiativeOpportunity | None:
         logical_time = projection.logical_time
         if logical_time is None:
             return None
@@ -273,19 +278,48 @@ class SocialInitiativeCompiler:
             ),
             default=None,
         )
+        # A contact produced by another consideration controls only the normal
+        # social cadence. It cannot settle or postpone an already committed
+        # technical failure whose stable retry lineage is still valid. The
+        # retry reader itself remains fail-closed on a newer user Observation.
+        retry = await self._failed_consideration_retry(projection)
+        if (
+            retry is not None
+            and retry.consideration_id not in excluded_consideration_ids
+        ):
+            return retry
         if recent_contact is not None and (
             logical_time - recent_contact
         ).total_seconds() < self._policy.contact_cooldown_seconds:
             return None
-        situation = await self._situation_change(projection, logical_time)
+        situation = await self._situation_change(
+            projection,
+            logical_time,
+            excluded_consideration_ids=excluded_consideration_ids,
+        )
         if situation is not None:
             return situation
-        retry = await self._failed_consideration_retry(projection)
+        # A pending retry still owns its message/ambient cadence context. Once
+        # the runtime excludes that not-yet-due consideration, only an
+        # independently grounded situation window may run in the meantime;
+        # minting a sibling cadence epoch would bypass the durable backoff.
         if retry is not None:
-            return retry
-        return await self._spontaneous_contact(projection, logical_time)
+            return None
+        spontaneous = await self._spontaneous_contact(projection, logical_time)
+        if (
+            spontaneous is not None
+            and spontaneous.consideration_id in excluded_consideration_ids
+        ):
+            return None
+        return spontaneous
 
-    async def _situation_change(self, projection, logical_time: datetime):
+    async def _situation_change(
+        self,
+        projection,
+        logical_time: datetime,
+        *,
+        excluded_consideration_ids: frozenset[str] = frozenset(),
+    ):
         latest_message_revision = (
             projection.message_observations[-1].world_revision
             if projection.message_observations
@@ -325,6 +359,7 @@ class SocialInitiativeCompiler:
                 )
             )
             is not None
+            and opportunity.consideration_id not in excluded_consideration_ids
         ]
         return (
             min(

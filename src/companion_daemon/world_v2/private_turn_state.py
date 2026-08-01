@@ -37,22 +37,6 @@ class PrivateTurnState(FrozenModel):
         return self
 
 
-def require_private_turn_state_first(
-    value: dict[str, object],
-    *,
-    required: bool,
-) -> None:
-    """Validate the causal wire shape without interpreting model semantics."""
-
-    if not required:
-        return
-    keys = tuple(value)
-    if not keys or keys[0] != "private_turn_state":
-        raise ValueError(
-            "private turn state must be present as the first ExpressionDraft field"
-        )
-
-
 def validate_private_turn_state_sources(
     state: PrivateTurnState | None,
     *,
@@ -71,6 +55,5 @@ def validate_private_turn_state_sources(
 
 __all__ = [
     "PrivateTurnState",
-    "require_private_turn_state_first",
     "validate_private_turn_state_sources",
 ]

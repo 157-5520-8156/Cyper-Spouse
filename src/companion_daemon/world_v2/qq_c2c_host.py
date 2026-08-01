@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Coroutine, Literal, TypeVar
 
 from companion_daemon.config import Settings
 from companion_daemon.qq_delivery import QQDelivery
@@ -54,9 +54,11 @@ from .qq_ingress_policy import (
 from .semantic_chat_composition import (
     SemanticChatComposition,
     build_semantic_chat_composition,
+    unavailable_life_source_authority_health,
 )
 from .expression_draft import qq_expression_capabilities
 from .expression_episode_lifecycle import next_expression_retry_due
+from .proactive_action import next_proactive_retry_due
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
 from .life_development_model_adapter import RoleBoundLifeDevelopmentModelAdapter
 from .recall_embedding import configured_recall_embedding
@@ -70,6 +72,7 @@ _LOG = logging.getLogger(__name__)
 _MAX_EXACT_DUE_ADVANCES = 64
 _ACTION_PUMP_CONFLICT_BACKOFF_SECONDS = (0.0, 0.01)
 _OWNED_ACTION_DRAIN_CANCEL_GRACE_SECONDS = 0.1
+_SchedulerResult = TypeVar("_SchedulerResult")
 
 
 def _utc_now() -> datetime:
@@ -296,6 +299,12 @@ class QQC2CHost:
         # ActionPump's durable claim/CAS is already the authority when a
         # targeted pump races a passive recovery pump.
         self._scheduled_work_lock = asyncio.Lock()
+        # Public scheduler-lane operations are process-owned across their
+        # deliberately non-nested clock/background phases.  The registry is
+        # the shutdown bridge across the gap between those two mutexes. Once
+        # admitted, a tick/drain/scheduler pass gets the same bounded close
+        # grace as other durable work before cancellation/restart recovery.
+        self._owned_scheduler_lane_tasks: set[asyncio.Task[object]] = set()
         # Provider handoffs are serialized separately from model-backed
         # scheduler work.  This protects one process from running overlapping
         # ActionPump effects while still allowing a visible, exact-target
@@ -362,8 +371,52 @@ class QQC2CHost:
         if self._closed:
             raise RuntimeError("QQ C2C host is closing")
 
+    def _start_owned_scheduler_lane_task(
+        self,
+        operation: Coroutine[Any, Any, _SchedulerResult],
+        *,
+        name: str,
+    ) -> asyncio.Task[_SchedulerResult]:
+        task = asyncio.create_task(operation, name=name)
+        self._owned_scheduler_lane_tasks.add(task)
+
+        def finished(completed: asyncio.Task[_SchedulerResult]) -> None:
+            self._owned_scheduler_lane_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return task
+
+    async def _join_owned_scheduler_lane_tasks(self) -> None:
+        pending = tuple(self._owned_scheduler_lane_tasks)
+        if not pending:
+            return
+        _done, still_pending = await asyncio.wait(
+            pending,
+            timeout=self._owned_action_close_grace_seconds,
+        )
+        if not still_pending:
+            return
+        _LOG.warning(
+            "world v2 close grace elapsed; cancelling %d owned "
+            "scheduler-lane task(s) for durable recovery",
+            len(still_pending),
+        )
+        for task in still_pending:
+            task.cancel()
+        _cancelled, ignored_cancellation = await asyncio.wait(
+            still_pending,
+            timeout=_OWNED_ACTION_DRAIN_CANCEL_GRACE_SECONDS,
+        )
+        if ignored_cancellation:
+            _LOG.error(
+                "world v2 owned scheduler-lane tasks ignored cancellation "
+                "during close count=%d",
+                len(ignored_cancellation),
+            )
+
     def _start_owned_action_drain(self, action_id: str) -> asyncio.Task[object]:
-        self._require_open()
         task = asyncio.create_task(
             self._drain_owned_action(action_id),
             name=f"qq-c2c-owned-action-drain:{action_id}",
@@ -371,7 +424,6 @@ class QQC2CHost:
         return self._track_owned_action_drain(task, action_ref=action_id)
 
     def _start_owned_scheduled_action_drain(self) -> asyncio.Task[object]:
-        self._require_open()
         current = self._scheduled_action_drain_task
         if current is not None and not current.done():
             return current
@@ -786,6 +838,15 @@ class QQC2CHost:
         """Resume one due or previously claimed batch after a restart."""
 
         self._require_open()
+        task = self._start_owned_scheduler_lane_task(
+            self._drain_ingress_once_admitted(),
+            name="qq-c2c-owned-scheduler-lane:drain-ingress",
+        )
+        return await asyncio.shield(task)
+
+    async def _drain_ingress_once_admitted(self) -> QQC2CIngressResult | None:
+        """Resume one batch already admitted through the public close gate."""
+
         if self._ingress_store is None:
             return None
         if self._rhythm_holds > 0:
@@ -1167,6 +1228,33 @@ class QQC2CHost:
         """Advance a caller-owned durable scheduler interval through the v2 host."""
 
         self._require_open()
+        task = self._start_owned_scheduler_lane_task(
+            self._tick_admitted(
+                tick_id=tick_id,
+                logical_time_from=logical_time_from,
+                logical_time_to=logical_time_to,
+                observed_at=observed_at,
+                reason=reason,
+                run_life_ecology=run_life_ecology,
+            ),
+            name=f"qq-c2c-owned-scheduler-lane:tick:{tick_id}",
+        )
+        return await asyncio.shield(task)
+
+    async def _tick_admitted(
+        self,
+        *,
+        tick_id: str,
+        logical_time_from: datetime,
+        logical_time_to: datetime,
+        observed_at: datetime,
+        reason: str,
+        run_life_ecology: bool,
+    ) -> str:
+        """Complete one tick admitted before the close gate was sealed."""
+
+        trace_id = f"trace:qq-c2c-v2:tick:{tick_id}"
+        correlation_id = f"clock:qq-c2c-v2:{self._recipient_id}"
         async with self._lock:
             outcome = await self._host.tick(
                 PlatformClockTick(
@@ -1174,14 +1262,45 @@ class QQC2CHost:
                     logical_time_from=logical_time_from,
                     logical_time_to=logical_time_to,
                     observed_at=observed_at,
-                    trace_id=f"trace:qq-c2c-v2:tick:{tick_id}",
+                    trace_id=trace_id,
                     causation_id=f"scheduler:qq-c2c-v2:{tick_id}",
-                    correlation_id=f"clock:qq-c2c-v2:{self._recipient_id}",
+                    correlation_id=correlation_id,
                     reason=reason,
-                    run_life_ecology=run_life_ecology,
+                    # QQ's clock mutex protects only the short Clock/CAS
+                    # phase. Life may wait on several model providers and is
+                    # advanced below on the scheduler/background lane.
+                    run_life_ecology=False,
                 )
             )
-            return outcome.status
+        if run_life_ecology:
+            async with self._scheduled_work_lock:
+                await self._advance_life_ecology_for_committed_tick(
+                    tick_id=tick_id,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+        return outcome.status
+
+    async def _advance_life_ecology_for_committed_tick(
+        self,
+        *,
+        tick_id: str,
+        trace_id: str,
+        correlation_id: str,
+    ) -> object | None:
+        """Run one source-bound Life wake without owning QQ's clock mutex."""
+
+        advance = getattr(self._host, "advance_life_ecology_once", None)
+        if not callable(advance):
+            # ``WorldV2PlatformHost`` always supplies this seam.  Keeping the
+            # adapter tolerant here preserves narrow clock-only test doubles;
+            # production composition cannot enter this branch.
+            return None
+        return await advance(
+            wake_event_ref=f"event:trigger:clock:{tick_id}",
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
 
     async def drain(
         self, *, max_action_units: int = 8, max_background_units: int = 8
@@ -1191,6 +1310,23 @@ class QQC2CHost:
         self._require_open()
         if not 0 <= max_action_units <= 64 or not 0 <= max_background_units <= 64:
             raise ValueError("QQ C2C drain limits must be between 0 and 64")
+        task = self._start_owned_scheduler_lane_task(
+            self._drain_admitted(
+                max_action_units=max_action_units,
+                max_background_units=max_background_units,
+            ),
+            name="qq-c2c-owned-scheduler-lane:drain",
+        )
+        return await asyncio.shield(task)
+
+    async def _drain_admitted(
+        self,
+        *,
+        max_action_units: int,
+        max_background_units: int,
+    ) -> QQC2CDrainResult:
+        """Complete one maintenance drain admitted before shutdown."""
+
         async with self._scheduled_work_lock:
             result = await self._drain_serialized(
                 max_action_units=max_action_units,
@@ -1256,13 +1392,32 @@ class QQC2CHost:
             raise ValueError("QQ C2C scheduler time must be timezone-aware")
         if not 0 <= max_action_units <= 64 or not 0 <= max_background_units <= 64:
             raise ValueError("QQ C2C scheduler drain limits must be between 0 and 64")
+        task = self._start_owned_scheduler_lane_task(
+            self._scheduler_once_admitted(
+                observed_at=observed_at,
+                max_action_units=max_action_units,
+                max_background_units=max_background_units,
+            ),
+            name="qq-c2c-owned-scheduler-lane:scheduler",
+        )
+        return await asyncio.shield(task)
+
+    async def _scheduler_once_admitted(
+        self,
+        *,
+        observed_at: datetime,
+        max_action_units: int,
+        max_background_units: int,
+    ) -> QQC2CDrainResult:
+        """Complete one scheduler pass admitted before the close gate."""
+
         scheduler_started_at = self._ingress_now()
         # A recovered ingress may authorize a targeted Action. Finish that
         # visible phase before entering the scheduler's separately locked work
         # phases below. No scheduler phase may hold ``_scheduled_work_lock``
         # while waiting for ``_lock`` (or vice versa).
         for _ in range(8):
-            if await self.drain_ingress_once() is None:
+            if await self._drain_ingress_once_admitted() is None:
                 break
         result = await self._scheduler_once_serialized(
             observed_at=observed_at,
@@ -1304,6 +1459,7 @@ class QQC2CHost:
         # attempts (which can create the observed 30s+ QQ tail).
         background_remaining = max_background_units
         priority_action_ids: list[str] = []
+        heartbeat_life_wake: tuple[str, str, str] | None = None
 
         def remember_priority_actions(result: object) -> bool:
             candidates: list[str] = []
@@ -1331,7 +1487,17 @@ class QQC2CHost:
         async with self._scheduled_work_lock:
             if callable(due_projection_reader):
                 due_projection = await due_projection_reader()
-                retry_due_before_tick = next_expression_retry_due(due_projection)
+                retry_due_before_tick = min(
+                    (
+                        value
+                        for value in (
+                            next_expression_retry_due(due_projection),
+                            next_proactive_retry_due(due_projection),
+                        )
+                        if value is not None
+                    ),
+                    default=None,
+                )
                 retry_logical_from = getattr(due_projection, "logical_time", None)
             # Preserve one unit whenever an eligible retry lies ahead.  Slow
             # pre-tick work can move the effective wall-clock boundary across a
@@ -1374,7 +1540,7 @@ class QQC2CHost:
         async with self._lock:
             logical_from = await self._host.current_logical_time()
             advanced_exact_due = False
-            reached_expression_retry = False
+            reached_technical_retry = False
             for _ in range(_MAX_EXACT_DUE_ADVANCES):
                 if logical_from is None:
                     break
@@ -1403,19 +1569,35 @@ class QQC2CHost:
                     and logical_from < nearest_expression_retry_due <= tick_boundary
                     else None
                 )
+                nearest_proactive_retry_due = (
+                    next_proactive_retry_due(due_projection)
+                    if due_projection is not None
+                    else None
+                )
+                proactive_retry_target = (
+                    nearest_proactive_retry_due
+                    if nearest_proactive_retry_due is not None
+                    and logical_from < nearest_proactive_retry_due <= tick_boundary
+                    else None
+                )
                 exact_due_targets = tuple(
                     value
-                    for value in (action_due_target, expression_retry_target)
+                    for value in (
+                        action_due_target,
+                        expression_retry_target,
+                        proactive_retry_target,
+                    )
                     if value is not None
                 )
                 if not exact_due_targets:
                     break
                 tick_target = min(exact_due_targets)
-                tick_reason = (
-                    "qq_c2c_action_due_wake"
-                    if tick_target == action_due_target
-                    else "qq_c2c_expression_retry_wake"
-                )
+                if tick_target == action_due_target:
+                    tick_reason = "qq_c2c_action_due_wake"
+                elif tick_target == expression_retry_target:
+                    tick_reason = "qq_c2c_expression_retry_wake"
+                else:
+                    tick_reason = "qq_c2c_proactive_retry_wake"
                 tick_id = "tick:qq-c2c-v2:" + tick_target.isoformat()
                 outcome = await self._host.tick(
                     PlatformClockTick(
@@ -1435,8 +1617,11 @@ class QQC2CHost:
                 remember_priority_actions(outcome)
                 logical_from = tick_target
                 advanced_exact_due = True
-                if tick_target == expression_retry_target:
-                    reached_expression_retry = True
+                if tick_target in {
+                    expression_retry_target,
+                    proactive_retry_target,
+                }:
+                    reached_technical_retry = True
                     break
 
             heartbeat_due = (
@@ -1451,22 +1636,28 @@ class QQC2CHost:
             )
             if heartbeat_due:
                 tick_id = "tick:qq-c2c-v2:" + tick_boundary.isoformat()
+                trace_id = f"trace:qq-c2c-v2:{tick_id}"
+                correlation_id = f"clock:qq-c2c-v2:{self._recipient_id}"
                 outcome = await self._host.tick(
                     PlatformClockTick(
                         tick_id=tick_id,
                         logical_time_from=logical_from,
                         logical_time_to=tick_boundary,
                         observed_at=tick_boundary,
-                        trace_id=f"trace:qq-c2c-v2:{tick_id}",
+                        trace_id=trace_id,
                         causation_id=f"scheduler:qq-c2c-v2:{tick_id}",
-                        correlation_id=f"clock:qq-c2c-v2:{self._recipient_id}",
+                        correlation_id=correlation_id,
                         reason="qq_c2c_scheduler",
-                        run_life_ecology=True,
+                        # Commit the exact Clock wake while holding only the
+                        # short CAS mutex. The model-backed Life continuation
+                        # runs below after this mutex has been released.
+                        run_life_ecology=False,
                     )
                 )
                 if outcome.status not in {"observed_only", "deferred"}:
                     raise RuntimeError("QQ C2C scheduler clock was not accepted")
                 remember_priority_actions(outcome)
+                heartbeat_life_wake = (tick_id, trace_id, correlation_id)
         # Re-enter the scheduled-work lane only after releasing ``_lock``.
         # ``priority_action_ids`` are immutable hints from committed outcomes,
         # never cached Action state: each targeted and generic drain re-projects
@@ -1476,7 +1667,7 @@ class QQC2CHost:
                 post_tick_retry_reserve
                 and retry_due_before_tick is not None
                 and retry_due_before_tick <= tick_boundary
-                and not reached_expression_retry
+                and not reached_technical_retry
             )
             # Give a time-sensitive, source-bound social-initiative
             # consideration one chance against the new clock before generic
@@ -1512,6 +1703,12 @@ class QQC2CHost:
                 )
                 if targeted is not None:
                     post_tick_actions.append(str(getattr(targeted, "status", "processed")))
+            if heartbeat_life_wake is not None:
+                await self._advance_life_ecology_for_committed_tick(
+                    tick_id=heartbeat_life_wake[0],
+                    trace_id=heartbeat_life_wake[1],
+                    correlation_id=heartbeat_life_wake[2],
+                )
             # Post-tick background/model work is likewise outside the ingress
             # lock. Action/trigger claims and cursor CAS provide idempotency.
             drained = await self._host.drain_scheduled_work(
@@ -1603,6 +1800,13 @@ class QQC2CHost:
             }
         return self._semantic_chat.proactive_source_authority_health()
 
+    def life_source_authority_health(self) -> dict[str, object]:
+        """Expose Life review runtime state independently from conversation."""
+
+        if self._semantic_chat is None:
+            return unavailable_life_source_authority_health()
+        return self._semantic_chat.life_source_authority_health()
+
     def export_replay_evidence(self) -> ReplayEvidence:
         """Expose immutable audit evidence without granting ledger mutation access."""
 
@@ -1623,7 +1827,12 @@ class QQC2CHost:
         host must run here as well.
         """
 
-        return await self._host.maintain_wal_once()
+        self._require_open()
+        task = self._start_owned_scheduler_lane_task(
+            self._host.maintain_wal_once(),
+            name="qq-c2c-owned-scheduler-lane:wal-maintenance",
+        )
+        return await asyncio.shield(task)
 
     async def aclose(self) -> None:
         close_task = self._close_task
@@ -1645,6 +1854,15 @@ class QQC2CHost:
     async def _aclose_owned(self) -> None:
         if self._action_due_wake is not None:
             await self._action_due_wake.aclose()
+        # The clock and scheduled-work mutexes are intentionally never nested.
+        # Joining the complete admitted operations bridges their phase gap and
+        # also covers a Life provider call already holding the scheduler lane.
+        # A provider that outlives the bounded close grace is cancelled here;
+        # its committed clock/claim remains restart-recoverable, and any
+        # process-owned model call is subsequently handled by World quiescence.
+        # The gate was sealed before this task started, so the registry cannot
+        # gain another public owner while it is being joined.
+        await self._join_owned_scheduler_lane_tasks()
         ingress = tuple(self._ingress_batch_tasks.values())
         if ingress:
             _done, pending_ingress = await asyncio.wait(
@@ -1792,6 +2010,7 @@ def build_qq_c2c_host(
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
     source_closure_model: ChatCompletionModel | None = None,
+    life_source_closure_model: ChatCompletionModel | None = None,
     candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     delivery: QQC2CDelivery | None = None,
     media_transport: MediaProviderTransport | None = None,
@@ -1854,6 +2073,7 @@ def build_qq_c2c_host(
         thinking_model=thinking_model,
         advisory_model=advisory_model,
         source_closure_model=source_closure_model,
+        life_source_closure_model=life_source_closure_model,
         candidate_external_proposition_inventory_model=(
             candidate_external_proposition_inventory_model
         ),
@@ -1879,10 +2099,10 @@ def build_qq_c2c_host(
     )
     life_source_closure_reviewer = (
         RoleBoundLifeDevelopmentModelAdapter(
-            model=semantic_chat.proactive_source_closure_model,
+            model=semantic_chat.life_source_closure_model,
             role="world_author_source_reviewer",
         )
-        if semantic_chat.proactive_source_closure_model is not None
+        if semantic_chat.life_source_closure_model is not None
         else None
     )
     delivery = delivery or QQDelivery(settings)

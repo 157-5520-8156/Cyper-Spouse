@@ -660,17 +660,19 @@ async def test_character_may_pull_one_source_bound_recall_before_deciding() -> N
         [
             json.dumps(
                 {
+                    "recall_request": {
+                        "query_text": "凤凰单丛",
+                        "memory_kinds": ["semantic"],
+                        "limit": 3,
+                    },
+                    # Recall choices use the same order-independent JSON
+                    # object semantics as complete ExpressionDraft objects.
                     "private_turn_state": {
                         "inner_state_summary": (
                             "这句话让我想起似乎还有一段关于凤凰单丛的细节，"
                             "但当前注意到的内容不够，我想先回忆一下再决定怎么接。"
                         ),
                         "attended_source_refs": ["trigger:1"],
-                    },
-                    "recall_request": {
-                        "query_text": "凤凰单丛",
-                        "memory_kinds": ["semantic"],
-                        "limit": 3,
                     },
                 },
                 ensure_ascii=False,
@@ -788,6 +790,7 @@ async def test_character_may_pull_one_source_bound_recall_before_deciding() -> N
     assert "凤凰单丛" in model.calls[1][0][-1]["content"]
     assert "parallel_attention_prefetch" in model.calls[1][0][-1]["content"]
     assert '"S1":"' + canonical_recall_ref + '"' in model.calls[1][0][-1]["content"]
+    assert "place it first" not in model.calls[1][0][-1]["content"]
     assert "private_turn_state" in model.calls[0][0][0]["content"]
     assert output.raw_proposal["timing_choice"] == "now"
     assert output.raw_proposal["private_turn_state"]["attended_source_refs"] == [
@@ -960,7 +963,7 @@ async def test_invalid_required_recall_choice_reselects_a_final_expression_once(
     assert len(model.calls) == 2
     repair_prompt = model.calls[1][0][-1]["content"]
     assert "complete replacement" in repair_prompt
-    assert "code=private_turn_state.recall_choice_field_order" in repair_prompt
+    assert "code=private_turn_state.missing" in repair_prompt
     assert "path=private_turn_state" in repair_prompt
     assert invalid_visible_text not in json.dumps(model.calls[1][0], ensure_ascii=False)
     assert output.raw_proposal["private_turn_state"]["attended_source_refs"] == ["observation:qq:1"]
@@ -14572,8 +14575,8 @@ async def test_structural_reselection_cannot_bypass_final_visible_source_review(
 
 
 @pytest.mark.asyncio
-async def test_private_state_and_visible_source_failures_share_the_only_full_reselection() -> None:
-    """An extractable draft carries both hard-boundary coordinates into one rechoice."""
+async def test_late_private_state_does_not_add_a_structural_reselection() -> None:
+    """JSON member order does not add a correction before source closure."""
 
     invented_visible_life = "我下午在宿舍翻了一本旧诗集"
     invalid = json.dumps(
@@ -14656,11 +14659,7 @@ async def test_private_state_and_visible_source_failures_share_the_only_full_res
         "v": ["undeclared_external_assertion"],
         "p": [],
     }
-    assert correction["prior_correction"] == {
-        "kind": "private_turn_state",
-        "code": "private_turn_state.field_order",
-        "field_path": "private_turn_state",
-    }
+    assert "prior_correction" not in correction
     assert correction["companion_life_authority_availability"] == {
         "authority": "pinned_claim_capability_only",
         "behavior_advice": False,
@@ -14676,8 +14675,8 @@ async def test_private_state_and_visible_source_failures_share_the_only_full_res
         for event in trace.snapshot()
         if getattr(event, "stage", None) == "initial_rejection"
     )
-    assert traced_rejection["prior_correction_kind"] == "private_turn_state"
-    assert traced_rejection["sanitized_failure_code"] == "private_turn_state.field_order"
+    assert "prior_correction_kind" not in traced_rejection
+    assert "sanitized_failure_code" not in traced_rejection
     assert "这段状态被放在表达决定之后" not in json.dumps(
         traced_rejection,
         ensure_ascii=False,
@@ -14944,10 +14943,6 @@ async def test_unextractable_effect_keeps_the_existing_structure_only_reselectio
     invalid = json.dumps(
         {
             "timing_choice": "now",
-            "private_turn_state": {
-                "inner_state_summary": "这段状态顺序错误，而且没有可审查的表达效果。",
-                "attended_source_refs": ["observation:qq:1"],
-            },
             "beats": [],
             "world_claims": [],
         },
@@ -17141,6 +17136,7 @@ async def test_required_private_state_failure_reselects_the_complete_expression(
 
     assert len(model.calls) == 2
     assert model.calls[1][1] == 0.25
+    assert "private_turn_state.missing" in model.calls[1][0][-1]["content"]
     assert "旧回复不应约束重选" not in json.dumps(model.calls[1][0], ensure_ascii=False)
     repair_prompt = model.calls[1][0][-1]["content"]
     assert "complete replacement" in repair_prompt
@@ -17152,6 +17148,38 @@ async def test_required_private_state_failure_reselects_the_complete_expression(
     assert "旧回复不应约束重选" not in reviewer.calls[0][0][1]["content"]
     payload = json.loads(output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"])
     assert payload["beat_drafts"][0]["inline_text"] == "终于弄完了，今晚可以松口气了。"
+
+
+@pytest.mark.asyncio
+async def test_required_private_state_is_independent_of_json_field_order() -> None:
+    draft = {
+        "timing_choice": "now",
+        "cadence": "conversational",
+        "beats": [{"modality": "text", "text": "总算弄完了，先歇会儿。"}],
+        "stance": "relieved_with_her",
+        "brief_rationale": "Choose from the current pinned turn.",
+        "confidence": 8000,
+        "world_claims": [],
+        # DeepSeek and strict-output providers may serialize this member last.
+        "private_turn_state": {
+            "contract": "private-turn-state.1",
+            "inner_state_summary": "她刚说麻烦事终于做完，我替她松了口气。",
+            "attended_source_refs": ["observation:qq:1"],
+        },
+    }
+    model = _SequenceJsonModel([json.dumps(draft, ensure_ascii=False)])
+
+    output = await ChatModelDeliberationAdapter(
+        model=model,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
+            update={"private_turn_state_mode": "required"}
+        ),
+    ).propose(_qq_request())
+
+    assert len(model.calls) == 1
+    assert output.raw_proposal["private_turn_state"]["inner_state_summary"] == (
+        "她刚说麻烦事终于做完，我替她松了口气。"
+    )
 
 
 @pytest.mark.asyncio
@@ -17297,17 +17325,6 @@ async def test_recovery_private_state_reselection_usage_is_not_hidden_in_backup_
     "invalid_draft",
     [
         {
-            "timing_choice": "now",
-            "private_turn_state": {
-                "inner_state_summary": "这段状态被放在表达决定之后，因此不能证明因果顺序。",
-                "attended_source_refs": ["observation:qq:1"],
-            },
-            "beats": [{"modality": "text", "text": "这句来自错误顺序。"}],
-            "stance": "invalid_order",
-            "brief_rationale": "Fixture.",
-            "world_claims": [],
-        },
-        {
             "private_turn_state": {
                 "inner_state_summary": "这段状态声称注意到了并不存在于本轮 Context 的来源。",
                 "attended_source_refs": ["memory:forged"],
@@ -17363,7 +17380,6 @@ async def test_recovery_private_state_reselection_usage_is_not_hidden_in_backup_
         },
     ],
     ids=[
-        "post_hoc_field_order",
         "outside_pinned_context",
         "invalid_contract",
         "extra_field",

@@ -107,6 +107,42 @@ Focused novel-origin critic 单独裁决 outcome 是否偷带分支发生前的�
 作语义判断。Premise coverage 不再由 focused critic 重复裁决，避免两个模型以不同
 口径重复否决同一个候选。
 
+两层审查都使用“最小充分证据包”，而不是复制整份面向创作的 Context。General
+reviewer 收到其权威范围内的冻结草稿字段、每条 `existing_world` claim 精确引用的不可变
+事件、完整 manifest hash/pinned cursor、草稿实际选中的精确 location capability，以及
+既有 entity refs；只有存在 typed location 时，outcome text 才作为地点一致性坐标进入
+General，且不能变成普通 undeclared-fact 负坐标。manifest 中的 entity ref 仍是 opaque
+coordinate；编译器只对固定的已选 Context slices 做 exact-ref structural join，把确实含有
+该 ref 且带 source bindings 的 compact item 附为 descriptor evidence，不猜名字字段、
+不做别名/关键词/子串匹配。没有匹配只表示本次 non-exhaustive Context 未提供描述，不能
+证明 novelty，也不能单独支持拒绝。
+
+Focused critic 收到 novel claim、NPC/outcome 坐标，并机械保留 Context Capsule 已经限界的
+character core、current situation、recent dialogue、relationship、open threads、appraisals、
+affect episodes、accepted facts、recent experiences、world life、private impressions 与
+perception results 中全部 items；其中有 source bindings 的 item 才能证明 existing-world
+语义，没有 binding 的 capsule-bound baseline 只能提示不确定性，不能单独支持 claim 或
+unsupported verdict。`active_memory_candidates` 是未巩固候选，明确不进入事实权威。
+source-bound item 的 value hash 必须与送审 value 精确一致；baseline projection 则分别
+保留上游 Capsule item hash 与 review-visible value hash，不能把投影视图冒充原值。
+这里删除 resolver/rank/budget 等运输元数据，不做关键词过滤、重新排序或二次截断。
+Focused manifest 的 descriptor index 只保留指向上述同一 evidence item 的 slice、item ref、
+value hash 与 source hash，不复制第二份语义内容。
+证据包仍绑定原 capsule identity 和完整 manifest hash；packet/compiler contract 与实际
+request hash 都进入 review subject 和每次 provider attempt 的不可变审计，因此编译器或
+相关证据变化不会命中旧的成功/失败/rewrite。压缩输入不能成为删减事实校验、伪造
+verdict 或指导角色行为的理由。当前新写入的 possibility authority 使用 `.6`，必须校验
+上述 packet/request/cursor/wake-bound identity；历史 `.4/.5` 只按各自的历史 identity
+重放，不能借 legacy hash 通过 `.6` 校验。
+
+Life 的 source-review authority 与可见聊天/主动联系的 authority 复用相同的、已有审计
+证据的 provider 配置和无状态 HTTP 连接池，但拥有独立的 leaf circuit/runtime health、
+route suppression、deadline task 与关闭生命周期。后台大包超时只能使 Life 自己进入
+技术失败退避，不能把交互事实审查一起压入 600 秒 suppression。该隔离不增加第二个
+语义投票，也不把未经过 release audit 的 Life strict schema 伪装成已 qualification：
+provider 侧仍安装本地 schema、parser 仍严格 fail closed，而 health 只报告实际取得的
+route qualification evidence。
+
 World Author 的跨字段机器契约明确暴露 visual location 的成对关系：proposal 未绑定
 执行地点时，所有 outcome 的 visual location 必须为空；绑定时，每个出现的 visual
 location 必须等于同一个执行坐标，背景地、来源地或设想中的其他地点不能借图片字段

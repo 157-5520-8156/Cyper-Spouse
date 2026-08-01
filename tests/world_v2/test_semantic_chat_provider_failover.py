@@ -54,6 +54,67 @@ class _InjectedModel:
         self.closed = True
 
 
+class _ForkableInjectedReviewer(_InjectedModel):
+    def __init__(self, model: str) -> None:
+        super().__init__(model)
+        self.forks: list[_ForkableInjectedReviewer] = []
+
+    def fork_isolated_runtime(self) -> "_ForkableInjectedReviewer":
+        fork = _ForkableInjectedReviewer(self.model)
+        self.forks.append(fork)
+        return fork
+
+    async def wait_for_shutdown_quiescence(self) -> None:
+        return None
+
+
+class _SharedCircuitForkableInjectedReviewer(_InjectedModel):
+    """A dishonest fork seam returning a new wrapper over shared failure state."""
+
+    def __init__(self, model: str) -> None:
+        super().__init__(model)
+        self.circuit_breaker = ProviderCircuitBreaker(
+            failure_threshold=2,
+            cooldown_seconds=60,
+        )
+
+    def fork_isolated_runtime(self) -> _InjectedModel:
+        fork = _InjectedModel(self.model)
+        fork.circuit_breaker = self.circuit_breaker
+        return fork
+
+
+class _CloseOnlyForkableInjectedReviewer(_InjectedModel):
+    def __init__(self, model: str) -> None:
+        super().__init__(model)
+        self.forks: list[_InjectedModel] = []
+
+    def fork_isolated_runtime(self) -> _InjectedModel:
+        fork = _InjectedModel(self.model)
+        self.forks.append(fork)
+        return fork
+
+
+class _UncloseableInjectedReviewer:
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.semantic_authority_id = f"semantic-authority:test:{model.casefold()}"
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> str:
+        del messages, temperature
+        return "{}"
+
+
+class _UncloseableForkableInjectedReviewer(_InjectedModel):
+    def fork_isolated_runtime(self) -> _UncloseableInjectedReviewer:
+        return _UncloseableInjectedReviewer(self.model)
+
+
 class _StrictInventoryInjectedModel(_InjectedModel):
     def supports_strict_output_contract(self, contract: str) -> bool:
         return contract == "candidate-external-proposition-inventory.5"
@@ -375,6 +436,67 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
     assert inventory is None
     assert composition.main_model._owner._candidate_external_proposition_inventory_model is None
 
+    life_authority = composition.life_source_closure_model
+    assert isinstance(life_authority, SourceReviewAuthority)
+    assert life_authority is not main_authority
+    assert life_authority.primary is not main_authority.primary
+    assert life_authority.secondary is not main_authority.secondary
+    assert life_authority.primary.client is main_authority.primary.client
+    assert life_authority.secondary.client is main_authority.secondary.client
+    assert (
+        life_authority.primary.circuit_breaker
+        is not main_authority.primary.circuit_breaker
+    )
+    assert (
+        life_authority.secondary.circuit_breaker
+        is not main_authority.secondary.circuit_breaker
+    )
+    assert life_authority in composition._owned_task_owners
+    # A background Life timeout must not suppress the interactive/proactive
+    # fact-review route that happens to use the same configured providers.
+    life_authority._after_lane_failure("primary", "provider_timeout")
+    life_health = life_authority.health_snapshot()
+    interactive_health = main_authority.health_snapshot()
+    assert life_health["route_suppression"]["primary"]["active"] is True
+    assert interactive_health["route_suppression"]["primary"] == {
+        "active": False,
+        "reason": None,
+        "retry_after_seconds": 0.0,
+        "skipped_calls": 0,
+    }
+    # Life schemas are locally installed and parser-enforced, but they are not
+    # silently upgraded to release-qualified strict-route evidence.
+    assert (
+        life_authority.supports_strict_output_contract(
+            "life-development-source-closure-review.1"
+        )
+        is False
+    )
+    assert (
+        life_authority.supports_strict_output_contract(
+            "life-development-novel-origin-review.2"
+        )
+        is False
+    )
+    deployment_health = composition.life_source_authority_health()
+    assert deployment_health["status"] == "operational_unqualified"
+    assert deployment_health["warning"] is True
+    assert deployment_health["runtime_isolated"] is True
+    assert deployment_health["contracts"] == {
+        "life-development-source-closure-review.1": {
+            "schema_installed": True,
+            "parser_fail_closed": True,
+            "release_qualified": False,
+        },
+        "life-development-novel-origin-review.2": {
+            "schema_installed": True,
+            "parser_fail_closed": True,
+            "release_qualified": False,
+        },
+    }
+    assert deployment_health["last_transport_winner"] is None
+    assert deployment_health["route_suppression"]["primary"]["active"] is True
+
     owner = composition.main_model._owner
     recovery_authority = owner._recovery_expression._source_closure_reviewer
     assert isinstance(recovery_authority, SourceReviewAuthority)
@@ -664,12 +786,151 @@ async def test_explicit_source_closure_injection_is_not_replaced_by_auto_wiring(
     assert composition.main_model._owner._report_relative_reviewer is reviewer
     assert composition.source_closure_model is reviewer
     assert composition.proactive_source_closure_model is reviewer
+    assert composition.life_source_closure_model is None
+    unavailable_health = composition.life_source_authority_health()
+    assert unavailable_health["runtime_isolation"] == "unavailable"
+    assert all(
+        contract["schema_installed"] is False
+        for contract in unavailable_health["contracts"].values()
+    )
     # A full-review injection does not silently acquire a second wire
     # responsibility. Without explicit Inventory V5 and Coverage V5 support,
     # production retains the full source-review boundary instead of sending
     # either strict contract to a generic model.
     assert composition.candidate_external_proposition_inventory_model is None
     await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_life_source_reviewer_uses_a_distinct_runtime_seam() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _InjectedModel("injected-reviewer")
+    life_reviewer = _InjectedModel("injected-life-reviewer")
+
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=author,
+        source_closure_model=reviewer,
+        life_source_closure_model=life_reviewer,
+        model_id_prefix="test",
+    )
+
+    assert composition.proactive_source_closure_model is reviewer
+    assert composition.life_source_closure_model is life_reviewer
+    life_health = composition.life_source_authority_health()
+    assert life_health["runtime_isolated"] is False
+    assert life_health["runtime_isolation"] == (
+        "caller_provided_distinct_unverified"
+    )
+    assert all(
+        contract["schema_installed"] is False
+        for contract in life_health["contracts"].values()
+    )
+    await composition.aclose()
+
+
+def test_explicit_life_source_reviewer_rejects_a_shared_runtime() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _InjectedModel("injected-reviewer")
+
+    with pytest.raises(ValueError, match="distinct runtime instance"):
+        build_semantic_chat_composition(
+            settings=Settings(_env_file=None),
+            flash_model=author,
+            source_closure_model=reviewer,
+            life_source_closure_model=reviewer,
+            model_id_prefix="test",
+        )
+
+
+def test_explicit_life_source_reviewer_rejects_a_shared_circuit() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _InjectedModel("injected-reviewer")
+    life_reviewer = _InjectedModel("injected-life-reviewer")
+    shared_circuit = ProviderCircuitBreaker(failure_threshold=2, cooldown_seconds=60)
+    reviewer.circuit_breaker = shared_circuit
+    life_reviewer.circuit_breaker = shared_circuit
+
+    with pytest.raises(ValueError, match="share mutable reviewer runtime"):
+        build_semantic_chat_composition(
+            settings=Settings(_env_file=None),
+            flash_model=author,
+            source_closure_model=reviewer,
+            life_source_closure_model=life_reviewer,
+            model_id_prefix="test",
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_reviewer_fork_is_owned_as_the_life_runtime() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _ForkableInjectedReviewer("forkable-reviewer")
+
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=author,
+        source_closure_model=reviewer,
+        model_id_prefix="test",
+    )
+
+    assert len(reviewer.forks) == 1
+    life_reviewer = reviewer.forks[0]
+    assert composition.life_source_closure_model is life_reviewer
+    assert life_reviewer.closed is False
+
+    await composition.aclose()
+
+    assert life_reviewer.closed is True
+    assert reviewer.closed is False
+
+
+def test_reviewer_fork_rejects_a_distinct_wrapper_over_the_source_circuit() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _SharedCircuitForkableInjectedReviewer("forkable-reviewer")
+
+    with pytest.raises(ValueError, match="share mutable reviewer runtime"):
+        build_semantic_chat_composition(
+            settings=Settings(_env_file=None),
+            flash_model=author,
+            source_closure_model=reviewer,
+            model_id_prefix="test",
+        )
+
+
+@pytest.mark.asyncio
+async def test_close_only_reviewer_fork_is_owned_as_the_life_runtime() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _CloseOnlyForkableInjectedReviewer("forkable-reviewer")
+
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=author,
+        source_closure_model=reviewer,
+        model_id_prefix="test",
+    )
+
+    assert len(reviewer.forks) == 1
+    life_reviewer = reviewer.forks[0]
+    assert composition.life_source_closure_model is life_reviewer
+    assert life_reviewer.closed is False
+
+    await composition.aclose()
+
+    assert life_reviewer.closed is True
+    assert reviewer.closed is False
+
+
+def test_uncloseable_reviewer_fork_is_rejected() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _UncloseableForkableInjectedReviewer("forkable-reviewer")
+
+    with pytest.raises(ValueError, match="fork must provide an async close lifecycle"):
+        build_semantic_chat_composition(
+            settings=Settings(_env_file=None),
+            flash_model=author,
+            source_closure_model=reviewer,
+            model_id_prefix="test",
+        )
 
 
 @pytest.mark.asyncio

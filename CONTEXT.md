@@ -83,6 +83,38 @@ than promising future presence. A bare location ID is never executable
 permission.
 _Avoid_: Plot menu, behavior recommendation
 
+## Life Review Evidence Packet
+
+A minimal, capsule-bound input to the independent Life source reviewers.
+General closure receives only its frozen, lane-owned World Author fields, exact
+immutable events cited by existing-world claims, the exact selected location
+capability, existing-entity refs, and the full manifest/cursor identity. Outcome
+text enters this lane only when a typed location needs an exact consistency
+coordinate. An entity ref gains descriptor evidence only through an exact
+structural ref join to a source-bound item in the already selected Context; the
+join never guesses a name or alias, and a missing match is non-evidence.
+Focused novel-origin review additionally receives every item already selected
+and bounded by the relevant character, current-life, dialogue, relationship,
+thread, appraisal, Affect, accepted-fact, recent-experience, world-life,
+Private-Impression, and perception slices. Source-bound item hashes are checked
+against the transported value. A projected baseline preserves the original
+Capsule item hash separately from the hash of the review-visible value and can
+only signal uncertainty; it cannot prove a claim or rejection. Unconsolidated
+Memory Candidates are non-authoritative and excluded. The compiler removes
+transport-only resolver, rank, and budget metadata, but never keyword-filters,
+re-ranks, or applies a second item cap. Focused manifest descriptor entries are
+hash-bound pointers into those same transported items, not duplicated semantic
+copies. Packet contract plus exact request bytes bind current replay identity;
+historical proposal versions retain only their historical identity formula, so
+changed evidence or compiler bytes cannot reuse an old result. Its compiler has
+no verdict or character behavior authority. Life and
+visible conversation may reuse provider route configuration and an HTTP pool,
+but their reviewer circuits, suppression state, active tasks, and shutdown
+leases are separate. Locally installed strict JSON schemas remain distinct from
+release-qualified route evidence.
+_Avoid_: Full creative Context copied into a classifier, local fact verdict,
+background failure suppressing visible review, unqualified route reported ready
+
 ## Provisional NPC
 
 A model-authored person that exists only inside a Proposal or unsettled
@@ -289,9 +321,11 @@ _Avoid_: Current personality rewrite, emotion-to-expression rule
 ## Private Turn State
 
 A concise, free-text, role-model-owned account of what is salient to the
-companion immediately before one Expression choice. It is the first field of
-the same model result that selects silence, timing, questions and Expression
-Beats, and its attended source refs must come from that Pinned Turn. It is
+companion as she forms one Expression choice. It is a required member of the
+same model result that selects silence, timing, questions and Expression
+Beats, and its attended source refs must come from that Pinned Turn. JSON
+object member order is transport serialization, not evidence of causal order.
+It is
 audit material bound into Proposal identity, not hidden chain-of-thought,
 World truth, a behavior category, a reply-mode switch, or a durable memory.
 Attended refs record only what material was available to the character's

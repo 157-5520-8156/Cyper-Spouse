@@ -488,8 +488,8 @@ def _expression_properties(
         expires = {"type": "null"}
         expectation = {"type": "null"}
 
-    # Property insertion order is part of the causal wire: the private state
-    # must be authored before the visible ExpressionDraft fields.
+    # Keep a stable schema serialization for provider caches and audits. JSON
+    # object member order is not a causal or validity boundary.
     return {
         "private_turn_state": private_state,
         "timing_choice": {

@@ -54,6 +54,7 @@ from .life_development_source_closure import (
     LifeDevelopmentSourceClosureReview,
     life_development_novel_origin_correction_message,
     life_development_novel_origin_messages,
+    life_development_review_packet_identity,
     life_development_source_closure_correction_message,
     life_development_source_closure_messages,
     parse_life_development_novel_origin_review,
@@ -63,6 +64,14 @@ from .life_events import (
     ActivityPlannedPayload,
     WorldOccurrenceActivatedPayload,
     WorldOccurrenceCommittedPayload,
+)
+from .life_review_identity import (
+    GENERAL_EVIDENCE_PACKET_CONTRACT,
+    NOVEL_EVIDENCE_PACKET_CONTRACT,
+    current_novel_origin_review_subject_hash,
+    current_source_review_subject_hash,
+    legacy_novel_origin_review_subject_hashes,
+    legacy_source_review_subject_hash,
 )
 from .proposal_audit_schemas import (
     LifeDevelopmentRecallResultRecordedPayload,
@@ -521,6 +530,7 @@ class LifeDevelopmentProposalReader:
             or version not in {
                 "life-development-possibility.4",
                 "life-development-possibility.5",
+                "life-development-possibility.6",
             }
             or not isinstance(possibility, dict)
             or proposal.get("possibility_authority_hash") != _digest(possibility)
@@ -539,6 +549,7 @@ class LifeDevelopmentProposalReader:
         self._validate_active_source_closure(
             proposal=proposal,
             possibility_version=version,
+            proposal_event=proposal_event,
         )
 
         occurrence_events = []
@@ -681,6 +692,7 @@ class LifeDevelopmentProposalReader:
         *,
         proposal: dict[str, object],
         possibility_version: object,
+        proposal_event: WorldEvent,
     ) -> None:
         review = proposal.get("world_author_source_closure_review")
         review_deliberation = proposal.get(
@@ -716,19 +728,52 @@ class LifeDevelopmentProposalReader:
             != author_deliberation.get("capability_manifest")
         ):
             raise ValueError("active occurrence source closure is unsupported")
-        expected_subject = _digest(
-            {
-                "capability_manifest_hash": proposal.get(
-                    "capability_manifest_hash"
-                ),
-                "world_author_raw_output_hash": proposal.get(
-                    "world_author_raw_output_hash"
-                ),
-            }
+        raw_output_hash = proposal.get("world_author_raw_output_hash")
+        manifest_hash = proposal.get("capability_manifest_hash")
+        if not isinstance(raw_output_hash, str) or not isinstance(
+            manifest_hash,
+            str,
+        ):
+            raise ValueError("active occurrence review subject hashes are missing")
+        legacy_subject = legacy_source_review_subject_hash(
+            world_author_raw_output_hash=raw_output_hash,
+            capability_manifest_hash=manifest_hash,
         )
-        if review_deliberation.get("decision_subject_hash") != expected_subject:
+        request_hashes = review_deliberation.get("request_hashes")
+        review_cursor = review_deliberation.get("context_cursor")
+        trigger_id = proposal.get("trigger_id")
+        current_subject: str | None = None
+        if (
+            isinstance(request_hashes, list)
+            and request_hashes
+            and all(isinstance(item, str) for item in request_hashes)
+            and isinstance(review_cursor, dict)
+            and isinstance(trigger_id, str)
+        ):
+            current_subject = current_source_review_subject_hash(
+                review_request_hashes=tuple(request_hashes),
+                world_author_raw_output_hash=raw_output_hash,
+                capability_manifest_hash=manifest_hash,
+                context_cursor=review_cursor,
+                wake_event_ref=trigger_id,
+                wake_world_id=proposal_event.world_id,
+                wake_logical_time=proposal_event.logical_time.isoformat(),
+            )
+        expected_source_subject = (
+            current_subject
+            if possibility_version == "life-development-possibility.6"
+            else legacy_subject
+        )
+        if (
+            expected_source_subject is None
+            or review_deliberation.get("decision_subject_hash")
+            != expected_source_subject
+        ):
             raise ValueError("active occurrence source closure changed subject")
-        if possibility_version != "life-development-possibility.5":
+        if possibility_version not in {
+            "life-development-possibility.5",
+            "life-development-possibility.6",
+        }:
             return
         novel_review = proposal.get("world_author_novel_origin_review")
         novel_deliberation = proposal.get(
@@ -754,6 +799,37 @@ class LifeDevelopmentProposalReader:
             != _digest(novel_deliberation)
         ):
             raise ValueError("active occurrence novel origin is unsupported")
+        legacy_novel_subjects = legacy_novel_origin_review_subject_hashes(
+            world_author_raw_output_hash=raw_output_hash,
+            capability_manifest_hash=manifest_hash,
+        )
+        novel_request_hashes = novel_deliberation.get("request_hashes")
+        novel_cursor = novel_deliberation.get("context_cursor")
+        current_novel_subject: str | None = None
+        if (
+            isinstance(novel_request_hashes, list)
+            and novel_request_hashes
+            and all(isinstance(item, str) for item in novel_request_hashes)
+            and isinstance(novel_cursor, dict)
+            and isinstance(trigger_id, str)
+        ):
+            current_novel_subject = current_novel_origin_review_subject_hash(
+                review_request_hashes=tuple(novel_request_hashes),
+                world_author_raw_output_hash=raw_output_hash,
+                capability_manifest_hash=manifest_hash,
+                context_cursor=novel_cursor,
+                wake_event_ref=trigger_id,
+                wake_world_id=proposal_event.world_id,
+                wake_logical_time=proposal_event.logical_time.isoformat(),
+            )
+        expected_novel_subjects = (
+            {current_novel_subject}
+            if possibility_version == "life-development-possibility.6"
+            and current_novel_subject is not None
+            else legacy_novel_subjects
+        )
+        if novel_deliberation.get("decision_subject_hash") not in expected_novel_subjects:
+            raise ValueError("active occurrence novel origin changed subject")
 
     def _read_bound_text(self, descriptor: dict[str, object]) -> str:
         content_ref = descriptor.get("content_ref")
@@ -2504,6 +2580,179 @@ class LifeDevelopmentRuntime:
                 terminals += 1
         return terminals
 
+    def _recoverable_review_subject_hash(
+        self,
+        *,
+        proposal_id: str,
+        role: Literal[
+            "world_author_source_reviewer",
+            "world_author_novel_origin_critic",
+        ],
+        current_world_revision: int,
+        wake_event_ref: str,
+        initial_messages: list[dict[str, str]],
+        draft: LifeDevelopmentPossibilityDraft,
+        raw: str,
+        manifest: LifeDevelopmentCapabilityManifest,
+        packet_contract: str,
+        context_cursor: ProjectionCursor,
+        wake: WorldEvent,
+        succeeded: bool,
+    ) -> str | None:
+        """Recompile an audited review chain before treating it as replayable.
+
+        A corrected review is a decision over both provider requests, not only
+        the first evidence packet.  Rebuilding the corrective request from the
+        exact first response makes compiler/feedback changes open a new chain
+        while keeping the stable proposal family request/cursor/wake-bound.
+        """
+
+        suffix = _digest({"proposal_id": proposal_id, "model_role": role})
+        prefix = f"attempt:life-development:{role}:{suffix}:"
+        projection = self._ledger.project()
+        terminals = tuple(
+            item
+            for item in projection.model_result_audits
+            if item.attempt_id.startswith(prefix)
+            and item.attempt_index == item.attempt_count - 1
+            and (item.proposal_hash is not None) == succeeded
+            and item.trigger_ref == wake_event_ref
+            and item.evaluated_world_revision == current_world_revision
+        )
+        if succeeded:
+            terminals = terminals[-1:]
+        for terminal in reversed(terminals):
+            attempt_projections = tuple(
+                sorted(
+                    (
+                        item
+                        for item in projection.model_result_audits
+                        if item.deliberation_result_id
+                        == terminal.deliberation_result_id
+                    ),
+                    key=lambda item: item.attempt_index,
+                )
+            )
+            if len(attempt_projections) != terminal.attempt_count or tuple(
+                item.attempt_index for item in attempt_projections
+            ) != tuple(range(terminal.attempt_count)):
+                continue
+            audits = tuple(
+                RecordedModelResultAudit.model_validate_json(item.audit_json)
+                for item in attempt_projections
+            )
+            request_hashes = self._recompiled_review_request_hashes(
+                role=role,
+                initial_messages=initial_messages,
+                draft=draft,
+                audits=audits,
+            )
+            if request_hashes is None or request_hashes != tuple(
+                item.request_hash for item in audits
+            ):
+                continue
+            if role == "world_author_source_reviewer":
+                subject_hash = _source_closure_subject_hash(
+                    raw=raw,
+                    manifest=manifest,
+                    packet_contract=packet_contract,
+                    review_request_hashes=request_hashes,
+                    context_cursor=context_cursor,
+                    wake=wake,
+                )
+            else:
+                subject_hash = _novel_origin_subject_hash(
+                    raw=raw,
+                    manifest=manifest,
+                    packet_contract=packet_contract,
+                    review_request_hashes=request_hashes,
+                    context_cursor=context_cursor,
+                    wake=wake,
+                )
+            decision_context = audits[0].decision_context
+            if (
+                decision_context is None
+                or any(
+                    item.decision_context != decision_context
+                    for item in audits
+                )
+                or decision_context.decision_subject_hash != subject_hash
+                or decision_context.world_revision != current_world_revision
+            ):
+                continue
+            return subject_hash
+        return None
+
+    def _recompiled_review_request_hashes(
+        self,
+        *,
+        role: Literal[
+            "world_author_source_reviewer",
+            "world_author_novel_origin_critic",
+        ],
+        initial_messages: list[dict[str, str]],
+        draft: LifeDevelopmentPossibilityDraft,
+        audits: tuple[RecordedModelResultAudit, ...],
+    ) -> tuple[str, ...] | None:
+        initial_hash = _messages_hash(initial_messages)
+        if len(audits) == 1:
+            return (initial_hash,)
+        if len(audits) != 2:
+            return None
+        first = audits[0]
+        storage = first.response_storage
+        if (
+            storage is None
+            or storage.disposition != "stored_exact"
+            or storage.truncated
+            or storage.content_ref is None
+            or storage.content_payload_hash is None
+            or first.response_hash != storage.content_payload_hash
+        ):
+            return None
+        stored = self._store.read_exact(content_ref=storage.content_ref)
+        if (
+            stored is None
+            or stored.content_kind != "raw_model_result"
+            or stored.content_payload_hash != storage.content_payload_hash
+            or life_content_payload_hash(stored.text) != first.response_hash
+        ):
+            return None
+        try:
+            if role == "world_author_source_reviewer":
+                parse_life_development_source_closure_review(
+                    raw=stored.text,
+                    draft=draft,
+                )
+            else:
+                parse_life_development_novel_origin_review(
+                    raw=stored.text,
+                    draft=draft,
+                )
+        except LifeDevelopmentSourceClosureError as exc:
+            correction = (
+                life_development_source_closure_correction_message(
+                    raw=stored.text,
+                    error=exc,
+                    draft=draft,
+                )
+                if role == "world_author_source_reviewer"
+                else life_development_novel_origin_correction_message(
+                    error=exc,
+                    draft=draft,
+                )
+            )
+        else:
+            # A two-attempt record whose first bytes now parse successfully no
+            # longer has the same deterministic correction lineage.
+            return None
+        correction_messages = [
+            *initial_messages,
+            {"role": "assistant", "content": stored.text},
+            correction,
+        ]
+        return (initial_hash, _messages_hash(correction_messages))
+
     def _recover_terminal_model_failure(
         self,
         *,
@@ -3065,10 +3314,16 @@ class LifeDevelopmentRuntime:
         rejection_review: (
             LifeDevelopmentSourceClosureReview | LifeDevelopmentNovelOriginReview
         ) = novel_origin_review or review
+        rejection_deliberation = (
+            novel_origin_deliberation or review_deliberation
+        )
 
         rewrite_proposal_id = proposal_id + ":source-rewrite:" + _digest(
             {
                 "rejected_world_author_raw_hash": _digest(raw),
+                "rejection_decision_subject_hash": (
+                    rejection_deliberation.decision_subject_hash
+                ),
                 "source_closure_coordinates": _world_author_rejection_coordinates(
                     rejection_review
                 ),
@@ -3079,6 +3334,9 @@ class LifeDevelopmentRuntime:
                 "role": "world_author",
                 "source_closure_coordinates": _world_author_rejection_coordinates(
                     rejection_review
+                ),
+                "rejection_decision_subject_hash": (
+                    rejection_deliberation.decision_subject_hash
                 ),
                 "rejected_world_author_raw_hash": _digest(raw),
                 "capability_manifest_hash": manifest.manifest_hash,
@@ -3269,9 +3527,39 @@ class LifeDevelopmentRuntime:
         reviewer = self._source_closure_reviewer
         if reviewer is None or self._source_closure_reviewer_model_id is None:
             raise ValueError("source-closure review was requested without a reviewer")
-        subject_hash = _source_closure_subject_hash(raw=raw, manifest=manifest)
+        try:
+            cited_events = self._source_closure_cited_events(draft=draft)
+        except ValueError as exc:
+            _LOG.warning(
+                "Life Development source evidence unavailable error_type=%s",
+                type(exc).__name__,
+            )
+            return LifeDevelopmentResult(
+                status="technical_failure",
+                reason_code="life_development.source_closure_evidence_unavailable",
+            )
+        messages = life_development_source_closure_messages(
+            context=context,
+            manifest=manifest,
+            draft=draft,
+            cited_events=cited_events,
+        )
+        packet_contract, _packet_hash = life_development_review_packet_identity(
+            messages
+        )
+        initial_request_hash = _messages_hash(messages)
+        review_family_hash = _source_closure_subject_hash(
+            raw=raw,
+            manifest=manifest,
+            packet_contract=packet_contract,
+            review_request_hashes=(initial_request_hash,),
+            context_cursor=context_cursor,
+            wake=wake,
+        )
         review_proposal_id = (
-            proposal_id + ":source-review:" + _digest({"decision_subject_hash": subject_hash})
+            proposal_id
+            + ":source-review:"
+            + _digest({"review_family_hash": review_family_hash})
         )
         projection = self._ledger.project()
         if projection.world_revision != context_cursor.world_revision:
@@ -3279,11 +3567,47 @@ class LifeDevelopmentRuntime:
                 status="stale_prefix",
                 reason_code="life_development.source_closure_context_stale",
             )
-        recovered = self._recover_successful_model_run(
+        recovered_subject_hash = self._recoverable_review_subject_hash(
             proposal_id=review_proposal_id,
             role="world_author_source_reviewer",
             current_world_revision=projection.world_revision,
-            expected_subject_hash=subject_hash,
+            wake_event_ref=wake.event_id,
+            initial_messages=messages,
+            draft=draft,
+            raw=raw,
+            manifest=manifest,
+            packet_contract=packet_contract,
+            context_cursor=context_cursor,
+            wake=wake,
+            succeeded=True,
+        )
+        recovered = (
+            self._recover_successful_model_run(
+                proposal_id=review_proposal_id,
+                role="world_author_source_reviewer",
+                current_world_revision=projection.world_revision,
+                expected_subject_hash=recovered_subject_hash,
+            )
+            if recovered_subject_hash is not None
+            else None
+        )
+        recovered_failure_subject_hash = (
+            self._recoverable_review_subject_hash(
+                proposal_id=review_proposal_id,
+                role="world_author_source_reviewer",
+                current_world_revision=projection.world_revision,
+                wake_event_ref=wake.event_id,
+                initial_messages=messages,
+                draft=draft,
+                raw=raw,
+                manifest=manifest,
+                packet_contract=packet_contract,
+                context_cursor=context_cursor,
+                wake=wake,
+                succeeded=False,
+            )
+            if recovered is None
+            else None
         )
         recovered_failure_code = (
             self._recover_terminal_model_failure_code(
@@ -3291,9 +3615,9 @@ class LifeDevelopmentRuntime:
                 role="world_author_source_reviewer",
                 wake_event_ref=wake.event_id,
                 current_world_revision=projection.world_revision,
-                expected_subject_hash=subject_hash,
+                expected_subject_hash=recovered_failure_subject_hash,
             )
-            if recovered is None
+            if recovered_failure_subject_hash is not None
             else None
         )
         if recovered_failure_code is not None:
@@ -3310,22 +3634,19 @@ class LifeDevelopmentRuntime:
                 ),
             )
         if recovered is None:
-            try:
-                cited_events = self._source_closure_cited_events(draft=draft)
-            except ValueError as exc:
-                _LOG.warning(
-                    "Life Development source evidence unavailable error_type=%s",
-                    type(exc).__name__,
-                )
-                return LifeDevelopmentResult(
-                    status="technical_failure",
-                    reason_code="life_development.source_closure_evidence_unavailable",
-                )
             review_run = await self._source_closure_review(
-                context=context,
-                manifest=manifest,
+                messages=messages,
                 draft=draft,
-                cited_events=cited_events,
+            )
+            subject_hash = _source_closure_subject_hash(
+                raw=raw,
+                manifest=manifest,
+                packet_contract=packet_contract,
+                review_request_hashes=tuple(
+                    attempt.request_hash for attempt in review_run.attempts
+                ),
+                context_cursor=context_cursor,
+                wake=wake,
             )
             try:
                 review_deliberation = self._record_model_run(
@@ -3408,11 +3729,27 @@ class LifeDevelopmentRuntime:
                 status="technical_failure",
                 reason_code="life_development.novel_origin_critic_unavailable",
             )
-        subject_hash = _novel_origin_subject_hash(raw=raw, manifest=manifest)
+        messages = life_development_novel_origin_messages(
+            context=context,
+            manifest=manifest,
+            draft=draft,
+        )
+        packet_contract, _packet_hash = life_development_review_packet_identity(
+            messages
+        )
+        initial_request_hash = _messages_hash(messages)
+        review_family_hash = _novel_origin_subject_hash(
+            raw=raw,
+            manifest=manifest,
+            packet_contract=packet_contract,
+            review_request_hashes=(initial_request_hash,),
+            context_cursor=context_cursor,
+            wake=wake,
+        )
         review_proposal_id = (
             proposal_id
             + ":novel-origin-review:"
-            + _digest({"decision_subject_hash": subject_hash})
+            + _digest({"review_family_hash": review_family_hash})
         )
         projection = self._ledger.project()
         if projection.world_revision != context_cursor.world_revision:
@@ -3420,11 +3757,47 @@ class LifeDevelopmentRuntime:
                 status="stale_prefix",
                 reason_code="life_development.novel_origin_context_stale",
             )
-        recovered = self._recover_successful_model_run(
+        recovered_subject_hash = self._recoverable_review_subject_hash(
             proposal_id=review_proposal_id,
             role="world_author_novel_origin_critic",
             current_world_revision=projection.world_revision,
-            expected_subject_hash=subject_hash,
+            wake_event_ref=wake.event_id,
+            initial_messages=messages,
+            draft=draft,
+            raw=raw,
+            manifest=manifest,
+            packet_contract=packet_contract,
+            context_cursor=context_cursor,
+            wake=wake,
+            succeeded=True,
+        )
+        recovered = (
+            self._recover_successful_model_run(
+                proposal_id=review_proposal_id,
+                role="world_author_novel_origin_critic",
+                current_world_revision=projection.world_revision,
+                expected_subject_hash=recovered_subject_hash,
+            )
+            if recovered_subject_hash is not None
+            else None
+        )
+        recovered_failure_subject_hash = (
+            self._recoverable_review_subject_hash(
+                proposal_id=review_proposal_id,
+                role="world_author_novel_origin_critic",
+                current_world_revision=projection.world_revision,
+                wake_event_ref=wake.event_id,
+                initial_messages=messages,
+                draft=draft,
+                raw=raw,
+                manifest=manifest,
+                packet_contract=packet_contract,
+                context_cursor=context_cursor,
+                wake=wake,
+                succeeded=False,
+            )
+            if recovered is None
+            else None
         )
         recovered_failure_code = (
             self._recover_terminal_model_failure_code(
@@ -3432,9 +3805,9 @@ class LifeDevelopmentRuntime:
                 role="world_author_novel_origin_critic",
                 wake_event_ref=wake.event_id,
                 current_world_revision=projection.world_revision,
-                expected_subject_hash=subject_hash,
+                expected_subject_hash=recovered_failure_subject_hash,
             )
-            if recovered is None
+            if recovered_failure_subject_hash is not None
             else None
         )
         if recovered_failure_code is not None:
@@ -3450,9 +3823,18 @@ class LifeDevelopmentRuntime:
             )
         if recovered is None:
             review_run = await self._novel_origin_review(
-                context=context,
-                manifest=manifest,
+                messages=messages,
                 draft=draft,
+            )
+            subject_hash = _novel_origin_subject_hash(
+                raw=raw,
+                manifest=manifest,
+                packet_contract=packet_contract,
+                review_request_hashes=tuple(
+                    attempt.request_hash for attempt in review_run.attempts
+                ),
+                context_cursor=context_cursor,
+                wake=wake,
             )
             try:
                 review_deliberation = self._record_model_run(
@@ -3529,18 +3911,12 @@ class LifeDevelopmentRuntime:
     async def _novel_origin_review(
         self,
         *,
-        context: dict[str, object],
-        manifest: LifeDevelopmentCapabilityManifest,
+        messages: list[dict[str, str]],
         draft: LifeDevelopmentPossibilityDraft,
     ) -> _LifeDevelopmentModelRun:
         critic = self._novel_origin_critic
         if critic is None or self._novel_origin_critic_model_id is None:
             raise ValueError("Life Development novel-origin critic is not configured")
-        messages = life_development_novel_origin_messages(
-            context=context,
-            manifest=manifest,
-            draft=draft,
-        )
         attempts: list[_LifeDevelopmentAttempt] = []
         completion_critic = critic
         for ordinal in range(2):
@@ -3658,20 +4034,12 @@ class LifeDevelopmentRuntime:
     async def _source_closure_review(
         self,
         *,
-        context: dict[str, object],
-        manifest: LifeDevelopmentCapabilityManifest,
+        messages: list[dict[str, str]],
         draft: LifeDevelopmentPossibilityDraft,
-        cited_events: tuple[WorldEvent, ...],
     ) -> _LifeDevelopmentModelRun:
         reviewer = self._source_closure_reviewer
         if reviewer is None or self._source_closure_reviewer_model_id is None:
             raise ValueError("Life Development source-closure reviewer is not configured")
-        messages = life_development_source_closure_messages(
-            context=context,
-            manifest=manifest,
-            draft=draft,
-            cited_events=cited_events,
-        )
         attempts: list[_LifeDevelopmentAttempt] = []
         completion_reviewer = reviewer
         for ordinal in range(2):
@@ -4830,6 +5198,10 @@ class LifeDevelopmentRuntime:
         if isinstance(draft, LifeDevelopmentPossibilityDraft):
             if source_closure_review is None:
                 raise ValueError("life development possibility bypassed source closure")
+            if novel_origin_review is None or novel_origin_deliberation is None:
+                raise ValueError(
+                    "current life development possibility bypassed novel-origin review"
+                )
             if source_closure_review is not None and (
                 source_closure_review.decision != "supported"
                 or source_closure_review.unsupported_claim_ids
@@ -4857,6 +5229,10 @@ class LifeDevelopmentRuntime:
             expected_source_subject = _source_closure_subject_hash(
                 raw=raw,
                 manifest=manifest,
+                packet_contract=GENERAL_EVIDENCE_PACKET_CONTRACT,
+                review_request_hashes=source_closure_deliberation.request_hashes,
+                context_cursor=context_cursor,
+                wake=wake,
             )
             if (
                 source_closure_deliberation.role
@@ -4873,6 +5249,10 @@ class LifeDevelopmentRuntime:
             expected_novel_subject = _novel_origin_subject_hash(
                 raw=raw,
                 manifest=manifest,
+                packet_contract=NOVEL_EVIDENCE_PACKET_CONTRACT,
+                review_request_hashes=novel_origin_deliberation.request_hashes,
+                context_cursor=context_cursor,
+                wake=wake,
             )
             if (
                 novel_origin_deliberation.role
@@ -4994,13 +5374,9 @@ class LifeDevelopmentRuntime:
             "capability_manifest_hash": manifest.manifest_hash,
             "possibility_authority_version": (
                 (
-                    "life-development-possibility.5"
+                    "life-development-possibility.6"
                     if novel_origin_deliberation is not None
-                    else (
-                        "life-development-possibility.4"
-                        if source_closure_deliberation is not None
-                        else "life-development-possibility.3"
-                    )
+                    else "life-development-possibility.3"
                 )
                 if possibility_authority is not None
                 else None
@@ -6145,12 +6521,21 @@ def _source_closure_subject_hash(
     *,
     raw: str,
     manifest: LifeDevelopmentCapabilityManifest,
+    packet_contract: str,
+    review_request_hashes: tuple[str, ...],
+    context_cursor: ProjectionCursor,
+    wake: WorldEvent,
 ) -> str:
-    return _digest(
-        {
-            "world_author_raw_output_hash": _digest(raw),
-            "capability_manifest_hash": manifest.manifest_hash,
-        }
+    if packet_contract != GENERAL_EVIDENCE_PACKET_CONTRACT:
+        raise ValueError("source review packet contract is not current")
+    return current_source_review_subject_hash(
+        review_request_hashes=review_request_hashes,
+        world_author_raw_output_hash=_digest(raw),
+        capability_manifest_hash=manifest.manifest_hash,
+        context_cursor=context_cursor.model_dump(mode="json"),
+        wake_event_ref=wake.event_id,
+        wake_world_id=wake.world_id,
+        wake_logical_time=wake.logical_time.isoformat(),
     )
 
 
@@ -6158,13 +6543,21 @@ def _novel_origin_subject_hash(
     *,
     raw: str,
     manifest: LifeDevelopmentCapabilityManifest,
+    packet_contract: str,
+    review_request_hashes: tuple[str, ...],
+    context_cursor: ProjectionCursor,
+    wake: WorldEvent,
 ) -> str:
-    return _digest(
-        {
-            "contract": "life-development-novel-origin-review.2",
-            "world_author_raw_output_hash": _digest(raw),
-            "capability_manifest_hash": manifest.manifest_hash,
-        }
+    if packet_contract != NOVEL_EVIDENCE_PACKET_CONTRACT:
+        raise ValueError("novel-origin review packet contract is not current")
+    return current_novel_origin_review_subject_hash(
+        review_request_hashes=review_request_hashes,
+        world_author_raw_output_hash=_digest(raw),
+        capability_manifest_hash=manifest.manifest_hash,
+        context_cursor=context_cursor.model_dump(mode="json"),
+        wake_event_ref=wake.event_id,
+        wake_world_id=wake.world_id,
+        wake_logical_time=wake.logical_time.isoformat(),
     )
 
 

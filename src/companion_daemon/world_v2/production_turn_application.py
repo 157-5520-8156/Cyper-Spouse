@@ -258,6 +258,7 @@ from .proactive_action import (
     ProactiveActionRuntime,
     ProactiveDeliberationTurn,
     ProactiveDraftAdapter,
+    proactive_technical_retry_states,
 )
 from .proposal_envelope import DecisionProposal, validate_proposal_envelope
 from .social_initiative import (
@@ -267,7 +268,6 @@ from .social_initiative import (
     SocialInitiativePolicy,
     social_initiative_attempt_id,
     social_initiative_consideration_id,
-    technical_failure_point,
 )
 from .random_authority import RandomDrawRecordedPayload
 from .memory_withdrawal_review import (
@@ -2206,57 +2206,36 @@ class WorldV2TurnApplication:
                     last_reason = decision.brief_rationale
                     last_impulse_summary = decision.impulse_summary
                     last_grounding_outcome = decision.proactive_grounding_outcome
-        consecutive_technical_failures = 0
-        latest_message_revision = (
-            projection.message_observations[-1].world_revision
-            if projection.message_observations
+        retry_states = proactive_technical_retry_states(projection)
+        active_retry = retry_states[-1] if retry_states else None
+        consecutive_technical_failures = (
+            active_retry.consecutive_technical_failures
+            if active_retry is not None
             else 0
         )
-        latest_failure_revision, _latest_failed_at = (
-            technical_failure_point(projection=projection, process=latest)
-            if latest is not None
-            and str(latest.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
-            else (None, None)
+        last_failure_code = (
+            active_retry.last_failure_code if active_retry is not None else None
         )
-        latest_failure_superseded = (
-            latest_failure_revision is not None
-            and latest_message_revision > latest_failure_revision
-        )
-        if (
-            not latest_failure_superseded
-            and latest is not None
-            and str(latest.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
-        ):
-            consecutive_technical_failures = sum(
-                process.trigger_ref == latest.trigger_ref
-                and process.state == "terminal"
-                and str(process.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
-                for process in proactive_processes
-            )
-        last_failure_code = None
-        if (
-            latest is not None
-            and not latest_failure_superseded
-            and str(latest.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
-        ):
-            result_ref = str(latest.runtime_outcome_ref).removeprefix(
-                "proactive:deliberation-failed:"
-            )
-            audit = next(
-                (
-                    item
-                    for item in reversed(projection.model_result_audits)
-                    if item.model_result_ref == result_ref
-                ),
-                None,
-            )
-            if audit is not None:
-                try:
-                    audit_value = json.loads(audit.audit_json)
-                except (TypeError, json.JSONDecodeError):
-                    audit_value = {}
-                code = audit_value.get("failure_code")
-                last_failure_code = code if isinstance(code, str) else None
+        if active_retry is not None:
+            # Cadence recomputation can legitimately move to a later ambient
+            # epoch, but it cannot replace the deadline owned by an unresolved
+            # durable technical failure (including situation-triggered ones).
+            next_consideration_at = active_retry.next_retry_at
+            cadence_reason_codes = ("technical_failure:retry",)
+            if active_retry.retry_process_state in {"open", "claimed"}:
+                initiative_state = "considering"
+                spontaneous_pending = False
+            else:
+                initiative_state = (
+                    "retry_wait"
+                    if logical_time is not None
+                    and logical_time < active_retry.next_retry_at
+                    else "consideration_due"
+                )
+                spontaneous_pending = (
+                    logical_time is not None
+                    and logical_time >= active_retry.next_retry_at
+                )
         warning_reasons: list[str] = []
         if consecutive_technical_failures and initiative_state not in {
             "retry_wait",
@@ -2264,13 +2243,6 @@ class WorldV2TurnApplication:
             "considering",
         }:
             warning_reasons.append("technical_failure_not_scheduled")
-        if (
-            next_consideration_at is not None
-            and logical_time is not None
-            and logical_time - next_consideration_at > timedelta(minutes=2)
-            and initiative_state == "consideration_due"
-        ):
-            warning_reasons.append("consideration_overdue")
         stimulus_source_count = sum(
             item.event_type in SITUATION_STIMULUS_EVENT_TYPES
             and (logical_time is None or logical_time - item.logical_time <= timedelta(minutes=10))

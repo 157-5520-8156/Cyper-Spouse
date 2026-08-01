@@ -74,6 +74,38 @@ _CANDIDATE_INVENTORY_CONTRACT = "candidate-external-proposition-inventory.5"
 _CANDIDATE_COVERAGE_CONTRACT = "candidate-external-proposition-coverage.5"
 _FULL_SOURCE_REVIEW_CONTRACT = "source-closure-review.7"
 _REPORT_RELATIVE_REVIEW_CONTRACT = "report-relative-entailment-adjudication.3"
+_LIFE_SOURCE_REVIEW_CONTRACTS = (
+    "life-development-source-closure-review.1",
+    "life-development-novel-origin-review.2",
+)
+
+
+def unavailable_life_source_authority_health() -> dict[str, object]:
+    """Return a fresh backward-compatible snapshot for missing composition.
+
+    Hosts expose this shape before semantic composition is available. Returning
+    new containers prevents one health consumer from mutating a later response.
+    """
+
+    return {
+        "status": "unavailable",
+        "warning": True,
+        "warning_reasons": ["life_source_authority.composition_unavailable"],
+        "runtime_isolated": False,
+        "runtime_isolation": "unavailable",
+        "reviewer_model": None,
+        "contracts": {
+            contract: {
+                "schema_installed": False,
+                "parser_fail_closed": True,
+                "release_qualified": False,
+            }
+            for contract in _LIFE_SOURCE_REVIEW_CONTRACTS
+        },
+        "last_transport_winner": None,
+        "route_suppression": {},
+        "transport_runtime": None,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +196,62 @@ def _supports_strict_output_contract(
         # A malformed capability declaration proves nothing. The caller keeps
         # its existing fallback instead of risking an unsupported strict wire.
         return False
+
+
+def _installs_strict_output_contract(
+    model: object | None,
+    contract: str,
+) -> bool:
+    """Prove that every possible transport lane installs the exact schema."""
+
+    if model is None:
+        return False
+    checker = getattr(model, "installs_strict_output_contract", None)
+    try:
+        if callable(checker):
+            return checker(contract) is True
+        primary = getattr(model, "primary", None)
+        secondary = getattr(model, "secondary", None)
+        if primary is not None and secondary is not None:
+            return _installs_strict_output_contract(
+                primary,
+                contract,
+            ) and _installs_strict_output_contract(secondary, contract)
+    except Exception:
+        return False
+    return False
+
+
+def _shares_known_reviewer_runtime(left: object | None, right: object | None) -> bool:
+    """Reject mutable runtime objects known to couple two reviewer roles."""
+
+    if left is None or right is None:
+        return False
+    if left is right:
+        return True
+    for attribute in ("circuit_breaker", "capacity_gate"):
+        left_state = getattr(left, attribute, None)
+        right_state = getattr(right, attribute, None)
+        if left_state is not None and left_state is right_state:
+            return True
+    left_lanes = tuple(
+        lane
+        for lane_name in ("primary", "secondary")
+        if (lane := getattr(left, lane_name, None)) is not None
+    )
+    right_lanes = tuple(
+        lane
+        for lane_name in ("primary", "secondary")
+        if (lane := getattr(right, lane_name, None)) is not None
+    )
+    if any(
+        left_lane is right_lane
+        or _shares_known_reviewer_runtime(left_lane, right_lane)
+        for left_lane in left_lanes
+        for right_lane in right_lanes
+    ):
+        return True
+    return False
 
 
 def _supports_inventory_followup_review(model: object | None) -> bool:
@@ -567,6 +655,8 @@ class SemanticChatComposition:
     recovery_source_closure_model: ChatCompletionModel | None
     source_closure_reselection_lane: SourceClosureReselectionLane | None
     proactive_source_closure_model: ChatCompletionModel | None
+    life_source_closure_model: ChatCompletionModel | None
+    life_source_runtime_isolation: str
     candidate_external_proposition_inventory_model: ChatCompletionModel | None
     proactive_source_authority: ProactiveSourceAuthorityDeployment
     main_model: SingleCallExpressionAdapter
@@ -576,6 +666,10 @@ class SemanticChatComposition:
     identity_frame: CompanionIdentityFrame
     local_provider_capacity: ProviderCapacityGate | None
     _owned_models: tuple[object, ...] = ()
+    # Close-only resources promise that ``aclose`` itself reaches quiescence.
+    # Task owners may return from bounded close while retaining provider
+    # leases, so they are tracked separately and expose an explicit waiter.
+    _owned_closeables: tuple[object, ...] = ()
     _owned_task_owners: tuple[object, ...] = ()
     _close_task: asyncio.Task[None] | None = None
     _deferred_model_close_task: asyncio.Task[None] | None = None
@@ -585,6 +679,104 @@ class SemanticChatComposition:
         """Return read-only deployment evidence without invoking a model."""
 
         return self.proactive_source_authority.health_snapshot()
+
+    def life_source_authority_health(self) -> dict[str, object]:
+        """Report Life reviewer transport state without overstating qualification."""
+
+        reviewer = self.life_source_closure_model
+        contracts = {
+            contract: {
+                "schema_installed": _installs_strict_output_contract(
+                    reviewer,
+                    contract,
+                ),
+                "parser_fail_closed": True,
+                "release_qualified": _supports_strict_output_contract(
+                    reviewer,
+                    contract,
+                ),
+            }
+            for contract in _LIFE_SOURCE_REVIEW_CONTRACTS
+        }
+        runtime_isolation = self.life_source_runtime_isolation
+        runtime_isolated = runtime_isolation == "verified_fork"
+        transport_runtime: dict[str, object] | None = None
+        health_reader = getattr(reviewer, "health_snapshot", None)
+        if callable(health_reader):
+            try:
+                raw_health = health_reader()
+                if isinstance(raw_health, dict):
+                    transport_runtime = dict(raw_health)
+            except Exception:
+                _LOG.warning("Life source-review health snapshot failed", exc_info=True)
+
+        route_suppression: object = {}
+        last_transport_winner: dict[str, object] | None = None
+        if transport_runtime is not None:
+            raw_suppression = transport_runtime.get("route_suppression")
+            if isinstance(raw_suppression, dict):
+                route_suppression = raw_suppression
+            winner_lane = transport_runtime.get("last_winner_lane")
+            lane_models = transport_runtime.get("lane_models")
+            lane_providers = transport_runtime.get("lane_providers")
+            if isinstance(winner_lane, str) and winner_lane:
+                last_transport_winner = {
+                    "lane": winner_lane,
+                    "model": (
+                        lane_models.get(winner_lane)
+                        if isinstance(lane_models, dict)
+                        else None
+                    ),
+                    "provider": (
+                        lane_providers.get(winner_lane)
+                        if isinstance(lane_providers, dict)
+                        else None
+                    ),
+                }
+
+        all_qualified = all(
+            bool(contract_health["release_qualified"])
+            for contract_health in contracts.values()
+        )
+        warning_reasons: list[str] = []
+        if reviewer is None:
+            status = "unavailable"
+            warning_reasons.append("life_source_authority.reviewer_unavailable")
+        elif runtime_isolation == "caller_provided_distinct_unverified":
+            status = (
+                "operational_isolation_unverified"
+                if all_qualified
+                else "operational_unqualified"
+            )
+            warning_reasons.append(
+                "life_source_authority.runtime_isolation_unverified"
+            )
+            if not all_qualified:
+                warning_reasons.append(
+                    "life_source_authority.release_qualification_unavailable"
+                )
+        elif not runtime_isolated:
+            status = "unsafe_shared_runtime"
+            warning_reasons.append("life_source_authority.runtime_not_isolated")
+        elif not all_qualified:
+            status = "operational_unqualified"
+            warning_reasons.append(
+                "life_source_authority.release_qualification_unavailable"
+            )
+        else:
+            status = "ready"
+        return {
+            "status": status,
+            "warning": bool(warning_reasons),
+            "warning_reasons": warning_reasons,
+            "runtime_isolated": runtime_isolated,
+            "runtime_isolation": runtime_isolation,
+            "reviewer_model": _model_identity(reviewer),
+            "contracts": contracts,
+            "last_transport_winner": last_transport_winner,
+            "route_suppression": route_suppression,
+            "transport_runtime": transport_runtime,
+        }
 
     async def aclose(self) -> None:
         close_task = self._close_task
@@ -601,7 +793,10 @@ class SemanticChatComposition:
         close_results = await asyncio.gather(
             *(
                 close()
-                for owner in self._owned_task_owners
+                for owner in (
+                    *self._owned_closeables,
+                    *self._owned_task_owners,
+                )
                 if callable(close := getattr(owner, "aclose", None))
             ),
             return_exceptions=True,
@@ -679,6 +874,7 @@ def build_semantic_chat_composition(
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
     source_closure_model: ChatCompletionModel | None = None,
+    life_source_closure_model: ChatCompletionModel | None = None,
     candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     expression_episode_observer_model: ChatCompletionModel | None = None,
     contextual_failsafe_model: ChatCompletionModel | None = None,
@@ -738,6 +934,7 @@ def build_semantic_chat_composition(
             source_closure_model=source_closure_model,
         )
     owned: list[object] = []
+    owned_closeables: list[object] = []
     owned_task_owners: list[object] = []
 
     def openai_recovery_leaf() -> StructuredExpressionReselectionModel:
@@ -929,6 +1126,7 @@ def build_semantic_chat_composition(
     auto_inventory_evidence: StrictOutputCapabilityEvidence | None = None
     auto_inventory_route_evidence: tuple[StrictOutputCapabilityEvidence, ...] = ()
     source_review_authority: SourceReviewAuthority | None = None
+    life_source_review_authority: SourceReviewAuthority | None = None
     if (
         auto_flash
         and not source_closure_was_injected
@@ -1107,6 +1305,13 @@ def build_semantic_chat_composition(
             deadline_seconds=settings.world_v2_source_review_deadline_seconds,
             caller_timeout_seconds=SOURCE_REVIEW_CALL_TIMEOUT_SECONDS,
         )
+        # Life Ecology is background cognition with a larger, differently
+        # shaped evidence packet. Reuse the same audited provider routes while
+        # isolating their circuit/runtime health, route suppression and active
+        # task ownership from visible/proactive conversation review.
+        life_source_review_authority = (
+            source_review_authority.fork_isolated_runtime()
+        )
         resolved_source_closure_model = source_review_authority
         # The ordinary recovery author remains Luna. Its fact review is a
         # different semantic role: audited Qwen through OpenRouter first, then
@@ -1120,7 +1325,11 @@ def build_semantic_chat_composition(
             caller_timeout_seconds=SOURCE_REVIEW_CALL_TIMEOUT_SECONDS,
         )
         owned_task_owners.extend(
-            (source_review_authority, recovery_source_closure_model)
+            (
+                source_review_authority,
+                recovery_source_closure_model,
+                life_source_review_authority,
+            )
         )
         if inventory_availability_authority is not None:
             owned_task_owners.append(inventory_availability_authority)
@@ -1142,6 +1351,75 @@ def build_semantic_chat_composition(
         )
         else None
     )
+    resolved_life_source_closure_model: ChatCompletionModel | None = None
+    life_source_runtime_isolation = "unavailable"
+    if life_source_closure_model is not None:
+        if life_source_closure_model is proactive_reviewer:
+            raise ValueError(
+                "Life source reviewer must use a distinct runtime instance"
+            )
+        if not _reviewer_is_independent(
+            author=background_model,
+            reviewer=life_source_closure_model,
+        ):
+            raise ValueError(
+                "Life source reviewer must be independent of the World Author"
+            )
+        if _shares_known_reviewer_runtime(
+            proactive_reviewer,
+            life_source_closure_model,
+        ):
+            raise ValueError(
+                "Life source reviewer must not share mutable reviewer runtime"
+            )
+        resolved_life_source_closure_model = life_source_closure_model
+        life_source_runtime_isolation = "caller_provided_distinct_unverified"
+    elif life_source_review_authority is not None:
+        resolved_life_source_closure_model = life_source_review_authority
+        life_source_runtime_isolation = "verified_fork"
+    if (
+        resolved_life_source_closure_model is None
+        and source_closure_was_injected
+        and proactive_reviewer is not None
+    ):
+        fork_runtime = getattr(proactive_reviewer, "fork_isolated_runtime", None)
+        if callable(fork_runtime):
+            isolated_runtime = fork_runtime()
+            if isolated_runtime is proactive_reviewer:
+                raise ValueError(
+                    "Life source reviewer runtime fork must return a distinct instance"
+                )
+            if not _reviewer_is_independent(
+                author=background_model,
+                reviewer=isolated_runtime,
+            ):
+                raise ValueError(
+                    "Life source reviewer must be independent of the World Author"
+                )
+            if any(
+                _shares_known_reviewer_runtime(existing_reviewer, isolated_runtime)
+                for existing_reviewer in (
+                    resolved_source_closure_model,
+                    proactive_reviewer,
+                )
+            ):
+                raise ValueError(
+                    "Life source reviewer fork must not share mutable reviewer runtime"
+                )
+            resolved_life_source_closure_model = isolated_runtime
+            life_source_runtime_isolation = "verified_fork"
+            close_runtime = getattr(isolated_runtime, "aclose", None)
+            if not callable(close_runtime):
+                raise ValueError(
+                    "Life source reviewer runtime fork must provide an async close "
+                    "lifecycle"
+                )
+            if callable(
+                getattr(isolated_runtime, "wait_for_shutdown_quiescence", None)
+            ):
+                owned_task_owners.append(isolated_runtime)
+            else:
+                owned_closeables.append(isolated_runtime)
     if auto_flash and settings.deepseek_api_key and proactive_reviewer is None:
         raise ValueError(
             "production character routing requires an independent source-closure reviewer"
@@ -1485,6 +1763,8 @@ def build_semantic_chat_composition(
         recovery_source_closure_model=recovery_source_closure_model,
         source_closure_reselection_lane=source_closure_reselection_lane,
         proactive_source_closure_model=proactive_reviewer,
+        life_source_closure_model=resolved_life_source_closure_model,
+        life_source_runtime_isolation=life_source_runtime_isolation,
         candidate_external_proposition_inventory_model=inventory_model,
         proactive_source_authority=proactive_source_authority,
         main_model=cognition.expression,
@@ -1494,6 +1774,7 @@ def build_semantic_chat_composition(
         identity_frame=identity_frame,
         local_provider_capacity=local_provider_capacity,
         _owned_models=tuple(owned),
+        _owned_closeables=tuple(owned_closeables),
         _owned_task_owners=tuple(owned_task_owners),
     )
 
@@ -1502,4 +1783,5 @@ __all__ = [
     "ProactiveSourceAuthorityDeployment",
     "SemanticChatComposition",
     "build_semantic_chat_composition",
+    "unavailable_life_source_authority_health",
 ]

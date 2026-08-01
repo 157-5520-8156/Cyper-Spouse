@@ -63,6 +63,7 @@ from .recall_embedding import configured_recall_embedding
 from .semantic_chat_composition import (
     SemanticChatComposition,
     build_semantic_chat_composition,
+    unavailable_life_source_authority_health,
 )
 
 
@@ -258,34 +259,94 @@ class HttpV2CaptureHost:
         self._dashboard_request_issuer = dashboard_request_issuer
         self._dashboard_public_request_issuer = dashboard_public_request_issuer
         self._semantic_chat = semantic_chat
+        # The facade lock is a clock-ordering mutex only.  Visible cognition and
+        # provider handoff must stay outside it: WorldRuntime owns the short
+        # Observation/CAS phase, and ActionPump owns exact-action effect-once.
         self._lock = asyncio.Lock()
+        self._scheduled_work_lock = asyncio.Lock()
         # A local capture transport knows the visible text as soon as the
         # provider dispatch call returns, while the durable Action settlement
-        # still has several ledger transitions left to write.  Keep those
-        # targeted drains alive so the HTTP caller can receive the captured
-        # body at first visibility without allowing a second ingress/tick to
-        # race the same single-writer ledger.  The next serialized operation
-        # joins any pending drains before advancing the world again.
-        self._pending_targeted_drains: set[asyncio.Task[object]] = set()
+        # still has several ledger transitions left to write. Keep those exact
+        # Action drains process-owned after the HTTP body becomes visible;
+        # ActionPump's claim/CAS and provider idempotency are the concurrency
+        # authority, so unrelated ingress and clock observations stay free.
+        # Concurrent delivery retries for the same immutable Action join one
+        # process-owned drain.  Different Action identities remain independent.
+        self._pending_targeted_drains: dict[str, asyncio.Task[object]] = {}
+        # A caller may abandon its HTTP wait while the character model is still
+        # finishing.  Keep that exact response process-owned, both to preserve
+        # durable recovery semantics and to give shutdown a complete task set.
+        self._active_response_tasks: set[asyncio.Task[HttpCaptureResult]] = set()
         self._background_drain_task: asyncio.Task[object] | None = None
         self._wal_maintenance_task: asyncio.Task[object] | None = None
         self._deferred_semantic_close_task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
         self._closed = False
 
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("HTTP capture host is closing")
+
+    def _track_response_task(
+        self,
+        task: asyncio.Task[HttpCaptureResult],
+    ) -> asyncio.Task[HttpCaptureResult]:
+        self._active_response_tasks.add(task)
+
+        def finished(completed: asyncio.Task[HttpCaptureResult]) -> None:
+            self._active_response_tasks.discard(completed)
+            if not completed.cancelled():
+                # Retrieve a late exception when the HTTP waiter was cancelled;
+                # an ordinary waiter still receives the same exception.
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return task
+
     async def _join_pending_targeted_drains(self) -> None:
-        pending = tuple(self._pending_targeted_drains)
+        pending = tuple(self._pending_targeted_drains.items())
         if not pending:
             return
-        results = await asyncio.gather(*pending, return_exceptions=True)
-        self._pending_targeted_drains.difference_update(pending)
+        results = await asyncio.gather(
+            *(task for _action_id, task in pending),
+            return_exceptions=True,
+        )
+        for action_id, task in pending:
+            if self._pending_targeted_drains.get(action_id) is task:
+                self._pending_targeted_drains.pop(action_id, None)
         for result in results:
             if isinstance(result, BaseException):
                 _LOG.error("HTTP capture targeted Action settlement failed", exc_info=result)
 
     def _start_targeted_drain(self, action_id: str) -> asyncio.Task[object]:
-        task = asyncio.create_task(self._host.drain_action(action_id))
-        self._pending_targeted_drains.add(task)
+        existing = self._pending_targeted_drains.get(action_id)
+        if existing is not None:
+            return existing
+        task = asyncio.create_task(
+            self._host.drain_action(action_id),
+            name=f"http-v2-targeted-action-drain:{action_id}",
+        )
+        self._pending_targeted_drains[action_id] = task
+
+        def finished(completed: asyncio.Task[object]) -> None:
+            if self._pending_targeted_drains.get(action_id) is completed:
+                self._pending_targeted_drains.pop(action_id, None)
+            if completed.cancelled():
+                _LOG.error(
+                    "HTTP capture targeted Action drain was cancelled action_id=%s",
+                    action_id,
+                )
+                return
+            error = completed.exception()
+            if error is not None:
+                _LOG.error(
+                    "HTTP capture targeted Action drain failed action_id=%s error=%s",
+                    action_id,
+                    type(error).__name__,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(finished)
         return task
 
     def schedule_background_drain(
@@ -300,6 +361,7 @@ class HttpV2CaptureHost:
         the response critical path.
         """
 
+        self._require_open()
         task = self._background_drain_task
         if task is not None and not task.done():
             return
@@ -371,13 +433,15 @@ class HttpV2CaptureHost:
         attachment_refs: tuple[str, ...] = (),
         coalescing_metadata: dict[str, object] | None = None,
     ) -> HttpCaptureResult:
-        """Ingest exactly one HTTP event, then advance one visible Action.
+        """Ingest exactly one HTTP event, then advance its visible Action.
 
-        The lock is process-local serialization for this capture transport. It
-        avoids letting two simultaneous HTTP requests race the same v2
-        ActionPump while the ledger remains the cross-process authority.
+        WorldRuntime serializes only the Observation/CAS phase and can
+        supersede an older unanswered episode.  This facade therefore owns the
+        response task but never holds its clock mutex across character/model or
+        provider work.
         """
 
+        self._require_open()
         inbound = PlatformInbound(
             platform=platform,
             platform_user_id=platform_user_id,
@@ -388,51 +452,58 @@ class HttpV2CaptureHost:
             attachment_refs=attachment_refs,
             coalescing_metadata=coalescing_metadata,
         )
-        async with self._lock:
-            await self._join_pending_targeted_drains()
-            started = time.perf_counter()
-            outcome = await self._host.inbound(inbound)
-            after_inbound = time.perf_counter()
-            action_id = next(
-                iter((*outcome.authorized_action_ids, *outcome.scheduled_action_ids)), None
+        task = self._track_response_task(
+            asyncio.create_task(
+                self._respond_owned(inbound),
+                name=f"http-v2-visible-response:{platform_message_id}",
             )
-            delivery = None
-            drain_task: asyncio.Task[object] | None = None
-            if action_id is not None:
-                drain_task = self._start_targeted_drain(action_id)
-                # The capture transport records the immutable visible body in
-                # ``send`` before the Action's terminal settlement batch.  A
-                # real provider adapter may therefore return the body while
-                # the durable receipt work continues in the background.  If a
-                # test/provider cannot expose an early body, retain the old
-                # fully awaited behavior.
-                while not drain_task.done():
-                    if self._transport.captured_body(action_id) is not None:
-                        break
-                    await asyncio.sleep(0.01)
-                if self._transport.captured_body(action_id) is None:
-                    delivery = await drain_task
-            after_drain = time.perf_counter()
-            if delivery is not None and delivery.action_id not in {None, action_id}:
-                raise RuntimeError("targeted HTTP capture drain returned a different Action")
-            visible_mood = getattr(self._host, "visible_mood", None)
-            mood = str(visible_mood()) if callable(visible_mood) else "calm"
-            _LOG.warning(
-                "http v2 response phases trace=%s action=%s inbound_ms=%.1f drain_ms=%.1f total_ms=%.1f status=%s",
-                inbound.trace_id,
-                action_id,
-                (after_inbound - started) * 1000,
-                (after_drain - after_inbound) * 1000,
-                (time.perf_counter() - started) * 1000,
-                outcome.status,
-            )
-            return HttpCaptureResult(
-                status=outcome.status,
-                action_id=action_id,
-                text=self._transport.captured_body(action_id),
-                canonical_user_id=self._primary_user_id,
-                mood=mood,
-            )
+        )
+        return await asyncio.shield(task)
+
+    async def _respond_owned(self, inbound: PlatformInbound) -> HttpCaptureResult:
+        """Run one visible turn without an adapter-wide model mutex."""
+
+        started = time.perf_counter()
+        outcome = await self._host.inbound(inbound)
+        after_inbound = time.perf_counter()
+        action_id = next(
+            iter((*outcome.authorized_action_ids, *outcome.scheduled_action_ids)), None
+        )
+        delivery = None
+        drain_task: asyncio.Task[object] | None = None
+        if action_id is not None:
+            drain_task = self._start_targeted_drain(action_id)
+            # The capture transport records the immutable visible body in
+            # ``send`` before the Action's terminal settlement batch.  A real
+            # provider adapter may therefore return the body while durable
+            # receipt work continues in the process-owned task.
+            while not drain_task.done():
+                if self._transport.captured_body(action_id) is not None:
+                    break
+                await asyncio.sleep(0.01)
+            if self._transport.captured_body(action_id) is None:
+                delivery = await asyncio.shield(drain_task)
+        after_drain = time.perf_counter()
+        if delivery is not None and delivery.action_id not in {None, action_id}:
+            raise RuntimeError("targeted HTTP capture drain returned a different Action")
+        visible_mood = getattr(self._host, "visible_mood", None)
+        mood = str(visible_mood()) if callable(visible_mood) else "calm"
+        _LOG.warning(
+            "http v2 response phases trace=%s action=%s inbound_ms=%.1f drain_ms=%.1f total_ms=%.1f status=%s",
+            inbound.trace_id,
+            action_id,
+            (after_inbound - started) * 1000,
+            (after_drain - after_inbound) * 1000,
+            (time.perf_counter() - started) * 1000,
+            outcome.status,
+        )
+        return HttpCaptureResult(
+            status=outcome.status,
+            action_id=action_id,
+            text=self._transport.captured_body(action_id),
+            canonical_user_id=self._primary_user_id,
+            mood=mood,
+        )
 
     async def tick(
         self,
@@ -448,8 +519,8 @@ class HttpV2CaptureHost:
         policy_version: str | None = None,
         policy_digest: str | None = None,
     ) -> str:
+        self._require_open()
         async with self._lock:
-            await self._join_pending_targeted_drains()
             outcome = await self._host.tick(
                 PlatformClockTick(
                     tick_id=tick_id,
@@ -462,30 +533,60 @@ class HttpV2CaptureHost:
                     reason=reason,
                     policy_version=policy_version,
                     policy_digest=policy_digest,
+                    # Keep only the clock/deferred-event CAS inside the facade
+                    # mutex. Life may span several provider attempts and runs
+                    # below on the independent scheduler lane.
+                    run_life_ecology=False,
                 )
             )
-            return outcome.status
+        async with self._scheduled_work_lock:
+            await self._advance_life_ecology_for_committed_tick(
+                tick_id=tick_id,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+        return outcome.status
+
+    async def _advance_life_ecology_for_committed_tick(
+        self,
+        *,
+        tick_id: str,
+        trace_id: str,
+        correlation_id: str,
+    ) -> object | None:
+        """Run one exact Life wake without owning the HTTP clock mutex."""
+
+        advance = getattr(self._host, "advance_life_ecology_once", None)
+        if not callable(advance):
+            # Production WorldV2PlatformHost always exposes the seam.  Narrow
+            # clock-only integrations retain their previous compatibility.
+            return None
+        return await advance(
+            wake_event_ref=f"event:trigger:clock:{tick_id}",
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
 
     async def drain(
         self, *, max_action_units: int = 8, max_background_units: int = 8
     ) -> HttpDrainResult:
+        self._require_open()
         if not 0 <= max_action_units <= 64 or not 0 <= max_background_units <= 64:
             raise ValueError("HTTP capture drain limits must be between 0 and 64")
-        # Joining a targeted Action and running model-backed background work
-        # can both take an unbounded provider round trip.  Runtime-level
-        # claims/CAS make these operations safe to run beside ingress; the
-        # adapter lock must not turn a passive scheduler into a visible-chat
-        # outage.  Inbound/tick still join pending targeted drains inside
-        # their short serialization section before mutating the world.
-        await self._join_pending_targeted_drains()
-        drained = await self._host.drain_scheduled_work(
-            max_action_units=max_action_units,
-            max_background_units=max_background_units,
-            media_preview_trace_id="trace:http-v2:media-preview",
-            media_preview_correlation_id=(
-                f"correlation:http-v2:media-preview:{self._primary_user_id}"
-            ),
-        )
+        # Passive drains and Life share only this background lane. Neither
+        # blocks visible ingress nor its exact targeted Action. Acquiring the
+        # lane before the first await also lets close rendezvous with every
+        # operation that passed the open gate.
+        async with self._scheduled_work_lock:
+            await self._join_pending_targeted_drains()
+            drained = await self._host.drain_scheduled_work(
+                max_action_units=max_action_units,
+                max_background_units=max_background_units,
+                media_preview_trace_id="trace:http-v2:media-preview",
+                media_preview_correlation_id=(
+                    f"correlation:http-v2:media-preview:{self._primary_user_id}"
+                ),
+            )
         # Checkpointing is deliberately scheduled after this bounded
         # scheduler pass.  The HTTP reply path never awaits this task.
         self._schedule_wal_maintenance()
@@ -527,6 +628,13 @@ class HttpV2CaptureHost:
             }
         return self._semantic_chat.proactive_source_authority_health()
 
+    def life_source_authority_health(self) -> dict[str, object]:
+        """Expose isolated Life reviewer state without invoking a model."""
+
+        if self._semantic_chat is None:
+            return unavailable_life_source_authority_health()
+        return self._semantic_chat.life_source_authority_health()
+
     async def aclose(self) -> None:
         close_task = self._close_task
         if close_task is None:
@@ -542,8 +650,31 @@ class HttpV2CaptureHost:
         await asyncio.shield(close_task)
 
     async def _aclose_owned(self) -> None:
+        responses = tuple(self._active_response_tasks)
+        if responses:
+            results = await asyncio.gather(*responses, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    _LOG.error(
+                        "HTTP capture visible response failed during close",
+                        exc_info=result,
+                    )
+        # A response may return at first visible body while its process-owned
+        # Action settlement continues.  Snapshot this set only after every
+        # response has finished, now that the closed gate prevents new work.
         await self._join_pending_targeted_drains()
         await self._join_background_drain()
+        # ``tick`` takes the clock mutex before it can enter the scheduler lane;
+        # ``drain`` takes the scheduler lane before its first await.  With the
+        # task-creation gate already closed, these sequential rendezvous cover
+        # every operation admitted before shutdown without nesting locks.
+        async with self._lock:
+            pass
+        async with self._scheduled_work_lock:
+            pass
+        # An admitted drain schedules WAL maintenance immediately after leaving
+        # the scheduler lane.  Join it only after the rendezvous so that late
+        # task is included before the World/SQLite owner is closed.
         await self._join_wal_maintenance()
         close_world = getattr(self._host, "aclose", None)
         if callable(close_world):
@@ -636,6 +767,7 @@ def build_http_v2_capture_host(
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
     source_closure_model: ChatCompletionModel | None = None,
+    life_source_closure_model: ChatCompletionModel | None = None,
     candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     media_transport: MediaProviderTransport | None = None,
     media_preview: MediaPreviewDeployment | None = None,
@@ -664,6 +796,7 @@ def build_http_v2_capture_host(
         thinking_model=thinking_model,
         advisory_model=advisory_model,
         source_closure_model=source_closure_model,
+        life_source_closure_model=life_source_closure_model,
         candidate_external_proposition_inventory_model=(
             candidate_external_proposition_inventory_model
         ),
@@ -689,10 +822,10 @@ def build_http_v2_capture_host(
     )
     life_source_closure_reviewer = (
         RoleBoundLifeDevelopmentModelAdapter(
-            model=semantic_chat.proactive_source_closure_model,
+            model=semantic_chat.life_source_closure_model,
             role="world_author_source_reviewer",
         )
-        if semantic_chat.proactive_source_closure_model is not None
+        if semantic_chat.life_source_closure_model is not None
         else None
     )
     primary_user_id = settings.primary_user_id

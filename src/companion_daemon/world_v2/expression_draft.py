@@ -39,7 +39,6 @@ from .proposal_envelope import (
 )
 from .private_turn_state import (
     PrivateTurnState,
-    require_private_turn_state_first,
     validate_private_turn_state_sources,
 )
 from .schema_core import FrozenModel
@@ -940,21 +939,15 @@ def validate_expression_private_turn_state(
     model_visible_context_json: str | None = None,
     source_ref_aliases: SourceRefAliasTable | None = None,
 ) -> PrivateTurnState | None:
-    """Validate the causal pre-expression state against the exact pinned turn.
+    """Validate the model-owned turn state against the exact pinned turn.
 
     This deliberately performs no semantic interpretation.  It exists as a
-    small shared boundary so a source-closure reviewer or recall follow-up
-    cannot run before an invalid post-hoc state has been rejected.
+    small shared boundary so a missing, malformed, or unpinned state cannot
+    reach source review or a recall follow-up. JSON object member order is not
+    evidence of when the model formed the state and is deliberately ignored.
     """
 
     required = capabilities.private_turn_state_mode == "required"
-    try:
-        require_private_turn_state_first(value, required=required)
-    except (TypeError, ValueError):
-        raise PrivateTurnStateValidationError(
-            code="private_turn_state.field_order",
-            field_path="private_turn_state",
-        ) from None
     aliases = source_ref_aliases or build_source_ref_alias_table(
         request=request,
         stable_identity_source_refs=stable_identity_source_refs,

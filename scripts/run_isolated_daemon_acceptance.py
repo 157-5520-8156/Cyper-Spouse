@@ -76,9 +76,17 @@ _LOOPBACK_ROLE_AUTHORITY = "semantic-authority:test:isolated-loopback-role.1"
 _LOOPBACK_REVIEW_AUTHORITY = (
     "semantic-authority:test:isolated-loopback-source-reviewer.1"
 )
+_LOOPBACK_LIFE_REVIEW_MODEL = "isolated-deterministic-life-source-reviewer"
+_LOOPBACK_LIFE_REVIEW_AUTHORITY = (
+    "semantic-authority:test:isolated-deterministic-life-source-reviewer.1"
+)
 _LOOPBACK_REVIEW_CONTRACTS = (
     "report-relative-entailment-adjudication.3",
     "source-closure-review.7",
+)
+_LOOPBACK_LIFE_REVIEW_CONTRACTS = (
+    "life-development-source-closure-review.1",
+    "life-development-novel-origin-review.2",
 )
 
 
@@ -910,10 +918,79 @@ class _IsolatedLoopbackRoleModel(DeepSeekChatModel):
     semantic_authority_id = _LOOPBACK_ROLE_AUTHORITY
 
 
+class _IsolatedDeterministicLifeSourceReviewer:
+    """Acceptance-only Life truth reviewer with no shared mutable runtime.
+
+    The process acceptance is about daemon, ledger, HTTP, restart and causal
+    evidence behavior. Life source review is a separate hard-boundary model
+    role, so this fixture answers its two closed contracts locally instead of
+    reusing either the character authority or the conversation reviewer.
+    """
+
+    model = _LOOPBACK_LIFE_REVIEW_MODEL
+    semantic_authority_id = _LOOPBACK_LIFE_REVIEW_AUTHORITY
+
+    def __init__(self) -> None:
+        self._closed = False
+
+    def supports_strict_output_contract(self, contract: str) -> bool:
+        return contract in _LOOPBACK_LIFE_REVIEW_CONTRACTS
+
+    def installs_strict_output_contract(self, contract: str) -> bool:
+        return contract in _LOOPBACK_LIFE_REVIEW_CONTRACTS
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.0,
+    ) -> str:
+        del temperature
+        if self._closed:
+            raise RuntimeError("isolated Life reviewer is closed")
+        joined = "\n".join(message["content"] for message in messages)
+        if "life-development-source-closure-review.1" in joined:
+            review = {
+                "decision": "supported",
+                "unsupported_claim_ids": [],
+                "undeclared_fact_fragments": [],
+                "undeclared_fact_paths": [],
+                "typed_location_conflicts": [],
+                "reason": "The acceptance fixture found no unsupported existing-world claim.",
+            }
+        elif "life-development-novel-origin-review.2" in joined:
+            review = {
+                "decision": "supported",
+                "unsupported_claims": [],
+                "unsupported_provisional_npcs": [],
+                "unsupported_outcome_prerequisites": [],
+                "undeclared_premise_fragments": [],
+                "reason": "The acceptance fixture found no imported prior-world premise.",
+            }
+        else:
+            raise ValueError("isolated Life reviewer received an unknown contract")
+        return json.dumps({"review": review}, ensure_ascii=False)
+
+    async def aclose(self) -> None:
+        self._closed = True
+
+    @property
+    def shutdown_pending_task_count(self) -> int:
+        return 0
+
+    async def wait_for_shutdown_quiescence(self) -> None:
+        return None
+
+
 class _IsolatedLoopbackSourceReviewer(StructuredSourceReviewModel):
     """Acceptance-only strict reviewer, distinct from the role authority."""
 
     semantic_authority_id = _LOOPBACK_REVIEW_AUTHORITY
+
+    def fork_isolated_runtime(self) -> _IsolatedDeterministicLifeSourceReviewer:
+        """Provide Life with a dedicated deterministic acceptance authority."""
+
+        return _IsolatedDeterministicLifeSourceReviewer()
 
     def request_payload(
         self,
@@ -2904,7 +2981,13 @@ def run(
                             {
                                 "role": _LOOPBACK_ROLE_AUTHORITY,
                                 "source_reviewer": _LOOPBACK_REVIEW_AUTHORITY,
+                                "life_source_reviewer": (
+                                    _LOOPBACK_LIFE_REVIEW_AUTHORITY
+                                ),
                                 "review_contracts": _LOOPBACK_REVIEW_CONTRACTS,
+                                "life_review_contracts": (
+                                    _LOOPBACK_LIFE_REVIEW_CONTRACTS
+                                ),
                             }
                             if model_mode == "loopback-stub"
                             else None

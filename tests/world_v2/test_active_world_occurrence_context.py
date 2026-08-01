@@ -19,6 +19,9 @@ from companion_daemon.world_v2.life_content_store import (
     life_content_payload_hash,
 )
 from companion_daemon.world_v2.life_events import NpcRegisteredPayload
+from companion_daemon.world_v2.life_development_runtime import (
+    LifeDevelopmentProposalReader,
+)
 from companion_daemon.world_v2.ledger_context_resolver import (
     ContextRelevanceScope,
     context_capsule_compiler_from_ledger,
@@ -44,6 +47,7 @@ from test_life_development_runtime import (
     _commit_at_head,
     _location_bound_world_draft,
     _location_capability,
+    _hash_json,
     _runtime,
     _seed_clock,
     _StaticManifestCompiler,
@@ -194,7 +198,7 @@ def _replay_as_legacy_without_source_closure(ledger: WorldLedger) -> WorldLedger
             if (
                 event.event_type == "ProposalRecorded"
                 and payload.get("possibility_authority_version")
-                == "life-development-possibility.5"
+                == "life-development-possibility.6"
             ):
                 payload["possibility_authority_version"] = (
                     "life-development-possibility.3"
@@ -310,6 +314,44 @@ async def test_source_closed_active_occurrence_reaches_current_self_without_futu
     allowed = world_claim_source_refs_by_scope(context=compact)
     assert value["occurrence_id"] in allowed["current_world"]
     assert value["occurrence_id"] not in allowed["past_world"]
+
+
+@pytest.mark.asyncio
+async def test_active_reader_retains_historical_v5_review_identities() -> None:
+    ledger, _store = await _source_closed_active_occurrence()
+    occurrence = ledger.project().world_occurrences[0]
+    proposal_event = ledger.lookup_event_commit(occurrence.trigger_ref)[0]
+    proposal = proposal_event.payload()
+    proposal["possibility_authority_version"] = "life-development-possibility.5"
+    raw_hash = proposal["world_author_raw_output_hash"]
+    manifest_hash = proposal["capability_manifest_hash"]
+    source_deliberation = proposal["world_author_source_closure_deliberation"]
+    source_deliberation["decision_subject_hash"] = _hash_json(
+        {
+            "capability_manifest_hash": manifest_hash,
+            "world_author_raw_output_hash": raw_hash,
+        }
+    )
+    proposal["world_author_source_closure_deliberation_hash"] = _hash_json(
+        source_deliberation
+    )
+    novel_deliberation = proposal["world_author_novel_origin_deliberation"]
+    novel_deliberation["decision_subject_hash"] = _hash_json(
+        {
+            "contract": "life-development-novel-origin-review.2",
+            "capability_manifest_hash": manifest_hash,
+            "world_author_raw_output_hash": raw_hash,
+        }
+    )
+    proposal["world_author_novel_origin_deliberation_hash"] = _hash_json(
+        novel_deliberation
+    )
+
+    LifeDevelopmentProposalReader._validate_active_source_closure(  # noqa: SLF001
+        proposal=proposal,
+        possibility_version="life-development-possibility.5",
+        proposal_event=proposal_event,
+    )
 
 
 @pytest.mark.asyncio

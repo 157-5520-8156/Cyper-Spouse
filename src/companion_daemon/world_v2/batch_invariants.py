@@ -83,6 +83,12 @@ from .life_development_draft import (
     LifeDevelopmentCapabilityManifest,
     LifeDevelopmentLocationCapability,
 )
+from .life_review_identity import (
+    current_novel_origin_review_subject_hash,
+    current_source_review_subject_hash,
+    legacy_novel_origin_review_subject_hashes,
+    legacy_source_review_subject_hash,
+)
 from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
@@ -755,12 +761,14 @@ def _validate_life_development_location_authority_batch(
             "life-development-possibility.3",
             "life-development-possibility.4",
             "life-development-possibility.5",
+            "life-development-possibility.6",
         }:
             raise ValueError("life-development possibility authority version is unknown")
         if possibility_version in {
             "life-development-possibility.3",
             "life-development-possibility.4",
             "life-development-possibility.5",
+            "life-development-possibility.6",
         }:
             expected_possibility_hash = hashlib.sha256(
                 json.dumps(
@@ -842,6 +850,7 @@ def _validate_life_development_location_authority_batch(
             if possibility_version in {
                 "life-development-possibility.4",
                 "life-development-possibility.5",
+                "life-development-possibility.6",
             }:
                 review = proposal.get("world_author_source_closure_review")
                 review_deliberation = proposal.get(
@@ -903,29 +912,53 @@ def _validate_life_development_location_authority_batch(
                     raise ValueError(
                         "life-development source-closure authority binding is invalid"
                     )
-                expected_source_subject_hash = hashlib.sha256(
-                    json.dumps(
-                        {
-                            "capability_manifest_hash": proposal.get(
-                                "capability_manifest_hash"
-                            ),
-                            "world_author_raw_output_hash": proposal.get(
-                                "world_author_raw_output_hash"
-                            ),
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
-                if (
-                    review_deliberation.get("decision_subject_hash")
-                    != expected_source_subject_hash
+                raw_output_hash = proposal.get("world_author_raw_output_hash")
+                manifest_hash = proposal.get("capability_manifest_hash")
+                if not isinstance(raw_output_hash, str) or not isinstance(
+                    manifest_hash,
+                    str,
+                ):
+                    raise ValueError(
+                        "life-development review subject hashes are missing"
+                    )
+                request_hashes = review_deliberation.get("request_hashes")
+                review_cursor = review_deliberation.get("context_cursor")
+                trigger_id = proposal.get("trigger_id")
+                if possibility_version == "life-development-possibility.6":
+                    if not (
+                        isinstance(request_hashes, list)
+                        and request_hashes
+                        and all(isinstance(item, str) for item in request_hashes)
+                        and isinstance(review_cursor, dict)
+                        and isinstance(trigger_id, str)
+                    ):
+                        raise ValueError(
+                            "life-development current source-review identity is incomplete"
+                        )
+                    expected_source_subject = current_source_review_subject_hash(
+                        review_request_hashes=tuple(request_hashes),
+                        world_author_raw_output_hash=raw_output_hash,
+                        capability_manifest_hash=manifest_hash,
+                        context_cursor=review_cursor,
+                        wake_event_ref=trigger_id,
+                        wake_world_id=proposal_event.world_id,
+                        wake_logical_time=proposal_event.logical_time.isoformat(),
+                    )
+                else:
+                    expected_source_subject = legacy_source_review_subject_hash(
+                        world_author_raw_output_hash=raw_output_hash,
+                        capability_manifest_hash=manifest_hash,
+                    )
+                if review_deliberation.get("decision_subject_hash") != (
+                    expected_source_subject
                 ):
                     raise ValueError(
                         "life-development source-closure reviewed another subject"
                     )
-            if possibility_version == "life-development-possibility.5":
+            if possibility_version in {
+                "life-development-possibility.5",
+                "life-development-possibility.6",
+            }:
                 novel_review = proposal.get("world_author_novel_origin_review")
                 novel_deliberation = proposal.get(
                     "world_author_novel_origin_deliberation"
@@ -988,31 +1021,44 @@ def _validate_life_development_location_authority_batch(
                     raise ValueError(
                         "life-development novel-origin authority binding is invalid"
                     )
-                expected_novel_subject_hashes = {
-                    hashlib.sha256(
-                        json.dumps(
-                            {
-                                "contract": contract,
-                                "capability_manifest_hash": proposal.get(
-                                    "capability_manifest_hash"
-                                ),
-                                "world_author_raw_output_hash": proposal.get(
-                                    "world_author_raw_output_hash"
-                                ),
-                            },
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ).encode("utf-8")
-                    ).hexdigest()
-                    for contract in (
-                        "life-development-novel-origin-review.1",
-                        "life-development-novel-origin-review.2",
+                novel_request_hashes = novel_deliberation.get("request_hashes")
+                novel_cursor = novel_deliberation.get("context_cursor")
+                if possibility_version == "life-development-possibility.6":
+                    if not (
+                        isinstance(novel_request_hashes, list)
+                        and novel_request_hashes
+                        and all(
+                            isinstance(item, str)
+                            for item in novel_request_hashes
+                        )
+                        and isinstance(novel_cursor, dict)
+                        and isinstance(trigger_id, str)
+                    ):
+                        raise ValueError(
+                            "life-development current novel-origin identity is incomplete"
+                        )
+                    expected_novel_subjects = {
+                        current_novel_origin_review_subject_hash(
+                            review_request_hashes=tuple(novel_request_hashes),
+                            world_author_raw_output_hash=raw_output_hash,
+                            capability_manifest_hash=manifest_hash,
+                            context_cursor=novel_cursor,
+                            wake_event_ref=trigger_id,
+                            wake_world_id=proposal_event.world_id,
+                            wake_logical_time=(
+                                proposal_event.logical_time.isoformat()
+                            ),
+                        )
+                    }
+                else:
+                    expected_novel_subjects = (
+                        legacy_novel_origin_review_subject_hashes(
+                            world_author_raw_output_hash=raw_output_hash,
+                            capability_manifest_hash=manifest_hash,
+                        )
                     )
-                }
-                if (
-                    novel_deliberation.get("decision_subject_hash")
-                    not in expected_novel_subject_hashes
+                if novel_deliberation.get("decision_subject_hash") not in (
+                    expected_novel_subjects
                 ):
                     raise ValueError(
                         "life-development novel-origin critic reviewed another subject"
@@ -1045,6 +1091,7 @@ def _validate_life_development_location_authority_batch(
                 "life-development-possibility.3",
                 "life-development-possibility.4",
                 "life-development-possibility.5",
+                "life-development-possibility.6",
             }
             or not isinstance(location_ref, str)
             or not isinstance(capability_ref, str)

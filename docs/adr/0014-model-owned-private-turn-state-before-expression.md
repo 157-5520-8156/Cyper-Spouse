@@ -53,8 +53,9 @@ Qualification 定义是当前运行状态的简明来源。
 
 普通入站 Expression 使用 `PrivateTurnState`：
 
-- 它是同一次角色模型输出里的第一个字段，随后才是 `timing_choice`、Beats、问题、沉默和
-  其他表达选择；
+- 它是同一次角色模型输出里的必填成员，与 `timing_choice`、Beats、问题、沉默和其他表达
+  选择共同构成一次完整角色选择。模型契约要求角色从这份当下私有状态形成表达，但 JSON
+  对象成员顺序只是传输序列化，不能证明或否定这种因果关系；
 - `inner_state_summary` 是短自由文本，只记录角色此刻注意到了什么、产生了怎样的主观
   倾向，不采用动机枚举、回复模式或行为菜单，也不索取隐藏推理过程；
 - `attended_source_refs` 最多八条且必须唯一，只能引用同一 Pinned Turn 的
@@ -71,7 +72,7 @@ Qualification 定义是当前运行状态的简明来源。
 - 自动 Recall 仍使用既有 RecallCoordinator。角色若想先回忆，首次输出
   `PrivateTurnState + recall_request`；召回后必须依据扩充后的 Context 重新形成最终
   `PrivateTurnState + ExpressionDraft`；
-- 状态缺失、位于表达字段之后或引用越界时，同一角色模型获得一次完整 Expression
+- 状态缺失、结构非法或引用越界时，同一角色模型获得一次完整 Expression
   重选。系统不得保留旧可见回复再补写一个事后理由；
 - 新 provider authored wire 不得借用 `ExpressionDraft` 为历史 replay 保留的本地默认值
   替角色作决定：生产 composition 要求模型显式返回 `timing_choice`、`beats`、`stance`、
@@ -639,8 +640,9 @@ Proposal 在字段缺失时维持原 canonical JSON 和哈希。
 ## Consequences
 
 角色可以因共情、联想、自身经历、疲惫、愤怒、无话可说或任何未枚举的主观原因选择单条、
-多条、追问、转述自己、稍后回复或沉默；确定性代码只验证因果字段顺序、来源闭包、能力和
-外部效果边界。
+多条、追问、转述自己、稍后回复或沉默；确定性代码只验证私有状态存在且结构合法、注意来源
+绑定、事实来源闭包、能力和外部效果边界。JSON 对象成员的序列化顺序不构成因果证据，也不
+得成为拒绝角色选择的理由。
 
 `PrivateTurnState` 不是耐久“内心事实”。值得长期保留的情绪、印象、承诺和记忆仍分别走
 既有 Appraisal/Affect、PrivateImpression、PrivateCommitment 与 MemoryCandidate

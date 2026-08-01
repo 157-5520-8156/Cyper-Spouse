@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import logging
 import secrets
 import time
@@ -83,6 +83,45 @@ class QQC2CSchedulerDiagnostics:
         else:
             status = "running"
         world = world or {}
+        raw_initiative_warning_reasons = world.get(
+            "initiative_warning_reasons", []
+        )
+        initiative_warning_reasons = [
+            item
+            for item in (
+                raw_initiative_warning_reasons
+                if isinstance(raw_initiative_warning_reasons, (list, tuple))
+                else ()
+            )
+            if isinstance(item, str) and item != "consideration_overdue"
+        ]
+        next_consideration_at = world.get("initiative_next_consideration_at")
+        due_at = None
+        if isinstance(next_consideration_at, str):
+            try:
+                parsed_due_at = datetime.fromisoformat(next_consideration_at)
+            except ValueError:
+                parsed_due_at = None
+            if (
+                parsed_due_at is not None
+                and parsed_due_at.tzinfo is not None
+                and parsed_due_at.utcoffset() is not None
+            ):
+                due_at = parsed_due_at
+        # "Two scheduler cycles" is an adapter liveness promise, so its
+        # threshold must come from this process's actual scheduler cadence.
+        # The application projection has no authority to invent a platform
+        # polling interval, and wall time lets this warning fire even when a
+        # failed scheduler has stopped advancing the World clock itself.
+        if (
+            world.get("initiative_state") == "consideration_due"
+            and due_at is not None
+            and now - due_at > timedelta(seconds=self.interval_seconds * 2)
+        ):
+            initiative_warning_reasons.append("consideration_overdue")
+        unexplained_initiative_warning = bool(
+            world.get("initiative_warning", False)
+        ) and not raw_initiative_warning_reasons
         return {
             "status": status,
             "task_running": task_running,
@@ -163,10 +202,9 @@ class QQC2CSchedulerDiagnostics:
                 "last_failure_code": world.get(
                     "initiative_last_failure_code"
                 ),
-                "warning": world.get("initiative_warning", False),
-                "warning_reasons": world.get(
-                    "initiative_warning_reasons", []
-                ),
+                "warning": bool(initiative_warning_reasons)
+                or unexplained_initiative_warning,
+                "warning_reasons": initiative_warning_reasons,
             },
             "world_activity": {
                 "life_event_count": world.get("life_event_count", 0),
@@ -196,6 +234,7 @@ def create_qq_c2c_onebot_app(
     _test_only_model: ChatCompletionModel | None = None,
     _test_only_advisory_model: ChatCompletionModel | None = None,
     _test_only_source_closure_model: ChatCompletionModel | None = None,
+    _test_only_life_source_closure_model: ChatCompletionModel | None = None,
     scheduler_interval_seconds: float = 15.0,
     media_preview: MediaPreviewDeployment | None = None,
     media_transport: MediaProviderTransport | None = None,
@@ -231,6 +270,7 @@ def create_qq_c2c_onebot_app(
             _test_only_model,
             _test_only_advisory_model,
             _test_only_source_closure_model,
+            _test_only_life_source_closure_model,
         )
     )
     if use_fake_model and test_authorities_injected:
@@ -298,6 +338,7 @@ def create_qq_c2c_onebot_app(
         model=FakeCompanionModel() if use_fake_model else _test_only_model,
         advisory_model=_test_only_advisory_model,
         source_closure_model=_test_only_source_closure_model,
+        life_source_closure_model=_test_only_life_source_closure_model,
         media_preview=media_preview,
         media_transport=media_transport,
         perception_model=(
@@ -445,6 +486,9 @@ def create_qq_c2c_onebot_app(
         )
         scheduler_view["proactive_source_authority"] = (
             host.proactive_source_authority_health()
+        )
+        scheduler_view["life_source_authority"] = (
+            host.life_source_authority_health()
         )
         scheduler_view["performance"] = production_latency_health_snapshot(
             host.latency_samples()

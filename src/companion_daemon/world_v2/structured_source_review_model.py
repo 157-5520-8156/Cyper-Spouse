@@ -1401,6 +1401,56 @@ class StructuredSourceReviewModel(OpenAICompatibleChatModel):
             contract
         )
 
+    def installs_strict_output_contract(self, contract: str) -> bool:
+        """Report local schema installation separately from release evidence."""
+
+        return contract in _STRICT_SCHEMAS
+
+    def fork_isolated_runtime(self) -> "StructuredSourceReviewModel":
+        """Reuse immutable route configuration with fresh failure state.
+
+        Background Life review and visible conversation may use the same
+        audited provider endpoints, but they must not share a circuit breaker,
+        strict-runtime counters or an in-flight authority task.  The HTTP
+        connection pool is intentionally reusable and carries no semantic
+        health decision; its original composition owner closes it only after
+        every authority task has quiesced.
+        """
+
+        if self.capacity_gate is not None:
+            # A capacity gate may carry a process marker and physical-worker
+            # lease.  Blindly copying or sharing it would falsely claim an
+            # isolated runtime. Production remote source-review leaves do not
+            # install one, so fail explicitly for unsupported custom routes.
+            raise ValueError(
+                "source-review runtime isolation does not support a capacity gate"
+            )
+        circuit = self.circuit_breaker
+        isolated_circuit = (
+            ProviderCircuitBreaker(
+                failure_threshold=circuit.failure_threshold,
+                cooldown_seconds=circuit.cooldown_seconds,
+                clock=circuit.clock,
+            )
+            if circuit is not None
+            else None
+        )
+        return StructuredSourceReviewModel(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            require_provider_parameters=self.require_provider_parameters,
+            reasoning_effort=self.reasoning_effort,
+            max_completion_tokens=self.max_completion_tokens,
+            proxy_url=self.proxy_url,
+            transport=self.transport,
+            usage_observer=self.usage_observer,
+            circuit_breaker=isolated_circuit,
+            client=self.client,
+            inventory_call_timeout_seconds=self.inventory_call_timeout_seconds,
+            strict_output_capability_evidence=self.strict_output_capability_evidence,
+        )
+
     def strict_output_capability_snapshot(self) -> dict[str, object]:
         """Return immutable transport evidence without invoking the provider."""
 

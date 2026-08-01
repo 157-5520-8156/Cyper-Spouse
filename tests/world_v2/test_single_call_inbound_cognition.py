@@ -5278,6 +5278,7 @@ async def test_paired_cognition_honors_character_recall_and_replays_trace(
     assert outcome.status == "action_authorized"
     assert len(provider.calls) == 2
     assert "bounded read-only recall result" in provider.calls[1][-1]["content"]
+    assert "place it first" not in provider.calls[1][-1]["content"]
     recall_audits = tuple(
         item
         for item in evidence.projection.model_result_audits

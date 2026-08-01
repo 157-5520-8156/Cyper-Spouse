@@ -257,6 +257,27 @@ class WorldV2PlatformHost:
             run_life_ecology=tick.run_life_ecology,
         )
 
+    async def advance_life_ecology_once(
+        self,
+        *,
+        wake_event_ref: str,
+        trace_id: str,
+        correlation_id: str,
+    ):
+        """Run Life for one exact committed wake on a scheduler-owned lane.
+
+        Provider adapters use this narrow seam to keep the short clock/CAS
+        critical section independent from model-backed Life work.  The
+        application remains the owner of durable trigger claim, replay, and
+        effect-once semantics.
+        """
+
+        return await self._application.advance_life_ecology_once(
+            wake_event_ref=wake_event_ref,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+
     async def receipt(self, receipt: PlatformReceipt):
         """Forward an asynchronous provider callback to application settlement."""
 

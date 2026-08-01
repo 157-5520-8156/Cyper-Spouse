@@ -35,6 +35,7 @@ from companion_daemon.world_v2.life_development_runtime import (
 from companion_daemon.world_v2.life_development_source_closure import (
     LifeDevelopmentSourceClosureError,
     life_development_novel_origin_messages,
+    life_development_review_packet_identity,
     life_development_source_closure_messages,
     parse_life_development_novel_origin_review,
     parse_life_development_source_closure_review,
@@ -2122,14 +2123,18 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
     assert character.calls == 1
     first_review = json.loads(reviewer.messages[0][-1]["content"])
     assert first_review["review_contract"] == "life-development-source-closure-review.1"
-    assert first_review["pinned_source_evidence"]["cited_committed_events"] == [
-        {
-            "source_ref": wake.event_id,
-            "event_type": "ClockAdvanced",
-            "logical_time": wake.logical_time.isoformat(),
-            "payload": wake.payload(),
-        }
-    ]
+    cited_events = first_review["pinned_source_evidence"]["cited_committed_events"]
+    assert len(cited_events) == 1
+    assert cited_events[0] == {
+        "source_ref": wake.event_id,
+        "world_id": wake.world_id,
+        "event_type": "ClockAdvanced",
+        "actor": wake.actor,
+        "source": wake.source,
+        "logical_time": wake.logical_time.isoformat(),
+        "payload_hash": wake.payload_hash,
+        "payload": wake.payload(),
+    }
     assert "ClockAdvanced event proves only" in reviewer.messages[0][0]["content"]
     assert "proposal-scoped novel environmental events" in reviewer.messages[0][0]["content"]
     assert (
@@ -2224,7 +2229,7 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
         ),
     }
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
-    assert proposal["possibility_authority_version"] == "life-development-possibility.5"
+    assert proposal["possibility_authority_version"] == "life-development-possibility.6"
     assert proposal["world_author_source_closure_model"] == "independent-source-reviewer"
     assert proposal["world_author_source_closure_review"]["decision"] == "supported"
     assert (
@@ -2953,7 +2958,7 @@ async def test_focused_novel_origin_critic_rejects_d10_history_then_accepts_firs
         }
     ]
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
-    assert proposal["possibility_authority_version"] == "life-development-possibility.5"
+    assert proposal["possibility_authority_version"] == "life-development-possibility.6"
     assert proposal["world_author_novel_origin_review"]["decision"] == "supported"
     assert (
         proposal["world_author_novel_origin_deliberation"]["role"]
@@ -3331,6 +3336,420 @@ async def test_terminal_source_review_failure_replays_without_provider_io() -> N
     assert len(ledger.project().model_result_audits) == 2
     assert ledger.project().plans == ()
     assert ledger.project().world_occurrences == ()
+
+
+@pytest.mark.asyncio
+async def test_changed_review_request_does_not_recover_old_terminal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compiler/evidence packet change opens a new exact review attempt."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    store = InMemoryImmutableLifeContentStore()
+    first_runtime, _ = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(
+            model="world-author-role",
+            outputs=(
+                json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),
+            ),
+        ),
+        character_model=_SequenceModel(model="character-role", outputs=()),
+        source_closure_reviewer=_SequenceModel(
+            model="independent-source-reviewer",
+            outputs=(TimeoutError("first packet unavailable"),),
+        ),
+        store=store,
+    )
+    first = await first_runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:source-review-old-packet",
+        correlation_id="correlation:life-development",
+    )
+    assert first.status == "technical_failure"
+
+    original_compiler = life_runtime_module.life_development_source_closure_messages
+
+    def changed_compiler(**kwargs):  # type: ignore[no-untyped-def]
+        messages = original_compiler(**kwargs)
+        return [
+            {
+                **messages[0],
+                "content": messages[0]["content"]
+                + " Compiler revision: review the same evidence packet exactly.",
+            },
+            *messages[1:],
+        ]
+
+    monkeypatch.setattr(
+        life_runtime_module,
+        "life_development_source_closure_messages",
+        changed_compiler,
+    )
+    restarted_world = _SequenceModel(
+        model="world-author-role",
+        outputs=(AssertionError("the accepted World Author result must recover"),),
+    )
+    restarted_reviewer = _SequenceModel(
+        model="independent-source-reviewer",
+        outputs=(_source_closure_review(decision="supported"),),
+    )
+    restarted, _ = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=restarted_world,
+        character_model=_SequenceModel(
+            model="character-role",
+            outputs=(
+                json.dumps(
+                    {
+                        "decision": "accept",
+                        "intention_summary": "我想去随便翻翻旧书。",
+                        "importance_bp": 3600,
+                        "participant_refs": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        ),
+        source_closure_reviewer=restarted_reviewer,
+        store=store,
+    )
+
+    recovered = await restarted.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:source-review-new-packet",
+        correlation_id="correlation:life-development",
+    )
+
+    assert recovered.status == "plan_committed"
+    assert restarted_world.calls == 0
+    assert restarted_reviewer.calls == 1
+
+
+@pytest.mark.parametrize("terminal", [False, True], ids=["success", "terminal"])
+@pytest.mark.asyncio
+async def test_general_review_correction_compiler_change_opens_a_new_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: bool,
+) -> None:
+    """Stable invalid bytes do not make changed corrective request bytes replayable."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    invalid = '{"decision":"supported"}'
+    first_reviewer = _WireReselectionSequenceModel(
+        model="independent-source-reviewer",
+        outputs=(invalid,),
+        reselection_outputs=(
+            TimeoutError("old corrective lane unavailable")
+            if terminal
+            else _source_closure_review(decision="supported"),
+        ),
+    )
+    first_runtime, store = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(
+            model="world-author-role",
+            outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
+        ),
+        character_model=_SequenceModel(
+            model="character-role",
+            outputs=(json.dumps({"decision": "no_op"}),),
+        ),
+        source_closure_reviewer=first_reviewer,
+    )
+    if terminal:
+        first = await first_runtime.advance_once(
+            wake_event_ref=wake.event_id,
+            trace_id="trace:general-old-correction-terminal",
+            correlation_id="correlation:life-development",
+        )
+        assert first.status == "technical_failure"
+    else:
+        async def stop_after_general_review(**_kwargs: object) -> None:
+            raise RuntimeError("stop after durable general review")
+
+        monkeypatch.setattr(
+            first_runtime,
+            "_review_novel_origin_candidate",
+            stop_after_general_review,
+        )
+        with pytest.raises(RuntimeError, match="durable general review"):
+            await first_runtime.advance_once(
+                wake_event_ref=wake.event_id,
+                trace_id="trace:general-old-correction-success",
+                correlation_id="correlation:life-development",
+            )
+
+    original_correction = (
+        life_runtime_module.life_development_source_closure_correction_message
+    )
+
+    def changed_correction(**kwargs):  # type: ignore[no-untyped-def]
+        message = original_correction(**kwargs)
+        return {
+            **message,
+            "content": message["content"] + "\ncorrection-compiler-revision:2",
+        }
+
+    monkeypatch.setattr(
+        life_runtime_module,
+        "life_development_source_closure_correction_message",
+        changed_correction,
+    )
+    restarted_reviewer = _WireReselectionSequenceModel(
+        model="independent-source-reviewer",
+        outputs=(invalid,),
+        reselection_outputs=(_source_closure_review(decision="supported"),),
+    )
+    restarted, _ = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(
+            model="world-author-role",
+            outputs=(AssertionError("World Author result must recover"),),
+        ),
+        character_model=_SequenceModel(
+            model="character-role",
+            outputs=(json.dumps({"decision": "no_op"}),),
+        ),
+        source_closure_reviewer=restarted_reviewer,
+        store=store,
+    )
+
+    result = await restarted.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:general-new-correction",
+        correlation_id="correlation:life-development",
+    )
+
+    assert result.status == "no_op"
+    assert restarted_reviewer.calls == restarted_reviewer.reselection.calls == 1
+
+
+@pytest.mark.parametrize("terminal", [False, True], ids=["success", "terminal"])
+@pytest.mark.asyncio
+async def test_focused_review_correction_compiler_change_opens_a_new_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: bool,
+) -> None:
+    """Focused review recovery also binds the complete corrective request lineage."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    invalid = '{"decision":"supported"}'
+    first_focused = _WireReselectionSequenceModel(
+        model="independent-novel-origin-critic",
+        outputs=(invalid,),
+        reselection_outputs=(
+            TimeoutError("old focused correction unavailable")
+            if terminal
+            else _novel_origin_review(decision="supported"),
+        ),
+    )
+    character_choice = json.dumps(
+        {
+            "decision": "accept",
+            "intention_summary": "我想去随便翻翻旧书。",
+            "importance_bp": 3600,
+            "participant_refs": [],
+        },
+        ensure_ascii=False,
+    )
+    first_runtime, store = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(
+            model="world-author-role",
+            outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
+        ),
+        character_model=_SequenceModel(
+            model="character-role",
+            outputs=(character_choice,),
+        ),
+        source_closure_reviewer=_SequenceModel(
+            model="independent-source-reviewer",
+            outputs=(_source_closure_review(decision="supported"),),
+        ),
+        novel_origin_critic=first_focused,
+    )
+    if terminal:
+        first = await first_runtime.advance_once(
+            wake_event_ref=wake.event_id,
+            trace_id="trace:focused-old-correction-terminal",
+            correlation_id="correlation:life-development",
+        )
+        assert first.status == "technical_failure"
+    else:
+        def stop_after_focused_review(**_kwargs: object) -> None:
+            raise RuntimeError("stop after durable focused review")
+
+        monkeypatch.setattr(
+            first_runtime,
+            "_commit_character_plan",
+            stop_after_focused_review,
+        )
+        with pytest.raises(RuntimeError, match="durable focused review"):
+            await first_runtime.advance_once(
+                wake_event_ref=wake.event_id,
+                trace_id="trace:focused-old-correction-success",
+                correlation_id="correlation:life-development",
+            )
+
+    original_correction = (
+        life_runtime_module.life_development_novel_origin_correction_message
+    )
+
+    def changed_correction(**kwargs):  # type: ignore[no-untyped-def]
+        message = original_correction(**kwargs)
+        return {
+            **message,
+            "content": message["content"] + "\ncorrection-compiler-revision:2",
+        }
+
+    monkeypatch.setattr(
+        life_runtime_module,
+        "life_development_novel_origin_correction_message",
+        changed_correction,
+    )
+    restarted_focused = _WireReselectionSequenceModel(
+        model="independent-novel-origin-critic",
+        outputs=(invalid,),
+        reselection_outputs=(_novel_origin_review(decision="supported"),),
+    )
+    restarted, _ = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(
+            model="world-author-role",
+            outputs=(AssertionError("World Author result must recover"),),
+        ),
+        character_model=_SequenceModel(
+            model="character-role",
+            outputs=(character_choice,),
+        ),
+        source_closure_reviewer=_SequenceModel(
+            model="independent-source-reviewer",
+            outputs=(AssertionError("general review result must recover"),),
+        ),
+        novel_origin_critic=restarted_focused,
+        store=store,
+    )
+
+    result = await restarted.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:focused-new-correction",
+        correlation_id="correlation:life-development",
+    )
+
+    assert result.status == "plan_committed"
+    assert restarted_focused.calls == restarted_focused.reselection.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_current_reader_and_batch_bind_every_review_request_hash() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    invalid = '{"decision":"supported"}'
+    runtime, store = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(
+            model="world-author-role",
+            outputs=(json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),),
+        ),
+        character_model=_SequenceModel(
+            model="character-role",
+            outputs=(
+                json.dumps(
+                    {
+                        "decision": "accept",
+                        "intention_summary": "我想去随便翻翻旧书。",
+                        "importance_bp": 3600,
+                        "participant_refs": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        ),
+        source_closure_reviewer=_WireReselectionSequenceModel(
+            model="independent-source-reviewer",
+            outputs=(invalid,),
+            reselection_outputs=(_source_closure_review(decision="supported"),),
+        ),
+        novel_origin_critic=_WireReselectionSequenceModel(
+            model="independent-novel-origin-critic",
+            outputs=(invalid,),
+            reselection_outputs=(_novel_origin_review(decision="supported"),),
+        ),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:complete-review-lineage-boundaries",
+        correlation_id="correlation:life-development",
+    )
+
+    assert result.status == "plan_committed"
+    assert result.plan_id is not None
+    proposal_event, _ = ledger.lookup_event_commit(result.proposal_event_ref or "")
+    proposal = proposal_event.payload()
+    source_deliberation = proposal["world_author_source_closure_deliberation"]
+    novel_deliberation = proposal["world_author_novel_origin_deliberation"]
+    assert len(source_deliberation["request_hashes"]) == 2
+    assert len(novel_deliberation["request_hashes"]) == 2
+    assert LifeDevelopmentProposalReader(
+        ledger=ledger,
+        content_store=store,
+    ).read_for_plan(plan_id=result.plan_id) is not None
+
+    reader_tamper = json.loads(json.dumps(proposal))
+    reader_source = reader_tamper["world_author_source_closure_deliberation"]
+    reader_source["request_hashes"][1] = "e" * 64
+    reader_tamper["world_author_source_closure_deliberation_hash"] = _hash_json(
+        reader_source
+    )
+    with pytest.raises(
+        ValueError,
+        match="source closure changed subject",
+    ):
+        LifeDevelopmentProposalReader._validate_active_source_closure(  # noqa: SLF001
+            proposal=reader_tamper,
+            possibility_version="life-development-possibility.6",
+            proposal_event=proposal_event,
+        )
+
+    batch_tamper = json.loads(json.dumps(proposal))
+    batch_novel = batch_tamper["world_author_novel_origin_deliberation"]
+    batch_novel["request_hashes"][1] = "f" * 64
+    batch_tamper["world_author_novel_origin_deliberation_hash"] = _hash_json(
+        batch_novel
+    )
+    tampered_proposal = WorldEvent.from_payload(
+        payload=batch_tamper,
+        **proposal_event.model_dump(
+            mode="python",
+            exclude={"payload_json", "payload_hash"},
+        ),
+    )
+    plan_event, _ = next(
+        ledger.lookup_event_commit(item.event_id)
+        for item in ledger.project().committed_world_event_refs
+        if item.event_type == "ActivityPlanned"
+    )
+    with pytest.raises(
+        ValueError,
+        match="novel-origin critic reviewed another subject",
+    ):
+        validate_commit_batch(
+            (tampered_proposal, plan_event),
+            expected_world_revision=0,
+            accepted_manifest_v3_authorized=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -4392,7 +4811,7 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
     location_capability = _location_capability()
     assert proposal_payload["causal_authority"] == "world_contingency"
     assert proposal_payload["model_role"] == "world_author"
-    assert proposal_payload["possibility_authority_version"] == "life-development-possibility.5"
+    assert proposal_payload["possibility_authority_version"] == "life-development-possibility.6"
     assert possibility_authority["authored_subject_ref"] == OWNER
     assert {item["experienced_by_ref"] for item in possibility_authority["outcomes"]} == {OWNER}
     assert possibility_authority["location_capability_ref"] == location_capability.capability_ref
@@ -4423,6 +4842,39 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
     ):
         validate_commit_batch(
             (tampered_proposal, occurrence_event),
+            expected_world_revision=0,
+            accepted_manifest_v3_authorized=True,
+        )
+    legacy_subject_payload = json.loads(json.dumps(proposal_payload))
+    legacy_deliberation = legacy_subject_payload[
+        "world_author_source_closure_deliberation"
+    ]
+    legacy_deliberation["decision_subject_hash"] = _hash_json(
+        {
+            "capability_manifest_hash": legacy_subject_payload[
+                "capability_manifest_hash"
+            ],
+            "world_author_raw_output_hash": legacy_subject_payload[
+                "world_author_raw_output_hash"
+            ],
+        }
+    )
+    legacy_subject_payload[
+        "world_author_source_closure_deliberation_hash"
+    ] = _hash_json(legacy_deliberation)
+    legacy_subject_proposal = WorldEvent.from_payload(
+        payload=legacy_subject_payload,
+        **proposal_event.model_dump(
+            mode="python",
+            exclude={"payload_json", "payload_hash"},
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="source-closure reviewed another subject",
+    ):
+        validate_commit_batch(
+            (legacy_subject_proposal, occurrence_event),
             expected_world_revision=0,
             accepted_manifest_v3_authorized=True,
         )
@@ -6718,6 +7170,634 @@ def test_source_closure_contract_delegates_outcome_semantics_to_focused_critic()
         ),
         "allow": "branch_internal_candidate_action_dialogue_feeling_or_response",
     }
+
+
+def test_general_source_review_packet_excludes_unrelated_capsule_bulk() -> None:
+    """The hard-boundary reviewer receives evidence, not the whole chat capsule."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    selected_manifest = _manifest(
+        wake,
+        pinned_cursor=_projection_cursor(ledger),
+        location_capability=capability,
+    )
+    same_place_other_window = LifeDevelopmentLocationCapability(
+        location_ref=capability.location_ref,
+        privacy_class="shareable",
+        availability_kind="reviewed_schedule",
+        timezone_name="Asia/Shanghai",
+        local_windows=("18:00-21:00",),
+        weekdays=(0, 1, 2, 3, 4, 5, 6),
+        authority_refs=("policy:other-window",),
+    )
+    manifest = LifeDevelopmentCapabilityManifest(
+        **selected_manifest.model_dump(
+            mode="python",
+            exclude={"location_capabilities"},
+        ),
+        location_capabilities=tuple(
+            sorted(
+                (capability, same_place_other_window),
+                key=lambda item: (
+                    item.location_ref,
+                    item.availability_kind,
+                    item.model_dump_json(),
+                ),
+            )
+        ),
+    )
+    draft = parse_world_author_draft(
+        raw=_location_bound_world_draft(
+            wake=wake,
+            capability=capability,
+            timing={"mode": "now", "duration_minutes": 30},
+            privacy_class="shareable",
+        ),
+        manifest=manifest,
+        logical_time=NOW,
+    )
+    assert isinstance(draft, LifeDevelopmentPossibilityDraft)
+    context = {
+        "snapshot_hash": "a" * 64,
+        "world_revision": 7,
+        "deliberation_revision": 11,
+        "slices": {
+            "action_budget": {
+                "availability": "available",
+                "items": [{"irrelevant_bulk": "x" * 40_000}],
+            },
+            "affect_episodes": {
+                "availability": "available",
+                "items": [{"irrelevant_bulk": "y" * 20_000}],
+            },
+        },
+    }
+
+    first = life_development_source_closure_messages(
+        context=context,
+        manifest=manifest,
+        draft=draft,
+        cited_events=(),
+    )
+    changed_irrelevant = json.loads(json.dumps(context))
+    changed_irrelevant["slices"]["action_budget"]["items"][0][
+        "irrelevant_bulk"
+    ] = "z" * 80_000
+    second = life_development_source_closure_messages(
+        context=changed_irrelevant,
+        manifest=manifest,
+        draft=draft,
+        cited_events=(),
+    )
+
+    assert first == second
+    request = json.loads(first[-1]["content"])
+    assert "pinned_world_context" not in request["pinned_source_evidence"]
+    manifest_binding = request["pinned_source_evidence"]["manifest_binding"]
+    assert manifest_binding["contract"] == (
+        "life-development-review-manifest-binding.2"
+    )
+    assert manifest_binding["manifest_hash"] == manifest.manifest_hash
+    assert manifest_binding["owner_actor_ref"] == OWNER
+    assert manifest_binding["pinned_cursor"] == manifest.pinned_cursor.model_dump(
+        mode="json"
+    )
+    assert manifest_binding["selected_location_capabilities"] == [
+        capability.model_dump(mode="json")
+    ]
+    assert manifest_binding["selected_location_descriptor"]["scope"] == (
+        "ref_level_only"
+    )
+    assert manifest_binding["known_entity_index_scope"] == (
+        "non_exhaustive_exact_ref_join_inline; opaque_without_source_bound_match; "
+        "absence_is_not_evidence_of_novelty"
+    )
+    assert life_development_review_packet_identity(first)[0] == (
+        "life-development-general-source-review-evidence-packet.3"
+    )
+    assert "A newly Opaque" not in first[0]["content"]
+    assert (
+        "Opaque entity or location refs prove only authorized identity coordinates"
+        in first[0]["content"]
+    )
+    assert (
+        "an existing_world claim or, by itself, justify an unsupported verdict"
+        in first[0]["content"]
+    )
+    # The reconstructed production packet contained 60 KiB of deliberately
+    # irrelevant Context above. The review request stays bounded by the exact
+    # draft, cited immutable sources, selected capability and parser contract.
+    assert len(first[-1]["content"].encode("utf-8")) < 20_000
+
+
+def test_general_review_omits_outcome_text_without_typed_location() -> None:
+    """General review has no authority over no-location outcome prose."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    manifest = _manifest(wake, pinned_cursor=_projection_cursor(ledger))
+    raw = _novel_book_exchange_draft(wake=wake)
+    marker = "GENERAL_REVIEW_MUST_NOT_RECEIVE_THIS_OUTCOME_" + ("x" * 11_000)
+    for outcome in raw["outcomes"]:  # type: ignore[index]
+        outcome["text"] = marker  # type: ignore[index]
+    draft = parse_world_author_draft(
+        raw=json.dumps(raw, ensure_ascii=False),
+        manifest=manifest,
+        logical_time=NOW,
+    )
+    assert isinstance(draft, LifeDevelopmentPossibilityDraft)
+
+    messages = life_development_source_closure_messages(
+        context={},
+        manifest=manifest,
+        draft=draft,
+        cited_events=(),
+    )
+
+    request = json.loads(messages[-1]["content"])
+    assert all("text" not in outcome for outcome in request["reviewed_surface"]["outcomes"])
+    assert marker not in messages[-1]["content"]
+    assert len(messages[-1]["content"].encode("utf-8")) < 20_000
+
+
+def test_location_descriptor_requires_exact_source_bound_capsule_item() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    manifest = _manifest(
+        wake,
+        pinned_cursor=_projection_cursor(ledger),
+        location_capability=capability,
+    )
+    draft = parse_world_author_draft(
+        raw=_location_bound_world_draft(
+            wake=wake,
+            capability=capability,
+            timing={"mode": "now", "duration_minutes": 30},
+            privacy_class="shareable",
+        ),
+        manifest=manifest,
+        logical_time=NOW,
+    )
+    assert isinstance(draft, LifeDevelopmentPossibilityDraft)
+    location_value = {
+        "location_slice": {
+            "location_ref": capability.location_ref,
+            "canonical_name": "校园院子",
+            "city": "深圳",
+            "kind": "courtyard",
+        }
+    }
+    baseline_context = {
+        "slices": {
+            "current_situation": {
+                "availability": "available",
+                "items": [
+                    {
+                        "item_ref": "situation:baseline",
+                        "value_hash": "1" * 64,
+                        "value": location_value,
+                    }
+                ],
+            }
+        }
+    }
+
+    baseline_messages = life_development_source_closure_messages(
+        context=baseline_context,
+        manifest=manifest,
+        draft=draft,
+        cited_events=(),
+    )
+    baseline_descriptor = json.loads(baseline_messages[-1]["content"])[
+        "pinned_source_evidence"
+    ]["manifest_binding"]["selected_location_descriptor"]
+    assert baseline_descriptor["scope"] == "ref_level_only"
+    assert baseline_descriptor["descriptor"] == {
+        "location_ref": capability.location_ref
+    }
+    assert baseline_descriptor["source_bindings"] == []
+
+    binding = {
+        "source_kind": "projection_snapshot",
+        "authority_type": "CurrentSituationProjection",
+        "ref": "snapshot:current-situation",
+        "source_world_revision": 1,
+        "immutable_hash": "a" * 64,
+    }
+    exact_context = json.loads(json.dumps(baseline_context))
+    exact_item = exact_context["slices"]["current_situation"]["items"][0]
+    exact_item["source_bindings"] = [binding]
+    exact_item["source_hash"] = _hash_json([binding])
+    exact_item["value_hash"] = _hash_json(location_value)
+    exact_messages = life_development_source_closure_messages(
+        context=exact_context,
+        manifest=manifest,
+        draft=draft,
+        cited_events=(),
+    )
+    exact_descriptor = json.loads(exact_messages[-1]["content"])[
+        "pinned_source_evidence"
+    ]["manifest_binding"]["selected_location_descriptor"]
+    assert exact_descriptor["scope"] == "canonical_descriptor"
+    assert exact_descriptor["descriptor"]["canonical_name"] == "校园院子"
+    assert exact_descriptor["descriptor"]["city"] == "深圳"
+
+    invalid_context = json.loads(json.dumps(exact_context))
+    invalid_context["slices"]["current_situation"]["items"][0][
+        "value_hash"
+    ] = "0" * 64
+    with pytest.raises(ValueError, match="value_hash does not bind its value"):
+        life_development_source_closure_messages(
+            context=invalid_context,
+            manifest=manifest,
+            draft=draft,
+            cited_events=(),
+        )
+
+
+def test_manifest_entity_descriptors_use_only_exact_source_bound_ref_joins() -> None:
+    """Entity evidence is structural source evidence, never guessed from prose."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    base_manifest = _manifest(wake, pinned_cursor=_projection_cursor(ledger))
+    exact_ref = "actor:npc:exact"
+    binding_ref = "actor:npc:binding-only"
+    opaque_ref = "actor:npc:opaque"
+    manifest = LifeDevelopmentCapabilityManifest(
+        **base_manifest.model_dump(
+            mode="python",
+            exclude={"entity_refs"},
+            exclude_computed_fields=True,
+        ),
+        entity_refs=(binding_ref, exact_ref, opaque_ref),
+    )
+    draft = parse_world_author_draft(
+        raw=json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),
+        manifest=manifest,
+        logical_time=NOW,
+    )
+    assert isinstance(draft, LifeDevelopmentPossibilityDraft)
+    source_binding = {
+        "ref": "event:relationship:exact",
+        "source_kind": "committed_event",
+        "authority_type": "RelationshipChanged",
+        "immutable_hash": "b" * 64,
+        "source_world_revision": 6,
+    }
+    exact_value = {
+        "participant_ref": exact_ref,
+        "canonical_name": "林遥",
+        "stage": "friend",
+    }
+    substring_value = {
+        "note": f"prose mentions {opaque_ref} but is not a ref value"
+    }
+    binding_only_source = {
+        **source_binding,
+        "ref": binding_ref,
+    }
+    binding_only_value = {"status": "known"}
+    context = {
+        "slices": {
+            "relationship_slice": {
+                "availability": "available",
+                "items": [
+                    {
+                        "item_ref": "relationship:exact",
+                        "source_hash": _hash_json([source_binding]),
+                        "value_hash": _hash_json(exact_value),
+                        "source_bindings": [source_binding],
+                        "value": exact_value,
+                    },
+                    {
+                        "item_ref": "relationship:substring-only",
+                        "source_hash": _hash_json([source_binding]),
+                        "value_hash": _hash_json(substring_value),
+                        "source_bindings": [source_binding],
+                        "value": substring_value,
+                    },
+                    {
+                        "item_ref": "relationship:unbound",
+                        "value_hash": "e" * 64,
+                        "source_bindings": [],
+                        "value": {"participant_ref": opaque_ref, "canonical_name": "阿岚"},
+                    },
+                    {
+                        "item_ref": "relationship:binding-only",
+                        "source_hash": _hash_json([binding_only_source]),
+                        "value_hash": _hash_json(binding_only_value),
+                        "source_bindings": [binding_only_source],
+                        "value": binding_only_value,
+                    },
+                ],
+            }
+        }
+    }
+
+    messages = life_development_source_closure_messages(
+        context=context,
+        manifest=manifest,
+        draft=draft,
+        cited_events=(),
+    )
+
+    request = json.loads(messages[-1]["content"])
+    index = {
+        item["entity_ref"]: item
+        for item in request["pinned_source_evidence"]["manifest_binding"][
+            "known_entity_index"
+        ]
+    }
+    assert index[exact_ref]["descriptor_status"] == "source_bound_exact_ref_join"
+    assert index[exact_ref]["descriptor_evidence"][0]["item"]["value"] == {
+        "participant_ref": exact_ref,
+        "canonical_name": "林遥",
+        "stage": "friend",
+    }
+    assert index[binding_ref]["descriptor_status"] == "source_bound_exact_ref_join"
+    assert index[binding_ref]["descriptor_evidence"][0]["item"]["value"] == {
+        "status": "known"
+    }
+    assert index[opaque_ref] == {
+        "entity_ref": opaque_ref,
+        "descriptor_status": "opaque_ref_only",
+        "descriptor_evidence": [],
+        "absence_is_not_evidence": True,
+    }
+
+    focused_messages = life_development_novel_origin_messages(
+        context=context,
+        manifest=manifest,
+        draft=draft,
+    )
+    focused_request = json.loads(focused_messages[-1]["content"])
+    focused_manifest = focused_request["pinned_authority"]["manifest_binding"]
+    assert "selected_location_capabilities" not in focused_manifest
+    assert "selected_location_descriptor" not in focused_manifest
+    assert focused_manifest["known_entity_index_scope"] == (
+        "non_exhaustive_exact_ref_pointer_into_existing_evidence; "
+        "opaque_without_source_bound_match; absence_is_not_evidence_of_novelty"
+    )
+    focused_index = {
+        item["entity_ref"]: item
+        for item in focused_manifest["known_entity_index"]
+    }
+    exact_pointer = focused_index[exact_ref]["descriptor_evidence"][0]
+    assert exact_pointer == {
+        "slice": "relationship_slice",
+        "item_ref": "relationship:exact",
+        "value_hash": _hash_json(exact_value),
+        "source_hash": _hash_json([source_binding]),
+    }
+    assert "item" not in exact_pointer
+    assert focused_messages[-1]["content"].count("林遥") == 1
+
+
+def test_novel_origin_packet_keeps_source_bound_truth_but_ignores_budget_noise() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    manifest = _manifest(
+        wake,
+        pinned_cursor=_projection_cursor(ledger),
+        location_capability=capability,
+    )
+    draft = parse_world_author_draft(
+        raw=_location_bound_world_draft(
+            wake=wake,
+            capability=capability,
+            timing={"mode": "now", "duration_minutes": 30},
+            privacy_class="shareable",
+        ),
+        manifest=manifest,
+        logical_time=NOW,
+    )
+    assert isinstance(draft, LifeDevelopmentPossibilityDraft)
+    source_binding = {
+        "ref": "event:fact:existing",
+        "source_kind": "committed_event",
+        "authority_type": "FactAccepted",
+        "immutable_hash": "b" * 64,
+        "source_world_revision": 6,
+    }
+    fact_value = {
+        "fact_id": "fact:existing",
+        "subject_ref": OWNER,
+        "predicate_code": "character.preference",
+        "source_excerpt": "她更喜欢安静的地方。",
+        "occurred_at": NOW.isoformat(),
+    }
+    context = {
+        "snapshot_hash": "a" * 64,
+        "world_revision": 7,
+        "deliberation_revision": 11,
+        "ledger_sequence": 13,
+        "logical_time": NOW.isoformat(),
+        "slices": {
+            "relevant_facts": {
+                "availability": "available",
+                "items": [
+                    {
+                        "item_ref": "fact:existing",
+                        "source_hash": _hash_json([source_binding]),
+                        "value_hash": _hash_json(fact_value),
+                        "source_bindings": [source_binding],
+                        "value": fact_value,
+                    }
+                ],
+                "resolver_proof": {"irrelevant": "proof-noise"},
+            },
+            "action_budget": {
+                "availability": "available",
+                "items": [{"irrelevant_bulk": "x" * 40_000}],
+            },
+        },
+    }
+
+    first = life_development_novel_origin_messages(
+        context=context,
+        manifest=manifest,
+        draft=draft,
+    )
+    changed_noise = json.loads(json.dumps(context))
+    changed_noise["slices"]["action_budget"]["items"][0][
+        "irrelevant_bulk"
+    ] = "z" * 80_000
+    same_evidence = life_development_novel_origin_messages(
+        context=changed_noise,
+        manifest=manifest,
+        draft=draft,
+    )
+    changed_fact = json.loads(json.dumps(context))
+    changed_fact["slices"]["relevant_facts"]["items"][0]["value"][
+        "source_excerpt"
+    ] = "她明确不喜欢安静的地方。"
+    changed_fact["slices"]["relevant_facts"]["items"][0]["value_hash"] = (
+        _hash_json(
+            changed_fact["slices"]["relevant_facts"]["items"][0]["value"]
+        )
+    )
+    different_evidence = life_development_novel_origin_messages(
+        context=changed_fact,
+        manifest=manifest,
+        draft=draft,
+    )
+
+    assert first == same_evidence
+    assert first != different_evidence
+    request = json.loads(first[-1]["content"])
+    authority = request["pinned_authority"]
+    assert "pinned_world_context" not in authority
+    assert authority["existing_world_evidence"]["slices"] == {
+        "relevant_facts": [
+            {
+                "item_ref": "fact:existing",
+                "value_hash": _hash_json(
+                    context["slices"]["relevant_facts"]["items"][0]["value"]
+                ),
+                "source_hash": _hash_json([source_binding]),
+                "source_bindings": [source_binding],
+                "value": context["slices"]["relevant_facts"]["items"][0][
+                    "value"
+                ],
+                "authority_scope": "exact_source_bound_existing_truth",
+            }
+        ]
+    }
+    assert life_development_review_packet_identity(first)[0] == (
+        "life-development-novel-origin-review-evidence-packet.4"
+    )
+    assert "Inspect each exact outcome Opaque" not in first[0]["content"]
+    assert (
+        "Opaque entity/location refs prove identity coordinates only"
+        in first[0]["content"]
+    )
+    assert (
+        "an existing_world claim or, by itself, justify an unsupported verdict"
+        in first[0]["content"]
+    )
+    assert len(first[-1]["content"].encode("utf-8")) < 25_000
+
+    # Context Capsule, not this transport adapter, owns the item budget.  The
+    # last source-bound fact must not disappear behind a second 8-item cap.
+    many_facts = json.loads(json.dumps(context))
+    many_facts["slices"]["relevant_facts"]["items"] = [
+        {
+            **context["slices"]["relevant_facts"]["items"][0],
+            "item_ref": f"fact:{index}",
+            "value": {
+                **context["slices"]["relevant_facts"]["items"][0]["value"],
+                "fact_id": f"fact:{index}",
+                "source_excerpt": f"source-bound fact {index}",
+            },
+            "value_hash": _hash_json(
+                {
+                    **context["slices"]["relevant_facts"]["items"][0]["value"],
+                    "fact_id": f"fact:{index}",
+                    "source_excerpt": f"source-bound fact {index}",
+                }
+            ),
+        }
+        for index in range(9)
+    ]
+    all_items = life_development_novel_origin_messages(
+        context=many_facts,
+        manifest=manifest,
+        draft=draft,
+    )
+    changed_last = json.loads(json.dumps(many_facts))
+    changed_last["slices"]["relevant_facts"]["items"][8]["value"][
+        "source_excerpt"
+    ] = "changed final source-bound fact"
+    changed_last["slices"]["relevant_facts"]["items"][8]["value_hash"] = (
+        _hash_json(
+            changed_last["slices"]["relevant_facts"]["items"][8]["value"]
+        )
+    )
+    assert all_items != life_development_novel_origin_messages(
+        context=changed_last,
+        manifest=manifest,
+        draft=draft,
+    )
+
+    mismatched_source_item = json.loads(json.dumps(context))
+    mismatched_source_item["slices"]["relevant_facts"]["items"][0][
+        "value_hash"
+    ] = "0" * 64
+    with pytest.raises(ValueError, match="value_hash does not bind its value"):
+        life_development_novel_origin_messages(
+            context=mismatched_source_item,
+            manifest=manifest,
+            draft=draft,
+        )
+    missing_value_hash = json.loads(json.dumps(context))
+    del missing_value_hash["slices"]["relevant_facts"]["items"][0][
+        "value_hash"
+    ]
+    with pytest.raises(ValueError, match="value_hash does not bind its value"):
+        life_development_novel_origin_messages(
+            context=missing_value_hash,
+            manifest=manifest,
+            draft=draft,
+        )
+    mismatched_source_hash = json.loads(json.dumps(context))
+    mismatched_source_hash["slices"]["relevant_facts"]["items"][0][
+        "source_hash"
+    ] = "0" * 64
+    with pytest.raises(ValueError, match="source_hash does not bind its sources"):
+        life_development_novel_origin_messages(
+            context=mismatched_source_hash,
+            manifest=manifest,
+            draft=draft,
+        )
+    invalid_binding = json.loads(json.dumps(context))
+    invalid_binding["slices"]["relevant_facts"]["items"][0]["source_bindings"][
+        0
+    ]["source_kind"] = "FactAccepted"
+    with pytest.raises(ValueError, match="invalid source bindings"):
+        life_development_novel_origin_messages(
+            context=invalid_binding,
+            manifest=manifest,
+            draft=draft,
+        )
+
+    baseline_context = {
+        "slices": {
+            "recent_dialogue": {
+                "availability": "available",
+                "items": [
+                    {
+                        "item_ref": "dialogue:compact",
+                        "source_hash": "2" * 64,
+                        "value_hash": "1" * 64,
+                        "value": {"text": "只展示压缩后的对话内容"},
+                    }
+                ],
+            }
+        }
+    }
+    baseline_messages = life_development_novel_origin_messages(
+        context=baseline_context,
+        manifest=manifest,
+        draft=draft,
+    )
+    baseline_item = json.loads(baseline_messages[-1]["content"])[
+        "pinned_authority"
+    ]["existing_world_evidence"]["slices"]["recent_dialogue"][0]
+    assert baseline_item["capsule_item_value_hash"] == "1" * 64
+    assert baseline_item["capsule_item_source_hash"] == "2" * 64
+    assert baseline_item["review_value_hash"] == _hash_json(
+        {"text": "只展示压缩后的对话内容"}
+    )
+    assert "value_hash" not in baseline_item
+    assert "source_hash" not in baseline_item
+    assert baseline_item["authority_scope"] == (
+        "capsule_bound_reviewer_baseline_only"
+    )
 
 
 @pytest.mark.asyncio

@@ -1548,10 +1548,25 @@ def test_provider_subprocess_capture_mode_retains_hash_only_causal_evidence(
     assert report["daemon"]["test_only_semantic_authority_injection"] is True
     semantic_authorities = report["daemon"]["semantic_authorities"]
     assert semantic_authorities["role"] != semantic_authorities["source_reviewer"]
+    assert semantic_authorities["life_source_reviewer"] not in {
+        semantic_authorities["role"],
+        semantic_authorities["source_reviewer"],
+    }
     assert semantic_authorities["review_contracts"] == [
         "report-relative-entailment-adjudication.3",
         "source-closure-review.7",
     ]
+    assert semantic_authorities["life_review_contracts"] == [
+        "life-development-source-closure-review.1",
+        "life-development-novel-origin-review.2",
+    ]
+    for phase in ("first_start", "after_restart"):
+        life_health = report["liveness"][phase]["scheduler"][
+            "life_source_authority"
+        ]
+        assert life_health["status"] == "ready"
+        assert life_health["runtime_isolated"] is True
+        assert life_health["runtime_isolation"] == "verified_fork"
     assert report["safety"]["network_topology"] == {
         "daemon_http_scope": "loopback",
         "onebot_provider_scope": "loopback_capture",

@@ -116,14 +116,14 @@ def test_trace_keeps_only_sanitized_prior_correction_coordinate() -> None:
             v=("undeclared_external_assertion",),
             p=(),
             prior_correction_kind="private_turn_state",
-            sanitized_failure_code="private_turn_state.field_order",
+            sanitized_failure_code="private_turn_state.missing",
             sanitized_failure_field_path="private_turn_state",
         )
 
     payload = collector.snapshot()[0].as_dict()
     encoded = json.dumps(payload, ensure_ascii=False)
     assert payload["prior_correction_kind"] == "private_turn_state"
-    assert payload["sanitized_failure_code"] == "private_turn_state.field_order"
+    assert payload["sanitized_failure_code"] == "private_turn_state.missing"
     assert payload["sanitized_failure_field_path"] == "private_turn_state"
     assert private not in encoded
     assert "inner_state_summary" not in encoded
@@ -413,7 +413,7 @@ def test_candidate_materialization_failure_trace_is_text_free_and_field_only() -
         emit_source_closure_candidate_materialization_failure_trace(
             raw_candidate=candidate,
             category="private_turn_state",
-            code="private_turn_state.field_order",
+            code="private_turn_state.missing",
             field_paths=(
                 "private_turn_state",
                 "private_turn_state.attended_source_refs",
@@ -427,7 +427,7 @@ def test_candidate_materialization_failure_trace_is_text_free_and_field_only() -
         "candidate_sha256": sha256(candidate.encode("utf-8")).hexdigest(),
         "stage": "post_source_acceptance",
         "category": "private_turn_state",
-        "code": "private_turn_state.field_order",
+        "code": "private_turn_state.missing",
         "field_paths": [
             "private_turn_state",
             "private_turn_state.attended_source_refs",

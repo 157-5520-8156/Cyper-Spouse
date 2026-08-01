@@ -233,6 +233,34 @@ class SourceReviewAuthority:
             contract,
         )
 
+    def fork_isolated_runtime(self) -> "SourceReviewAuthority":
+        """Create a role-local authority over the same immutable route config.
+
+        The fork has fresh lane circuits, suppression watermarks, counters and
+        task ownership.  Provider connection pools may be reused by each leaf;
+        they are transport resources, not failure or verdict authority.
+        """
+
+        isolated_lanes: list[object] = []
+        for lane in (self.primary, self.secondary):
+            fork = getattr(lane, "fork_isolated_runtime", None)
+            if not callable(fork):
+                raise TypeError(
+                    "source-review lane cannot prove isolated runtime construction"
+                )
+            isolated_lanes.append(fork())
+        return SourceReviewAuthority(
+            primary=isolated_lanes[0],
+            secondary=isolated_lanes[1],
+            hedge_after_seconds=self.hedge_after_seconds,
+            deadline_seconds=self.configured_deadline_seconds,
+            caller_timeout_seconds=self.caller_timeout_seconds,
+            monotonic_clock=self._monotonic_clock,
+            technical_failure_cooldown_seconds=(
+                self._technical_failure_cooldown_seconds
+            ),
+        )
+
     @staticmethod
     def _lane_supports_strict_output_contract(
         lane: object,

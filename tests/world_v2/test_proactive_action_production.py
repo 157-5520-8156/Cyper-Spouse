@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import companion_daemon.world_v2.proactive_action as proactive_action_module
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.biographical_claim_authority import (
     biographical_coordinate_authorities,
@@ -40,6 +41,9 @@ from companion_daemon.world_v2.proactive_action import (
     ProactiveDeliberationTurn,
     ProactiveDraftAdapter,
     ProactiveOpportunity,
+    ProactiveTechnicalRetryState,
+    next_proactive_retry_due,
+    proactive_technical_retry_states,
 )
 from companion_daemon.world_v2.proposal_envelope import (
     DecisionProposal,
@@ -425,7 +429,7 @@ async def test_proactive_expression_uses_shared_multi_beat_draft_and_plan_bindin
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery", (False, True))
-async def test_required_private_turn_state_must_precede_expression_fields(
+async def test_required_private_turn_state_is_independent_of_json_field_order(
     recovery: bool,
 ) -> None:
     model = _ProactiveReplySequence(
@@ -439,8 +443,8 @@ async def test_required_private_turn_state_must_precede_expression_fields(
                 "impulse_summary": "一个当下的念头。",
                 "confidence": 7000,
                 "world_claims": [],
-                # Deliberately last on the provider wire. Pydantic model order
-                # must not launder this into a causal pre-expression state.
+                # Deliberately last on the provider wire. JSON object member
+                # order is transport serialization, not causal evidence.
                 "private_turn_state": {
                     "contract": "private-turn-state.1",
                     "inner_state_summary": "想到对方，想说句话。",
@@ -458,11 +462,55 @@ async def test_required_private_turn_state_must_precede_expression_fields(
         expression_capabilities=capabilities,
     )
 
-    with pytest.raises(ValueError, match="private turn state must be present as the first"):
-        if recovery:
-            await adapter.recover(_proactive_model_request(), "primary_timeout")
-        else:
-            await adapter.propose(_proactive_model_request())
+    output = (
+        await adapter.recover(_proactive_model_request(), "primary_timeout")
+        if recovery
+        else await adapter.propose(_proactive_model_request())
+    )
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert model.calls == 1
+    assert proposal.private_turn_state is not None
+    assert proposal.private_turn_state.inner_state_summary == "想到对方，想说句话。"
+
+
+@pytest.mark.asyncio
+async def test_missing_required_proactive_private_turn_state_reselects_complete_draft() -> None:
+    model = _ProactiveReplySequence(
+        [
+            {
+                "timing_choice": "now",
+                "cadence": "conversational",
+                "beats": [{"modality": "text", "text": "这份草稿缺少私人状态。"}],
+                "stance": "invalid_without_private_state",
+                "brief_rationale": "Fixture.",
+                "impulse_summary": "一个当下的念头。",
+                "confidence": 7000,
+                "world_claims": [],
+            },
+            _private_proactive_draft(
+                "now",
+                attended_source_ref="event:ambient:1",
+            ),
+        ]
+    )
+    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        expression_capabilities=capabilities,
+    ).propose(_proactive_model_request())
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert model.calls == 2
+    assert "private_turn_state.missing" in model.messages[1][-1]["content"]
+    assert "这份草稿缺少私人状态" not in json.dumps(
+        model.messages[1], ensure_ascii=False
+    )
+    assert proposal.private_turn_state is not None
 
 
 @pytest.mark.asyncio
@@ -1426,6 +1474,8 @@ async def test_proactive_character_chosen_recall_reuses_prefetch_then_forms_fina
     assert output.recall_trace is not None
     assert verify_trusted_recall_trace(output.recall_trace).hits
     assert model.calls == 2
+    assert "either JSON member order" in model.messages[0][0]["content"]
+    assert "first followed by recall_request" not in model.messages[0][0]["content"]
     assert "上次雨夜回宿舍" in model.messages[-1][-1]["content"]
     request_hash = sha256(
         json.dumps(
@@ -1547,9 +1597,13 @@ def _seed_due_thread(
     ledger: WorldLedger,
     *,
     consideration_horizon: timedelta = timedelta(hours=8),
+    thread_key: str = "1",
+    advance_clock: bool = True,
+    event_at: datetime = NOW,
 ) -> None:
+    suffix = "" if thread_key == "1" else f":{thread_key}"
     source = EvidenceRef(
-        ref_id="operator:unfinished-thought",
+        ref_id="operator:unfinished-thought" + suffix,
         evidence_type="operator_observation",
         claim_purpose="conversation_continuity",
         immutable_hash="a" * 64,
@@ -1557,38 +1611,39 @@ def _seed_due_thread(
     _commit(
         ledger,
         _event(
-            "event:operator:unfinished",
+            "event:operator:unfinished" + suffix,
             "OperatorObservationRecorded",
             {
                 "observation_id": source.ref_id,
                 "observation_hash": source.immutable_hash,
             },
+            at=event_at,
         ),
     )
     projection = ledger.project()
     origin = ThreadOrigin(
-        change_id="change:thread:pulse:1",
-        transition_id="transition:thread:pulse:1",
+        change_id=f"change:thread:pulse:{thread_key}",
+        transition_id=f"transition:thread:pulse:{thread_key}",
         policy_refs=("policy:thread-v1",),
-        accepted_event_ref="event:thread:pulse:opened",
+        accepted_event_ref="event:thread:pulse:opened" + suffix,
     )
     values = ThreadValues(
         kind="topic_open",
-        subject_ref="subject:unfinished-thought",
+        subject_ref="subject:unfinished-thought" + suffix,
         conversation_ref="conversation:proactive",
         anchor_evidence_refs=(source,),
         source_evidence_refs=(source,),
         importance_bp=7_000,
         due_window=DueWindow(
-            opens_at=NOW + timedelta(minutes=1),
+            opens_at=max(NOW + timedelta(minutes=1), event_at),
             closes_at=NOW + consideration_horizon,
         ),
         expires_at=NOW + consideration_horizon,
-        resolution_contract_ref="resolution:unfinished-thought",
+        resolution_contract_ref="resolution:unfinished-thought" + suffix,
         privacy_class="private",
     )
     thread = ThreadProjection(
-        thread_id="thread:pulse:1",
+        thread_id=f"thread:pulse:{thread_key}",
         entity_revision=1,
         semantic_fingerprint=thread_semantic_fingerprint(
             kind=values.kind,
@@ -1600,8 +1655,8 @@ def _seed_due_thread(
         ),
         values=values,
         origin=origin,
-        opened_at=NOW,
-        updated_at=NOW,
+        opened_at=event_at,
+        updated_at=event_at,
     )
     raw: dict[str, object] = {
         "change_id": origin.change_id,
@@ -1609,8 +1664,8 @@ def _seed_due_thread(
         "expected_entity_revision": 0,
         "evidence_refs": (source,),
         "policy_refs": origin.policy_refs,
-        "acceptance_id": "acceptance:thread:pulse:1",
-        "proposal_id": "proposal:thread:pulse:1",
+        "acceptance_id": f"acceptance:thread:pulse:{thread_key}",
+        "proposal_id": f"proposal:thread:pulse:{thread_key}",
         "evaluated_world_revision": projection.world_revision,
         "accepted_change_hash": "0" * 64,
         "operation": "open",
@@ -1645,13 +1700,16 @@ def _seed_due_thread(
     _commit(
         ledger,
         _event(
-            "event:proposal:thread:pulse:1", "ProposalRecorded", proposed.model_dump(mode="json")
+            "event:proposal:thread:pulse:" + thread_key,
+            "ProposalRecorded",
+            proposed.model_dump(mode="json"),
+            at=event_at,
         ),
     )
     _commit(
         ledger,
         _event(
-            "event:acceptance:thread:pulse:1",
+            "event:acceptance:thread:pulse:" + thread_key,
             "AcceptanceRecorded",
             {
                 "acceptance_id": changed.acceptance_id,
@@ -1661,22 +1719,29 @@ def _seed_due_thread(
                 "accepted_change_id": changed.change_id,
                 "accepted_change_hash": changed.accepted_change_hash,
             },
+            at=event_at,
         ),
-        _event(origin.accepted_event_ref, "ThreadOpened", changed.model_dump(mode="json")),
-    )
-    due = NOW + timedelta(minutes=2)
-    _commit(
-        ledger,
         _event(
-            "event:clock:thread-due",
-            "ClockAdvanced",
-            {
-                "logical_time_from": NOW.isoformat(),
-                "logical_time_to": due.isoformat(),
-            },
-            at=due,
+            origin.accepted_event_ref,
+            "ThreadOpened",
+            changed.model_dump(mode="json"),
+            at=event_at,
         ),
     )
+    if advance_clock:
+        due = NOW + timedelta(minutes=2)
+        _commit(
+            ledger,
+            _event(
+                "event:clock:thread-due",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": NOW.isoformat(),
+                    "logical_time_to": due.isoformat(),
+                },
+                at=due,
+            ),
+        )
 
 
 class _Router:
@@ -3037,6 +3102,50 @@ async def test_technical_failures_retry_at_ten_thirty_then_capped_one_twenty_min
     assert malformed.calls == 10
 
 
+def test_proactive_retry_timer_tracks_newest_unresolved_consideration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = ProactiveTechnicalRetryState(
+        consideration_id="consideration:old",
+        trigger_ref="proactive-consideration:consideration:old",
+        source_evidence_ref="event:situation:old",
+        retry_ordinal=1,
+        consecutive_technical_failures=1,
+        last_failed_at=NOW,
+        next_retry_at=NOW + timedelta(minutes=10),
+        last_failure_code="quick_timeout",
+        last_failure_world_revision=10,
+    )
+    newest = ProactiveTechnicalRetryState(
+        consideration_id="consideration:newest",
+        trigger_ref="proactive-consideration:consideration:newest",
+        source_evidence_ref="event:situation:newest",
+        retry_ordinal=2,
+        consecutive_technical_failures=2,
+        last_failed_at=NOW + timedelta(minutes=5),
+        next_retry_at=NOW + timedelta(minutes=35),
+        last_failure_code="quick_timeout",
+        last_failure_world_revision=20,
+    )
+    monkeypatch.setattr(
+        proactive_action_module,
+        "proactive_technical_retry_states",
+        lambda _projection: (old, newest),
+    )
+
+    assert next_proactive_retry_due(SimpleNamespace()) == newest.next_retry_at
+
+    monkeypatch.setattr(
+        proactive_action_module,
+        "proactive_technical_retry_states",
+        lambda _projection: (
+            old,
+            newest.model_copy(update={"retry_process_state": "open"}),
+        ),
+    )
+    assert next_proactive_retry_due(SimpleNamespace()) is None
+
+
 @pytest.mark.asyncio
 async def test_technical_failure_retry_survives_sixty_four_attempts_and_runtime_restart() -> None:
     ledger, _model, _runtime_value, _turn = _runtime(
@@ -3176,6 +3285,7 @@ async def test_new_user_observation_supersedes_an_old_technical_retry() -> None:
     assert (await runtime.drain_one()).status == "failed_safe"
     current = ledger.project().logical_time
     assert current is not None
+    assert next_proactive_retry_due(ledger.project()) == current + timedelta(minutes=10)
     observed_at = current + timedelta(minutes=1)
     observation = Observation(
         schema_version="world-v2.1",
@@ -3222,6 +3332,8 @@ async def test_new_user_observation_supersedes_an_old_technical_retry() -> None:
 
     assert result.status == "idle"
     assert malformed.calls == 2
+    assert proactive_technical_retry_states(ledger.project()) == ()
+    assert next_proactive_retry_due(ledger.project()) is None
 
 
 @pytest.mark.asyncio
@@ -3274,6 +3386,7 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         )
         assert (await app.drain_background_once()).status == "opened"
         assert (await app.drain_background_once()).status == "failed_safe"
+        retry_due = first_due + timedelta(minutes=10)
         second_epoch = NOW + timedelta(seconds=121)
         await app.tick(
             tick_id="tick:backoff:second-epoch",
@@ -3285,11 +3398,19 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
             correlation_id="conversation:backoff",
             reason="test_idle",
         )
+        health = await app.world_health_diagnostics()
+        assert health["initiative_state"] == "retry_wait"
+        assert health["initiative_next_consideration_at"] == retry_due.isoformat()
+        assert health["initiative_cadence_reason_codes"] == [
+            "technical_failure:retry"
+        ]
+        assert health["initiative_consecutive_technical_failures"] == 1
+        assert health["initiative_retry_ordinal"] == 1
+        assert health["initiative_last_failure_code"] == "quick_invalid_output"
         waiting = await app.drain_background_once()
         assert waiting.status == "retry_wait"
         assert waiting.retry_ordinal == 1
         assert malformed.calls == 2
-        retry_due = first_due + timedelta(minutes=10)
         await app.tick(
             tick_id="tick:backoff:retry-due",
             logical_time_from=second_epoch,
@@ -3301,8 +3422,92 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
             reason="test_idle",
         )
         assert (await app.drain_background_once()).status == "opened"
+        considering = await app.world_health_diagnostics()
+        assert considering["initiative_state"] == "considering"
+        assert considering["initiative_retry_ordinal"] == 1
+        assert considering["initiative_next_consideration_at"] == retry_due.isoformat()
         assert (await app.drain_background_once()).status == "failed_safe"
         assert malformed.calls == 4
+        second_retry = await app.world_health_diagnostics()
+        assert second_retry["initiative_state"] == "retry_wait"
+        assert second_retry["initiative_retry_ordinal"] == 2
+        assert second_retry["initiative_next_consideration_at"] == (
+            retry_due + timedelta(minutes=30)
+        ).isoformat()
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_health_keeps_pending_retry_visible_after_newer_consideration_is_silent(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    proactive = _ProactiveReplySequence(
+        [
+            "{}",
+            "{}",
+            {
+                "timing_choice": "silent",
+                "cadence": "conversational",
+                "stance": "newer_context_does_not_call_for_contact",
+                "brief_rationale": "The newer consideration is complete.",
+                "impulse_summary": "Nothing to add from the newer context.",
+                "confidence": 7_000,
+                "world_claims": [],
+            },
+        ]
+    )
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "health-multiple-proactive-considerations.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id=WORLD,
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=_DeliveredTransport(),
+        proactive_model=proactive,
+        now=NOW,
+    )
+    try:
+        _seed_due_thread(app._ledger)  # noqa: SLF001 - real persisted authority fixture
+        runtime = app._turns._runtime._proactive_action_runtime  # noqa: SLF001
+        assert runtime is not None
+        assert (await runtime.drain_one()).status == "opened"
+        assert (await runtime.drain_one()).status == "failed_safe"
+        failed_at = app._ledger.project().logical_time  # noqa: SLF001
+        assert failed_at is not None
+        retry_due = failed_at + timedelta(minutes=10)
+
+        _seed_due_thread(
+            app._ledger,  # noqa: SLF001
+            thread_key="2",
+            advance_clock=False,
+            event_at=failed_at,
+        )
+        assert (await runtime.drain_one()).status == "opened"
+        assert (await runtime.drain_one()).status == "silent"
+        projection = app._ledger.project()  # noqa: SLF001
+        proactive_processes = tuple(
+            item
+            for item in projection.trigger_processes
+            if item.process_kind == ProactiveActionRuntime.PROCESS_KIND
+        )
+        assert len({item.trigger_ref for item in proactive_processes}) == 2
+        assert proactive_processes[-1].runtime_outcome_ref == "proactive:silent"
+        assert next_proactive_retry_due(projection) == retry_due
+
+        health = await app.world_health_diagnostics()
+
+        assert health["initiative_state"] == "retry_wait"
+        assert health["initiative_next_consideration_at"] == retry_due.isoformat()
+        assert health["initiative_retry_ordinal"] == 1
+        assert health["initiative_last_model_decision"] == "silent"
     finally:
         app.close()
 

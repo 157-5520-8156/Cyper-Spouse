@@ -200,13 +200,18 @@ class ScenarioVerificationError(AssertionError):
 # executable predicates and every cold replay green; the changed Context,
 # Proposal and provider-audit identities are therefore intentional mechanism
 # drift, not evidence of human-likeness or permission to relax a truth gate.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.40"
+# ``.41`` stops treating JSON object member order as causal evidence for the
+# required Private Turn State.  A side-by-side run against ``.40`` kept every
+# visible output, event type, Action state, model-call count and explicit
+# predicate identical across all 120 cases; only replay hashes changed because
+# the model request/audit identity now records the order-independent contract.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.41"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "adc4c1cfb4038dec27aa0d44d0953a1c4daa736c0bb1a922e3a9380eecdb70ba"
+    "6f06d80b8479acaf8e8e8920ff6caaa9e8ac4ee57e70f2e411aeb59e4a21e9d8"
 )
 
 
