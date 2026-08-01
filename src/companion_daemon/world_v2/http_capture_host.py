@@ -14,6 +14,7 @@ delivered the message.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -268,6 +269,8 @@ class HttpV2CaptureHost:
         self._pending_targeted_drains: set[asyncio.Task[object]] = set()
         self._background_drain_task: asyncio.Task[object] | None = None
         self._wal_maintenance_task: asyncio.Task[object] | None = None
+        self._deferred_semantic_close_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._closed = False
 
     async def _join_pending_targeted_drains(self) -> None:
@@ -510,16 +513,119 @@ class HttpV2CaptureHost:
             raise RuntimeError("World v2 dashboard public capture is not configured")
         return self._host.capture_dashboard_public(self._dashboard_public_request_issuer.issue())
 
+    def proactive_source_authority_health(self) -> dict[str, object]:
+        """Expose deployment authority without inspecting character decisions."""
+
+        if self._semantic_chat is None:
+            return {
+                "status": "unavailable",
+                "warning": True,
+                "warning_reasons": ["proactive_source_authority.composition_unavailable"],
+                "independent_reviewer": False,
+                "fact_effects_available": False,
+                "subjective_expression_available": False,
+            }
+        return self._semantic_chat.proactive_source_authority_health()
+
     async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        close_task = self._close_task
+        if close_task is None:
+            # Publish one shielded owner before the first await. Concurrent or
+            # cancelled lifecycle callers therefore join the same cleanup
+            # instead of treating the early `_closed` gate as quiescence.
+            self._closed = True
+            close_task = asyncio.create_task(
+                self._aclose_owned(),
+                name="http-v2-capture-host-close",
+            )
+            self._close_task = close_task
+        await asyncio.shield(close_task)
+
+    async def _aclose_owned(self) -> None:
         await self._join_pending_targeted_drains()
         await self._join_background_drain()
         await self._join_wal_maintenance()
-        self._host.close()
+        close_world = getattr(self._host, "aclose", None)
+        if callable(close_world):
+            await close_world()
+        else:
+            self._host.close()
         if self._semantic_chat is not None:
-            await self._semantic_chat.aclose()
+            world_quiescence = getattr(
+                self._host,
+                "wait_for_shutdown_quiescence",
+                None,
+            )
+            if (
+                getattr(self._host, "shutdown_pending_task_count", 0) > 0
+                and callable(world_quiescence)
+            ):
+                deferred = asyncio.create_task(
+                    self._close_semantic_after_world_quiescence(world_quiescence),
+                    name="http-v2-deferred-semantic-close",
+                )
+                self._deferred_semantic_close_task = deferred
+                deferred.add_done_callback(self._observe_deferred_semantic_close)
+            else:
+                await self._semantic_chat.aclose()
+
+    async def _close_semantic_after_world_quiescence(
+        self,
+        wait_for_world: Callable[[], Awaitable[None]],
+    ) -> None:
+        await wait_for_world()
+        assert self._semantic_chat is not None
+        await self._semantic_chat.aclose()
+
+    @staticmethod
+    def _observe_deferred_semantic_close(task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    @property
+    def shutdown_pending_task_count(self) -> int:
+        """Dependencies retained after the facade's bounded close."""
+
+        deferred = self._deferred_semantic_close_task
+        if deferred is not None and not deferred.done():
+            return 1
+        return int(
+            getattr(self._host, "shutdown_pending_task_count", 0) > 0
+            or (
+                self._semantic_chat is not None
+                and getattr(
+                    self._semantic_chat,
+                    "shutdown_pending_task_count",
+                    0,
+                )
+                > 0
+            )
+        )
+
+    async def wait_for_shutdown_quiescence(self) -> None:
+        """Wait for deferred World and semantic dependency cleanup."""
+
+        close_task = self._close_task
+        if close_task is not None:
+            await asyncio.shield(close_task)
+        deferred = self._deferred_semantic_close_task
+        if deferred is not None:
+            await asyncio.shield(deferred)
+        else:
+            world_wait = getattr(self._host, "wait_for_shutdown_quiescence", None)
+            if (
+                getattr(self._host, "shutdown_pending_task_count", 0) > 0
+                and callable(world_wait)
+            ):
+                await world_wait()
+        semantic = self._semantic_chat
+        semantic_wait = getattr(semantic, "wait_for_shutdown_quiescence", None)
+        if (
+            semantic is not None
+            and getattr(semantic, "shutdown_pending_task_count", 0) > 0
+            and callable(semantic_wait)
+        ):
+            await semantic_wait()
 
 
 def build_http_v2_capture_host(
@@ -529,8 +635,8 @@ def build_http_v2_capture_host(
     model: ChatCompletionModel | None = None,
     thinking_model: ChatCompletionModel | None = None,
     advisory_model: ChatCompletionModel | None = None,
-    immediate_emotion_gate_model: ChatCompletionModel | None = None,
     source_closure_model: ChatCompletionModel | None = None,
+    candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     media_transport: MediaProviderTransport | None = None,
     media_preview: MediaPreviewDeployment | None = None,
     perception_model: DeliberationModelAdapter | None = None,
@@ -557,8 +663,10 @@ def build_http_v2_capture_host(
         flash_model=model,
         thinking_model=thinking_model,
         advisory_model=advisory_model,
-        immediate_emotion_gate_model=immediate_emotion_gate_model,
         source_closure_model=source_closure_model,
+        candidate_external_proposition_inventory_model=(
+            candidate_external_proposition_inventory_model
+        ),
         model_id_prefix="http-v2",
     )
     _LOG.warning(
@@ -571,9 +679,21 @@ def build_http_v2_capture_host(
         model=background_model,
         role="world_author",
     )
+    life_world_author_source_rewriter = RoleBoundLifeDevelopmentModelAdapter(
+        model=background_model,
+        role="world_author",
+    )
     life_character = RoleBoundLifeDevelopmentModelAdapter(
         model=background_model,
         role="character_model",
+    )
+    life_source_closure_reviewer = (
+        RoleBoundLifeDevelopmentModelAdapter(
+            model=semantic_chat.proactive_source_closure_model,
+            role="world_author_source_reviewer",
+        )
+        if semantic_chat.proactive_source_closure_model is not None
+        else None
     )
     primary_user_id = settings.primary_user_id
     transport = HttpCaptureTransport()
@@ -643,7 +763,6 @@ def build_http_v2_capture_host(
             reply_target=f"user:{primary_user_id}",
             action_pump_owner="pump:http-v2-capture",
             life_ecology=LifeEcologyComposition.production_v1(),
-            immediate_emotion_signal_gate=True,
             media_selection_acceptance=(
                 media_preview.acceptance if media_preview is not None else None
             ),
@@ -677,11 +796,18 @@ def build_http_v2_capture_host(
         private_impression_model=background_model,
         memory_model=background_model,
         proactive_model=background_model,
+        proactive_identity_frame=semantic_chat.identity_frame,
+        proactive_source_closure_model=semantic_chat.proactive_source_closure_model,
+        proactive_candidate_external_proposition_inventory_model=(
+            semantic_chat.candidate_external_proposition_inventory_model
+        ),
         # A scheduler-only, bounded selection over already legal activities.
         # Invalid provider output terminates the ecology wake fail-safe.
         activity_lifecycle_model=background_model,
         life_world_author_model=life_world_author,
+        life_world_author_source_rewriter=life_world_author_source_rewriter,
         life_character_model=life_character,
+        life_source_closure_reviewer=life_source_closure_reviewer,
         media_selection_model=(
             media_preview.selection_model if media_preview is not None else None
         ),

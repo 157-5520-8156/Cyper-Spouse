@@ -12,9 +12,15 @@ import hashlib
 import json
 from typing import Literal, Protocol
 
-from .action_pump import ActionExecutor
-from .media_provider_grants import require_provider_media_grant
-from .media_delivery_runtime import require_current_media_delivery_approval
+from .action_pump import ActionExecutor, TerminalPreDispatchFailure
+from .media_provider_grants import (
+    ProviderMediaGrantError,
+    require_provider_media_grant,
+)
+from .media_delivery_runtime import (
+    MediaDeliveryError,
+    require_current_media_delivery_approval,
+)
 from .production_latency_trace import ProductionLatencyRecorder, TurnLatencyTrace
 from .schema_core import FrozenModel
 from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
@@ -26,6 +32,13 @@ from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
 # also requires a proposal materializer and a concrete platform transport.
 SUPPORTED_PLATFORM_ACTION_KINDS = frozenset(
     {"reply", "followup", "proactive_message", "reaction", "typing", "sticker", "media_delivery"}
+)
+# These effects can produce something the recipient can actually perceive.
+# ``typing`` is intentionally absent: a provider may accept that ephemeral
+# hint and then fail every substantive beat, which must remain a failed reply
+# rather than a deceptively fast success in reliability telemetry.
+USER_VISIBLE_PLATFORM_ACTION_KINDS = frozenset(
+    {"reply", "followup", "proactive_message", "reaction", "sticker", "media_delivery"}
 )
 CONTENT_TYPES_BY_KIND = {
     "reply": frozenset({"text/plain"}),
@@ -48,6 +61,10 @@ class ResolvedActionPayload(FrozenModel):
     payload_hash: str
     content_type: str
     body: str
+
+
+class AuthorizedPayloadResolutionError(ValueError):
+    """A declared immutable-payload proof failure, not an arbitrary reader bug."""
 
 
 class PlatformDispatchRequest(FrozenModel):
@@ -130,11 +147,18 @@ class PlatformActionExecutor(ActionExecutor):
         """Fail closed for the one platform action that carries media bytes."""
 
         if action.kind == "media_delivery":
-            require_current_media_delivery_approval(
-                action=action,
-                projection=projection,
-                logical_time=projection.logical_time or action.logical_time,
-            )
+            try:
+                require_current_media_delivery_approval(
+                    action=action,
+                    projection=projection,
+                    logical_time=projection.logical_time or action.logical_time,
+                )
+            except MediaDeliveryError as exc:
+                raise TerminalPreDispatchFailure(
+                    provider=self._transport.provider,
+                    error_class="local_preflight_authorization_rejected",
+                    message="media delivery authorization was rejected before provider dispatch",
+                ) from exc
 
     async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None:
         trace = self._trace(action)
@@ -219,7 +243,7 @@ class PlatformActionExecutor(ActionExecutor):
     ) -> None:
         if (
             trace is not None
-            and action.kind in {"reply", "followup", "proactive_message"}
+            and action.kind in USER_VISIBLE_PLATFORM_ACTION_KINDS
             and isinstance(result, ProviderReceipt)
             and result.status == "delivered"
         ):
@@ -230,7 +254,14 @@ class PlatformActionExecutor(ActionExecutor):
 
     async def _request_for(self, action: Action) -> PlatformDispatchRequest:
         kind = self._kind(action)
-        payload = await self._payloads.resolve(action)
+        try:
+            payload = await self._payloads.resolve(action)
+        except AuthorizedPayloadResolutionError as exc:
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_payload_unavailable",
+                message="authorized payload proof is unavailable before provider dispatch",
+            ) from exc
         self._validate_payload(action=action, payload=payload)
         return PlatformDispatchRequest(
             action_id=action.action_id,
@@ -243,26 +274,41 @@ class PlatformActionExecutor(ActionExecutor):
             idempotency_key=action.idempotency_key,
         )
 
-    @staticmethod
     def _kind(
+        self,
         action: Action,
     ) -> Literal[
         "reply", "followup", "proactive_message", "reaction", "typing", "sticker",
         "media_delivery",
     ]:
         if action.layer != "external_action" or action.kind not in SUPPORTED_PLATFORM_ACTION_KINDS:
-            raise ValueError(f"platform executor does not support action kind {action.kind!r}")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_action_unsupported",
+                message=f"platform executor does not support action kind {action.kind!r}",
+            )
         return action.kind  # type: ignore[return-value]
 
-    @staticmethod
-    def _validate_payload(*, action: Action, payload: ResolvedActionPayload) -> None:
+    def _validate_payload(self, *, action: Action, payload: ResolvedActionPayload) -> None:
         if payload.payload_ref != action.payload_ref or payload.payload_hash != action.payload_hash:
-            raise ValueError("resolved payload does not bind the authorized Action")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_payload_binding_mismatch",
+                message="resolved payload does not bind the authorized Action",
+            )
         if payload.content_type not in CONTENT_TYPES_BY_KIND[action.kind]:
-            raise ValueError("resolved payload content type is not allowed for Action kind")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_payload_content_type_rejected",
+                message="resolved payload content type is not allowed for Action kind",
+            )
         actual = "sha256:" + hashlib.sha256(payload.body.encode("utf-8")).hexdigest()
         if action.payload_hash != actual:
-            raise ValueError("resolved payload hash does not match authorized payload bytes")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_payload_hash_mismatch",
+                message="resolved payload hash does not match authorized payload bytes",
+            )
 
     def _bind_result(
         self,
@@ -359,9 +405,16 @@ class ProviderMediaActionExecutor(ActionExecutor):
         self, *, action: Action, projection: LedgerProjection
     ) -> None:
         logical_time = projection.logical_time or action.logical_time
-        grant = require_provider_media_grant(
-            action=action, projection=projection, logical_time=logical_time
-        )
+        try:
+            grant = require_provider_media_grant(
+                action=action, projection=projection, logical_time=logical_time
+            )
+        except ProviderMediaGrantError as exc:
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_authorization_rejected",
+                message="provider media authorization was rejected before provider dispatch",
+            ) from exc
         self._dispatch_authorizations.add((action.action_id, grant.grant_id, grant.entity_revision))
 
     async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None:
@@ -383,26 +436,53 @@ class ProviderMediaActionExecutor(ActionExecutor):
             "media_inspection",
             "media_repair",
         }:
-            raise ValueError("media provider executor does not support this Action kind")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_action_unsupported",
+                message="media provider executor does not support this Action kind",
+            )
         if action.layer != "media_action" or action.provider_media_grant is None:
-            raise ValueError("media provider Action lacks enforcement grant binding")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_authorization_rejected",
+                message="media provider Action lacks enforcement grant binding",
+            )
         authority_key = (
             action.action_id,
             action.provider_media_grant.grant_id,
             action.provider_media_grant.grant_revision,
         )
         if authority_key not in self._dispatch_authorizations:
-            raise ValueError("media provider dispatch was not authorized by ActionPump")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_authorization_rejected",
+                message="media provider dispatch was not authorized by ActionPump",
+            )
         # One verified permission is consumed by one provider RPC.  Recovery
         # must therefore obtain a fresh final-projection check for lookup and
         # again before a retry dispatch.
         self._dispatch_authorizations.remove(authority_key)
-        payload = await self._payloads.resolve(action)
+        try:
+            payload = await self._payloads.resolve(action)
+        except AuthorizedPayloadResolutionError as exc:
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_payload_unavailable",
+                message="authorized media payload proof is unavailable before provider dispatch",
+            ) from exc
         if payload.payload_ref != action.payload_ref or payload.payload_hash != action.payload_hash:
-            raise ValueError("resolved payload does not bind the authorized Action")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_payload_binding_mismatch",
+                message="resolved payload does not bind the authorized Action",
+            )
         actual = "sha256:" + hashlib.sha256(payload.body.encode("utf-8")).hexdigest()
         if actual != action.payload_hash:
-            raise ValueError("resolved payload hash does not match authorized payload bytes")
+            raise TerminalPreDispatchFailure(
+                provider=self._transport.provider,
+                error_class="local_preflight_payload_hash_mismatch",
+                message="resolved payload hash does not match authorized payload bytes",
+            )
         return MediaProviderDispatchRequest(
             action_id=action.action_id,
             kind=action.kind,  # type: ignore[arg-type]
@@ -516,6 +596,7 @@ class RoutedActionExecutor(ActionExecutor):
 
 __all__ = [
     "AuthorizedPayloadReader",
+    "AuthorizedPayloadResolutionError",
     "PlatformActionExecutor",
     "PlatformDispatchReceipt",
     "PlatformDispatchRequest",

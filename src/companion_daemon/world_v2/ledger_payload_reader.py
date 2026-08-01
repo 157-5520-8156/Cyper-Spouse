@@ -14,7 +14,10 @@ from typing import Protocol
 
 from .ledger import LedgerPort
 from .expression_payload_store import ImmutableExpressionPayloadStore, expression_payload_hash
-from .platform_action_executor import ResolvedActionPayload
+from .platform_action_executor import (
+    AuthorizedPayloadResolutionError,
+    ResolvedActionPayload,
+)
 from .schemas import Action, LedgerProjection
 
 
@@ -46,7 +49,9 @@ class LedgerAuthorizedPayloadReader:
 
     async def resolve(self, action: Action) -> ResolvedActionPayload:
         if action.world_id != self._reader.world_id:
-            raise ValueError("authorized payload reader belongs to another world")
+            raise AuthorizedPayloadResolutionError(
+                "authorized payload reader belongs to another world"
+            )
         projection = await self._project()
         generic = tuple(
             (manifest, beat)
@@ -56,13 +61,17 @@ class LedgerAuthorizedPayloadReader:
         )
         if generic:
             if len(generic) != 1:
-                raise ValueError("Action has no unique expression-plan authorization manifest")
+                raise AuthorizedPayloadResolutionError(
+                    "Action has no unique expression-plan authorization manifest"
+                )
             return self._resolve_generic(action=action, projection=projection, manifest=generic[0][0], beat=generic[0][1])
         manifests = tuple(
             item for item in projection.minimal_reply_manifests if item.action_id == action.action_id
         )
         if len(manifests) != 1:
-            raise ValueError("Action has no unique minimal-reply authorization manifest")
+            raise AuthorizedPayloadResolutionError(
+                "Action has no unique minimal-reply authorization manifest"
+            )
         manifest = manifests[0]
         if (
             action.kind != "reply"
@@ -71,7 +80,9 @@ class LedgerAuthorizedPayloadReader:
             or action.payload_ref != manifest.message_payload_ref
             or action.payload_hash != manifest.message_payload_hash
         ):
-            raise ValueError("Action does not exactly bind its authorization manifest")
+            raise AuthorizedPayloadResolutionError(
+                "Action does not exactly bind its authorization manifest"
+            )
         payloads = tuple(
             item
             for item in projection.stored_message_payloads
@@ -81,11 +92,15 @@ class LedgerAuthorizedPayloadReader:
             and item.payload_hash == manifest.message_payload_hash
         )
         if len(payloads) != 1:
-            raise ValueError("authorization manifest has no unique stored message payload")
+            raise AuthorizedPayloadResolutionError(
+                "authorization manifest has no unique stored message payload"
+            )
         payload = payloads[0]
         actual_hash = "sha256:" + hashlib.sha256(payload.text.encode("utf-8")).hexdigest()
         if actual_hash != payload.payload_hash:
-            raise ValueError("stored message payload hash does not bind its text")
+            raise AuthorizedPayloadResolutionError(
+                "stored message payload hash does not bind its text"
+            )
         return ResolvedActionPayload(
             payload_ref=payload.payload_ref,
             payload_hash=payload.payload_hash,
@@ -105,14 +120,18 @@ class LedgerAuthorizedPayloadReader:
             or action.expression_beat_id != beat.beat_id
             or _authorization_image(action) != _authorization_image(beat.action)
         ):
-            raise ValueError("Action does not exactly bind its expression-plan authorization manifest")
+            raise AuthorizedPayloadResolutionError(
+                "Action does not exactly bind its expression-plan authorization manifest"
+            )
         if beat.storage_kind == "inline_text":
             payloads = tuple(item for item in projection.stored_message_payloads if (
                 item.acceptance_id == manifest.acceptance_id and item.proposal_id == manifest.proposal_id
                 and item.payload_ref == beat.payload_ref and item.payload_hash == beat.payload_hash
             ))
             if len(payloads) != 1 or payloads[0].text != beat.text:
-                raise ValueError("expression authorization has no unique stored message payload")
+                raise AuthorizedPayloadResolutionError(
+                    "expression authorization has no unique stored message payload"
+                )
             return ResolvedActionPayload(payload_ref=beat.payload_ref, payload_hash=beat.payload_hash,
                                          content_type=beat.content_type, body=payloads[0].text)
         descriptors = tuple(item for item in projection.expression_payload_descriptors if (
@@ -122,7 +141,9 @@ class LedgerAuthorizedPayloadReader:
             and item.payload_kind == beat.sidecar_kind
         ))
         if len(descriptors) != 1 or self._expression_payload_store is None:
-            raise ValueError("expression sidecar descriptor or store is unavailable")
+            raise AuthorizedPayloadResolutionError(
+                "expression sidecar descriptor or store is unavailable"
+            )
         record = self._expression_payload_store.read_exact(payload_ref=beat.payload_ref)
         if record is None or (
             record.payload_hash != beat.payload_hash
@@ -131,7 +152,9 @@ class LedgerAuthorizedPayloadReader:
             or record.payload_kind != beat.sidecar_kind
             or expression_payload_hash(record.encoded_payload) != record.payload_hash
         ):
-            raise ValueError("expression sidecar payload proof failed")
+            raise AuthorizedPayloadResolutionError(
+                "expression sidecar payload proof failed"
+            )
         return ResolvedActionPayload(payload_ref=record.payload_ref, payload_hash=record.payload_hash,
                                      content_type=record.content_type, body=record.encoded_payload)
 

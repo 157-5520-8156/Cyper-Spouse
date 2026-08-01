@@ -68,10 +68,19 @@ class RelationshipDraftDeliberationAdapter:
         evaluation = _relationship_evaluation(material=material, trigger_ref=request.trigger_ref)
         if evaluation is not None:
             subject_ref = evaluation["subject_ref"]
+            source_summary = (
+                {"accepted_appraisal_summary": evaluation["appraisal_summary_json"]}
+                if "appraisal_summary_json" in evaluation
+                else {
+                    "interaction_source_summary": evaluation[
+                        "interaction_source_summary_json"
+                    ]
+                }
+            )
             draft = await self._draft_adapter.deliberate(
                 capsule=RelationshipEvaluationDraftCapsule(
-                    accepted_appraisal_summary=evaluation["appraisal_summary_json"],
                     relationship_summary=evaluation["relationship_summary_json"],
+                    **source_summary,
                     **context,
                 )
             )
@@ -79,16 +88,33 @@ class RelationshipDraftDeliberationAdapter:
                 _proposal_from_draft(draft=draft, request=request, subject_ref=subject_ref)
             )
         appraisals = _slice_items(material, "appraisals")
-        subject_ref = _counterpart_subject(
-            material=material,
-            appraisals=appraisals,
-            trigger_ref=request.trigger_ref,
-        )
-        if subject_ref is None:
-            return self._output(_no_change(request=request, rationale="relationship_data_unavailable"))
-        draft = await self._draft_adapter.deliberate(
-            capsule=_draft_capsule(material=material, request=request, context=context)
-        )
+        if _trigger_appraisal(appraisals=appraisals, trigger_ref=request.trigger_ref) is not None:
+            subject_ref = _counterpart_subject(
+                material=material,
+                appraisals=appraisals,
+                trigger_ref=request.trigger_ref,
+            )
+            if subject_ref is None:
+                return self._output(
+                    _no_change(request=request, rationale="relationship_data_unavailable")
+                )
+            capsule = _draft_capsule(material=material, request=request, context=context)
+        else:
+            source = _ordinary_interaction_source(
+                material=material, trigger_ref=request.trigger_ref
+            )
+            if source is None:
+                return self._output(
+                    _no_change(request=request, rationale="relationship_source_unavailable")
+                )
+            subject_ref, interaction_summary = source
+            capsule = _interaction_draft_capsule(
+                material=material,
+                subject_ref=subject_ref,
+                interaction_summary=interaction_summary,
+                context=context,
+            )
+        draft = await self._draft_adapter.deliberate(capsule=capsule)
         return self._output(_proposal_from_draft(draft=draft, request=request, subject_ref=subject_ref))
 
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
@@ -153,30 +179,38 @@ def _relationship_evaluation(
         return None
     if not isinstance(value, dict):
         raise ValueError("RelationshipDraft compact relationship view is invalid")
-    required = (
-        "subject_ref",
-        "trigger_appraisal_id",
-        "appraisal_summary_json",
-        "relationship_summary_json",
-        "appraisal_source",
-    )
-    if any(not isinstance(value.get(name), str) or not value[name] for name in required[:-1]):
+    required = ("subject_ref", "relationship_summary_json")
+    if any(not isinstance(value.get(name), str) or not value[name] for name in required):
         raise ValueError("RelationshipDraft compact relationship view is incomplete")
-    if not isinstance(value["appraisal_source"], dict):
-        raise ValueError("RelationshipDraft compact relationship evidence is invalid")
-    source_bindings = value["appraisal_source"].get("source_bindings")
-    if not isinstance(source_bindings, list) or not source_bindings:
-        raise ValueError("RelationshipDraft compact relationship evidence is missing")
-    # The view is valid only for the exact accepted appraisal that triggered
-    # this background job.  Binding the source event prevents a compact view
-    # from accidentally becoming a generic, stale relationship summary.
-    if not any(binding.get("ref") == trigger_ref for binding in source_bindings if isinstance(binding, dict)):
-        raise ValueError("RelationshipDraft compact relationship view is not trigger-bound")
-    return {
+    appraisal_summary = value.get("appraisal_summary_json")
+    interaction_summary = value.get("interaction_source_summary_json")
+    if (isinstance(appraisal_summary, str) and bool(appraisal_summary)) == (
+        isinstance(interaction_summary, str) and bool(interaction_summary)
+    ):
+        raise ValueError("RelationshipDraft compact relationship source is ambiguous")
+    # Full audit material includes proof bindings; provider-compacted material
+    # intentionally omits them after the trusted Capsule has already bound the
+    # overlay. If present, still require the exact trigger ref.
+    source_key = "appraisal_source" if isinstance(appraisal_summary, str) else "interaction_source"
+    source = value.get(source_key)
+    if source is not None:
+        if not isinstance(source, dict):
+            raise ValueError("RelationshipDraft compact relationship evidence is invalid")
+        source_bindings = source.get("source_bindings")
+        if not isinstance(source_bindings, list) or not any(
+            isinstance(binding, dict) and binding.get("ref") == trigger_ref
+            for binding in source_bindings
+        ):
+            raise ValueError("RelationshipDraft compact relationship view is not trigger-bound")
+    result = {
         "subject_ref": str(value["subject_ref"]),
-        "appraisal_summary_json": str(value["appraisal_summary_json"]),
         "relationship_summary_json": str(value["relationship_summary_json"]),
     }
+    if isinstance(appraisal_summary, str):
+        result["appraisal_summary_json"] = appraisal_summary
+    else:
+        result["interaction_source_summary_json"] = str(interaction_summary)
+    return result
 
 
 def _trimmed(value: str, *, limit: int = 300) -> str:
@@ -338,14 +372,18 @@ def _interaction_continuity(
     if not items:
         return None
     items.sort(key=lambda item: (item[0], item[4]))
+    occurred_times = tuple(item[2] for item in items)
     return RelationshipInteractionContinuity(
         counterpart_turn_count=sum(item[1] == "counterpart" for item in items),
         companion_turn_count=sum(item[1] == "companion" for item in items),
         delivered_companion_turn_count=sum(
             item[1] == "companion" and item[3] == "delivered" for item in items
         ),
-        first_occurred_at=items[0][2],
-        last_occurred_at=items[-1][2],
+        # Dialogue sequence is the replay/order coordinate, not a timestamp
+        # surrogate. A provider receipt can settle later while retaining the
+        # earlier physical occurrence time of the expression it confirms.
+        first_occurred_at=min(occurred_times),
+        last_occurred_at=max(occurred_times),
         source_items=tuple(
             RelationshipContinuitySourceItem(
                 item_ref=item[4],
@@ -409,6 +447,115 @@ def _counterpart_subject(
     return subject_ref
 
 
+def _trigger_appraisal(
+    *,
+    appraisals: tuple[dict[str, object], ...] | None,
+    trigger_ref: str,
+) -> dict[str, object] | None:
+    matches = tuple(
+        appraisal
+        for appraisal in appraisals or ()
+        if isinstance(appraisal.get("origin"), dict)
+        and appraisal["origin"].get("accepted_event_ref") == trigger_ref
+    )
+    if len(matches) > 1:
+        raise ValueError("RelationshipDraft trigger appraisal is ambiguous")
+    return matches[0] if matches else None
+
+
+def _ordinary_interaction_source(
+    *, material: dict[str, object], trigger_ref: str
+) -> tuple[str, str] | None:
+    """Bind an ordinary relationship opportunity to its exact observed turn."""
+
+    matches: list[dict[str, object]] = []
+    for item in _lenient_slice_values(material, "recent_dialogue"):
+        claims = item.get("source_claims")
+        if (
+            item.get("speaker") != "counterpart"
+            or not isinstance(item.get("speaker_ref"), str)
+            or not item["speaker_ref"]
+            or not isinstance(claims, list)
+        ):
+            continue
+        if any(
+            isinstance(claim, dict)
+            and claim.get("authority_event_ref") == trigger_ref
+            for claim in claims
+        ):
+            matches.append(item)
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("RelationshipDraft ordinary source is ambiguous")
+    item = matches[0]
+    subject_ref = str(item["speaker_ref"])
+    actor = material.get("actor_ref")
+    if not isinstance(actor, str) or not actor or subject_ref == actor:
+        raise ValueError("RelationshipDraft ordinary counterpart subject is invalid")
+    summary = {
+        "source_kind": "ordinary_interaction",
+        "speaker": "counterpart",
+        "occurred_at": item.get("occurred_at"),
+        "delivery_state": item.get("delivery_state"),
+    }
+    return subject_ref, _canonical(summary)
+
+
+def _relationship_summary_for_subject(
+    *, material: dict[str, object], subject_ref: str
+) -> str:
+    relationships = _slice_items(material, "relationship_slice")
+    if relationships:
+        matches = tuple(
+            relationship
+            for relationship in relationships
+            if relationship.get("subject_ref") == subject_ref
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                "RelationshipDraft requires one relationship head for its counterpart"
+            )
+        relationship = matches[0]
+    else:
+        relationship = {
+            "stage": "stranger",
+            "variables": {
+                "trust_bp": 0,
+                "closeness_bp": 0,
+                "respect_bp": 0,
+                "reliability_bp": 0,
+                "mutuality_bp": 0,
+                "repair_confidence_bp": 0,
+            },
+            "temperature": "ordinary",
+        }
+    summary = {
+        key: relationship[key]
+        for key in ("stage", "variables", "temperature")
+        if key in relationship
+    }
+    if not summary:
+        raise ValueError("RelationshipDraft relationship summary is incomplete")
+    return _canonical(summary)
+
+
+def _interaction_draft_capsule(
+    *,
+    material: dict[str, object],
+    subject_ref: str,
+    interaction_summary: str,
+    context: dict[str, object],
+) -> RelationshipEvaluationDraftCapsule:
+    return RelationshipEvaluationDraftCapsule(
+        interaction_source_summary=interaction_summary,
+        relationship_summary=_relationship_summary_for_subject(
+            material=material, subject_ref=subject_ref
+        ),
+        **context,
+    )
+
+
 def _draft_capsule(
     *,
     material: dict[str, object],
@@ -470,7 +617,7 @@ def _trigger_evidence(request: ModelInput) -> ProposalEvidenceRef:
         if item.ref_id == request.trigger_ref and item.evidence_kind == "committed_world_event"
     )
     if len(values) != 1:
-        raise ValueError("RelationshipDraft requires one accepted-appraisal trigger evidence")
+        raise ValueError("RelationshipDraft requires one committed trigger evidence")
     return values[0]
 
 

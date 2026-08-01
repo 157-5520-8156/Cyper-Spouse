@@ -19,23 +19,15 @@ def _settled_life_ledger() -> WorldLedger:
     return ledger
 
 
-def test_settled_npc_occurrence_is_visible_when_bound_to_a_companion_plan() -> None:
+def test_settled_npc_occurrence_is_not_companion_life_when_only_bound_by_plan() -> None:
     ledger = _settled_life_ledger()
 
-    items = WorldLifeContextCompiler().compile(
+    assert WorldLifeContextCompiler().compile(
         projection=ledger.project(), actor_ref="actor:companion"
-    )
-
-    assert len(items) == 1
-    item = items[0]
-    assert item.occurrence_id == "occurrence-tea"
-    assert item.participant_refs == ("npc:lin",)
-    assert item.location_ref == "room:kitchen"
-    assert item.source.authority_event_ref == "occurrence-settled"
-    assert item.source.authority_world_revision == 9
+    ) == ()
 
 
-def test_world_life_slice_reaches_the_next_deliberation_context_with_exact_settlement_source() -> None:
+def test_plan_owned_npc_occurrence_does_not_enter_companion_context() -> None:
     ledger = _settled_life_ledger()
     projection = ledger.project()
     capsule = context_capsule_compiler_from_ledger(
@@ -48,10 +40,9 @@ def test_world_life_slice_reaches_the_next_deliberation_context_with_exact_settl
     )
 
     assert capsule.world_life.availability == "available"
-    assert capsule.world_life.source_refs == ("occurrence-settled",)
+    assert capsule.world_life.source_refs == ()
     model_slice = json.loads(capsule.model_content_json)["slices"]["world_life"]
-    assert model_slice["items"][0]["value"]["occurrence_id"] == "occurrence-tea"
-    assert model_slice["items"][0]["value"]["source"]["authority_payload_hash"]
+    assert model_slice["items"] == []
 
 
 def test_npc_occurrence_does_not_leak_to_an_unrelated_actor() -> None:

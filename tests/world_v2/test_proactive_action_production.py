@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import asyncio
+from hashlib import sha256
 import json
+import threading
+from types import SimpleNamespace
 
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
+from companion_daemon.world_v2.biographical_claim_authority import (
+    biographical_coordinate_authorities,
+)
 from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     ChatModelDeliberationAdapter,
     CompanionIdentityFrame,
@@ -15,9 +21,13 @@ from companion_daemon.world_v2.deliberation import (
     ModelInput,
     ModelOutput,
     ModelRoute,
+    ModelUsageProvenance,
     RouteRequest,
+    TriggerMessage,
+    ValidationTechnicalFailure,
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
+from companion_daemon.world_v2.expression_draft import TEXT_ONLY_EXPRESSION_CAPABILITIES
 from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -48,6 +58,7 @@ from companion_daemon.world_v2.recall_index import (
     InMemoryRecallIndex,
     RecallCursor,
     RecallDocument,
+    RecallEmbedding,
     RecallSourceBinding,
 )
 from companion_daemon.world_v2.recall_runtime import (
@@ -149,6 +160,158 @@ class _ProactiveReplySequence:
         return reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False)
 
 
+def _usage(*, provider: str, ordinal: int) -> ModelUsageProvenance:
+    material = {
+        "usage_contract": "model-usage.1",
+        "route_class": "chat",
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "thinking_tokens": 0,
+        "token_provenance": "provider_reported",
+        "transport": "provider_api",
+        "provider": provider,
+        "provider_usage_ref": f"usage:{provider}:{ordinal}",
+    }
+    digest = sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return ModelUsageProvenance(**material, provider_usage_hash=digest)
+
+
+class _MeteredProactiveReplySequence(_ProactiveReplySequence):
+    async def complete_with_usage(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        self.messages.append(messages)
+        reply = self.replies.pop(0)
+        raw = reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False)
+        return raw, _usage(provider=self.model, ordinal=self.calls)
+
+    async def complete_json_with_usage(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        return await self.complete_with_usage(messages, temperature=temperature)
+
+
+def _source_closure_review(
+    *,
+    claim_indexes: tuple[int, ...] = (),
+    visible_failures: tuple[str, ...] = (),
+    visible_findings: tuple[dict[str, object], ...] = (),
+) -> str:
+    return json.dumps(
+        {
+            "ci": list(claim_indexes),
+            "v": list(visible_failures),
+            "p": [],
+            "visible_findings": list(visible_findings),
+            "r": "Review only exact factual source closure.",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _supporting_source_reviewer() -> _ProactiveReplySequence:
+    return _ProactiveReplySequence([_source_closure_review()])
+
+
+def _candidate_inventory(
+    text: str,
+    *,
+    semantic_role: str = "standalone_external_proposition",
+) -> str:
+    return json.dumps(
+        {
+            "contract": "candidate-external-proposition-inventory.3",
+            "propositions": [
+                {
+                    "locator": {
+                        "beat_index": 0,
+                        "char_start": 0,
+                        "char_end": len(text),
+                        "text": text,
+                    },
+                    "semantic_role": semantic_role,
+                    "parent_index": None,
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
+class _ProactiveCoverageAuthority:
+    model = "test-proactive-coverage-authority"
+
+    def __init__(self, *, unclosed_texts: tuple[str, ...] = (), metered: bool = False) -> None:
+        self._unclosed_texts = frozenset(unclosed_texts)
+        self._metered = metered
+        self.calls = 0
+        self.messages: list[list[dict[str, str]]] = []
+
+    async def complete_json(self, messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+        raw, _usage_value = await self._complete(messages, temperature=temperature)
+        return raw
+
+    async def complete_json_with_usage(self, messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+        return await self._complete(messages, temperature=temperature)
+
+    async def _complete(self, messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+        del temperature
+        self.calls += 1
+        self.messages.append(messages)
+        payload = json.loads(messages[-1]["content"])
+        contract = payload.get("output_contract", {}).get("contract")
+        if contract == "source-closure-review.7":
+            raw = _source_closure_review()
+        else:
+            assert contract == "candidate-external-proposition-coverage.1"
+            findings = []
+            for locator in payload["locators"]:
+                unclosed = locator["text"] in self._unclosed_texts
+                findings.append(
+                    {
+                        "locator": locator,
+                        "decision": "unclosed" if unclosed else "closed",
+                        "source_relation": (
+                            "unclosed" if unclosed else "first_person_immediate_private_continuity"
+                        ),
+                        "source_refs": [],
+                    }
+                )
+            raw = json.dumps(
+                {
+                    "contract": "candidate-external-proposition-coverage.1",
+                    "findings": findings,
+                },
+                ensure_ascii=False,
+            )
+        return raw, _usage(provider=self.model, ordinal=self.calls)
+
+
+class _EmptyV5ProactiveCoverageAuthority:
+    model = "test-empty-v5-proactive-coverage-authority"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def supports_strict_output_contract(self, contract: str) -> bool:
+        return contract == "candidate-external-proposition-coverage.5"
+
+    async def complete_json(self, _messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+        del temperature
+        self.calls += 1
+        return json.dumps(
+            {
+                "contract": "candidate-external-proposition-coverage.5",
+                "findings": [],
+            },
+            ensure_ascii=False,
+        )
+
+
 class _RainAssociationEmbedding:
     version = "rain-association-fixture.1"
     dimensions = 2
@@ -159,18 +322,562 @@ class _RainAssociationEmbedding:
         )
 
 
+class _BlockingProactivePrefetchEmbedding:
+    version = "blocking-proactive-prefetch-fixture.1"
+    dimensions = FeatureHashRecallEmbedding.dimensions
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self._delegate = FeatureHashRecallEmbedding()
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        if any("听雨" in value for value in texts):
+            self.started.set()
+            self.release.wait(timeout=2)
+        return self._delegate.embed(texts)
+
+
 def _proactive_draft(text: str, *, claims: list[dict[str, object]] | None = None):
     return {
         "timing_choice": "now",
-        "response_text": text,
-        "behavior_tendency": "reach_out",
+        "cadence": "conversational",
+        "beats": [{"modality": "text", "text": text}],
         "stance": "curious",
-        "display_strategy": "natural",
         "brief_rationale": "The present context brought the counterpart to mind.",
         "impulse_summary": "突然想到对方，想顺着这个念头问一句。",
         "world_claims": claims or [],
         "confidence": 7_000,
     }
+
+
+def _private_proactive_draft(
+    choice: str,
+    *,
+    attended_source_ref: str,
+    inner_state_summary: str = "此刻想到对方，想按自己的感觉决定要不要开口。",
+    claims: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        "private_turn_state": {
+            "contract": "private-turn-state.1",
+            "inner_state_summary": inner_state_summary,
+            "attended_source_refs": [attended_source_ref],
+        },
+        "timing_choice": choice,
+        "cadence": "conversational",
+        "stance": "self_directed",
+        "brief_rationale": "根据此刻真实注意到的情境作出选择。",
+        "impulse_summary": "此刻自然地想到了对方。",
+        "world_claims": claims or [],
+        "confidence": 7_000,
+    }
+    if choice != "silent":
+        value["beats"] = [{"modality": "text", "text": "刚刚忽然想和你说句话。"}]
+    if choice == "later":
+        value.update(delay_seconds=60, expires_after_seconds=600)
+    return value
+
+
+@pytest.mark.asyncio
+async def test_proactive_expression_uses_shared_multi_beat_draft_and_plan_binding() -> None:
+    model = _ProactiveReplySequence(
+        [
+            {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "想到对方刚好在意的事，想自然地补两句。",
+                    "attended_source_refs": ["event:ambient:1"],
+                },
+                "timing_choice": "now",
+                "cadence": "conversational",
+                "beats": [
+                    {"modality": "text", "text": "刚刚突然想起你。"},
+                    {"modality": "text", "text": "这边的雨声有点像下午那会儿。"},
+                ],
+                "stance": "warm",
+                "brief_rationale": "此刻有自然的分享冲动。",
+                "impulse_summary": "雨声把注意力带回了这段关系。",
+                "confidence": 7000,
+                "world_claims": [],
+            }
+        ]
+    )
+    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        expression_capabilities=capabilities,
+    ).propose(_proactive_model_request())
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+    assert len(proposal.action_intents) == 2
+    assert proposal.action_intents[1].dependencies == (proposal.action_intents[0].intent_id,)
+    payload = proposal.proposed_changes[0].payload.value()
+    binding = payload["proactive_source_plan_binding_v2"]
+    assert binding["beat_payload_hashes"] == [
+        action.payload_hash for action in proposal.action_intents
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery", (False, True))
+async def test_required_private_turn_state_must_precede_expression_fields(
+    recovery: bool,
+) -> None:
+    model = _ProactiveReplySequence(
+        [
+            {
+                "timing_choice": "now",
+                "cadence": "conversational",
+                "beats": [{"modality": "text", "text": "刚刚忽然想和你说句话。"}],
+                "stance": "warm",
+                "brief_rationale": "此刻想说。",
+                "impulse_summary": "一个当下的念头。",
+                "confidence": 7000,
+                "world_claims": [],
+                # Deliberately last on the provider wire. Pydantic model order
+                # must not launder this into a causal pre-expression state.
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "想到对方，想说句话。",
+                    "attended_source_refs": ["event:ambient:1"],
+                },
+            }
+        ]
+    )
+    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+    adapter = ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        expression_capabilities=capabilities,
+    )
+
+    with pytest.raises(ValueError, match="private turn state must be present as the first"):
+        if recovery:
+            await adapter.recover(_proactive_model_request(), "primary_timeout")
+        else:
+            await adapter.propose(_proactive_model_request())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("choice", "expected_action_kind"),
+    (("now", "proactive_message"), ("later", "followup"), ("silent", None)),
+)
+async def test_unpinned_proactive_private_state_is_reselected_before_source_review(
+    choice: str,
+    expected_action_kind: str | None,
+) -> None:
+    forged_ref = "memory:untrusted:not-in-pinned-context"
+    corrected_ref = "event:user:shenzhen"
+    model = _ProactiveReplySequence(
+        [
+            _private_proactive_draft(choice, attended_source_ref=forged_ref),
+            _private_proactive_draft(choice, attended_source_ref=corrected_ref),
+        ]
+    )
+    inventory = _ProactiveReplySequence(
+        [
+            {
+                "contract": "candidate-external-proposition-inventory.5",
+                "propositions": [],
+            }
+        ]
+        if choice != "silent"
+        else []
+    )
+    authority = _EmptyV5ProactiveCoverageAuthority()
+    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        expression_capabilities=capabilities,
+        source_closure_reviewer=authority,
+        candidate_external_proposition_inventory_model=inventory,
+    ).propose(_proactive_model_request())
+    proposal = validate_proposal_envelope(output.raw_proposal)
+
+    assert isinstance(proposal, DecisionProposal)
+    assert model.calls == 2
+    assert inventory.calls == (0 if choice == "silent" else 1)
+    assert authority.calls == (0 if choice == "silent" else 1)
+    assert proposal.private_turn_state is not None
+    assert proposal.private_turn_state.attended_source_refs == (corrected_ref,)
+    assert proposal.proactive_grounding_outcome == "corrected"
+    if expected_action_kind is None:
+        assert proposal.action_intents == ()
+    else:
+        assert tuple(intent.kind for intent in proposal.action_intents) == (
+            expected_action_kind,
+        )
+    correction_messages = model.messages[1]
+    rendered_correction = json.dumps(correction_messages, ensure_ascii=False)
+    assert forged_ref not in rendered_correction
+    assert "private_turn_state.unpinned_source" in rendered_correction
+    assert "private_turn_state.attended_source_refs" in rendered_correction
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice", ("now", "later", "silent"))
+async def test_second_unpinned_proactive_private_state_fails_closed_without_source_review(
+    choice: str,
+) -> None:
+    model = _ProactiveReplySequence(
+        [
+            _private_proactive_draft(
+                choice,
+                attended_source_ref="memory:untrusted:first",
+            ),
+            _private_proactive_draft(
+                choice,
+                attended_source_ref="memory:untrusted:second",
+            ),
+        ]
+    )
+    inventory = _ProactiveReplySequence([])
+    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+
+    with pytest.raises(ValidationTechnicalFailure) as failure:
+        await ProactiveDraftAdapter(
+            model=model,
+            target="user:primary",
+            expression_capabilities=capabilities,
+            candidate_external_proposition_inventory_model=inventory,
+        ).propose(_proactive_model_request())
+
+    assert failure.value.failure_code == "authored_expression_reselection_invalid"
+    assert model.calls == 2
+    assert inventory.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_grounding_rejected_proactive_proposal_retains_valid_private_state_audit() -> None:
+    unsupported_claim = {
+        "claim_text": "对方之前说去成都看熊猫",
+        "scope": "counterpart_history",
+        "source_refs": ["event:user:chengdu:not-in-context"],
+    }
+    corrected_summary = "仍然想起对方，但没有可引用的那段经历。"
+    model = _ProactiveReplySequence(
+        [
+            _private_proactive_draft(
+                "now",
+                attended_source_ref="event:ambient:1",
+                claims=[unsupported_claim],
+            ),
+            _private_proactive_draft(
+                "now",
+                attended_source_ref="event:ambient:1",
+                inner_state_summary=corrected_summary,
+                claims=[unsupported_claim],
+            ),
+        ]
+    )
+    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        expression_capabilities=capabilities,
+    ).propose(_proactive_model_request())
+    proposal = validate_proposal_envelope(output.raw_proposal)
+
+    assert isinstance(proposal, DecisionProposal)
+    assert proposal.proactive_grounding_outcome == "rejected"
+    assert proposal.private_turn_state is not None
+    assert proposal.private_turn_state.inner_state_summary == corrected_summary
+    assert proposal.proposed_changes == ()
+    assert proposal.action_intents == ()
+
+
+@pytest.mark.asyncio
+async def test_proactive_private_state_changes_audit_not_effect_identity() -> None:
+    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    attention_refs = ("attention:context-only:first", "attention:context-only:second")
+    context["slices"]["recent_dialogue"]["items"][0]["attention_source_refs"] = list(
+        attention_refs
+    )
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    first_output = await ProactiveDraftAdapter(
+        model=_ProactiveReplySequence(
+            [
+                    _private_proactive_draft(
+                        "now",
+                        attended_source_ref=attention_refs[0],
+                    inner_state_summary="想起这段关系，愿意现在开口。",
+                )
+            ]
+        ),
+        target="user:primary",
+        expression_capabilities=capabilities,
+    ).propose(request)
+    second_output = await ProactiveDraftAdapter(
+        model=_ProactiveReplySequence(
+            [
+                    _private_proactive_draft(
+                        "now",
+                        attended_source_ref=attention_refs[1],
+                    inner_state_summary="注意到旧对话，仍然愿意现在开口。",
+                )
+            ]
+        ),
+        target="user:primary",
+        expression_capabilities=capabilities,
+    ).propose(request)
+    first = validate_proposal_envelope(first_output.raw_proposal)
+    second = validate_proposal_envelope(second_output.raw_proposal)
+
+    assert isinstance(first, DecisionProposal)
+    assert isinstance(second, DecisionProposal)
+    assert first.private_turn_state != second.private_turn_state
+    assert first.proposal_hash != second.proposal_hash
+    assert first.proposal_id == second.proposal_id
+    assert first.effect_hash == second.effect_hash
+    assert first.proposed_changes == second.proposed_changes
+    assert first.action_intents == second.action_intents
+    effect_material = json.dumps(
+        {
+            "changes": [item.model_dump(mode="json") for item in first.proposed_changes],
+            "actions": [item.model_dump(mode="json") for item in first.action_intents],
+        },
+        ensure_ascii=False,
+    )
+    assert "private_turn_state" not in effect_material
+    assert all(source_ref not in effect_material for source_ref in attention_refs)
+
+
+@pytest.mark.asyncio
+async def test_later_proactive_multi_beat_plan_preserves_ordered_effect_once_actions() -> None:
+    ledger, _unused_model, _unused_runtime, _turn = _runtime(choice="silent")
+    model = _ProactiveReplySequence(
+        [
+            {
+                "timing_choice": "later",
+                "cadence": "hesitant",
+                "delay_seconds": 60,
+                "expires_after_seconds": 600,
+                "beats": [
+                    {"modality": "text", "text": "我先把刚才的念头放一下。"},
+                    {"modality": "text", "text": "晚一点再慢慢跟你讲。"},
+                ],
+                "stance": "thoughtful",
+                "brief_rationale": "更适合稍后自然接续。",
+                "impulse_summary": "这件事还想留一点余地。",
+                "confidence": 7000,
+                "world_claims": [],
+            }
+        ]
+    )
+    runtime, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001 - acceptance seam fixture
+        model=model,
+    )
+
+    assert (await runtime.drain_one()).status == "opened"
+    result = await runtime.drain_one()
+    assert result.status == "authorized"
+    actions = ledger.project().actions
+    assert len(actions) == 2
+    assert actions[1].dependencies == (actions[0].action_id,)
+    assert actions[0].not_before == actions[1].not_before
+    assert actions[0].expires_at == actions[1].expires_at
+
+
+def _proactive_biography_request() -> ModelInput:
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["world_life"] = {
+        "availability": "available",
+        "items": [
+            {
+                "item_ref": "biography:summer-home",
+                "value": {
+                    "context_kind": "biographical_context",
+                    "logical_at": NOW.isoformat(),
+                    "age": 21,
+                    "academic_phase": "summer_break",
+                    "season": "summer",
+                    "current_residence_context_tags": ["residence:family_home_jiaxing"],
+                    "active_life_arcs": [],
+                },
+            }
+        ],
+    }
+    return request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+
+
+@pytest.mark.asyncio
+async def test_proactive_biography_parent_cannot_authorize_an_occurrence() -> None:
+    unsupported = _proactive_draft(
+        "早上翻旧书的时候突然想起以前在嘉兴老街逛书店的日子。",
+        claims=[
+            {
+                "claim_text": "沈知栀今天早上翻旧书并想起以前逛老街书店",
+                "scope": "current_world",
+                "source_refs": ["biography:summer-home"],
+            }
+        ],
+    )
+    model = _ProactiveReplySequence([unsupported, unsupported])
+
+    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
+        _proactive_biography_request()
+    )
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+    assert model.calls == 2
+    assert proposal.proactive_grounding_outcome == "rejected"
+    assert not proposal.action_intents
+    first_request = json.loads(model.messages[0][1]["content"])
+    authority = first_request["proactive_fact_authority"]
+    assert authority["biographical_parent_attention_only"] == ["biography:summer-home"]
+    assert "biography:summer-home" not in authority["world_claim_source_refs"]["current_world"]
+    assert "biography:summer-home" not in authority["world_claim_source_refs"]["past_world"]
+    correction_messages = model.messages[1]
+    assert unsupported["beats"][0]["text"] not in json.dumps(
+        correction_messages, ensure_ascii=False
+    )
+    correction = json.loads(correction_messages[-1]["content"])
+    assert correction["contract"] == "proactive-grounding-reselection.1"
+    assert correction["validation_failure"] == {
+        "code": "proactive_world_claim_source_lane_mismatch",
+        "path": "world_claims[].source_refs",
+    }
+    assert "original_draft" not in correction
+
+
+@pytest.mark.asyncio
+async def test_proactive_can_cite_an_exact_current_biographical_coordinate() -> None:
+    request = _proactive_biography_request()
+    context = json.loads(request.model_content_json)
+    residence_ref = next(
+        item.source_ref
+        for item in biographical_coordinate_authorities(context)
+        if item.field_path == "/current_residence_context_tags"
+    )
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "我现在在嘉兴家里，刚才忽然想和你说句话。",
+                claims=[
+                    {
+                        "claim_text": "沈知栀当前住处情境是嘉兴家庭住处",
+                        "scope": "current_world",
+                        "source_refs": [residence_ref],
+                    }
+                ],
+            )
+        ]
+    )
+
+    reviewer = _supporting_source_reviewer()
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+    ).propose(request)
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+    assert model.calls == 1
+    assert reviewer.calls == 1
+    assert proposal.proactive_grounding_outcome == "not_required"
+    assert proposal.action_intents
+
+
+@pytest.mark.asyncio
+async def test_proactive_cannot_use_age_coordinate_to_prove_a_life_occurrence() -> None:
+    request = _proactive_biography_request()
+    context = json.loads(request.model_content_json)
+    age_ref = next(
+        item.source_ref
+        for item in biographical_coordinate_authorities(context)
+        if item.field_path == "/age"
+    )
+    unsupported = _proactive_draft(
+        "今天早上翻书架时看到一本旧书，忽然想起你。",
+        claims=[
+            {
+                "claim_text": "沈知栀今天早上翻书架时看到一本旧书",
+                "scope": "current_world",
+                "source_refs": [age_ref],
+            }
+        ],
+    )
+    model = _ProactiveReplySequence([unsupported, unsupported])
+    reviewer = _ProactiveReplySequence(
+        [
+            _source_closure_review(
+                claim_indexes=(0,),
+                visible_failures=("occurrence_or_status_authority_mismatch",),
+                visible_findings=(
+                    {
+                        "category": "occurrence_or_status_authority_mismatch",
+                        "visible_span": "今天早上翻书架时看到一本旧书",
+                        "claim_index": 0,
+                        "source_relation": "declared_world_claim_source_mismatch",
+                        "source_refs": [age_ref],
+                    },
+                ),
+            ),
+            _source_closure_review(
+                claim_indexes=(0,),
+                visible_failures=("occurrence_or_status_authority_mismatch",),
+                visible_findings=(
+                    {
+                        "category": "occurrence_or_status_authority_mismatch",
+                        "visible_span": "今天早上翻书架时看到一本旧书",
+                        "claim_index": 0,
+                        "source_relation": "declared_world_claim_source_mismatch",
+                        "source_refs": [age_ref],
+                    },
+                ),
+            ),
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+    ).propose(request)
+    proposal = validate_proposal_envelope(output.raw_proposal)
+
+    assert isinstance(proposal, DecisionProposal)
+    assert model.calls == 2
+    assert reviewer.calls == 2
+    assert proposal.proactive_grounding_outcome == "rejected"
+    assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
+    assert not proposal.action_intents
+    first_review = json.loads(reviewer.messages[0][1]["content"])
+    coordinate_entry = next(
+        entry
+        for entry in first_review["source_evidence"]["entries"]
+        if entry["kind"] == "biographical_coordinate"
+    )
+    assert coordinate_entry["material"]["field_path"] == "/age"
+    assert coordinate_entry["material"]["value"] == 21
 
 
 @pytest.mark.asyncio
@@ -200,18 +907,121 @@ async def test_proactive_history_claim_is_corrected_once_against_pinned_sources(
         ]
     )
 
-    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
-        _proactive_model_request()
-    )
+    reviewer = _supporting_source_reviewer()
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+    ).propose(_proactive_model_request())
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
 
     assert model.calls == 2
+    assert reviewer.calls == 1
     assert proposal.proactive_grounding_outcome == "corrected"
     assert proposal.impulse_summary == "突然想到对方，想顺着这个念头问一句。"
     assert (
         "成都" not in proposal.proposed_changes[0].payload.value()["beat_drafts"][0]["inline_text"]
     )
+
+
+@pytest.mark.asyncio
+async def test_proactive_corrected_candidate_gets_its_own_report_relative_review() -> None:
+    """A correction is a distinct author candidate, even in the proactive lane."""
+
+    current_report = "深圳说实话不是很好玩哈哈哈哈"
+    request = _proactive_model_request().model_copy(
+        update={
+            "trigger_ref": "event:user:current-shenzhen",
+            "trigger_evidence": (
+                ProposalEvidenceRef(
+                    ref_id="event:user:current-shenzhen",
+                    evidence_kind="observed_message",
+                    source_world_revision=8,
+                    immutable_hash="sha256:" + "c" * 64,
+                ),
+            ),
+            "trigger_message": TriggerMessage(
+                event_ref="event:user:current-shenzhen",
+                event_payload_hash="sha256:" + "c" * 64,
+                observation_ref="observation:current-shenzhen",
+                source_world_revision=8,
+                actor="user:primary",
+                channel="qq:c2c",
+                reply_target="user:primary",
+                text=current_report,
+            ),
+        }
+    )
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "你上次去成都看熊猫，后来怎么样？",
+                claims=[
+                    {
+                        "claim_text": "你上次去成都看熊猫",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:user:chengdu:not-in-context"],
+                    }
+                ],
+            ),
+            _proactive_draft(
+                "你刚才说深圳不好玩，是哪里让你觉得没劲？",
+                claims=[
+                    {
+                        "claim_text": "你刚才说深圳不好玩",
+                        "scope": "counterpart_history",
+                        "source_refs": ["event:user:shenzhen"],
+                    }
+                ],
+            ),
+        ]
+    )
+    primary = _ProactiveReplySequence(
+        [
+            _source_closure_review(
+                visible_failures=("undeclared_external_assertion",),
+                visible_findings=(
+                    {
+                        "category": "undeclared_external_assertion",
+                        "visible_span": "你刚才说深圳不好玩",
+                        "claim_index": None,
+                        "source_relation": "unclosed",
+                        "source_refs": [],
+                    },
+                ),
+            )
+        ]
+    )
+    narrow = _ProactiveReplySequence(
+        [
+            {
+                "contract": "report-relative-entailment-adjudication.2",
+                "findings": [
+                    {
+                        "finding_index": 0,
+                        "decision": "covered_by_exact_current_report",
+                        "failure_dimensions": [],
+                    }
+                ],
+                "r": "The question directly takes up the exact current report.",
+            }
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=primary,
+        report_relative_reviewer=narrow,
+    ).propose(request)
+    proposal = validate_proposal_envelope(output.raw_proposal)
+
+    assert isinstance(proposal, DecisionProposal)
+    assert proposal.proactive_grounding_outcome == "corrected"
+    assert model.calls == 2
+    assert primary.calls == 1
+    assert narrow.calls == 1
 
 
 @pytest.mark.asyncio
@@ -247,6 +1057,37 @@ async def test_proactive_history_claim_is_rejected_after_one_bad_correction() ->
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
 
+    assert model.calls == 2
+    assert proposal.proactive_grounding_outcome == "rejected"
+    assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
+    assert not proposal.action_intents
+
+
+@pytest.mark.asyncio
+async def test_proactive_legacy_subjective_claim_cannot_launder_a_life_event() -> None:
+    unsupported_life_claim = {
+        "claim_text": "我下午在家泡茶翻书",
+        "scope": "subjective_or_hypothetical",
+        "source_refs": [],
+    }
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "我下午在家泡茶翻书的时候突然想起你。",
+                claims=[unsupported_life_claim],
+            ),
+            _proactive_draft(
+                "我下午在家泡茶翻书的时候突然想起你。",
+                claims=[unsupported_life_claim],
+            ),
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
+        _proactive_model_request()
+    )
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
     assert model.calls == 2
     assert proposal.proactive_grounding_outcome == "rejected"
     assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
@@ -305,23 +1146,168 @@ async def test_companion_old_reply_cannot_prove_a_counterpart_experience() -> No
 
 
 @pytest.mark.asyncio
-async def test_claim_free_proactive_question_does_not_add_a_review_call() -> None:
-    model = _ProactiveReplySequence(
-        [_proactive_draft("突然有点好奇，你最近有没有遇到什么让你眼前一亮的东西？")]
+async def test_claim_free_proactive_greeting_passes_candidate_wide_review() -> None:
+    text = "刚刚忽然想和你说句话。"
+    model = _ProactiveReplySequence([_proactive_draft(text)])
+    inventory = _ProactiveReplySequence(
+        [_candidate_inventory(text, semantic_role="outer_private_state")]
     )
+    reviewer = _ProactiveCoverageAuthority()
 
-    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
-        _proactive_model_request()
-    )
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+    ).propose(_proactive_model_request())
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
 
     assert model.calls == 1
+    assert inventory.calls == 1
+    assert reviewer.calls == 1
     assert proposal.proactive_grounding_outcome == "not_required"
+    assert proposal.action_intents
 
 
 @pytest.mark.asyncio
-async def test_proactive_decision_sees_semantic_memory_from_its_current_situation() -> None:
+async def test_no_external_candidate_inventory_needs_no_source_authority_for_subjective_greeting() -> (
+    None
+):
+    text = "刚刚忽然想和你说句话。"
+    model = _ProactiveReplySequence([_proactive_draft(text)])
+    inventory = _ProactiveReplySequence(
+        [_candidate_inventory(text, semantic_role="outer_private_state")]
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        candidate_external_proposition_inventory_model=inventory,
+    ).propose(_proactive_model_request())
+    proposal = validate_proposal_envelope(output.raw_proposal)
+
+    assert isinstance(proposal, DecisionProposal)
+    assert proposal.action_intents
+    assert inventory.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_nonempty_candidate_inventory_fails_closed_without_source_authority() -> None:
+    invented = "你下午说已经把延迟问题彻底解决了。"
+    model = _ProactiveReplySequence([_proactive_draft(invented)])
+    inventory = _ProactiveReplySequence([_candidate_inventory(invented)])
+
+    with pytest.raises(
+        ValidationTechnicalFailure,
+        match="proactive_source_closure_reviewer_unavailable",
+    ):
+        await ProactiveDraftAdapter(
+            model=model,
+            target="user:primary",
+            candidate_external_proposition_inventory_model=inventory,
+        ).propose(_proactive_model_request())
+
+    assert model.calls == 1
+    assert inventory.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_undeclared_counterpart_fact_is_reselected_with_usage_and_winner_identity() -> None:
+    invented = "你下午说已经把延迟问题彻底解决了。"
+    corrected = "刚刚忽然想和你说句话。"
+    model = _MeteredProactiveReplySequence(
+        [_proactive_draft(invented), _proactive_draft(corrected)]
+    )
+    inventory = _MeteredProactiveReplySequence(
+        [
+            _candidate_inventory(invented),
+            _candidate_inventory(
+                corrected,
+                semantic_role="outer_private_state",
+            ),
+        ]
+    )
+    inventory.model = "test-proactive-inventory"
+    reviewer = _ProactiveCoverageAuthority(
+        unclosed_texts=(invented,),
+        metered=True,
+    )
+    request = _proactive_model_request()
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+    ).propose(request)
+    proposal = validate_proposal_envelope(output.raw_proposal)
+
+    assert isinstance(proposal, DecisionProposal)
+    assert proposal.proactive_grounding_outcome == "corrected"
+    assert corrected in json.dumps(output.raw_proposal, ensure_ascii=False)
+    assert invented not in json.dumps(output.raw_proposal, ensure_ascii=False)
+    assert model.calls == 2
+    assert inventory.calls == 2
+    assert reviewer.calls == 3
+    assert output.usage is not None
+    assert output.usage.input_tokens == 70
+    assert output.usage.output_tokens == 14
+    assert output.winning_model_call_id is not None
+    assert output.winning_model_call_id != request.call_id
+    correction_messages = model.messages[1]
+    expected_request_hash = sha256(
+        json.dumps(
+            {"messages": correction_messages, "temperature": 0.2},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    assert output.winning_request_hash == expected_request_hash
+    rendered_correction = json.dumps(correction_messages, ensure_ascii=False)
+    assert invented not in rendered_correction
+    assert "original_draft" not in rendered_correction
+    correction = json.loads(correction_messages[-1]["content"])
+    assert correction["contract"] == "source-closure-reselection.2"
+    assert correction["rejected_candidate_sha256"]
+    assert correction["rejected_categories"] == {
+        "ci": [],
+        "v": ["undeclared_external_assertion"],
+        "p": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_undeclared_companion_life_fact_is_grounding_rejected_after_one_reselection() -> None:
+    invented = "我下午去学校旁边的新书店逛了两小时。"
+    model = _ProactiveReplySequence([_proactive_draft(invented), _proactive_draft(invented)])
+    inventory = _ProactiveReplySequence(
+        [_candidate_inventory(invented), _candidate_inventory(invented)]
+    )
+    reviewer = _ProactiveCoverageAuthority(unclosed_texts=(invented,))
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+    ).propose(_proactive_model_request())
+    proposal = validate_proposal_envelope(output.raw_proposal)
+
+    assert isinstance(proposal, DecisionProposal)
+    assert proposal.proactive_grounding_outcome == "rejected"
+    assert proposal.proactive_opportunity_decision.disposition == "grounding_rejected"
+    assert not proposal.action_intents
+    assert model.calls == 2
+    assert inventory.calls == 2
+    assert reviewer.calls == 4
+
+
+def _proactive_recall_fixture(
+    *,
+    semantic_embedding: RecallEmbedding | None = None,
+) -> tuple[ModelInput, RecallCoordinator]:
     request = _proactive_model_request()
     context = json.loads(request.model_content_json)
     context["slices"]["current_situation"] = {
@@ -376,10 +1362,60 @@ async def test_proactive_decision_sees_semantic_memory_from_its_current_situatio
         actor_ref="agent:companion",
         subject_refs=("agent:companion", "user:primary"),
         logical_time=NOW,
-        semantic_embedding=_RainAssociationEmbedding(),
+        semantic_embedding=semantic_embedding or _RainAssociationEmbedding(),
         trigger_ref=request.trigger_ref,
     )
-    model = _ProactiveReplySequence([_proactive_draft("雨声让我突然想起一件旧事。")])
+    return request, recall
+
+
+@pytest.mark.asyncio
+async def test_unselected_proactive_prefetch_is_not_model_result_provenance() -> None:
+    request, recall = _proactive_recall_fixture()
+    model = _ProactiveReplySequence([_proactive_draft("刚刚忽然想和你说句话。")])
+    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
+    adapter.install_recall_coordinator(recall)
+
+    output = await adapter.propose(request)
+
+    health = recall.semantic_health()
+    assert health["prefetch_first_pass_local_count"] == 0
+    assert health["prefetch_first_pass_semantic_count"] == 0
+    assert output.prefetch_trace is None
+    assert output.recall_trace is None
+
+
+@pytest.mark.asyncio
+async def test_unselected_proactive_prefetch_never_delays_or_claims_first_pass_delivery() -> None:
+    embedding = _BlockingProactivePrefetchEmbedding()
+    request, recall = _proactive_recall_fixture(semantic_embedding=embedding)
+    model = _ProactiveReplySequence([_proactive_draft("刚刚忽然想和你说句话。")])
+    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
+    adapter.install_recall_coordinator(recall)
+
+    started = asyncio.get_running_loop().time()
+    try:
+        output = await adapter.propose(request)
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        embedding.release.set()
+        recall.close()
+
+    assert elapsed < 0.1
+    assert output.prefetch_trace is None
+    health = recall.semantic_health()
+    assert health["prefetch_first_pass_local_count"] == 0
+    assert health["prefetch_first_pass_semantic_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_character_chosen_recall_reuses_prefetch_then_forms_final_draft() -> None:
+    request, recall = _proactive_recall_fixture()
+    model = _ProactiveReplySequence(
+        [
+            {"recall_request": {"query_text": "雨夜 听雨", "limit": 4}},
+            _proactive_draft("雨声让我突然想起一件旧事。"),
+        ]
+    )
     adapter = ProactiveDraftAdapter(model=model, target="user:primary")
     adapter.install_recall_coordinator(recall)
 
@@ -387,11 +1423,41 @@ async def test_proactive_decision_sees_semantic_memory_from_its_current_situatio
 
     assert output.prefetch_trace is not None
     assert verify_trusted_recall_trace(output.prefetch_trace).hits
-    assert any("上次雨夜回宿舍" in str(call) for call in model.messages)
+    assert output.recall_trace is not None
+    assert verify_trusted_recall_trace(output.recall_trace).hits
+    assert model.calls == 2
+    assert "上次雨夜回宿舍" in model.messages[-1][-1]["content"]
+    request_hash = sha256(
+        json.dumps(
+            {"messages": model.messages[-1], "temperature": 0.8},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    expected_call_id = (
+        "model-call:"
+        + sha256(
+            json.dumps(
+                {
+                    "parent_call_id": request.call_id,
+                    "purpose": "recall_followup",
+                    "request_hash": request_hash,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
+    assert output.winning_request_hash == request_hash
+    assert output.winning_model_call_id == expected_call_id
+    assert tuple(item.phase for item in output.presented_prefetch_traces) == ("recall_followup",)
+    assert output.presented_prefetch_traces[0].model_call_id == expected_call_id
 
 
 @pytest.mark.asyncio
-async def test_valid_grounded_proactive_claim_does_not_add_a_review_call() -> None:
+async def test_valid_grounded_proactive_claim_runs_one_source_review() -> None:
     model = _ProactiveReplySequence(
         [
             _proactive_draft(
@@ -407,12 +1473,16 @@ async def test_valid_grounded_proactive_claim_does_not_add_a_review_call() -> No
         ]
     )
 
-    output = await ProactiveDraftAdapter(model=model, target="user:primary").propose(
-        _proactive_model_request()
-    )
+    reviewer = _supporting_source_reviewer()
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+    ).propose(_proactive_model_request())
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert isinstance(proposal, DecisionProposal)
     assert model.calls == 1
+    assert reviewer.calls == 1
     assert proposal.proactive_grounding_outcome == "not_required"
 
 
@@ -473,7 +1543,11 @@ def _commit(ledger: WorldLedger, *events: WorldEvent) -> None:
     )
 
 
-def _seed_due_thread(ledger: WorldLedger) -> None:
+def _seed_due_thread(
+    ledger: WorldLedger,
+    *,
+    consideration_horizon: timedelta = timedelta(hours=8),
+) -> None:
     source = EvidenceRef(
         ref_id="operator:unfinished-thought",
         evidence_type="operator_observation",
@@ -506,9 +1580,10 @@ def _seed_due_thread(ledger: WorldLedger) -> None:
         source_evidence_refs=(source,),
         importance_bp=7_000,
         due_window=DueWindow(
-            opens_at=NOW + timedelta(minutes=1), closes_at=NOW + timedelta(hours=6)
+            opens_at=NOW + timedelta(minutes=1),
+            closes_at=NOW + consideration_horizon,
         ),
-        expires_at=NOW + timedelta(hours=8),
+        expires_at=NOW + consideration_horizon,
         resolution_contract_ref="resolution:unfinished-thought",
         privacy_class="private",
     )
@@ -698,14 +1773,14 @@ class _DraftModel:
         self.messages.append(messages)
         value: dict[str, object] = {
             "timing_choice": self.choice,
-            "behavior_tendency": "remember_and_choose",
+            "cadence": "conversational",
             "stance": "low_pressure",
-            "display_strategy": "natural",
             "brief_rationale": "根据当前关系与未完事项自由决定",
+            "impulse_summary": "此刻有一点想把这件事接回来的冲动。",
             "confidence": 7_200,
         }
         if self.choice != "silent":
-            value["response_text"] = "刚才那件事我又想了一下。"
+            value["beats"] = [{"modality": "text", "text": "刚才那件事我又想了一下。"}]
         if self.choice == "later":
             value.update(delay_seconds=60, expires_after_seconds=600)
         return json.dumps(value, ensure_ascii=False)
@@ -939,9 +2014,13 @@ def _make_proactive_runtime(
     owner="worker:proactive",
     identity_frame=None,
     social_initiative=None,
+    expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
 ):  # type: ignore[no-untyped-def]
     adapter = ProactiveDraftAdapter(
-        model=model, target="user:primary", identity_frame=identity_frame
+        model=model,
+        target="user:primary",
+        identity_frame=identity_frame,
+        expression_capabilities=expression_capabilities,
     )
     turn = ProactiveDeliberationTurn(
         ledger=ledger,
@@ -974,7 +2053,12 @@ def _make_proactive_runtime(
     return runtime, turn
 
 
-def _runtime(*, choice: str, budget: int = 100):
+def _runtime(
+    *,
+    choice: str,
+    budget: int = 100,
+    consideration_horizon: timedelta = timedelta(hours=8),
+):
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=WORLD, accepted_batch_issuer=issuer)
     _commit(ledger, _event("event:world:start", "WorldStarted", {}))
@@ -1003,7 +2087,7 @@ def _runtime(*, choice: str, budget: int = 100):
             {"account": account.model_dump(mode="json")},
         ),
     )
-    _seed_due_thread(ledger)
+    _seed_due_thread(ledger, consideration_horizon=consideration_horizon)
     model = _DraftModel(choice)
     runtime, turn = _make_proactive_runtime(ledger=ledger, issuer=issuer, model=model)
     return ledger, model, runtime, turn
@@ -1039,6 +2123,45 @@ async def test_due_thread_is_a_model_opportunity_not_a_timer_message(
 
 
 @pytest.mark.asyncio
+async def test_grounding_rejection_completes_consideration_without_retry_or_visible_effect() -> (
+    None
+):
+    """A semantic rejection is terminal for this choice, not a technical outage."""
+
+    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
+    unsupported_claim = {
+        "claim_text": "对方之前说去成都看熊猫",
+        "scope": "counterpart_history",
+        "source_refs": ["event:user:chengdu:not-in-context"],
+    }
+    rejected = _proactive_draft(
+        "突然想起你之前说去成都看熊猫。",
+        claims=[unsupported_claim],
+    )
+    model = _ProactiveReplySequence([rejected, rejected])
+    runtime, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001 - acceptance seam fixture
+        model=model,
+        owner="worker:proactive:grounding-rejected",
+    )
+
+    assert (await runtime.drain_one()).status == "opened"
+    rejected_result = await runtime.drain_one()
+
+    assert rejected_result.status == "grounding_rejected"
+    assert rejected_result.reason_code == "proactive.grounding_rejected"
+    assert model.calls == 2
+    projection = ledger.project()
+    assert projection.actions == ()
+    process = projection.trigger_processes[-1]
+    assert process.state == "terminal"
+    assert process.runtime_outcome_ref == "proactive:grounding-rejected"
+    assert (await runtime.drain_one()).status == "idle"
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
 async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity() -> None:
     ledger, model, runtime, _turn = _runtime(choice="now")
 
@@ -1061,14 +2184,33 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
         "target_ref": "user:primary",
     }
     system = model.messages[0][0]["content"]
-    assert "semantic anchor" in system
-    assert "light relationship-appropriate check-in" in system
-    assert "Do not select from a motive menu" in system
-    assert "choose silent" in system
+    for behavioral_instruction in (
+        "curiosity, sharing, missing someone, asking for help or comfort",
+        "semantic anchor",
+        "light relationship-appropriate check-in",
+        "Do not select from a motive menu",
+        "choose silent",
+        "A silent brief_rationale must explain",
+        "smallest valid choice",
+    ):
+        assert behavioral_instruction not in system
     user = json.loads(model.messages[0][1]["content"])
     assert user["proactive_opportunity"]["source_kind"] == "thread"
     assert "verified proactive opportunity" in user["proactive_opportunity"]["guidance"].lower()
     assert user["proactive_opportunity"]["source_refs"] == [proposal["trigger_ref"]]
+
+
+@pytest.mark.asyncio
+async def test_proactive_recovery_keeps_the_same_character_choice_prompt() -> None:
+    model = _SequenceDraftModel(("silent", "silent"))
+    adapter = ProactiveDraftAdapter(model=model, target="user:primary")
+    request = _proactive_model_request()
+
+    await adapter.propose(request)
+    await adapter.recover(request, "primary_timeout")
+
+    assert model.messages[0][0]["content"] == model.messages[1][0]["content"]
+    assert "smallest valid choice" not in model.messages[1][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -1113,7 +2255,7 @@ async def test_proactive_draft_uses_provider_json_mode_when_available() -> None:
 
 
 @pytest.mark.asyncio
-async def test_loose_visible_proactive_output_salvages_only_explicit_choice_and_text() -> None:
+async def test_proactive_output_requires_the_shared_expression_draft_shape() -> None:
     ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
     model = _LooseProactiveModel({"choice": "now", "text": "刚才那件事，我还记着。"})
     runtime, _ = _make_proactive_runtime(
@@ -1125,15 +2267,11 @@ async def test_loose_visible_proactive_output_salvages_only_explicit_choice_and_
     assert (await runtime.drain_one()).status == "opened"
     result = await runtime.drain_one()
 
-    assert result.status == "authorized"
-    proposal = json.loads(ledger.project().proposal_audits[-1].proposal_json)
-    assert proposal["brief_rationale"] == "Considered the verified proactive opportunity."
-    assert proposal["confidence"] == 5000
-    assert proposal["proactive_opportunity_decision"]["decision_origin"] == "model"
+    assert result.status == "failed_safe"
 
 
 @pytest.mark.asyncio
-async def test_loose_explicit_silent_ignores_invalid_peripheral_fields() -> None:
+async def test_proactive_silence_requires_the_shared_expression_draft_shape() -> None:
     ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
     model = _LooseProactiveModel(
         {"choice": "silent", "confidence": "certain", "brief_rationale": []}
@@ -1145,12 +2283,7 @@ async def test_loose_explicit_silent_ignores_invalid_peripheral_fields() -> None
     )
 
     assert (await runtime.drain_one()).status == "opened"
-    assert (await runtime.drain_one()).status == "silent"
-
-    proposal = json.loads(ledger.project().proposal_audits[-1].proposal_json)
-    decision = proposal["proactive_opportunity_decision"]
-    assert decision["disposition"] == "silent_after_consideration"
-    assert decision["decision_origin"] == "model"
+    assert (await runtime.drain_one()).status == "failed_safe"
 
 
 @pytest.mark.asyncio
@@ -1256,6 +2389,47 @@ async def test_two_unparseable_choices_are_technical_failure_not_character_silen
 
 
 @pytest.mark.asyncio
+async def test_repeated_unpinned_private_state_commits_no_effect_and_waits_for_retry() -> None:
+    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
+    model = _ProactiveReplySequence(
+        [
+            _private_proactive_draft(
+                "now",
+                attended_source_ref="memory:untrusted:first",
+            ),
+            _private_proactive_draft(
+                "now",
+                attended_source_ref="memory:untrusted:second",
+            ),
+        ]
+    )
+    capabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES.model_copy(
+        update={"private_turn_state_mode": "required"}
+    )
+    runtime, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001 - acceptance seam fixture
+        model=model,
+        owner="worker:proactive:private-state-failure",
+        expression_capabilities=capabilities,
+    )
+
+    assert (await runtime.drain_one()).status == "opened"
+    result = await runtime.drain_one()
+
+    assert result.status == "failed_safe"
+    assert model.calls == 2
+    projection = ledger.project()
+    assert projection.proposal_audits == ()
+    assert projection.actions == ()
+    waiting = await runtime.drain_one()
+    assert waiting.status == "retry_wait"
+    assert waiting.retry_ordinal == 1
+    assert waiting.next_retry_at == projection.logical_time + timedelta(minutes=10)
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
 async def test_technical_backoff_does_not_starve_a_later_due_opportunity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1297,6 +2471,57 @@ async def test_technical_backoff_does_not_starve_a_later_due_opportunity(
 
     assert result.status == "opened"
     assert opened == [second]
+
+
+@pytest.mark.asyncio
+async def test_settled_occurrence_cannot_bypass_situation_change_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger, _model, runtime, _turn = _runtime(choice="silent")
+    settlement = _event(
+        "event:settlement:scheduled-only",
+        "WorldOccurrenceSettled",
+        {},
+        at=NOW,
+    )
+    source_ref = SimpleNamespace(
+        event_id=settlement.event_id,
+        event_type=settlement.event_type,
+        payload_hash=settlement.payload_hash,
+        world_revision=7,
+        logical_time=settlement.logical_time,
+    )
+    projection = SimpleNamespace(
+        logical_time=NOW + timedelta(seconds=30),
+        world_occurrences=(
+            SimpleNamespace(
+                status="settled",
+                settlement_event_ref=settlement.event_id,
+                visibility="shareable",
+                settled_at=NOW,
+                occurrence_id="occurrence:scheduled-only",
+            ),
+        ),
+        threads=(),
+        commitments=(),
+        trigger_processes=(),
+        message_observations=(),
+        committed_world_event_refs=(source_ref,),
+        model_result_audits=(),
+    )
+
+    class _NotDueSituationInitiative:
+        async def next_opportunity(self, _projection):  # type: ignore[no-untyped-def]
+            return None
+
+    async def lookup(event_id: str):  # type: ignore[no-untyped-def]
+        assert event_id == settlement.event_id
+        return settlement, SimpleNamespace(world_revision=source_ref.world_revision)
+
+    runtime._social_initiative = _NotDueSituationInitiative()  # noqa: SLF001
+    monkeypatch.setattr(runtime, "_lookup", lookup)
+
+    assert await runtime._next_opportunity(projection) is None  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -1759,6 +2984,10 @@ async def test_ambient_presence_clock_can_open_model_owned_contact_after_source_
         )
         assert proposal["proactive_opportunity_decision"]["source_kind"] == "ambient_presence"
         assert proactive.calls == 1
+        prompt = json.dumps(proactive.messages[0], ensure_ascii=False)
+        assert "choose silen" not in prompt
+        assert "genuine contact" not in prompt
+        assert "timing authority only" in prompt
     finally:
         app.close()
 
@@ -1806,6 +3035,87 @@ async def test_technical_failures_retry_at_ten_thirty_then_capped_one_twenty_min
         assert (await runtime.drain_one()).status == "failed_safe"
 
     assert malformed.calls == 10
+
+
+@pytest.mark.asyncio
+async def test_technical_failure_retry_survives_sixty_four_attempts_and_runtime_restart() -> None:
+    ledger, _model, _runtime_value, _turn = _runtime(
+        choice="silent",
+        consideration_horizon=timedelta(days=14),
+    )
+    malformed = _MalformedProactiveModel()
+    runtime, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
+        model=malformed,
+        owner="worker:proactive:retry-before-restart",
+    )
+
+    assert (await runtime.drain_one()).status == "opened"
+    assert (await runtime.drain_one()).status == "failed_safe"
+    for retry_ordinal in range(1, 65):
+        waiting = await runtime.drain_one()
+        assert waiting.status == "retry_wait"
+        assert waiting.retry_ordinal == retry_ordinal
+        assert waiting.next_retry_at is not None
+        current = ledger.project().logical_time
+        assert current is not None
+        _commit(
+            ledger,
+            _event(
+                f"event:clock:unbounded-retry:{retry_ordinal}",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": current.isoformat(),
+                    "logical_time_to": waiting.next_retry_at.isoformat(),
+                },
+                at=waiting.next_retry_at,
+            ),
+        )
+        assert (await runtime.drain_one()).status == "opened"
+        assert (await runtime.drain_one()).status == "failed_safe"
+
+    restarted, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
+        model=malformed,
+        owner="worker:proactive:retry-after-restart",
+    )
+    waiting = await restarted.drain_one()
+
+    assert waiting.status == "retry_wait"
+    assert waiting.retry_ordinal == 65
+    assert waiting.next_retry_at == ledger.project().logical_time + timedelta(minutes=120)
+
+    current = ledger.project().logical_time
+    assert current is not None
+    assert waiting.next_retry_at is not None
+    _commit(
+        ledger,
+        _event(
+            "event:clock:unbounded-retry:65",
+            "ClockAdvanced",
+            {
+                "logical_time_from": current.isoformat(),
+                "logical_time_to": waiting.next_retry_at.isoformat(),
+            },
+            at=waiting.next_retry_at,
+        ),
+    )
+    assert (await restarted.drain_one()).status == "opened"
+    assert (await restarted.drain_one()).status == "failed_safe"
+    calls_after_retry = malformed.calls
+
+    restarted_again, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
+        model=malformed,
+        owner="worker:proactive:retry-second-restart",
+    )
+    next_wait = await restarted_again.drain_one()
+    assert next_wait.status == "retry_wait"
+    assert next_wait.retry_ordinal == 66
+    assert malformed.calls == calls_after_retry
 
 
 @pytest.mark.asyncio

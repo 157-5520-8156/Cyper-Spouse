@@ -9,6 +9,7 @@ from typing import Literal
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
 from .affect_proposal_compiler import AffectProposalCompiler
 from .appraisal_proposal_worker import AppraisalProposalWorkResult, AppraisalProposalWorker
+from .errors import ConcurrencyConflict
 from .schema_core import FrozenModel
 from .schemas import CommitResult, ProjectionCursor
 
@@ -21,9 +22,25 @@ class ImmediateEmotionProposalWorkResult(FrozenModel):
     source_proposal_id: str
     appraisal: AppraisalProposalWorkResult
     affect_skip_reason: str | None = None
+    requires_fresh_affect_consideration: bool = False
     typed_affect_proposal_id: str | None = None
     affect_compile_commit: CommitResult | None = None
     affect_acceptance_commit: CommitResult | None = None
+
+
+class ImmediateEmotionConcurrencyConflict(ConcurrencyConflict):
+    """A cursor race with enough phase identity for safe recovery.
+
+    Appraisal contention means no Appraisal mutation was accepted and the
+    role must reconsider against a fresh pinned World Context. Affect
+    contention happens only after the source Appraisal is authoritative, so
+    recovery must reuse the same audited decision rather than create a second
+    Appraisal for one Observation.
+    """
+
+    def __init__(self, *, stage: Literal["appraisal", "affect"]) -> None:
+        super().__init__(f"immediate emotion {stage} cursor became stale")
+        self.stage = stage
 
 
 class ImmediateEmotionProposalWorker:
@@ -70,11 +87,14 @@ class ImmediateEmotionProposalWorker:
         if world_id != self._ledger.world_id:
             raise ValueError("immediate emotion worker world mismatch")
         started = time.perf_counter()
-        appraisal = self._appraisal.process(
-            world_id=world_id,
-            cursor=audit_cursor,
-            proposal_id=proposal_id,
-        )
+        try:
+            appraisal = self._appraisal.process(
+                world_id=world_id,
+                cursor=audit_cursor,
+                proposal_id=proposal_id,
+            )
+        except ConcurrencyConflict as exc:
+            raise ImmediateEmotionConcurrencyConflict(stage="appraisal") from exc
         appraisal_ms = (time.perf_counter() - started) * 1000
         head = self._ledger.project()
         current_cursor = ProjectionCursor(
@@ -82,12 +102,15 @@ class ImmediateEmotionProposalWorker:
             deliberation_revision=head.deliberation_revision,
             ledger_sequence=head.ledger_sequence,
         )
-        affect = self._affect_compiler.record_rebased(
-            world_id=world_id,
-            audit_cursor=audit_cursor,
-            current_cursor=current_cursor,
-            proposal_id=proposal_id,
-        )
+        try:
+            affect = self._affect_compiler.record_rebased(
+                world_id=world_id,
+                audit_cursor=audit_cursor,
+                current_cursor=current_cursor,
+                proposal_id=proposal_id,
+            )
+        except ConcurrencyConflict as exc:
+            raise ImmediateEmotionConcurrencyConflict(stage="affect") from exc
         _LOG.warning(
             "immediate emotion worker phases proposal=%s appraisal_ms=%.1f affect_ms=%.1f affect_status=%s",
             proposal_id,
@@ -96,27 +119,34 @@ class ImmediateEmotionProposalWorker:
             affect.status,
         )
         if affect.status == "no_change":
+            reconsider = (
+                affect.skip_reason
+                == "affect_proposal_compiler.target_lower_bound_changed_after_pin"
+            )
             return ImmediateEmotionProposalWorkResult(
                 status="appraisal_only" if appraisal.status == "accepted" else "no_change",
                 source_proposal_id=proposal_id,
                 appraisal=appraisal,
                 affect_skip_reason=affect.skip_reason,
+                requires_fresh_affect_consideration=reconsider,
             )
-        if affect.commit is None or affect.typed_proposal_id is None:
+        if (
+            affect.commit is None
+            or affect.acceptance_cursor is None
+            or affect.typed_proposal_id is None
+        ):
             raise RuntimeError("rebased affect compiler returned an incomplete candidate")
-        affect_cursor = ProjectionCursor(
-            world_revision=affect.commit.world_revision,
-            deliberation_revision=affect.commit.deliberation_revision,
-            ledger_sequence=affect.commit.ledger_sequence,
-        )
-        accepted = self._affect_acceptance.accept_runtime_owned(
-            handle=self._affect_acceptance.pin_proposal(
-                cursor=affect_cursor,
-                proposal_id=affect.typed_proposal_id,
-            ),
-            actor=self._actor,
-            source=self._source,
-        )
+        try:
+            accepted = self._affect_acceptance.accept_runtime_owned(
+                handle=self._affect_acceptance.pin_proposal(
+                    cursor=affect.acceptance_cursor,
+                    proposal_id=affect.typed_proposal_id,
+                ),
+                actor=self._actor,
+                source=self._source,
+            )
+        except ConcurrencyConflict as exc:
+            raise ImmediateEmotionConcurrencyConflict(stage="affect") from exc
         _LOG.warning(
             "immediate emotion worker complete proposal=%s total_ms=%.1f acceptance_events=%d",
             proposal_id,
@@ -133,4 +163,8 @@ class ImmediateEmotionProposalWorker:
         )
 
 
-__all__ = ["ImmediateEmotionProposalWorker", "ImmediateEmotionProposalWorkResult"]
+__all__ = [
+    "ImmediateEmotionConcurrencyConflict",
+    "ImmediateEmotionProposalWorker",
+    "ImmediateEmotionProposalWorkResult",
+]

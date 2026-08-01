@@ -227,7 +227,12 @@ class QQIngressBatch:
 
 class QQIngressStore(Protocol):
     def submit(self, fragment: QQIngressFragment, *, received_at: datetime) -> QQIngressSubmission: ...
-    def claim_due(self, *, now: datetime) -> QQIngressBatch | None: ...
+    def claim_due(
+        self,
+        *,
+        now: datetime,
+        source_event_id: str | None = None,
+    ) -> QQIngressBatch | None: ...
     def complete(self, *, batch_id: str, outcome_status: str, action_id: str | None) -> None: ...
     def submission(self, source_event_id: str) -> QQIngressSubmission | None: ...
     def close(self) -> None: ...
@@ -367,9 +372,27 @@ class MemoryQQIngressStore:
         self._fragments[fragment.source_event_id] = record
         return self._submission(record)
 
-    def claim_due(self, *, now: datetime) -> QQIngressBatch | None:
+    def claim_due(
+        self,
+        *,
+        now: datetime,
+        source_event_id: str | None = None,
+    ) -> QQIngressBatch | None:
         _aware("now", now)
         self._expire_orphan_controls(now)
+        target = (
+            self._fragments.get(source_event_id)
+            if source_event_id is not None
+            else None
+        )
+        if source_event_id is not None:
+            if target is None:
+                return None
+            if target.state == "claimed":
+                claimed_batch = self._batches.get(target.batch_id or "")
+                return claimed_batch.batch if claimed_batch is not None else None
+            if target.state == "committed" or target.due_at > now:
+                return None
         claimed = sorted(
             (
                 item for item in self._batches.values()
@@ -377,7 +400,7 @@ class MemoryQQIngressStore:
             ),
             key=lambda item: item.batch.batch_id,
         )
-        if claimed:
+        if source_event_id is None and claimed:
             return claimed[0].batch
         pending = sorted(
             (
@@ -387,9 +410,11 @@ class MemoryQQIngressStore:
             ),
             key=lambda item: (item.received_at, item.fragment.source_event_id),
         )
-        if not pending or pending[0].due_at > now:
+        if not pending:
             return None
-        anchor = pending[0]
+        anchor = target if target is not None else pending[0]
+        if anchor.due_at > now:
+            return None
         limit = self.catalog.lookup(
             content_shape=anchor.fragment.content_shape,
             continuity_signal=anchor.fragment.continuity_signal,
@@ -538,24 +563,53 @@ class SQLiteQQIngressStore:
             assert result is not None
             return result
 
-    def claim_due(self, *, now: datetime) -> QQIngressBatch | None:
+    def claim_due(
+        self,
+        *,
+        now: datetime,
+        source_event_id: str | None = None,
+    ) -> QQIngressBatch | None:
         _aware("now", now)
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 self._expire_orphan_controls_locked(now)
-                claimed = self._connection.execute(
-                    "SELECT batch_json FROM world_v2_qq_ingress_batches "
-                    "WHERE outcome_status IS NULL ORDER BY batch_id LIMIT 1"
-                ).fetchone()
-                if claimed is not None:
-                    self._connection.execute("COMMIT")
-                    return self._decode_batch(json.loads(claimed["batch_json"]))
-                anchor = self._connection.execute(
-                    "SELECT * FROM world_v2_qq_ingress_fragments WHERE state='pending' "
-                    "AND json_extract(payload_json, '$.content_shape')!='control' "
-                    "ORDER BY received_at, source_event_id LIMIT 1"
-                ).fetchone()
+                anchor = None
+                if source_event_id is not None:
+                    target = self._connection.execute(
+                        "SELECT * FROM world_v2_qq_ingress_fragments "
+                        "WHERE source_event_id=?",
+                        (source_event_id,),
+                    ).fetchone()
+                    if target is None or target["state"] == "committed":
+                        self._connection.execute("COMMIT")
+                        return None
+                    if target["state"] == "claimed":
+                        claimed = self._connection.execute(
+                            "SELECT batch_json FROM world_v2_qq_ingress_batches "
+                            "WHERE batch_id=?",
+                            (target["batch_id"],),
+                        ).fetchone()
+                        self._connection.execute("COMMIT")
+                        return (
+                            self._decode_batch(json.loads(claimed["batch_json"]))
+                            if claimed is not None
+                            else None
+                        )
+                    anchor = target
+                else:
+                    claimed = self._connection.execute(
+                        "SELECT batch_json FROM world_v2_qq_ingress_batches "
+                        "WHERE outcome_status IS NULL ORDER BY batch_id LIMIT 1"
+                    ).fetchone()
+                    if claimed is not None:
+                        self._connection.execute("COMMIT")
+                        return self._decode_batch(json.loads(claimed["batch_json"]))
+                    anchor = self._connection.execute(
+                        "SELECT * FROM world_v2_qq_ingress_fragments WHERE state='pending' "
+                        "AND json_extract(payload_json, '$.content_shape')!='control' "
+                        "ORDER BY received_at, source_event_id LIMIT 1"
+                    ).fetchone()
                 if anchor is None or datetime.fromisoformat(anchor["due_at"]) > now:
                     self._connection.execute("COMMIT")
                     return None

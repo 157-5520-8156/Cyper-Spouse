@@ -4,7 +4,11 @@ from datetime import UTC, datetime
 from hashlib import sha256
 
 from companion_daemon.config import get_settings
-from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
+from companion_daemon.llm import (
+    DeepSeekChatModel,
+    FakeCompanionModel,
+    OpenAICompatibleChatModel,
+)
 from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     ChatCompletionModel,
     RoutedChatModelDeliberationAdapter,
@@ -54,6 +58,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
     now = datetime.now(UTC)
     transport = CaptureSimulatorTransport(received_at=now)
     owned_models: list[DeepSeekChatModel] = []
+    life_source_reviewer: ChatCompletionModel | None = None
     if fake:
         flash_model: ChatCompletionModel = FakeCompanionModel()
         thinking_model: ChatCompletionModel | None = FakeCompanionModel() if thinking else None
@@ -67,6 +72,21 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
             thinking_enabled=False,
         )
         owned_models.append(flash_model)
+        if settings.openai_api_key:
+            # The World Author may invent proposal-scoped life material, but
+            # it cannot review its own existing-world claims.  The simulator
+            # installs the independently configured OpenAI lane when present;
+            # without it, factful life proposals fail closed while no-op
+            # ecology remains available.
+            life_source_reviewer = OpenAICompatibleChatModel(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                model=settings.world_v2_fallback_model,
+                reasoning_effort="none",
+                max_completion_tokens=1_200,
+                proxy_url=settings.openai_proxy_url,
+            )
+            owned_models.append(life_source_reviewer)
         thinking_model = None
         if thinking:
             thinking_model = DeepSeekChatModel(
@@ -107,9 +127,21 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
             model=flash_model,
             role="world_author",
         ),
+        life_world_author_source_rewriter=RoleBoundLifeDevelopmentModelAdapter(
+            model=flash_model,
+            role="world_author",
+        ),
         life_character_model=RoleBoundLifeDevelopmentModelAdapter(
             model=flash_model,
             role="character_model",
+        ),
+        life_source_closure_reviewer=(
+            RoleBoundLifeDevelopmentModelAdapter(
+                model=life_source_reviewer,
+                role="world_author_source_reviewer",
+            )
+            if life_source_reviewer is not None
+            else None
         ),
         now=now,
     )

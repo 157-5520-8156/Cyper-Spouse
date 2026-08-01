@@ -93,6 +93,12 @@ class _ExpressionReplyModel:
             self.first_called_at = time.monotonic()
         proposal = materialize_expression_draft(
             value={
+                "private_turn_state": {
+                    "inner_state_summary": (
+                        "我先替对方完成这件事感到高兴，想自然地接一句。"
+                    ),
+                    "attended_source_refs": [],
+                },
                 "timing_choice": "now",
                 "beats": [{"modality": "text", "text": "恭喜！写完最后一章最难得。"}],
                 "stance": "celebrate_briefly",
@@ -151,6 +157,14 @@ class _HangingGateModel(_GateModel):
         self.calls += 1
         await asyncio.sleep(30)
         return '{"react":true,"reaction_id":"haha"}'
+
+
+class _HealthyBudgetedGateModel(_GateModel):
+    async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        self.last_messages = messages
+        await asyncio.sleep(0.15)
+        return self.output
 
 
 class _RecordingExecutor:
@@ -269,7 +283,7 @@ def _build_runtime(
     *,
     gate_model: _GateModel,
     base_act_bp: int,
-    gate_timeout_seconds: float = 1.0,
+    gate_timeout_seconds: float = QuickReactionPolicy().gate_timeout_seconds,
     with_quick_worker: bool = True,
 ) -> tuple[WorldRuntime, QuickReactionWorker, _RecordingExecutor, _ExpressionReplyModel, WorldLedger]:
     issuer = AcceptedLedgerBatchIssuer()
@@ -367,7 +381,7 @@ def test_gate_prompt_spells_out_the_social_safety_boundary() -> None:
     system = gate.messages(text="随便")[0]["content"]
     # The boundary the coordinator required, verbatim concerns: distress,
     # anger/conflict, serious matters, and fail-closed uncertainty.
-    for marker in ("痛苦", "生气", "争执", "严肃", "拿不准", '{"react":false}'):
+    for marker in ("痛苦", "生气", "争执", "严肃", "拿不准", "输出 none"):
         assert marker in system
     # The closed catalog is enumerated for the model, token by token.
     assert "- haha（laughing）" in system and "- like（approval）" in system
@@ -375,6 +389,8 @@ def test_gate_prompt_spells_out_the_social_safety_boundary() -> None:
 
 def test_gate_verdict_parsing_is_closed_over_the_installed_catalog() -> None:
     options = frozenset({"haha", "like"})
+    assert parse_quick_reaction_verdict("none", option_ids=options) is None
+    assert parse_quick_reaction_verdict("haha", option_ids=options) == "haha"
     assert parse_quick_reaction_verdict('{"react":false}', option_ids=options) is None
     assert (
         parse_quick_reaction_verdict(
@@ -390,7 +406,6 @@ def test_gate_verdict_parsing_is_closed_over_the_installed_catalog() -> None:
         is None
     )
     assert parse_quick_reaction_verdict('{"react":"yes"}', option_ids=options) is None
-    assert parse_quick_reaction_verdict("haha", option_ids=options) is None
     assert parse_quick_reaction_verdict(None, option_ids=options) is None
     assert parse_quick_reaction_verdict('{"react":true}', option_ids=options) is None
 
@@ -584,6 +599,29 @@ async def test_quick_reaction_reaches_provider_before_the_reply_model_is_consult
     assert gate_model.calls == 1
 
 
+@pytest.mark.asyncio
+async def test_healthy_local_token_verdict_hits_inside_the_production_budget() -> None:
+    observation = _observation(suffix="4-budget")
+    base = _base_act_bp_for(
+        source_event_ref=_observation_event_id(observation), want="act"
+    )
+    gate_model = _HealthyBudgetedGateModel("haha")
+    runtime, _worker, executor, reply_model, _ledger = _build_runtime(
+        gate_model=gate_model,
+        base_act_bp=base,
+    )
+
+    started = time.monotonic()
+    outcome = await runtime.ingest(observation)
+    elapsed = time.monotonic() - started
+
+    assert outcome.status == "action_authorized"
+    assert elapsed < 0.5
+    assert gate_model.calls == 1
+    assert [item[0] for item in executor.dispatched] == ["reaction"]
+    assert reply_model.calls == 1
+
+
 # ---------------------------------------------------------------------------
 # Failure modes stay silent and never block the visible turn
 # ---------------------------------------------------------------------------
@@ -719,6 +757,10 @@ def test_quick_reaction_grammar_is_closed_to_one_reaction_action() -> None:
     )
     text_reply = materialize_expression_draft(
         value={
+            "private_turn_state": {
+                "inner_state_summary": "我想用一句文字接住当前消息。",
+                "attended_source_refs": [],
+            },
             "timing_choice": "now",
             "beats": [{"modality": "text", "text": "好呀。"}],
             "stance": "acknowledge",
@@ -731,6 +773,10 @@ def test_quick_reaction_grammar_is_closed_to_one_reaction_action() -> None:
         grammar.validate(text_reply)
     sticker = materialize_expression_draft(
         value={
+            "private_turn_state": {
+                "inner_state_summary": "我此刻更想用一个表情回应。",
+                "attended_source_refs": [],
+            },
             "timing_choice": "now",
             "beats": [{"modality": "sticker", "sticker_id": "qq-face:14"}],
             "stance": "acknowledge",
@@ -784,10 +830,19 @@ class _HostExpressionModel:
         self.calls += 1
         return json.dumps(
             {
+                "private_turn_state": {
+                    "inner_state_summary": (
+                        "看到对方完成最后一章，我真心替她高兴，想直接祝贺。"
+                    ),
+                    "attended_source_refs": [],
+                },
                 "timing_choice": "now",
                 "beats": [{"modality": "text", "text": "写完啦？恭喜恭喜，等你细讲。"}],
+                "cadence": "conversational",
                 "stance": "celebrate_briefly",
                 "brief_rationale": "Celebrate the finished chapter with one line.",
+                "confidence": 8_000,
+                "world_claims": [],
             },
             ensure_ascii=False,
         )
@@ -866,7 +921,7 @@ def _napcat_message_id_that_draws_act(*, world_id: str, recipient_id: str) -> st
 
 
 @pytest.mark.asyncio
-async def test_qq_host_delivers_the_quick_reaction_before_the_ordinary_reply(
+async def test_qq_host_does_not_enable_the_retired_quick_reaction_worker(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     from companion_daemon.config import Settings
@@ -874,12 +929,9 @@ async def test_qq_host_delivers_the_quick_reaction_before_the_ordinary_reply(
 
     delivery = _NapCatDelivery()
     model = _HostExpressionModel()
-    gate_model = _GateModel('{"react":true,"reaction_id":"heart"}')
     from companion_daemon.llm import FakeCompanionModel
 
-    message_id = _napcat_message_id_that_draws_act(
-        world_id="world:companion-v2:qq-c2c:geoff", recipient_id="10001"
-    )
+    message_id = "quick-reaction-retired"
     host = build_qq_c2c_host(
         settings=Settings(
             database_path=tmp_path / "qq-quick-reaction.sqlite",
@@ -891,7 +943,6 @@ async def test_qq_host_delivers_the_quick_reaction_before_the_ordinary_reply(
         model=model,
         advisory_model=FakeCompanionModel(),
         delivery=delivery,
-        quick_reaction_model=gate_model,
     )
     try:
         result = await host.inbound_text(
@@ -905,15 +956,7 @@ async def test_qq_host_delivers_the_quick_reaction_before_the_ordinary_reply(
         await host.aclose()
 
     assert result.status == "action_authorized"
-    assert gate_model.calls == 1
     assert model.calls == 1
     visible = [item for item in delivery.sent if not item[1].startswith("typing:")]
-    # The reaction binds the exact inbound provider message and lands before
-    # the ordinary text reply.
-    assert visible[0] == ("10001", f"reaction:{message_id}:heart")
-    assert visible[1][0] == "10001" and "恭喜" in visible[1][1]
-    assert len(visible) == 2
-    reaction_action = next(item for item in projection.actions if item.kind == "reaction")
-    reply_action = next(item for item in projection.actions if item.kind == "reply")
-    assert reaction_action.state == "provider_accepted"
-    assert reply_action.state == "provider_accepted"
+    assert visible == [("10001", "写完啦？恭喜恭喜，等你细讲。")]
+    assert all(item.kind != "reaction" for item in projection.actions)

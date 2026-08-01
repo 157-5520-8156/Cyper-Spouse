@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
@@ -29,6 +30,23 @@ from .deferred_thread_proposal import DeferredThreadProposalCompiler
 def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, allow_nan=False,
         sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class _SocialAuditResolution:
+    """One mechanically resolved reply authority for the social-defer lane.
+
+    Expression Episode may persist more than one independently authored
+    candidate for one Observation.  A candidate set is not itself authority:
+    exact Acceptance manifests identify proposals that gained effects, while
+    the episode lifecycle identifies legitimate candidates that are still
+    pending.  Anything else remains ambiguous and must not be selected by
+    ledger order.
+    """
+
+    audit: ProposalAuditProjection | None = None
+    choice: Literal["no_reply", "reply_now", "defer"] | None = None
+    reason_code: str | None = None
 
 
 class SocialActionRunResult(FrozenModel):
@@ -91,18 +109,13 @@ class SocialActionWorker:
             # Production reuses the already-audited main reply proposal.  A
             # missing/failed main audit is not work for this lane and must not
             # consume one background unit forever on every scheduler pass.
-            if (
-                self._turn is None
-                and (
-                    (audit := self._existing_audit(
-                        projection=projection, trigger_ref=observation[1].event_id
-                    )) is None
-                    or self._proposal_choice(
-                        validate_proposal_envelope(json.loads(audit.proposal_json))
-                    ) != "defer"
+            if self._turn is None:
+                resolution = self._resolve_audit(
+                    projection=projection,
+                    trigger_ref=observation[1].event_id,
                 )
-            ):
-                continue
+                if resolution.audit is None or resolution.choice != "defer":
+                    continue
             return await self.run_observation(source.observation_id)
         return SocialActionRunResult(status="idle")
 
@@ -112,7 +125,16 @@ class SocialActionWorker:
         if source is None:
             return SocialActionRunResult(status="unavailable", reason_code="social_action.source_unavailable")
         observation, observation_event = source
-        audit = self._existing_audit(projection=projection, trigger_ref=observation_event.event_id)
+        resolution = self._resolve_audit(
+            projection=projection,
+            trigger_ref=observation_event.event_id,
+        )
+        audit = resolution.audit
+        if audit is None and resolution.reason_code is not None:
+            return SocialActionRunResult(
+                status="unavailable",
+                reason_code=resolution.reason_code,
+            )
         if audit is None:
             cursor = ProjectionCursor(world_revision=projection.world_revision,
                 deliberation_revision=projection.deliberation_revision,
@@ -130,7 +152,16 @@ class SocialActionWorker:
             except ConcurrencyConflict:
                 return SocialActionRunResult(status="stale", reason_code="social_action.cursor_stale")
             projection = self._ledger.project()
-            audit = self._existing_audit(projection=projection, trigger_ref=observation_event.event_id)
+            resolution = self._resolve_audit(
+                projection=projection,
+                trigger_ref=observation_event.event_id,
+            )
+            audit = resolution.audit
+            if audit is None and resolution.reason_code is not None:
+                return SocialActionRunResult(
+                    status="unavailable",
+                    reason_code=resolution.reason_code,
+                )
         if audit is None:
             return SocialActionRunResult(status="unavailable", reason_code="social_action.model_terminal_failure")
         proposal = validate_proposal_envelope(json.loads(audit.proposal_json))
@@ -382,9 +413,11 @@ class SocialActionWorker:
             return "no_reply"
         return "defer" if proposal.action_intents[0].kind == "followup" else "reply_now"
 
-    @staticmethod
-    def _existing_audit(*, projection, trigger_ref: str) -> ProposalAuditProjection | None:
-        matches = []
+    @classmethod
+    def _resolve_audit(cls, *, projection, trigger_ref: str) -> _SocialAuditResolution:
+        matches: list[
+            tuple[ProposalAuditProjection, MinimalProposal | DecisionProposal]
+        ] = []
         for audit in projection.proposal_audits:
             if audit.trigger_ref != trigger_ref:
                 continue
@@ -401,10 +434,107 @@ class SocialActionWorker:
                 or isinstance(proposal, DecisionProposal)
                 and proposal.proposal_id.startswith("proposal:expression:")
             ):
-                matches.append(audit)
-        if len(matches) > 1:
-            raise ValueError("social action has duplicate proposal audit authority")
-        return matches[0] if matches else None
+                matches.append((audit, proposal))
+        if not matches:
+            return _SocialAuditResolution()
+
+        dismissed = {
+            decision.proposal_id
+            for decision in getattr(projection, "acceptance_decisions", ())
+            if decision.status in {"rejected", "stale"}
+        }
+        candidates = tuple(
+            item for item in matches if item[0].proposal_id not in dismissed
+        )
+        if not candidates:
+            return _SocialAuditResolution()
+
+        accepted_bindings = {
+            (
+                manifest.proposal_id,
+                manifest.proposal_event_ref,
+                manifest.proposal_event_payload_hash,
+                manifest.proposal_hash,
+            )
+            for manifest in (
+                *getattr(projection, "minimal_reply_manifests", ()),
+                *getattr(projection, "expression_plan_manifests", ()),
+            )
+        }
+        accepted = tuple(
+            item
+            for item in candidates
+            if (
+                item[0].proposal_id,
+                item[0].event_ref,
+                item[0].event_payload_hash,
+                item[0].proposal_hash,
+            )
+            in accepted_bindings
+        )
+        if accepted:
+            accepted_choices = {
+                cls._proposal_choice(proposal) for _audit, proposal in accepted
+            }
+            if len(accepted_choices) != 1:
+                return _SocialAuditResolution(
+                    reason_code="social_action.ambiguous_proposal_authority"
+                )
+            choice = accepted_choices.pop()
+            # One accepted deferred Proposal can be joined by its existing
+            # Action chain.  Multiple accepted episode messages are already
+            # governed by their exact manifests and are not new social-defer
+            # work; selecting either audit would make list order authoritative.
+            if choice == "defer" and len(accepted) == 1:
+                return _SocialAuditResolution(
+                    audit=accepted[0][0],
+                    choice=choice,
+                )
+            return _SocialAuditResolution(
+                choice=choice,
+                reason_code="social_action.accepted_expression_authority",
+            )
+
+        accepted_proposal_ids = {
+            manifest.proposal_id
+            for manifest in (
+                *getattr(projection, "minimal_reply_manifests", ()),
+                *getattr(projection, "expression_plan_manifests", ()),
+            )
+        }
+        if any(audit.proposal_id in accepted_proposal_ids for audit, _ in candidates):
+            # A manifest naming one of these proposals without matching the
+            # exact Proposal event/hash is corrupt or ambiguous authority.
+            return _SocialAuditResolution(
+                reason_code="social_action.ambiguous_proposal_authority"
+            )
+
+        if len(candidates) == 1:
+            audit, proposal = candidates[0]
+            return _SocialAuditResolution(
+                audit=audit,
+                choice=cls._proposal_choice(proposal),
+            )
+
+        episode_processes = tuple(
+            process
+            for process in getattr(projection, "trigger_processes", ())
+            if process.process_kind == "expression_episode"
+            and process.source_evidence_ref == trigger_ref
+        )
+        if (
+            len(episode_processes) == 1
+            and all(
+                audit.attempt_id in episode_processes[0].attempt_ids
+                for audit, _proposal in candidates
+            )
+        ):
+            return _SocialAuditResolution(
+                reason_code="social_action.expression_episode_pending"
+            )
+        return _SocialAuditResolution(
+            reason_code="social_action.ambiguous_proposal_authority"
+        )
 
 
 __all__ = ["SocialActionRunResult", "SocialActionWorker"]

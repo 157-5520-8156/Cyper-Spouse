@@ -26,6 +26,8 @@ from companion_daemon.onebot_adapter import (
 )
 
 from .platform_action_executor import MediaProviderTransport
+from .chat_model_deliberation_adapter import ChatCompletionModel
+from .production_latency_health import production_latency_health_snapshot
 from .production_reliability_metrics import reliability_snapshot
 from .durable_reliability import durable_reliability_snapshot
 from .production_turn_application import MediaPreviewDeployment
@@ -172,6 +174,8 @@ class QQC2CSchedulerDiagnostics:
                 "experience_count": world.get("experience_count", 0),
                 "starved": world.get("starved", True),
             },
+            "expression_episode": world.get("expression_episode", {}),
+            "expression_retry": world.get("expression_retry", {}),
             # Keep the legacy ``world_activity`` contract stable while
             # exposing the per-mechanism evidence needed to diagnose a live
             # companion.  These values are read-only projection counts; they
@@ -189,6 +193,9 @@ def create_qq_c2c_onebot_app(
     adapter: str,
     settings: Settings,
     use_fake_model: bool = False,
+    _test_only_model: ChatCompletionModel | None = None,
+    _test_only_advisory_model: ChatCompletionModel | None = None,
+    _test_only_source_closure_model: ChatCompletionModel | None = None,
     scheduler_interval_seconds: float = 15.0,
     media_preview: MediaPreviewDeployment | None = None,
     media_transport: MediaProviderTransport | None = None,
@@ -218,6 +225,43 @@ def create_qq_c2c_onebot_app(
             "World v2 QQ C2C requires exactly one NAPCAT_ALLOWED_PRIVATE_USER_IDS entry"
         )
     recipient_id = recipient_ids[0]
+    test_authorities_injected = any(
+        model is not None
+        for model in (
+            _test_only_model,
+            _test_only_advisory_model,
+            _test_only_source_closure_model,
+        )
+    )
+    if use_fake_model and test_authorities_injected:
+        raise ValueError("fake-model mode cannot also inject test authorities")
+    if test_authorities_injected:
+        if _test_only_model is None or _test_only_source_closure_model is None:
+            raise ValueError(
+                "test authority injection requires a character author and source reviewer"
+            )
+        strict_checker = getattr(
+            _test_only_source_closure_model,
+            "supports_strict_output_contract",
+            None,
+        )
+        if not callable(strict_checker) or not all(
+            strict_checker(contract) is True
+            for contract in (
+                "report-relative-entailment-adjudication.3",
+                "source-closure-review.7",
+            )
+        ):
+            raise ValueError("test source reviewer requires exact RR.3/V7 qualification")
+    if (
+        not use_fake_model
+        and _test_only_model is None
+        and not (settings.deepseek_api_key or "").strip()
+    ):
+        raise RuntimeError(
+            "World v2 production QQ C2C requires a configured real character provider; "
+            "set DEEPSEEK_API_KEY or explicitly enable the fake-model test mode"
+        )
     media_bundle = None
     if media_preview is None and not use_fake_model:
         # The production entry composes its own complete media deployment
@@ -251,7 +295,9 @@ def create_qq_c2c_onebot_app(
     host = build_qq_c2c_host(
         settings=settings,
         recipient_id=recipient_id,
-        model=FakeCompanionModel() if use_fake_model else None,
+        model=FakeCompanionModel() if use_fake_model else _test_only_model,
+        advisory_model=_test_only_advisory_model,
+        source_closure_model=_test_only_source_closure_model,
         media_preview=media_preview,
         media_transport=media_transport,
         perception_model=(
@@ -336,6 +382,13 @@ def create_qq_c2c_onebot_app(
             task.cancel()
             await asyncio.gather(backfill_task, task, return_exceptions=True)
             await host.aclose()
+            wait_for_quiescence = getattr(
+                host,
+                "wait_for_shutdown_quiescence",
+                None,
+            )
+            if callable(wait_for_quiescence):
+                await wait_for_quiescence()
             if media_bundle is not None:
                 media_bundle.transport.close()
             if perception_bundle is not None:
@@ -387,9 +440,18 @@ def create_qq_c2c_onebot_app(
     async def health():
         world = await host.world_health_diagnostics()
         scheduler_view = scheduler.snapshot(now=datetime.now(UTC), world=world)
-        # Rolling process-local reliability counters (24h window): visible
-        # inbound replies, local failsafe engagements, corrective repairs,
-        # claim-free boundary lines, and backup-provider recoveries.  The
+        scheduler_view["local_provider_capacity"] = (
+            host.local_provider_capacity_health()
+        )
+        scheduler_view["proactive_source_authority"] = (
+            host.proactive_source_authority_health()
+        )
+        scheduler_view["performance"] = production_latency_health_snapshot(
+            host.latency_samples()
+        )
+        # Rolling process-local reliability counters (24h window): provider
+        # dispatch ACKs are reported separately from strongly evidenced
+        # visible replies, alongside failsafe engagements and repairs.  The
         # ledger stays the durable audit; this makes the failsafe rate
         # checkable at a glance without a ledger scan.
         scheduler_view["reliability"] = reliability_snapshot()

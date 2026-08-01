@@ -93,6 +93,7 @@ async def test_injected_tool_lane_compiles_enforced_request_then_settles_a_real_
         world_id=WORLD, trigger_ref=source.event_id, logical_time=NOW, created_at=NOW, actor="agent:companion", source="test",
         trace_id="trace:tool", causation_id=source.event_id, correlation_id="conversation:tool", evaluated_world_revision=head.world_revision,
         expected_commit_world_revision=head.world_revision, expected_deliberation_revision=head.deliberation_revision,
+        expected_ledger_sequence=head.ledger_sequence,
     ))
     compiled = ReadOnlyToolProposalCompiler(
         ledger=ledger, authorization_resolver=ProjectionReadOnlyToolAuthorizationResolver(), actor_ref="agent:companion",

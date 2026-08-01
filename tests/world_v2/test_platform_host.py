@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -535,6 +536,57 @@ async def test_platform_host_forwards_tick_and_close_without_exposing_world_inte
     assert application.closed is True
 
 
+@pytest.mark.asyncio
+async def test_platform_host_async_close_waits_for_application_lifecycle() -> None:
+    class _AsyncClosingApplication(_FakeApplication):
+        def __init__(self) -> None:
+            super().__init__()
+            self.async_close_started = False
+            self.release = asyncio.Event()
+
+        async def aclose(self) -> None:
+            self.async_close_started = True
+            await self.release.wait()
+            self.closed = True
+
+    application = _AsyncClosingApplication()
+    host = WorldV2PlatformHost(application=application)  # type: ignore[arg-type]
+    closing = asyncio.create_task(host.aclose())
+    await asyncio.sleep(0)
+
+    assert application.async_close_started is True
+    assert closing.done() is False
+
+    application.release.set()
+    await closing
+    assert application.closed is True
+
+
+@pytest.mark.asyncio
+async def test_platform_host_preserves_application_shutdown_quiescence_lease() -> None:
+    release = asyncio.Event()
+
+    class _LeasedApplication(_FakeApplication):
+        async def aclose(self) -> None:
+            return None
+
+        @property
+        def shutdown_pending_task_count(self) -> int:
+            return 0 if release.is_set() else 1
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            await release.wait()
+
+    host = WorldV2PlatformHost(application=_LeasedApplication())  # type: ignore[arg-type]
+
+    await host.aclose()
+
+    assert host.shutdown_pending_task_count == 1
+    release.set()
+    await asyncio.wait_for(host.wait_for_shutdown_quiescence(), timeout=1)
+    assert host.shutdown_pending_task_count == 0
+
+
 def test_platform_host_exposes_dashboard_capture_without_an_http_dependency() -> None:
     capture: DashboardProjectionCapture = _FakeDashboardCapture()
     host = WorldV2PlatformHost(
@@ -581,6 +633,7 @@ def test_platform_host_is_clean_application_adapter_without_legacy_or_ledger_imp
         "typing",
             "production_turn_application",
             "production_latency_trace",
+            "replay_evidence",
         }
     source = path.read_text(encoding="utf-8")
     forbidden = (

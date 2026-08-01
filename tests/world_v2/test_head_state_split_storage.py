@@ -37,7 +37,6 @@ from companion_daemon.world_v2.media_v2 import (
 )
 from companion_daemon.world_v2.qq_ingress_policy import QQIngressFragment, SQLiteQQIngressStore
 from companion_daemon.world_v2.reducers import (
-    PREVIOUS_REDUCER_BUNDLE_VERSION,
     REDUCER_BUNDLE_VERSION,
     ReducerState,
 )
@@ -160,7 +159,7 @@ def test_v43_head_migration_replays_contextual_life_pending_index(tmp_path) -> N
         ledger._state_hash_material(  # noqa: SLF001
             canonical_state=canonical_v43_json,
             cursor=cursor,
-            reducer_bundle_version=PREVIOUS_REDUCER_BUNDLE_VERSION,
+            reducer_bundle_version="world-v2-reducers.43",
         )
     ).hexdigest()
     broken_v43_semantic_hash = hashlib.sha256(
@@ -168,7 +167,7 @@ def test_v43_head_migration_replays_contextual_life_pending_index(tmp_path) -> N
             broken_v43_state.semantic_payload(
                 world_id=WORLD,
                 world_revision=current.world_revision,
-                reducer_bundle_version=PREVIOUS_REDUCER_BUNDLE_VERSION,
+                reducer_bundle_version="world-v2-reducers.43",
             ),
             ensure_ascii=False,
             sort_keys=True,
@@ -193,7 +192,7 @@ def test_v43_head_migration_replays_contextual_life_pending_index(tmp_path) -> N
                 broken_v43_json,
                 broken_v43_state_hash,
                 broken_v43_semantic_hash,
-                PREVIOUS_REDUCER_BUNDLE_VERSION,
+                "world-v2-reducers.43",
                 WORLD,
             ),
         )

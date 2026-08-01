@@ -2,7 +2,77 @@
 
 Date: 2026-07-09
 
-## What Runs Now
+> **Historical snapshot, not current implementation authority.** This document predates the
+> World V2 controlled-high-variance expression path and is retained only to explain earlier
+> migrations. For current behavior and vocabulary, use `CONTEXT.md`,
+> `docs/adr/0010-controlled-high-variance-character-agency.md`,
+> `docs/adr/0014-model-owned-private-turn-state-before-expression.md`, and
+> `docs/state-machine.md`. In particular, the legacy reply-policy, question-budget, ghost,
+> follow-up, sanitizer, and keyword-routing descriptions below must not be restored to the
+> production path.
+
+## Current World V2 Delta (2026-07-30)
+
+This section is the current implementation summary. The dated runtime inventory after it is a
+historical snapshot, even where its original prose uses the present tense.
+
+### Private Self, Selective Recall, and Expression
+
+- A pinned World Context and source-bound Current Self provide the character with current
+  conversation, life, affect, relationship, memory, capability, and consequence material.
+- The character model first forms a turn-local `PrivateTurnState`. This is an auditable proposal
+  about what she notices and thinks now; it is neither a new world fact nor authority to invent one.
+- Inbound semantic prefetch may place a small, source-bound attention set in the first role-model
+  call; it remains reference material, never a behavior decision. A valid, model-chosen
+  `recall_request` can open one further bounded selective-recall pass. Every prefetch trace that a
+  role call actually sees is recorded in call order with its phase and model-call identity; a
+  prepared result that no role call saw is neither claim authority nor a delivered-memory metric.
+- Proactive consideration only schedules prefetch beside its first role call and never waits for or
+  injects that result. If the character chooses `recall_request`, the follow-up may absorb a result
+  that is already ready at zero wait; otherwise the character pull proceeds without waiting on the
+  automatic lane.
+- The character then chooses `now`, `later`, or `silent`, and, when expressing, chooses the
+  modalities, number of message beats, cadence, questions, self-disclosure, and wording. Local
+  appraisal and durable Affect can inform Current Self, but they do not dictate the visible reply.
+
+### Context-Driven Proactive Contact V3
+
+- Source-bound life, activity, affect, relationship, Thread, Commitment, and related semantic
+  changes are merged into a ten-minute stimulus window. A recorded draw chooses a consideration
+  opportunity at 2, 15, or 45 minutes; additional events join the same window without redrawing it.
+- When no new event exists, ambient opportunities remain available on a relationship- and
+  situation-weighted cadence between 45 minutes and 8 hours. Night, busyness, and low closeness
+  change opportunity weights, not permission to speak.
+- These timers decide only when the character may reconsider. They cannot create a motive, prose,
+  life fact, or send decision. At consideration time the model receives the pinned context, forms a
+  free-text `impulse_summary`, and chooses `now`, `later`, or `silent`.
+- `silent` closes only that consideration. Provider, parsing, or worker failures are technical
+  failures and follow their retry path; they must not be recorded as character silence. New user
+  ingress retires stale, unexecuted proactive cognition and establishes a fresh context.
+- There is no forced maximum-silence send, fixed motive taxonomy, template greeting, or random
+  `act/hold` gate. Authorized external Actions remain effect-once even when later conversation
+  supersedes the cognition that proposed them.
+
+### Retired Behavioral Authority
+
+- `afterthought_author` and `open_thread_afterthought` have no production drain. Their historical
+  events remain replayable, while same-turn continuations and multiple bubbles are ordinary
+  `ExpressionDraft`/`ExpressionPlan` beats. A genuinely later impulse must come through the
+  event-driven initiative path.
+- Legacy message-category routing, question budgets, `emotional_ghost`, fixed follow-up lanes,
+  mood-to-expression matrices, and broad naturalness sanitizers do not decide whether or how the
+  World V2 character responds. A new user Observation ends stale, uncommitted pre-Action
+  expression work without first classifying the user's message into a social-behavior category.
+- Deterministic code still enforces source closure, privacy and consent, safety and law, external
+  Action authorization, effect-once delivery, CAS, receipts, and replayability. Everything outside
+  those hard boundaries remains a character-model decision. This is the project's meaning of
+  controlled high variance.
+
+## Historical Runtime Snapshot (2026-07-09)
+
+The remainder of this document preserves the earlier daemon inventory and migration context. Read
+its words such as “now”, “current”, and “implemented” as referring to that snapshot unless a
+paragraph is explicitly labelled as a World V2 migration note.
 
 ### Core Runtime Decision
 
@@ -46,10 +116,11 @@ This returns the daemon-owned state, recent chat lines with local freshness tags
 context package, selected memory lines, self-core text, and a preview prompt. The preview is for
 inspection only and does not update state or send a message.
 
-The reply context path now has a deterministic regression suite. It verifies that unrelated profile
+The historical reply context path had a deterministic regression suite. It verified that unrelated profile
 facts are not padded into a reply, explicitly sidelined topics do not leak back through retrieval,
 temporary schedules expire, conflicting location facts choose the newest version, and unresolved
-emotion becomes a compact reply policy rather than public-facing inner monologue.
+emotion becomes a compact legacy reply policy rather than public-facing inner monologue. World V2
+replaced that policy with sourced Current Self, model-owned private turn state, and selective recall.
 
 Local dashboard:
 
@@ -204,13 +275,20 @@ Current profile:
 - Relationship stage: 刚认识
 - Origin: met through a QQ reading/city-walk interest group after the user shared a late-night Chengdu street note.
 
-The prompt now explicitly forbids stage directions such as `（手机震了一下）`, action narration, and hidden psychological notes in public QQ/WeChat replies. A sanitizer also removes common roleplay-style stage directions before sending.
+At the time of this snapshot, the prompt explicitly forbade stage directions such as `（手机震了一下）`,
+action narration, and hidden psychological notes in public QQ/WeChat replies, and a sanitizer
+removed common roleplay-style stage directions before sending. That sanitizer is historical
+behavioral machinery, not World V2 expression authority.
 
-The live QQ reply prompt also has a naturalness guard: avoid asking a question every turn, keep at most one question mark per reply, reduce assistant-like phrases such as “我理解/这个问题确实/建议”, and avoid the overused “我有个朋友/同学/室友也...” pattern unless memory or context truly supports it.
+World V2 migration note: the production QQ prompt does not impose a question quota, phrase blacklist,
+reply-mode menu, or engagement objective. It supplies a source-bound Current Self and
+requires the role model to form a turn-local `PrivateTurnState` before freely choosing
+silence, questions, self-disclosure, timing, modality, wording, and message count. Factual
+claims and externally checkable background details remain subject to source closure.
 
-### Emotional State Machine
+### Legacy Emotional and Reply State Machine
 
-Implemented:
+Historical implementation included:
 
 - Interaction event classification for rude/control/warmth/apology/vulnerable/busy/returning/question/attachment-only messages.
 - Expanded mood state: patience, security, curiosity, initiative, emotional charge, and boundary level.
@@ -223,7 +301,6 @@ Implemented:
 - EchoText-inspired proactive trigger timeline chooses concrete outreach reasons such as hanging question, late night, repair attempt, longing, random thought, inside joke, or soft follow-up.
 - Trigger history, semantic category cooldowns, daily-stable jitter, and a max-unanswered-proactive guard reduce repetitive or needy proactive messages.
 - Recent emotion impact can create a `mood_follow_up` proactive candidate when the state shift is strong enough.
-- The former fixed post-reply `open_thread_afterthought` lane is retired. Same-turn continuation is part of the role model's ordinary `ExpressionPlan`, while a genuinely later impulse must arise through the existing event-driven initiative, memory, affect, and current-self context. Historical events remain replayable.
 - EchoText-inspired memory highlight detection extracts life facts, favorites, hobbies, important people, recent events, and shared moments.
 - Context orchestration now builds a per-turn context package before model calls: current user
   intent, reply focus, forbidden stale-topic mistakes, relevant long-term memories, current life
@@ -248,14 +325,30 @@ Implemented:
   insertion. Backchannels such as "嗯嗯/对/哈哈" are recorded without interrupting; new questions,
   corrections, emotional messages, or substantive inserted text stop the remaining parts and start a
   new turn.
-- QQ private chat now has a conservative reply-decision layer enabled by default: pure acknowledgements can be recorded without a reply, questions/emotional/urgent messages always reply, and long story-like messages may be deferred during busy phases with a “just saw this” context hint.
-- Normal replies include a question-budget hint based on recent outgoing messages, so if she has already asked several questions recently the next reply is steered toward statements, reactions, or small self-disclosure instead of another follow-up question.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.
 - Tool/computer-operation requests are detected and logged as proposals. Risky actions are injected into the prompt as requiring explicit user confirmation; no MCP/computer action executes automatically yet.
 
+World V2 migration notes:
+
+- The fixed post-reply `open_thread_afterthought` lane is retired. Same-turn continuation is part
+  of the character model's ordinary expression plan; a genuinely later impulse must arise through
+  the event-driven initiative path. Historical events remain replayable.
+- The legacy conversation engine still contains a conservative reply-decision experiment, but it
+  is not part of the production World V2 QQ path. World V2 does not classify acknowledgements,
+  questions, emotional messages, or long stories into host-chosen reply behavior.
+- Production World V2 forms a sourced Current Self, offers one optional model-chosen Recall pass,
+  and requires a `PrivateTurnState` before the character model freely chooses silence, questions,
+  self-disclosure, timing, modality, wording, and message count.
+- New user ingress invalidates stale uncommitted expression cognition directly. It does not use the
+  legacy backchannel-versus-substantive classifier to decide whether the character may be
+  interrupted; already-authorized external Actions retain their effect-once semantics.
+
 See `docs/state-machine.md`.
 
-## Implemented Project Modules
+## Historical Project Modules (2026-07-09)
+
+This shallow module list records the pre-World-V2 layout. Current domain code lives primarily under
+`src/companion_daemon/world_v2/`; do not infer current ownership boundaries from this inventory.
 
 ```text
 src/companion_daemon/
@@ -274,7 +367,7 @@ src/companion_daemon/
   time.py            timezone-aware clock helper
 ```
 
-## Character
+## Historical Character Configuration Note
 
 The current companion profile lives at:
 
@@ -290,7 +383,7 @@ Current name:
 
 The profile is now loaded by the daemon instead of being hardcoded.
 
-## QQ Official Bot Status
+## Historical QQ Official Bot Status
 
 Implemented locally:
 
@@ -310,7 +403,7 @@ Verified:
 uv run pytest
 ```
 
-Current local verification count:
+Historical local verification count:
 
 ```text
 81 tests passed
@@ -329,9 +422,9 @@ The official send-message docs currently state that QQ single-chat proactive mes
 
 Earlier terminal output exposed API keys in the local conversation. Treat those keys as compromised and rotate them.
 
-## Next Best Step
+## Historical Next-Step Note
 
-The next meaningful step is improving the QQ private-chat experience now that private C2C is working:
+At the time of the snapshot, the next proposed step was improving the QQ private-chat experience:
 
 1. Keep this command running:
 

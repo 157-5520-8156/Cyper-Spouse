@@ -291,6 +291,38 @@ async def test_draft_capsule_exposes_source_bound_interaction_continuity_without
 
 
 @pytest.mark.asyncio
+async def test_interaction_continuity_time_bounds_do_not_assume_sequence_is_chronological() -> None:
+    """A late-settled delivery may have a higher sequence but an earlier occurrence time."""
+
+    request = _rich_request()
+    material = json.loads(request.model_content_json)
+    material["slices"]["recent_dialogue"]["items"][1]["value"]["occurred_at"] = (
+        "2026-07-20T08:59:55+08:00"
+    )
+    model = _CapturingModel()
+
+    await RelationshipDraftDeliberationAdapter(model=model).propose(
+        request.model_copy(
+            update={
+                "model_content_json": json.dumps(
+                    material,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            }
+        )
+    )
+
+    continuity = json.loads(model.messages[0][1]["content"])["interaction_continuity"]
+    assert continuity["first_occurred_at"] == "2026-07-20T08:59:55+08:00"
+    assert continuity["last_occurred_at"] == "2026-07-20T09:00:00+08:00"
+    assert [item["item_ref"] for item in continuity["source_items"]] == [
+        "dialogue:observation:1",
+        "dialogue:expression:1",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_missing_optional_slices_still_produce_a_draft() -> None:
     model = _CapturingModel()
 

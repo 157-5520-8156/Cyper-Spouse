@@ -32,6 +32,7 @@ from companion_daemon.world_v2.platform_action_executor import (
     PlatformDispatchReceipt,
     PlatformDispatchRequest,
 )
+from companion_daemon.world_v2.production_latency_trace import ProductionLatencyRecorder
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn, WorldTurnRuntime
 
 
@@ -236,6 +237,75 @@ async def test_platform_neutral_turn_ingress_records_one_idempotent_v2_observati
 
     assert first == duplicate
     assert first.status == "observed_only"
+
+
+@pytest.mark.asyncio
+async def test_turn_cognition_terminal_enters_bounded_action_join_window() -> None:
+    runtime = WorldRuntime.in_memory(world_id="world:latency-cognition-terminal")
+    latency = ProductionLatencyRecorder(max_retained_traces=2)
+    trace = latency.start_ingress(
+        trace_id="trace:cognition-terminal",
+        environment="real_transport",
+    )
+    turn = WorldTurnRuntime(
+        runtime=runtime,
+        identities=_Identities(),
+        latency_recorder=latency,
+    )
+
+    await turn.respond(
+        InboundTurn(
+            platform="test",
+            platform_user_id="user.1",
+            platform_message_id="message:cognition-terminal",
+            text="今天有点累。",
+            observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+            trace_id=trace.trace_id,
+        )
+    )
+
+    assert latency.active_trace_count == 0
+    assert latency.completed_trace_count == 1
+    assert latency.get(trace.trace_id) is trace
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_still_releases_active_latency_lease() -> None:
+    class _FailingRuntime:
+        world_id = "world:failed-latency-turn"
+
+        async def current_logical_time(self):  # type: ignore[no-untyped-def]
+            return None
+
+        async def ingest(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulated cognition failure")
+
+    latency = ProductionLatencyRecorder(max_retained_traces=2)
+    trace = latency.start_ingress(
+        trace_id="trace:failed-cognition",
+        environment="real_transport",
+    )
+    turn = WorldTurnRuntime(
+        runtime=_FailingRuntime(),  # type: ignore[arg-type]
+        identities=_Identities(),
+        latency_recorder=latency,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated cognition failure"):
+        await turn.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:failed-cognition",
+                text="这轮会失败。",
+                observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+                trace_id=trace.trace_id,
+            )
+        )
+
+    assert latency.active_trace_count == 0
+    assert latency.completed_trace_count == 1
+    assert latency.get(trace.trace_id) is trace
 
 
 @pytest.mark.asyncio

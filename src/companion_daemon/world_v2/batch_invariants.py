@@ -86,6 +86,7 @@ from .life_development_draft import (
 from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
+    RecordedModelResultAudit,
 )
 from .acceptance_manifest import parse_acceptance_manifest_v2
 from .minimal_reply_events import (
@@ -156,8 +157,12 @@ def _reject_new_private_impression_without_role_reflection(
             continue
         payload = event.payload()
         impression = payload.get("impression")
+        contract = payload.get("reflection_contract")
+        transition_kind = payload.get("transition_kind", "open")
+        expected_decision = "retain" if transition_kind == "open" else transition_kind
         if (
-            payload.get("reflection_contract") != "private-impression-draft.3"
+            contract != "private-impression-draft.4"
+            or payload.get("reflection_decision") != expected_decision
             or not payload.get("reflection_source_refs")
             or not payload.get("source_model_result")
             or not payload.get("source_capsule_id")
@@ -583,9 +588,11 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         raise ValueError("model audit transaction cannot contain multiple character outcomes")
 
     first = ModelResultRecordedPayload.model_validate_json(events[0].payload_json)
-    expected_model_indexes = list(range(first.attempt_count))
-    if model_indexes != expected_model_indexes:
+    if model_indexes != list(range(len(model_indexes))):
         raise ValueError("model attempts must be complete and contiguous in one commit")
+    if first.attempt_count > len(model_indexes):
+        raise ValueError("model attempt lineage is incomplete")
+    expected_model_indexes = list(range(first.attempt_count))
     attempts = [
         ModelResultRecordedPayload.model_validate_json(events[index].payload_json)
         for index in expected_model_indexes
@@ -603,12 +610,54 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         ):
             raise ValueError("model attempts have mixed or out-of-order lineage")
 
+    nested_provider_records = [
+        ModelResultRecordedPayload.model_validate_json(events[index].payload_json)
+        for index in model_indexes[first.attempt_count :]
+    ]
+    all_call_ids = {attempt.model_call_id for attempt in attempts}
+    authored_call_ids = set(all_call_ids)
+    for nested in nested_provider_records:
+        recorded = RecordedModelResultAudit.model_validate_json(nested.audit_json)
+        if (
+            nested.attempt_index != 0
+            or nested.attempt_count != 1
+            or nested.proposal_hash is not None
+            or nested.capsule_id != first.capsule_id
+            or nested.trigger_ref != first.trigger_ref
+            or nested.evaluated_world_revision != first.evaluated_world_revision
+            or nested.model_call_id in all_call_ids
+        ):
+            raise ValueError("nested provider record has mixed or invalid lineage")
+        if recorded.route.router_version == "authored-candidate-audit.1":
+            if (
+                recorded.parent_model_call_id is not None
+                or recorded.response_hash is None
+                or (
+                    (recorded.status, recorded.outcome)
+                    not in {
+                        ("main_invalid", "invalid"),
+                        ("candidate_returned", "returned"),
+                    }
+                )
+            ):
+                raise ValueError("authored candidate has invalid lineage")
+            authored_call_ids.add(nested.model_call_id)
+        elif recorded.route.router_version == "provider-subcall-audit.1":
+            if (
+                recorded.parent_model_call_id not in authored_call_ids
+                or recorded.parent_model_call_id == recorded.model_call_id
+            ):
+                raise ValueError("provider subcall has no persisted author parent")
+        else:
+            raise ValueError("nested provider record uses an unknown audit contract")
+        all_call_ids.add(nested.model_call_id)
+
     if first.proposal_hash is None:
-        if len(events) != first.attempt_count or v2_proposal_indexes:
+        if len(events) != len(model_indexes) or v2_proposal_indexes:
             raise ValueError("failed recovery audit transaction cannot contain a Proposal")
         return
 
-    proposal_index = first.attempt_count
+    proposal_index = len(model_indexes)
     if len(events) not in {proposal_index + 1, proposal_index + 5} or v2_proposal_indexes != [
         proposal_index
     ]:
@@ -704,9 +753,15 @@ def _validate_life_development_location_authority_batch(
         if possibility_version not in {
             "life-development-possibility.2",
             "life-development-possibility.3",
+            "life-development-possibility.4",
+            "life-development-possibility.5",
         }:
             raise ValueError("life-development possibility authority version is unknown")
-        if possibility_version == "life-development-possibility.3":
+        if possibility_version in {
+            "life-development-possibility.3",
+            "life-development-possibility.4",
+            "life-development-possibility.5",
+        }:
             expected_possibility_hash = hashlib.sha256(
                 json.dumps(
                     possibility,
@@ -784,6 +839,184 @@ def _validate_life_development_location_authority_batch(
                 possibility=possibility,
                 authored_subject_ref=authored_subject_ref,
             )
+            if possibility_version in {
+                "life-development-possibility.4",
+                "life-development-possibility.5",
+            }:
+                review = proposal.get("world_author_source_closure_review")
+                review_deliberation = proposal.get(
+                    "world_author_source_closure_deliberation"
+                )
+                if not isinstance(review, dict) or not isinstance(
+                    review_deliberation,
+                    dict,
+                ):
+                    raise ValueError(
+                        "life-development v4 possibility lacks source-closure authority"
+                    )
+                if (
+                    review.get("decision") != "supported"
+                    or review.get("unsupported_claim_ids") != []
+                    or review.get("undeclared_fact_fragments") != []
+                    or review.get("undeclared_fact_paths", []) != []
+                    or review.get("typed_location_conflicts") != []
+                ):
+                    raise ValueError(
+                        "life-development v4 possibility has unsupported source closure"
+                    )
+                expected_review_hash = hashlib.sha256(
+                    json.dumps(
+                        review,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                expected_review_deliberation_hash = hashlib.sha256(
+                    json.dumps(
+                        review_deliberation,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if (
+                    proposal.get("world_author_source_closure_review_hash")
+                    != expected_review_hash
+                    or proposal.get(
+                        "world_author_source_closure_deliberation_hash"
+                    )
+                    != expected_review_deliberation_hash
+                    or review_deliberation.get("role")
+                    != "world_author_source_reviewer"
+                    or review_deliberation.get("capsule_id")
+                    != deliberation.get("capsule_id")
+                    or review_deliberation.get("context_cursor")
+                    != deliberation.get("context_cursor")
+                    or review_deliberation.get("capability_manifest")
+                    != deliberation.get("capability_manifest")
+                    or not isinstance(
+                        proposal.get("world_author_source_closure_model"),
+                        str,
+                    )
+                ):
+                    raise ValueError(
+                        "life-development source-closure authority binding is invalid"
+                    )
+                expected_source_subject_hash = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "capability_manifest_hash": proposal.get(
+                                "capability_manifest_hash"
+                            ),
+                            "world_author_raw_output_hash": proposal.get(
+                                "world_author_raw_output_hash"
+                            ),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if (
+                    review_deliberation.get("decision_subject_hash")
+                    != expected_source_subject_hash
+                ):
+                    raise ValueError(
+                        "life-development source-closure reviewed another subject"
+                    )
+            if possibility_version == "life-development-possibility.5":
+                novel_review = proposal.get("world_author_novel_origin_review")
+                novel_deliberation = proposal.get(
+                    "world_author_novel_origin_deliberation"
+                )
+                if not isinstance(novel_review, dict) or not isinstance(
+                    novel_deliberation,
+                    dict,
+                ):
+                    raise ValueError(
+                        "life-development v5 possibility lacks novel-origin authority"
+                    )
+                if (
+                    novel_review.get("decision") != "supported"
+                    or novel_review.get("unsupported_claims") != []
+                    or novel_review.get("unsupported_provisional_npcs") != []
+                    or novel_review.get(
+                        "unsupported_outcome_prerequisites",
+                        [],
+                    )
+                    != []
+                    or novel_review.get("undeclared_premise_fragments") != []
+                ):
+                    raise ValueError(
+                        "life-development v5 possibility has unsupported novel origin"
+                    )
+                expected_novel_hash = hashlib.sha256(
+                    json.dumps(
+                        novel_review,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                expected_novel_deliberation_hash = hashlib.sha256(
+                    json.dumps(
+                        novel_deliberation,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if (
+                    proposal.get("world_author_novel_origin_review_hash")
+                    != expected_novel_hash
+                    or proposal.get("world_author_novel_origin_deliberation_hash")
+                    != expected_novel_deliberation_hash
+                    or novel_deliberation.get("role")
+                    != "world_author_novel_origin_critic"
+                    or novel_deliberation.get("capsule_id")
+                    != deliberation.get("capsule_id")
+                    or novel_deliberation.get("context_cursor")
+                    != deliberation.get("context_cursor")
+                    or novel_deliberation.get("capability_manifest")
+                    != deliberation.get("capability_manifest")
+                    or not isinstance(
+                        proposal.get("world_author_novel_origin_model"),
+                        str,
+                    )
+                ):
+                    raise ValueError(
+                        "life-development novel-origin authority binding is invalid"
+                    )
+                expected_novel_subject_hashes = {
+                    hashlib.sha256(
+                        json.dumps(
+                            {
+                                "contract": contract,
+                                "capability_manifest_hash": proposal.get(
+                                    "capability_manifest_hash"
+                                ),
+                                "world_author_raw_output_hash": proposal.get(
+                                    "world_author_raw_output_hash"
+                                ),
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    for contract in (
+                        "life-development-novel-origin-review.1",
+                        "life-development-novel-origin-review.2",
+                    )
+                }
+                if (
+                    novel_deliberation.get("decision_subject_hash")
+                    not in expected_novel_subject_hashes
+                ):
+                    raise ValueError(
+                        "life-development novel-origin critic reviewed another subject"
+                    )
         location_ref = possibility.get("location_ref")
         capability_ref = possibility.get("location_capability_ref")
         capability_value = possibility.get("location_capability")
@@ -810,6 +1043,8 @@ def _validate_life_development_location_authority_batch(
             not in {
                 "life-development-possibility.2",
                 "life-development-possibility.3",
+                "life-development-possibility.4",
+                "life-development-possibility.5",
             }
             or not isinstance(location_ref, str)
             or not isinstance(capability_ref, str)

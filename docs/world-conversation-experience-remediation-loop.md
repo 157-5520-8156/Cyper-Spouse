@@ -298,13 +298,10 @@
 
 ### 2026-07-12 / Iteration 11：最终三十轮清洁回放
 
-可复现命令：
-
-```bash
-.venv/bin/python scripts/run_world_conversation_audit.py \
-  --database data/conversation-experience-iteration18.sqlite \
-  --output data/conversation-experience-iteration18.jsonl
-```
+这次结果来自当时的 World V1 审计入口。该入口依赖已经删除的
+`CompanionEngine`/`WorldKernel`，现不再作为可运行命令保留；当前端到端验收入口为
+`scripts/run_isolated_daemon_acceptance.py`，私人自我—召回—表达审计入口为
+`scripts/run_private_self_expression_audit.py`。
 
 结果：
 
@@ -323,7 +320,7 @@
 - availability 确定性覆盖提前到最近两条复读检查之前，并对连续相同询问给出交替短答；
 - `_bounded_paraphrase` 增加时间锚点、程度、否定、来源主体和新增谓词检查；grounded fallback 与 facts 使用同一 `user_id` ownership 过滤，来源按唯一文本收集后再截断；
 - 空外部模型结果只结算 Action，不创建空 ModelProposal；非 JSON、超时和模型失败都进入可观察失败/repair 链；
-- 最终静态检查：`ruff check src tests scripts/run_world_conversation_audit.py` 通过；
+- 最终静态检查：当时的 World V1 审计入口通过；该入口现已退役；
 - 最终全量自动化：`611 passed`，1 个 `httpx`/Starlette deprecation warning，无失败；小屋相关工作区文件未纳入本任务修改；
 - 最终真实回放 iteration18 的体验账本仍满足 `ready=true`、六投影一致、30 入站/28 外发/2 合法延期/0 异常；
 - 独立复审提出的剩余观察项均已转为测试或显式边界：慢模型调用由 45 秒 HTTP 上限与 2 分钟 observed lease 约束，活动列表 unresolved 优先展示，控制台不开放任意外部回执命令。

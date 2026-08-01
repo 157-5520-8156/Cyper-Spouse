@@ -1,4 +1,9 @@
-"""Durable lane/source-scoped retry authority for contextual life deliberation."""
+"""Durable lane/source-scoped retry authority for life model post-processing.
+
+The same immutable 10/30/120-minute authority is shared by contextual life
+deliberation and Experience-memory retention. A lane and exact source event
+remain part of the retry identity, so success in one lane cannot reset another.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ from .schemas import (
 
 
 CONTEXTUAL_LIFE_RETRY_DELAYS_SECONDS = (600, 1800, 7200)
-ContextualLifeLane = Literal["formation", "planning"]
+ContextualLifeLane = Literal["formation", "planning", "experience_memory"]
 
 
 def retry_for(
@@ -110,7 +115,11 @@ def record_technical_failure(
         logical_time=projection.logical_time,
         created_at=projection.logical_time,
         actor=actor,
-        source="world-v2:contextual-life-inspiration",
+        source=(
+            "world-v2:experience-memory"
+            if lane == "experience_memory"
+            else "world-v2:contextual-life-inspiration"
+        ),
         trace_id=trace_id,
         causation_id=source_event_ref,
         correlation_id=correlation_id,

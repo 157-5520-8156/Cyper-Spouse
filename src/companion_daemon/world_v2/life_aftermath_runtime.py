@@ -13,6 +13,10 @@ import httpx
 
 from .batch_invariants import appraisal_trigger_identity
 from .context_resolver import query_from_projection
+from .contextual_life_retry import (
+    record_technical_failure as record_contextual_life_technical_failure,
+    retry_for as contextual_life_retry_for,
+)
 from .event_identity import domain_idempotency_key
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .experience_memory_candidate_lifecycle import ExperienceMemoryCandidateLifecycle
@@ -24,7 +28,11 @@ from .experience_memory_decision import (
     experience_memory_decision_identity,
 )
 from .experience_events import ExperienceCommittedPayload, experience_mutation_hash
-from .fact_memory_draft import FactMemoryDraftAdapter, FactMemoryRetentionDraft
+from .fact_memory_draft import (
+    FactMemoryDraftAdapter,
+    FactMemoryDraftTechnicalFailure,
+    FactMemoryRetentionDraft,
+)
 from .life_author_seed import ReviewedLifeSeedCatalog
 from .life_content_events import LifeContentRecordedPayload
 from .life_content_store import (
@@ -1880,7 +1888,7 @@ class LifeAftermathRuntime:
         logical_time: datetime,
         trace_id: str,
         correlation_id: str,
-    ) -> Literal["retained", "no_change"] | None:
+    ) -> Literal["retained", "no_change", "retry_wait"] | None:
         """Single-flight one Experience decision inside this worker process."""
 
         lock = self._memory_decision_locks.setdefault(
@@ -1902,7 +1910,7 @@ class LifeAftermathRuntime:
         logical_time: datetime,
         trace_id: str,
         correlation_id: str,
-    ) -> Literal["retained", "no_change"] | None:
+    ) -> Literal["retained", "no_change", "retry_wait"] | None:
         """Retain settled lived history through the existing memory authority.
 
         The semantic text remains the immutable sidecar and the candidate is
@@ -1986,6 +1994,17 @@ class LifeAftermathRuntime:
         else:
             if self._memory_adapter is None:
                 return None
+            retry = contextual_life_retry_for(
+                projection,
+                lane="experience_memory",
+                source_event_ref=experience.origin.accepted_event_ref,
+            )
+            if (
+                retry is not None
+                and projection.logical_time is not None
+                and projection.logical_time < retry.next_retry_at
+            ):
+                return "retry_wait"
             summary = self._content_store.read_exact(
                 content_ref=experience.values.summary_ref
             )
@@ -1997,10 +2016,37 @@ class LifeAftermathRuntime:
                 raise ValueError(
                     "experience summary sidecar is unavailable for memory classification"
                 )
-            classified = await self._memory_adapter.classify(
-                predicate_code="world.experience",
-                source_text=summary.text,
-            )
+            try:
+                classified = await self._memory_adapter.classify(
+                    predicate_code="world.experience",
+                    source_text=summary.text,
+                )
+            except FactMemoryDraftTechnicalFailure as exc:
+                try:
+                    record_contextual_life_technical_failure(
+                        ledger=self._ledger,
+                        projection=projection,
+                        lane="experience_memory",
+                        source_event_ref=experience.origin.accepted_event_ref,
+                        source_payload_hash=committed_experience.payload_hash,
+                        context_cursor=_cursor(projection),
+                        failure_code=exc.failure_code,
+                        actor=self._actor,
+                        trace_id=trace_id,
+                        correlation_id=correlation_id,
+                    )
+                except (ConcurrencyConflict, IdempotencyConflict):
+                    # A competing worker may have recorded the exact
+                    # source-scoped failure first. Join that durable retry;
+                    # never turn one failed attempt into two ordinals.
+                    joined = contextual_life_retry_for(
+                        self._ledger.project(),
+                        lane="experience_memory",
+                        source_event_ref=experience.origin.accepted_event_ref,
+                    )
+                    if joined is None:
+                        raise
+                raise
             decision = self._record_experience_memory_decision(
                 experience=experience,
                 committed_experience=committed_experience,

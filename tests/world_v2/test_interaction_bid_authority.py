@@ -91,7 +91,7 @@ def _audit(ledger: WorldLedger, source: WorldEvent, source_revision: int):
     base = _result()
     result = DeliberationResult(result_id="deliberation:" + _digest({"capsule_id": base.capsule_id, "proposal_hash": proposal.proposal_hash, "attempt_audits": [base.audit.model_dump(mode="json")]}), capsule_id=base.capsule_id, proposal=proposal, audit=base.audit, attempt_audits=(base.audit,))
     head = ledger.project()
-    recorded = ProposalAuditRecorder(ledger=ledger).record(result, ProposalAuditContext(world_id=WORLD, trigger_ref=source.event_id, logical_time=NOW, created_at=NOW, actor="agent:companion", source="test", trace_id="trace:interaction-bid", causation_id="cause:proposal", correlation_id="correlation:interaction-bid", evaluated_world_revision=head.world_revision, expected_commit_world_revision=head.world_revision, expected_deliberation_revision=head.deliberation_revision))
+    recorded = ProposalAuditRecorder(ledger=ledger).record(result, ProposalAuditContext(world_id=WORLD, trigger_ref=source.event_id, logical_time=NOW, created_at=NOW, actor="agent:companion", source="test", trace_id="trace:interaction-bid", causation_id="cause:proposal", correlation_id="correlation:interaction-bid", evaluated_world_revision=head.world_revision, expected_commit_world_revision=head.world_revision, expected_deliberation_revision=head.deliberation_revision, expected_ledger_sequence=head.ledger_sequence))
     return proposal, recorded
 
 
@@ -127,6 +127,6 @@ def test_sqlite_migrates_v30_head_without_fabricating_interaction_bids(tmp_path)
         legacy_hash = hashlib.sha256(json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         connection.execute("UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ?, state_hash = '' WHERE world_id = ?", (legacy_hash, "world-v2-reducers.30", WORLD))
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.44"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.46"
     assert migrated.project().interaction_bids == ()
     assert migrated.rebuild() == migrated.project()

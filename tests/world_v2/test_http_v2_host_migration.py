@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import inspect
 import json
 from pathlib import Path
+import threading
 import time
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ from companion_daemon.world_v2.http_capture_host import (
     HttpV2CaptureHost,
     build_http_v2_capture_host,
 )
+from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.platform_host import PlatformScheduledDrainResult
 from companion_daemon.world_v2.platform_action_executor import (
     MediaProviderDispatchRequest,
@@ -77,6 +79,31 @@ class _DurableMediaTransport:
         return None
 
 
+class _NamedNoCallModel:
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.semantic_authority_id = f"semantic-authority:test:{model.casefold()}"
+
+    async def complete(
+        self,
+        _messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> str:
+        del temperature
+        raise AssertionError(f"unexpected composition-only model call: {self.model}")
+
+
+class _NamedStrictInventoryNoCallModel(_NamedNoCallModel):
+    def supports_strict_output_contract(self, contract: str) -> bool:
+        return contract == "candidate-external-proposition-inventory.5"
+
+
+class _NamedStrictCoverageNoCallModel(_NamedNoCallModel):
+    def supports_strict_output_contract(self, contract: str) -> bool:
+        return contract == "candidate-external-proposition-coverage.5"
+
+
 class _NoCallMediaPlanner:
     async def lookup(self, *, planning_request_id: str):  # type: ignore[no-untyped-def]
         del planning_request_id
@@ -84,6 +111,47 @@ class _NoCallMediaPlanner:
 
     async def plan(self, **_kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("a deployment seam must not plan without an accepted candidate")
+
+
+@pytest.mark.asyncio
+async def test_http_composition_wires_proactive_identity_reviewer_and_inventory(
+    tmp_path: Path,
+) -> None:
+    author = _NamedNoCallModel("http-proactive-author")
+    reviewer = _NamedStrictCoverageNoCallModel("http-independent-source-reviewer")
+    inventory = _NamedStrictInventoryNoCallModel("http-candidate-inventory")
+    host = build_http_v2_capture_host(
+        settings=Settings(database_path=tmp_path / "http-proactive-source-authority.sqlite"),
+        bootstrap_at=NOW,
+        model=author,
+        source_closure_model=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+    )
+    try:
+        runtime = (  # noqa: SLF001
+            host._host._application._turns._runtime._proactive_action_runtime
+        )
+        adapter = runtime._turn._deliberation._main  # noqa: SLF001
+
+        assert adapter._identity_frame is not None  # noqa: SLF001
+        assert adapter._source_closure_reviewer is reviewer  # noqa: SLF001
+        assert (  # noqa: SLF001
+            adapter._candidate_external_proposition_inventory_model is inventory
+        )
+        development = (  # noqa: SLF001
+            host._host._application._life_ecology._life_development_followup
+        )
+        assert development._world_author.authority_origin is author  # noqa: SLF001
+        assert (  # noqa: SLF001
+            development._world_author_source_rewriter.authority_origin is author
+        )
+        assert (  # noqa: SLF001
+            development._source_closure_reviewer.authority_origin is reviewer
+        )
+        assert development._source_closure_reviewer_is_independent is True  # noqa: SLF001
+        assert host.proactive_source_authority_health()["status"] == "ready"
+    finally:
+        await host.aclose()
 
 
 class _CognitiveHostModel:
@@ -126,12 +194,18 @@ class _LaterHostModel:
     async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         del temperature
         self.calls += 1
-        return json.dumps({
-            "timing_choice": "later",
-            "beats": [{"modality": "text", "text": "等我忙完回来。"}],
-            "delay_seconds": 60, "expires_after_seconds": 600,
-            "stance": "defer", "brief_rationale": "稍后接续", "confidence": 7200,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "timing_choice": "later",
+                "beats": [{"modality": "text", "text": "等我忙完回来。"}],
+                "delay_seconds": 60,
+                "expires_after_seconds": 600,
+                "stance": "defer",
+                "brief_rationale": "稍后接续",
+                "confidence": 7200,
+            },
+            ensure_ascii=False,
+        )
 
 
 class _TwoBeatHostModel:
@@ -143,16 +217,19 @@ class _TwoBeatHostModel:
     async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         del temperature
         self.calls += 1
-        return json.dumps({
-            "timing_choice": "now",
-            "beats": [
-                {"modality": "text", "text": "等等。"},
-                {"modality": "text", "text": "我想认真听你讲。"},
-            ],
-            "stance": "engage",
-            "brief_rationale": "Use two natural beats selected in the one draft.",
-            "confidence": 7600,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "timing_choice": "now",
+                "beats": [
+                    {"modality": "text", "text": "等等。"},
+                    {"modality": "text", "text": "我想认真听你讲。"},
+                ],
+                "stance": "engage",
+                "brief_rationale": "Use two natural beats selected in the one draft.",
+                "confidence": 7600,
+            },
+            ensure_ascii=False,
+        )
 
 
 class _UnavailableHttpExpressionModel:
@@ -160,12 +237,14 @@ class _UnavailableHttpExpressionModel:
 
     async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         del temperature
-        return json.dumps({
-            "timing_choice": "now",
-            "beats": [{"modality": "reaction", "reaction_id": "like"}],
-            "stance": "acknowledge_briefly",
-            "brief_rationale": "Attempt an unavailable HTTP modality.",
-        })
+        return json.dumps(
+            {
+                "timing_choice": "now",
+                "beats": [{"modality": "reaction", "reaction_id": "like"}],
+                "stance": "acknowledge_briefly",
+                "brief_rationale": "Attempt an unavailable HTTP modality.",
+            }
+        )
 
 
 class _BlockingHttpBackgroundModel:
@@ -253,12 +332,17 @@ async def test_http_shared_reply_audit_reaches_deferred_followup_with_one_main_c
     model = _LaterHostModel()
     host = build_http_v2_capture_host(
         settings=Settings(database_path=tmp_path / "http-v2-shared-later.sqlite"),
-        bootstrap_at=NOW, model=model, advisory_model=FakeCompanionModel(),
+        bootstrap_at=NOW,
+        model=model,
+        advisory_model=FakeCompanionModel(),
     )
     try:
         result = await host.respond(
-            platform="simulator", platform_user_id="geoff",
-            platform_message_id="message:http-later", text="你先忙吧", observed_at=NOW,
+            platform="simulator",
+            platform_user_id="geoff",
+            platform_message_id="message:http-later",
+            text="你先忙吧",
+            observed_at=NOW,
         )
         projection = host._host._application._ledger.project()  # type: ignore[attr-defined]
     finally:
@@ -332,16 +416,21 @@ async def test_http_regular_drain_does_not_hold_the_inbound_lock(tmp_path: Path)
     drain_task: asyncio.Task[object] | None = None
     try:
         first = await host.respond(
-            platform="simulator", platform_user_id="geoff",
-            platform_message_id="message:http-background-one", text="你好", observed_at=NOW,
+            platform="simulator",
+            platform_user_id="geoff",
+            platform_message_id="message:http-background-one",
+            text="你好",
+            observed_at=NOW,
         )
         drain_task = asyncio.create_task(host.drain(max_action_units=0, max_background_units=1))
         await asyncio.wait_for(background.started.wait(), timeout=2)
         started = asyncio.get_running_loop().time()
         second = await asyncio.wait_for(
             host.respond(
-                platform="simulator", platform_user_id="geoff",
-                platform_message_id="message:http-background-two", text="还在吗？",
+                platform="simulator",
+                platform_user_id="geoff",
+                platform_message_id="message:http-background-two",
+                text="还在吗？",
                 observed_at=NOW + timedelta(minutes=1),
             ),
             timeout=2,
@@ -395,9 +484,7 @@ async def test_http_capture_returns_at_first_visible_body_while_joining_settleme
             return None
 
     target = _SlowSettlementHost()
-    host = HttpV2CaptureHost(
-        host=target, transport=transport, primary_user_id="geoff"
-    )  # type: ignore[arg-type]
+    host = HttpV2CaptureHost(host=target, transport=transport, primary_user_id="geoff")  # type: ignore[arg-type]
     response_task = asyncio.create_task(
         host.respond(
             platform="simulator",
@@ -430,7 +517,8 @@ async def test_http_builder_installs_only_a_complete_media_preview_deployment(
         planner=_NoCallMediaPlanner(),
         acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(
-                grant_id="grant:http-preview", grant_revision=1,
+                grant_id="grant:http-preview",
+                grant_revision=1,
             ),
             account_id="account:http-preview",
             account_window_id="window:http-preview",
@@ -455,20 +543,20 @@ async def test_http_builder_installs_only_a_complete_media_preview_deployment(
 
 
 def test_real_http_asgi_factory_carries_complete_media_deployment_to_conductor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def unavailable_model(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("provider unavailable in composition test")
 
-    monkeypatch.setattr(
-        semantic_chat_composition.DeepSeekChatModel, "complete", unavailable_model
-    )
+    monkeypatch.setattr(semantic_chat_composition.DeepSeekChatModel, "complete", unavailable_model)
     deployment = MediaPreviewDeployment(
         selection_model=_CognitiveHostModel(),
         planner=_NoCallMediaPlanner(),
         acceptance=MediaSelectionAcceptanceComposition(
             grant=ProviderMediaGrantBinding(
-                grant_id="grant:http-asgi-preview", grant_revision=1,
+                grant_id="grant:http-asgi-preview",
+                grant_revision=1,
             ),
             account_id="account:http-asgi-preview",
             account_window_id="window:http-asgi-preview",
@@ -508,7 +596,8 @@ def test_real_http_asgi_factory_carries_complete_media_deployment_to_conductor(
 
 
 def test_first_messages_returns_retryable_not_ready_without_ingress_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cold capture never holds ingress behind replay or writes early data."""
 
@@ -568,9 +657,164 @@ def test_first_messages_returns_retryable_not_ready_without_ingress_write(
     assert capture.responded == ["message:http-v2:readiness"]
 
 
+def test_health_starts_one_warmup_and_reports_sanitized_sticky_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_calls = 0
+
+    def invalid_capture(*, asgi_app, bootstrap_at=None):  # type: ignore[no-untyped-def]
+        nonlocal build_calls
+        del asgi_app, bootstrap_at
+        build_calls += 1
+        raise LedgerIntegrityError("private ledger path and semantic hash details")
+
+    monkeypatch.setattr(app_module, "_http_v2_capture", invalid_capture)
+    configured = app_module.create_http_asgi_app(
+        settings=Settings(database_path=tmp_path / "http-v2-invalid-ledger.sqlite")
+    )
+
+    with TestClient(configured) as client:
+        first = client.get("/health")
+        deadline = time.monotonic() + 2
+        current = first
+        while (
+            current.json().get("world_v2_capture", {}).get("status") != "failed"
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+            current = client.get("/health")
+
+        assert current.status_code == 200
+        assert current.json()["status"] == "degraded"
+        assert current.json()["world_v2_capture"] == {
+            "status": "failed",
+            "failure_code": "ledger_integrity_error",
+        }
+        assert "private ledger path" not in current.text
+
+        repeated = [client.get("/health").json() for _ in range(3)]
+
+    assert build_calls == 1
+    assert all(item == current.json() for item in repeated)
+
+
+def test_explicit_message_retries_failed_health_warmup_and_restores_ready_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RecoveredCapture:
+        async def respond(self, **kwargs):  # type: ignore[no-untyped-def]
+            return HttpCaptureResult(
+                status="replied",
+                action_id=None,
+                text=f"接住 {kwargs['platform_message_id']}",
+                canonical_user_id="geoff",
+                mood="calm",
+            )
+
+        def proactive_source_authority_health(self) -> dict[str, object]:
+            return {"status": "ready"}
+
+        async def aclose(self) -> None:
+            return None
+
+    recovered = _RecoveredCapture()
+    build_calls = 0
+
+    def fail_then_recover(*, asgi_app, bootstrap_at=None):  # type: ignore[no-untyped-def]
+        nonlocal build_calls
+        del bootstrap_at
+        build_calls += 1
+        if build_calls == 1:
+            raise LedgerIntegrityError("must remain internal")
+        asgi_app.state.http_v2_capture = recovered
+        return recovered
+
+    monkeypatch.setattr(app_module, "_http_v2_capture", fail_then_recover)
+    configured = app_module.create_http_asgi_app(
+        settings=Settings(database_path=tmp_path / "http-v2-recover.sqlite")
+    )
+
+    with TestClient(configured) as client:
+        client.get("/health")
+        deadline = time.monotonic() + 2
+        health = client.get("/health")
+        while (
+            health.json().get("world_v2_capture", {}).get("status") != "failed"
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+            health = client.get("/health")
+        assert health.json()["status"] == "degraded"
+
+        response = client.post(
+            "/messages",
+            json={
+                "platform": "simulator",
+                "platform_user_id": "geoff",
+                "message_id": "message:http-v2:recover",
+                "text": "再试一次。",
+                "sent_at": NOW.isoformat(),
+            },
+        )
+        ready = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "接住 message:http-v2:recover"
+    assert build_calls == 2
+    assert ready.json()["status"] == "ok"
+    assert ready.json()["world_v2_capture"] == {"status": "ready"}
+    assert ready.json()["proactive_source_authority"] == {"status": "ready"}
+
+
+def test_health_reports_running_warmup_without_starting_another_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ReadyCapture:
+        async def aclose(self) -> None:
+            return None
+
+    build_started = threading.Event()
+    release_build = threading.Event()
+    build_calls = 0
+
+    def blocked_capture(*, asgi_app, bootstrap_at=None):  # type: ignore[no-untyped-def]
+        nonlocal build_calls
+        del bootstrap_at
+        build_calls += 1
+        build_started.set()
+        assert release_build.wait(timeout=2)
+        capture = _ReadyCapture()
+        asgi_app.state.http_v2_capture = capture
+        return capture
+
+    monkeypatch.setattr(app_module, "_http_v2_capture", blocked_capture)
+    configured = app_module.create_http_asgi_app(
+        settings=Settings(database_path=tmp_path / "http-v2-running.sqlite")
+    )
+
+    with TestClient(configured) as client:
+        first = client.get("/health")
+        assert build_started.wait(timeout=2)
+        second = client.get("/health")
+        assert first.json()["world_v2_capture"] == {"status": "warming"}
+        assert second.json()["world_v2_capture"] == {"status": "warming"}
+        assert build_calls == 1
+        release_build.set()
+
+        deadline = time.monotonic() + 2
+        while configured.state.http_v2_capture is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert build_calls == 1
+
+
 @pytest.mark.asyncio
 async def test_http_capture_warmup_is_single_flight_and_timeout_does_not_cancel(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configured = app_module.create_http_asgi_app(
         settings=Settings(database_path=tmp_path / "http-v2-single-flight.sqlite")
@@ -589,10 +833,12 @@ async def test_http_capture_warmup_is_single_flight_and_timeout_does_not_cancel(
     monkeypatch.setattr(app_module, "_http_v2_capture", delayed_capture)
     results = await asyncio.gather(
         app_module._http_v2_capture_async(
-            asgi_app=configured, wait_timeout_seconds=0.01,
+            asgi_app=configured,
+            wait_timeout_seconds=0.01,
         ),
         app_module._http_v2_capture_async(
-            asgi_app=configured, wait_timeout_seconds=0.01,
+            asgi_app=configured,
+            wait_timeout_seconds=0.01,
         ),
         return_exceptions=True,
     )
@@ -604,14 +850,14 @@ async def test_http_capture_warmup_is_single_flight_and_timeout_does_not_cancel(
 
 
 def test_real_http_asgi_factory_defaults_media_to_unavailable_and_rejects_partial_pair(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def unavailable_model(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("provider unavailable in composition test")
 
-    monkeypatch.setattr(
-        semantic_chat_composition.DeepSeekChatModel, "complete", unavailable_model
-    )
+    monkeypatch.setattr(semantic_chat_composition.DeepSeekChatModel, "complete", unavailable_model)
+
     class _UnrelatedGlobalCapture:
         closed = False
 
@@ -869,9 +1115,7 @@ def test_http_accepts_pure_attachment_without_fabricating_text(
     assert response.status_code in {200, 202}
     observation = json.loads(event.payload_json)
     assert observation["text"] is None
-    assert observation["attachment_refs"][0].startswith(
-        "attachment:http:image:sha256:"
-    )
+    assert observation["attachment_refs"][0].startswith("attachment:http:image:sha256:")
 
 
 def test_http_dashboard_room_route_is_operator_gated_and_returns_only_the_v2_public_dto(
@@ -1222,6 +1466,276 @@ async def test_http_capture_only_drains_the_action_authorized_by_its_own_ingress
 
     assert targeted.targeted_action_ids == ["action:new"]
     assert result.action_id == "action:new"
+
+
+@pytest.mark.asyncio
+async def test_http_capture_prefers_platform_async_lifecycle() -> None:
+    class _AsyncClosingHost:
+        def __init__(self) -> None:
+            self.async_closed = False
+            self.sync_closed = False
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            self.async_closed = True
+
+        def close(self) -> None:
+            self.sync_closed = True
+
+    platform = _AsyncClosingHost()
+    host = HttpV2CaptureHost(  # type: ignore[arg-type]
+        host=platform,
+        transport=HttpCaptureTransport(),
+        primary_user_id="geoff",
+    )
+
+    await host.aclose()
+
+    assert platform.async_closed is True
+    assert platform.sync_closed is False
+
+
+@pytest.mark.asyncio
+async def test_http_asgi_lifespan_consumes_capture_shutdown_lease(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    class _LeasedCapture:
+        closed = False
+        quiescent = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+            events.append("close")
+
+        @property
+        def shutdown_pending_task_count(self) -> int:
+            return int(self.closed and not self.quiescent)
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            assert self.closed is True
+            events.append("wait")
+            self.quiescent = True
+
+    configured = app_module.create_http_asgi_app(
+        settings=Settings(
+            _env_file=None,
+            database_path=tmp_path / "http-v2-lifespan-lease.sqlite",
+        )
+    )
+    capture = _LeasedCapture()
+    configured.state.http_v2_capture = capture
+
+    async with configured.router.lifespan_context(configured):
+        pass
+
+    assert events == ["close", "wait"]
+    assert capture.shutdown_pending_task_count == 0
+
+
+@pytest.mark.asyncio
+async def test_http_asgi_lifespan_consumes_shutdown_lease_after_server_error(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class _LeasedCapture:
+        async def aclose(self) -> None:
+            events.append("close")
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            events.append("wait")
+
+    configured = app_module.create_http_asgi_app(
+        settings=Settings(
+            _env_file=None,
+            database_path=tmp_path / "http-v2-error-shutdown-lease.sqlite",
+        )
+    )
+    configured.state.http_v2_capture = _LeasedCapture()
+
+    with pytest.raises(RuntimeError, match="server failed"):
+        async with configured.router.lifespan_context(configured):
+            raise RuntimeError("server failed")
+
+    assert events == ["close", "wait"]
+
+
+@pytest.mark.asyncio
+async def test_http_asgi_lifespan_joins_late_warmup_before_closing_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_started = threading.Event()
+    release_thread = threading.Event()
+    cleanup_events: list[str] = []
+
+    class _LateCapture:
+        async def aclose(self) -> None:
+            cleanup_events.append("close")
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            cleanup_events.append("wait")
+
+    configured = app_module.create_http_asgi_app(
+        settings=Settings(
+            _env_file=None,
+            database_path=tmp_path / "http-v2-late-warmup.sqlite",
+        )
+    )
+
+    def delayed_build(*, asgi_app, bootstrap_at=None):
+        del bootstrap_at
+        thread_started.set()
+        assert release_thread.wait(timeout=2)
+        capture = _LateCapture()
+        asgi_app.state.http_v2_capture = capture
+        return capture
+
+    monkeypatch.setattr(app_module, "_http_v2_capture", delayed_build)
+
+    async def run_lifespan() -> None:
+        async with configured.router.lifespan_context(configured):
+            app_module._schedule_http_v2_warmup(asgi_app=configured)
+            await asyncio.to_thread(thread_started.wait, 2)
+
+    lifecycle = asyncio.create_task(run_lifespan())
+    await asyncio.to_thread(thread_started.wait, 2)
+    configured.state.http_v2_warmup_task.cancel()
+    await asyncio.sleep(0)
+    assert lifecycle.done() is False
+    assert cleanup_events == []
+
+    release_thread.set()
+    await asyncio.wait_for(lifecycle, timeout=2)
+
+    assert cleanup_events == ["close", "wait"]
+
+
+@pytest.mark.asyncio
+async def test_http_close_reports_semantic_shutdown_lease_without_blocking() -> None:
+    release = asyncio.Event()
+
+    class _AsyncClosingHost:
+        async def aclose(self) -> None:
+            return None
+
+    class _SemanticDependencies:
+        def __init__(self) -> None:
+            self.close_called = False
+
+        async def aclose(self) -> None:
+            self.close_called = True
+
+        @property
+        def shutdown_pending_task_count(self) -> int:
+            return 0 if release.is_set() else int(self.close_called)
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            await release.wait()
+
+    semantic = _SemanticDependencies()
+    host = HttpV2CaptureHost(  # type: ignore[arg-type]
+        host=_AsyncClosingHost(),
+        transport=HttpCaptureTransport(),
+        primary_user_id="geoff",
+        semantic_chat=semantic,  # type: ignore[arg-type]
+    )
+
+    await asyncio.wait_for(host.aclose(), timeout=0.2)
+
+    assert semantic.close_called is True
+    assert host.shutdown_pending_task_count == 1
+    quiescence = asyncio.create_task(host.wait_for_shutdown_quiescence())
+    await asyncio.sleep(0)
+    assert quiescence.done() is False
+
+    release.set()
+    await asyncio.wait_for(quiescence, timeout=1)
+    assert host.shutdown_pending_task_count == 0
+
+
+@pytest.mark.asyncio
+async def test_http_close_defers_semantic_dependencies_while_world_lease_is_open() -> None:
+    release = asyncio.Event()
+
+    class _LeasedWorld:
+        async def aclose(self) -> None:
+            return None
+
+        @property
+        def shutdown_pending_task_count(self) -> int:
+            return 0 if release.is_set() else 1
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            await release.wait()
+
+    class _SemanticDependencies:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    semantic = _SemanticDependencies()
+    host = HttpV2CaptureHost(  # type: ignore[arg-type]
+        host=_LeasedWorld(),
+        transport=HttpCaptureTransport(),
+        primary_user_id="geoff",
+        semantic_chat=semantic,  # type: ignore[arg-type]
+    )
+
+    await asyncio.wait_for(host.aclose(), timeout=0.2)
+
+    assert semantic.closed is False
+    assert host.shutdown_pending_task_count == 1
+
+    release.set()
+    await asyncio.wait_for(host.wait_for_shutdown_quiescence(), timeout=1)
+
+    assert semantic.closed is True
+
+
+@pytest.mark.asyncio
+async def test_http_capture_duplicate_and_cancelled_close_join_one_owner() -> None:
+    world_close_started = asyncio.Event()
+    release_world_close = asyncio.Event()
+
+    class _SlowWorld:
+        close_calls = 0
+        finished = False
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            world_close_started.set()
+            await release_world_close.wait()
+            self.finished = True
+
+    world = _SlowWorld()
+    host = HttpV2CaptureHost(  # type: ignore[arg-type]
+        host=world,
+        transport=HttpCaptureTransport(),
+        primary_user_id="geoff",
+    )
+
+    cancelled_waiter = asyncio.create_task(host.aclose())
+    await world_close_started.wait()
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+
+    duplicate_waiter = asyncio.create_task(host.aclose())
+    quiescence_waiter = asyncio.create_task(host.wait_for_shutdown_quiescence())
+    await asyncio.sleep(0)
+    assert duplicate_waiter.done() is False
+    assert quiescence_waiter.done() is False
+    assert world.close_calls == 1
+
+    release_world_close.set()
+    await asyncio.gather(duplicate_waiter, quiescence_waiter)
+
+    assert world.finished is True
+    assert world.close_calls == 1
+    assert host.shutdown_pending_task_count == 0
 
 
 @pytest.mark.asyncio

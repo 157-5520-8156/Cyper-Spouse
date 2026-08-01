@@ -289,7 +289,9 @@ class NpcWorldAppraisalTriggerRuntime:
         ):
             events.extend(
                 affect_deliberation_trigger_events(
-                    appraisal_event=appraisal_event, owner_id=self._affect_owner_id
+                    appraisal_event=appraisal_event,
+                    owner_id=self._affect_owner_id,
+                    claimed_at=projection.logical_time,
                 )
             )
         relationship_id = relationship_deliberation_trigger_id(
@@ -300,7 +302,9 @@ class NpcWorldAppraisalTriggerRuntime:
         ):
             events.extend(
                 relationship_deliberation_trigger_events(
-                    appraisal_event=appraisal_event, owner_id=self._relationship_owner_id
+                    appraisal_event=appraisal_event,
+                    owner_id=self._relationship_owner_id,
+                    claimed_at=projection.logical_time,
                 )
             )
         if not events:

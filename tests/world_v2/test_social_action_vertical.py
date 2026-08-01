@@ -455,6 +455,69 @@ async def test_model_reply_now_remains_an_inert_proposal_for_the_existing_reply_
 
 
 @pytest.mark.asyncio
+async def test_multiple_unaccepted_reply_audits_are_not_selected_by_ledger_order() -> None:
+    ledger, worker, model = await _setup(output=(
+        '{"choice":"reply_now","response_text":"第一种候选。",'
+        '"brief_rationale":"现在回应","confidence":6800}'
+    ))
+    observation = _observation()
+    located = ledger.lookup_event_commit(
+        "event:trigger:observation:test:message:1"
+    )
+    assert located is not None
+    turn = worker._turn  # noqa: SLF001 - fixture authors competing durable candidates
+    assert turn is not None
+
+    for response in ("第一种候选。", "第二种候选。"):
+        model.output = json.dumps(
+            {
+                "choice": "reply_now",
+                "response_text": response,
+                "brief_rationale": "现在回应",
+                "confidence": 6800,
+            },
+            ensure_ascii=False,
+        )
+        projection = ledger.project()
+        await turn.audit_observation(
+            observation=observation,
+            observation_event=located[0],
+            cursor=ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            ),
+        )
+
+    result = await worker.run_observation(observation.observation_id)
+    production_worker = SocialActionWorker(
+        ledger=ledger,
+        pinned_turn=None,
+        batch_issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
+        policy=SocialDeferredPolicy(
+            expression=ExpressionPlanBudgetPolicy(
+                account_id="account:chat",
+                amount_limit_per_action=3,
+                actor="actor:companion",
+                allowed_targets=("user:primary",),
+                recovery_policy="effect_once",
+            )
+        ),
+    )
+    drained = await production_worker.drain_one()
+
+    assert result.status == "unavailable"
+    assert result.reason_code == "social_action.ambiguous_proposal_authority"
+    assert drained.status == "idle"
+    assert model.calls == 2
+    assert ledger.project().actions == ()
+    assert not any(
+        item.process_kind == "social_action_deliberation"
+        for item in ledger.project().trigger_processes
+    )
+
+
+@pytest.mark.asyncio
 async def test_budget_exhaustion_does_not_authorize_partial_social_effects_or_repeat_model() -> None:
     ledger, worker, model = await _setup(output=(
         '{"choice":"defer","response_text":"晚些说。","delay_seconds":30,'

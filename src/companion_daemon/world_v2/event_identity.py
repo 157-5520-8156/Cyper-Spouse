@@ -301,6 +301,8 @@ def _life_identity_components(
         and payload.get("model_result_ref") is not None
     ):
         return world_id, payload.get("model_call_id"), payload.get("model_result_ref")
+    if event_type == "LifeDevelopmentRecallResultRecorded":
+        return world_id, payload.get("result_id")
     if (
         event_type == "ProposalRecorded"
         and payload.get("audit_contract") == "proposal-envelope-audit.1"
@@ -608,6 +610,16 @@ def _life_identity_components(
             attempts = process.get("attempt_ids")
             attempt_id = attempts[-1] if isinstance(attempts, list) and attempts else None
             return world_id, process.get("trigger_id"), attempt_id, event_type
+    if event_type == "ExpressionRepinReserved":
+        return (
+            world_id,
+            _nested(payload, "process", "trigger_id"),
+            payload.get("attempt_id"),
+            payload.get("repin_ordinal"),
+            payload.get("reserved_world_revision"),
+            payload.get("reserved_deliberation_revision"),
+            payload.get("reserved_ledger_sequence"),
+        )
     return None
 
 

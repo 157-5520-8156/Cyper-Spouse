@@ -324,6 +324,158 @@ def test_sqlite_migrates_verified_v39_head_and_cold_replays_same_history(tmp_pat
         assert after == before
 
 
+@pytest.mark.parametrize(
+    "source_bundle",
+    ("world-v2-reducers.44", "world-v2-reducers.45"),
+)
+def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_history(
+    tmp_path,
+    source_bundle: str,
+) -> None:
+    """Recent authenticated heads migrate without changing immutable history."""
+
+    source_revision = source_bundle.rsplit(".", 1)[-1]
+    path = tmp_path / f"world-v2-v{source_revision}-head.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    for index in range(2):
+        head = ledger.project()
+        ledger.commit(
+            [event(f"event-v44-migration-{index}", f"obs-v44-migration-{index}")],
+            expected_world_revision=head.world_revision,
+            expected_deliberation_revision=head.deliberation_revision,
+        )
+    expected = ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=expected.world_revision,
+        deliberation_revision=expected.deliberation_revision,
+        ledger_sequence=expected.ledger_sequence,
+    )
+    legacy_state = ledger._state_from_projection(expected)  # noqa: SLF001
+    legacy_state_json = ledger._encode_state(legacy_state)  # noqa: SLF001
+    canonical_legacy_state = json.dumps(
+        json.loads(legacy_state_json),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    legacy_semantic_hash = hashlib.sha256(
+        json.dumps(
+            legacy_state.semantic_payload(
+                world_id="world-sqlite-test",
+                world_revision=expected.world_revision,
+                reducer_bundle_version=source_bundle,
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    legacy_state_hash = hashlib.sha256(
+        ledger._state_hash_material(  # noqa: SLF001
+            canonical_state=canonical_legacy_state,
+            cursor=cursor,
+            reducer_bundle_version=source_bundle,
+        )
+    ).hexdigest()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        immutable_history_before = (
+            connection.execute(
+                "SELECT COUNT(*) FROM world_v2_events WHERE world_id = ?",
+                ("world-sqlite-test",),
+            ).fetchone()[0],
+            connection.execute(
+                """
+                SELECT event_hash
+                FROM world_v2_events
+                WHERE world_id = ?
+                ORDER BY ledger_sequence DESC
+                LIMIT 1
+                """,
+                ("world-sqlite-test",),
+            ).fetchone()[0],
+        )
+        connection.execute(
+            "DELETE FROM world_v2_head_state_items WHERE world_id = ?",
+            ("world-sqlite-test",),
+        )
+        connection.execute(
+            """
+            UPDATE world_v2_heads
+            SET state_json = ?, semantic_hash = ?, state_hash = ?,
+                reducer_bundle_version = ?
+            WHERE world_id = ?
+            """,
+            (
+                legacy_state_json,
+                legacy_semantic_hash,
+                legacy_state_hash,
+                source_bundle,
+                "world-sqlite-test",
+            ),
+        )
+
+    tampered_state_path = tmp_path / (
+        f"world-v2-v{source_revision}-head-state-tampered.sqlite3"
+    )
+    with sqlite3.connect(path) as source, sqlite3.connect(tampered_state_path) as target:
+        source.backup(target)
+        target.execute(
+            "UPDATE world_v2_heads SET state_hash = ? WHERE world_id = ?",
+            ("0" * 64, "world-sqlite-test"),
+        )
+    with pytest.raises(LedgerIntegrityError, match="legacy head state hash is invalid"):
+        SQLiteWorldLedger(path=tampered_state_path, world_id="world-sqlite-test")
+
+    tampered_semantic_path = tmp_path / (
+        f"world-v2-v{source_revision}-head-semantic-tampered.sqlite3"
+    )
+    with sqlite3.connect(path) as source, sqlite3.connect(tampered_semantic_path) as target:
+        source.backup(target)
+        target.execute(
+            "UPDATE world_v2_heads SET semantic_hash = ? WHERE world_id = ?",
+            ("0" * 64, "world-sqlite-test"),
+        )
+    with pytest.raises(LedgerIntegrityError, match="legacy head semantic hash is invalid"):
+        SQLiteWorldLedger(path=tampered_semantic_path, world_id="world-sqlite-test")
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    migrated = reopened.project()
+    assert migrated.reducer_bundle_version == "world-v2-reducers.46"
+    assert migrated.observation_refs == expected.observation_refs
+    assert (
+        migrated.world_revision,
+        migrated.deliberation_revision,
+        migrated.ledger_sequence,
+    ) == (
+        cursor.world_revision,
+        cursor.deliberation_revision,
+        cursor.ledger_sequence,
+    )
+    assert reopened.rebuild() == migrated
+    reopened.close()
+
+    with sqlite3.connect(path) as connection:
+        immutable_history_after = (
+            connection.execute(
+                "SELECT COUNT(*) FROM world_v2_events WHERE world_id = ?",
+                ("world-sqlite-test",),
+            ).fetchone()[0],
+            connection.execute(
+                """
+                SELECT event_hash
+                FROM world_v2_events
+                WHERE world_id = ?
+                ORDER BY ledger_sequence DESC
+                LIMIT 1
+                """,
+                ("world-sqlite-test",),
+            ).fetchone()[0],
+        )
+    assert immutable_history_after == immutable_history_before
+
+
 def test_historical_projection_replay_reuses_verified_ascending_prefixes(tmp_path) -> None:
     path = tmp_path / "historical-prefix.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")

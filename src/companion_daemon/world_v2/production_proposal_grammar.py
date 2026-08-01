@@ -547,27 +547,13 @@ def compose_production_deliberation(
         proposal_grammar=production_proposal_grammar(
             lane_id, expression_action_kinds=expression_action_kinds
         ),
-        # Chat recovery may legitimately return the typed ``silent``
-        # DecisionProposal after both provider attempts fail.  The grammar
-        # already allows an empty no-change decision and keeps it inert.
-        # Every appraisal lane's recovery likewise fails closed with a typed
-        # no-change appraisal proposal — never a visible MinimalReply — so it
-        # must be validated by its lane grammar; under ``minimal_only`` that
-        # honest recovery was rejected on shape alone and the whole appraisal
-        # turn failed even though nothing needed to change.
-        recovery_mode=(
-            "proposal_grammar"
-            if lane_id
-            in {
-                "proactive",
-                "chat_reply",
-                "interaction_appraisal",
-                "settled_world_appraisal",
-                "silence_appraisal",
-                "plan_disruption_appraisal",
-            }
-            else "minimal_only"
-        ),
+        # Every production recovery is interpreted under the same typed lane
+        # grammar as its primary candidate. Chat may legitimately return a
+        # MinimalProposal or a typed ``silent`` DecisionProposal; background
+        # lanes normally return an inert typed no-change DecisionProposal.
+        # A global ``minimal_only`` check incorrectly rejected those honest
+        # background recoveries solely because they were not chat replies.
+        recovery_mode="proposal_grammar",
     )
 
 

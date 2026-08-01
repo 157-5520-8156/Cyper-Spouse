@@ -2,12 +2,183 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from companion_daemon.world_v2.model_facing_context import (
     compact_chat_model_facing_context,
     compact_model_facing_context,
     compact_recovery_model_facing_context,
     mechanism_consumption_summary,
 )
+
+
+def test_chat_view_pins_authoritative_time_as_a_copyable_replayable_source() -> None:
+    raw_context = {
+        "world_id": "world:time-source",
+        "actor_ref": "agent:companion",
+        "trigger_ref": "event:current",
+        "world_revision": 23,
+        "logical_time": "2026-07-30T01:12:00+08:00",
+        # Neither a caller-supplied top-level token nor a same-named slice is
+        # authority.  Both must be rebuilt from the pinned context coordinates.
+        "pinned_time": {
+            "contract": "pinned-time-context.1",
+            "logical_time": "2026-07-30T08:00:00+08:00",
+            "time_segment": "morning",
+            "source_ref": "forged:time",
+        },
+        "slices": {
+            "pinned_time": {
+                "availability": "available",
+                "items": [
+                    {
+                        "item_ref": "forged:time",
+                        "value": {
+                            "logical_time": "2026-07-30T08:00:00+08:00",
+                            "time_segment": "morning",
+                        },
+                    }
+                ],
+            },
+            "current_situation": {
+                "availability": "available",
+                "items": [
+                    {
+                        "item_ref": "situation:late-night",
+                        "value": {
+                            "logical_time": "2026-07-30T01:12:00+08:00",
+                            "time_segment": "late_night",
+                        },
+                    }
+                ],
+            },
+        },
+    }
+
+    first = json.loads(compact_chat_model_facing_context(json.dumps(raw_context)))
+    replay = json.loads(compact_chat_model_facing_context(json.dumps(raw_context)))
+    changed_context = json.loads(json.dumps(raw_context))
+    changed_context["slices"]["current_situation"]["items"][0]["value"][
+        "time_segment"
+    ] = "early_morning"
+    changed = json.loads(
+        compact_chat_model_facing_context(json.dumps(changed_context))
+    )
+
+    pinned_time = first["pinned_time"]
+    assert pinned_time == {
+        "authority": "derived_from_verified_context",
+        "contract": "pinned-time-context.1",
+        "logical_time": "2026-07-30T01:12:00+08:00",
+        "local_logical_time": "2026-07-30T01:12:00+08:00",
+        "source_ref": pinned_time["source_ref"],
+        "time_segment": "late_night",
+    }
+    assert pinned_time["source_ref"].startswith("pinned-time:sha256:")
+    assert pinned_time["source_ref"] != "forged:time"
+    assert replay["pinned_time"]["source_ref"] == pinned_time["source_ref"]
+    assert changed["pinned_time"]["source_ref"] != pinned_time["source_ref"]
+    assert first["slices"]["pinned_time"] == {
+        "availability": "available",
+        "items": [
+            {
+                "attention_source_refs": [pinned_time["source_ref"]],
+                "source_ref": pinned_time["source_ref"],
+                "value": {
+                    "authority": "derived_from_verified_context",
+                    "contract": "pinned-time-context.1",
+                    "logical_time": "2026-07-30T01:12:00+08:00",
+                    "local_logical_time": "2026-07-30T01:12:00+08:00",
+                    "time_segment": "late_night",
+                },
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("dimension", ("anger", "warmth"))
+def test_raw_pinned_environment_does_not_translate_affect_into_reply_behavior(
+    dimension: str,
+) -> None:
+    raw = json.dumps(
+        {
+            "world_id": "world:raw-attention-environment",
+            "actor_ref": "agent:companion",
+            "trigger_ref": "event:current",
+            "world_revision": 9,
+            "logical_time": "2026-07-30T01:12:00+08:00",
+            "slices": {
+                "current_situation": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "situation:current",
+                            "value": {
+                                "logical_time": "2026-07-30T01:12:00+08:00",
+                                "time_segment": "late_night",
+                                "activity_slices": [],
+                                "attention_slice": {
+                                    "availability": "unavailable",
+                                    "reason": "no_authority",
+                                },
+                            },
+                        }
+                    ],
+                },
+                "affect_episodes": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "affect:current",
+                            "value": {
+                                "components": [
+                                    {
+                                        "dimension": dimension,
+                                        "source_cluster_ref": "cluster:current",
+                                        "intensity_bp": 7_000,
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    compact = json.loads(compact_chat_model_facing_context(raw))
+
+    assert compact["pinned_time"]["time_segment"] == "late_night"
+    assert compact["pinned_time"]["source_ref"].startswith("pinned-time:sha256:")
+    assert compact["slices"]["current_situation"]["items"][0]["source_ref"] == (
+        "situation:current"
+    )
+    assert compact["slices"]["affect_episodes"]["items"][0]["source_ref"] == (
+        "affect:current"
+    )
+    assert compact["current_self_state"]["situation"][0]["activity_slices"] == []
+    assert compact["current_self_state"]["situation"][0]["attention_slice"] == {
+        "availability": "unavailable",
+        "reason": "no_authority",
+    }
+    assert compact["current_self_state"]["affect"][0]["components"][0] == {
+        "dimension": dimension,
+        "source_cluster_ref": "cluster:current",
+        "intensity_bp": 7_000,
+    }
+    serialized = json.dumps(compact, ensure_ascii=False)
+    for host_authored_conclusion in (
+        "phone_attention",
+        "attention-view.",
+        "withdrawal_affect",
+        "do_not_disturb",
+        "reply_timing",
+        "手机扣着",
+        "看到通知也可能先放着",
+        "多半要忙完这一段才会点开看",
+    ):
+        assert host_authored_conclusion not in serialized
 
 
 def test_chat_view_keeps_semantics_but_omits_authority_and_accounting_noise() -> None:
@@ -106,6 +277,7 @@ def test_chat_view_keeps_semantics_but_omits_authority_and_accounting_noise() ->
 
     assert set(compact["slices"]) == {
         "recent_dialogue",
+        "pinned_time",
         "current_situation",
         "relevant_facts",
         "affect_episodes",
@@ -135,6 +307,78 @@ def test_chat_view_keeps_semantics_but_omits_authority_and_accounting_noise() ->
     assert recovery["slices"]["relevant_facts"]["items"][0]["source_ref"] == "fact:user:name"
     assert recovery["slices"]["recent_dialogue"]["items"][-1]["value"]["text"] == "message 11"
     assert len(json.dumps(recovery, ensure_ascii=False)) < len(raw)
+
+
+def test_chat_view_uses_causal_sequence_before_coarse_dialogue_timestamps() -> None:
+    same_second = "2026-07-30T13:07:05Z"
+    dialogue = [
+        {
+            "item_ref": item_ref,
+            "value": {
+                "speaker": speaker,
+                "text": text,
+                "occurred_at": occurred_at,
+                "sequence": sequence,
+            },
+        }
+        for item_ref, speaker, text, occurred_at, sequence in (
+            (
+                "dialogue:user:2",
+                "counterpart",
+                "第二句用户消息",
+                same_second,
+                300,
+            ),
+            (
+                "dialogue:user:1",
+                "counterpart",
+                "第一句用户消息",
+                same_second,
+                100,
+            ),
+            (
+                "dialogue:companion:2",
+                "companion",
+                "第二句角色回复",
+                "2026-07-30T13:07:05.840000Z",
+                401,
+            ),
+            (
+                "dialogue:companion:1",
+                "companion",
+                "第一句角色回复",
+                "2026-07-30T13:07:05.280000Z",
+                201,
+            ),
+        )
+    ]
+    raw = json.dumps(
+        {
+            "world_id": "world:burst-dialogue",
+            "actor_ref": "agent:companion",
+            "trigger_ref": "event:user:2",
+            "world_revision": 5,
+            "logical_time": same_second,
+            "slices": {
+                "recent_dialogue": {
+                    "availability": "available",
+                    "items": dialogue,
+                }
+            },
+        }
+    )
+
+    compact = json.loads(compact_chat_model_facing_context(raw))
+
+    assert [
+        item["value"]["text"]
+        for item in compact["slices"]["recent_dialogue"]["items"]
+    ] == [
+        "第一句用户消息",
+        "第一句角色回复",
+        "第二句用户消息",
+        "第二句角色回复",
+    ]
 
 
 def test_chat_view_derives_a_source_bound_current_self_state_without_flattening_affect() -> None:
@@ -400,6 +644,10 @@ def test_chat_view_keeps_source_bound_recent_self_experience_in_current_self_sta
                                     "participant_refs": ["actor:companion"],
                                     "privacy_class": "personal",
                                 },
+                                "content": {
+                                    "content_ref": "content:experience:walk",
+                                    "text": "后来把这场雨记成了夏天傍晚很安静的一小段。",
+                                },
                             },
                         }
                     ],
@@ -441,7 +689,140 @@ def test_chat_view_keeps_source_bound_recent_self_experience_in_current_self_sta
         == "沿河走了一会儿，看到雨后积水反光。"
     )
     assert recent["items"][1]["source_ref"] == "experience:walk"
+    assert (
+        recent["items"][1]["content"]["text"]
+        == "后来把这场雨记成了夏天傍晚很安静的一小段。"
+    )
     assert current["stable_self"][0]["source_ref"] == "character-core:1"
+
+
+def test_world_life_cannot_starve_committed_experience_from_current_self_state() -> None:
+    raw = json.dumps(
+        {
+            "logical_time": "2026-07-28T08:00:00+08:00",
+            "slices": {
+                "world_life": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "occurrence:breakfast",
+                            "value": {
+                                "occurrence_id": "occurrence:breakfast",
+                                "settled_at": "2026-07-28T07:30:00+08:00",
+                                "content": {"text": "吃了早饭。"},
+                            },
+                        },
+                        {
+                            "item_ref": "occurrence:walk",
+                            "value": {
+                                "occurrence_id": "occurrence:walk",
+                                "settled_at": "2026-07-28T07:00:00+08:00",
+                                "content": {"text": "沿河走了一会儿。"},
+                            },
+                        },
+                    ],
+                },
+                "recent_experiences": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "experience:argument",
+                            "value": {
+                                "experience_id": "experience:argument",
+                                "values": {
+                                    "summary_ref": "content:experience:argument",
+                                    "occurred_from": "2026-07-27T18:00:00+08:00",
+                                    "occurred_to": "2026-07-27T18:20:00+08:00",
+                                    "participant_refs": ["actor:companion", "npc:vendor"],
+                                    "privacy_class": "personal",
+                                },
+                                "content": {
+                                    "content_ref": "content:experience:argument",
+                                    "text": "傍晚和摊贩起了争执，回来后心里还堵着。",
+                                },
+                            },
+                        }
+                    ],
+                },
+            },
+        }
+    )
+
+    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+    recent = current["recent_self_experiences"]["items"]
+
+    assert [item["source_ref"] for item in recent] == [
+        "occurrence:breakfast",
+        "experience:argument",
+    ]
+    assert (
+        recent[1]["content"]["text"]
+        == "傍晚和摊贩起了争执，回来后心里还堵着。"
+    )
+
+
+@pytest.mark.parametrize("source_lane", ["recent_experiences", "world_life"])
+def test_recalled_own_experience_enters_current_self_as_remembered_experience(
+    source_lane: str,
+) -> None:
+    """A selected recall must not stay buried in the generic Context slice."""
+
+    raw = json.dumps(
+        {
+            "logical_time": "2026-07-28T08:00:00+08:00",
+            "slices": {
+                source_lane: {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "experience:vendor-argument",
+                            "privacy_class": "personal",
+                            "recall_injected": True,
+                            "value": {
+                                "memory_kind": "episodic",
+                                "authority": "world_fact",
+                                "epistemic_scope": "world_fact",
+                                "actor_ref": "actor:companion",
+                                "subject_refs": ["actor:companion", "npc:vendor"],
+                                "text": "上周也和摊贩争过一次，回去以后越想越堵。",
+                                "source_refs": [
+                                    "event:experience:vendor-argument",
+                                    "event:content:vendor-argument",
+                                ],
+                                "occurred_from": "2026-07-20T18:00:00+08:00",
+                                "occurred_to": "2026-07-20T18:20:00+08:00",
+                                "valid_from": None,
+                                "valid_to": None,
+                                "status": "active",
+                            },
+                        }
+                    ],
+                }
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+
+    assert current["recent_self_experiences"] == {
+        "availability": "available",
+        "items": [
+            {
+                "memory_kind": "episodic",
+                "authority": "world_fact",
+                "epistemic_scope": "world_fact",
+                "actor_ref": "actor:companion",
+                "subject_refs": ["actor:companion", "npc:vendor"],
+                "text": "上周也和摊贩争过一次，回去以后越想越堵。",
+                "occurred_from": "2026-07-20T18:00:00+08:00",
+                "occurred_to": "2026-07-20T18:20:00+08:00",
+                "status": "active",
+                "source_ref": "experience:vendor-argument",
+            }
+        ],
+    }
+    assert current["source_refs"] == ["experience:vendor-argument"]
 
 
 def test_current_self_state_reports_unavailable_without_sourced_persona_or_experience() -> None:
@@ -461,6 +842,133 @@ def test_current_self_state_reports_unavailable_without_sourced_persona_or_exper
     assert current["availability"] == "unavailable"
     assert current["source_refs"] == []
     assert current["recent_self_experiences"] == {"availability": "unavailable"}
+
+
+def test_current_self_state_exposes_source_bound_memory_and_private_impression() -> None:
+    raw = json.dumps(
+        {
+            "logical_time": "2026-07-28T08:00:00+08:00",
+            "slices": {
+                "active_memory_candidates": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "memory:project-anxiety",
+                            "value": {
+                                "candidate_id": "memory:project-anxiety",
+                                "cue_kind": "emotional_resonance",
+                                "retrieval_strength_bp": 7200,
+                                "source_excerpts": [
+                                    {
+                                        "source_kind": "fact",
+                                        "source_id": "fact:project-anxiety",
+                                        "excerpt_ref": "observation:project-anxiety",
+                                        "text": "我其实挺怕最后做砸的。",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                "private_impressions": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "impression:honesty-matters",
+                            "value": {
+                                "subject_ref": "user:primary",
+                                "reflection_summary": "他更在意真实回应，不喜欢被套话安慰。",
+                                "confidence_bp": 6800,
+                                "last_supported": "2026-07-28T07:59:00+08:00",
+                                "status": "active",
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+
+    assert current["remembered_material"][0]["source_ref"] == "memory:project-anxiety"
+    assert (
+        current["remembered_material"][0]["source_excerpts"][0]["text"]
+        == "我其实挺怕最后做砸的。"
+    )
+    assert current["private_impressions"][0] == {
+        "subject_ref": "user:primary",
+        "reflection_summary": "他更在意真实回应，不喜欢被套话安慰。",
+        "confidence_bp": 6800,
+        "last_supported": "2026-07-28T07:59:00+08:00",
+        "status": "active",
+        "source_ref": "impression:honesty-matters",
+    }
+    assert current["source_refs"] == [
+        "impression:honesty-matters",
+        "memory:project-anxiety",
+    ]
+
+
+def test_recalled_emotional_association_enters_current_self_without_becoming_fact() -> None:
+    raw = json.dumps(
+        {
+            "logical_time": "2026-07-28T08:00:00+08:00",
+            "slices": {
+                "recalled_emotional_associations": {
+                    "availability": "available",
+                    "items": [
+                        {
+                            "item_ref": "affect-opening:vendor-frustration",
+                            "privacy_class": "withhold",
+                            "recall_injected": True,
+                            "value": {
+                                "memory_kind": "reflective",
+                                "authority": "defeasible_interpretation",
+                                "epistemic_scope": "private_interpretation",
+                                "actor_ref": "actor:companion",
+                                "subject_refs": ["actor:companion", "npc:vendor"],
+                                "text": (
+                                    "Emotional episode at opening — "
+                                    "anger=4200bp | resentment=3600bp"
+                                ),
+                                "source_refs": [
+                                    "event:affect:vendor-frustration",
+                                    "event:appraisal:vendor-frustration",
+                                ],
+                                "occurred_from": "2026-07-20T18:00:00+08:00",
+                                "occurred_to": "2026-07-20T19:00:00+08:00",
+                                "status": "historical",
+                            },
+                        }
+                    ],
+                }
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    current = json.loads(compact_chat_model_facing_context(raw))["current_self_state"]
+
+    assert current["recalled_emotional_associations"] == [
+        {
+            "memory_kind": "reflective",
+            "authority": "defeasible_interpretation",
+            "epistemic_scope": "private_interpretation",
+            "actor_ref": "actor:companion",
+            "subject_refs": ["actor:companion", "npc:vendor"],
+            "text": (
+                "Emotional episode at opening — "
+                "anger=4200bp | resentment=3600bp"
+            ),
+            "occurred_from": "2026-07-20T18:00:00+08:00",
+            "occurred_to": "2026-07-20T19:00:00+08:00",
+            "status": "historical",
+            "source_ref": "affect-opening:vendor-frustration",
+        }
+    ]
+    assert current["source_refs"] == ["affect-opening:vendor-frustration"]
 
 
 def test_recalled_dialogue_supplements_without_evicting_latest_working_turns() -> None:

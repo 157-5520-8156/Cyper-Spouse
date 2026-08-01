@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 
 import pytest
 
 from companion_daemon.config import Settings
+from companion_daemon.llm import (
+    mark_model_request_completed,
+    mark_model_request_emitted,
+)
 from companion_daemon.world_v2.http_capture_host import build_http_v2_capture_host
 from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
 
@@ -37,8 +41,16 @@ class _ReplyModel:
                         "confidence": 7_000,
                     },
                     "expression_draft": {
+                        "private_turn_state": {
+                            "inner_state_summary": (
+                                "我看见了当下的语气和可选线索，"
+                                "现在想按自己的感受回应。"
+                            ),
+                            "attended_source_refs": [],
+                        },
                         "timing_choice": "now",
                         "beats": [{"modality": "text", "text": self.text}],
+                        "cadence": "conversational",
                         "stance": "answer_without_world_claims",
                         "brief_rationale": (
                             "I noticed the alternatives and chose my own response."
@@ -51,10 +63,19 @@ class _ReplyModel:
             )
         return json.dumps(
             {
-                "response_text": self.text,
+                "private_turn_state": {
+                    "inner_state_summary": (
+                        "我重新看过当前已经落账的情境，仍想按自己的感受回应。"
+                    ),
+                    "attended_source_refs": [],
+                },
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": self.text}],
+                "cadence": "conversational",
                 "stance": "answer_without_world_claims",
                 "brief_rationale": "I noticed the alternatives and chose my own response.",
                 "confidence": 7600,
+                "world_claims": [],
             },
             ensure_ascii=False,
         )
@@ -83,12 +104,30 @@ class _AdvisoryModel:
         return json.dumps({"classifications": material}, ensure_ascii=False)
 
 
-class _ImmediateEmotionGateModel:
+class _ExactTransportReplyModel(_ReplyModel):
+    reports_exact_request_emission = True
+
     async def complete(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.0
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
     ) -> str:
-        del messages, temperature
-        return '{"immediate": true}'
+        request_span = mark_model_request_emitted()
+        try:
+            return await super().complete(messages, temperature=temperature)
+        finally:
+            mark_model_request_completed(request_span)
+
+
+class _ExactTransportAdvisoryModel(_AdvisoryModel):
+    reports_exact_request_emission = True
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.2
+    ) -> str:
+        request_span = mark_model_request_emitted()
+        try:
+            return await super().complete(messages, temperature=temperature)
+        finally:
+            mark_model_request_completed(request_span)
 
 
 class _QQDelivery:
@@ -98,6 +137,60 @@ class _QQDelivery:
     async def send_text(self, recipient_id: str, text: str) -> dict[str, object]:
         self.sent.append((recipient_id, text))
         return {"status": "ok", "data": {"message_id": f"qq-{len(self.sent)}"}}
+
+
+@pytest.mark.asyncio
+async def test_production_expression_sees_pinned_environment_without_host_phone_story(
+    tmp_path,
+) -> None:
+    """Time is attention material; it does not prove where the phone is or when she replies."""
+
+    reply = _ReplyModel("我看见这句了，至于现在想怎么接，由我自己决定。")
+    host = build_http_v2_capture_host(
+        settings=Settings(
+            database_path=tmp_path / "raw-attention-environment.sqlite",
+            LOCAL_APPRAISAL_ENABLED=False,
+        ),
+        bootstrap_at=NOW,
+        model=reply,
+    )
+    try:
+        tick_at = NOW + timedelta(minutes=10)
+        await host.tick(
+            tick_id="tick:raw-attention-environment",
+            logical_time_from=NOW,
+            logical_time_to=tick_at,
+            observed_at=tick_at,
+            trace_id="trace:raw-attention-environment:clock",
+            causation_id="cause:raw-attention-environment:clock",
+            correlation_id="correlation:raw-attention-environment",
+            reason="test_clock",
+        )
+        result = await host.respond(
+            platform="simulator",
+            platform_user_id="geoff",
+            platform_message_id="message:raw-attention-environment",
+            text="还没睡吗？",
+            observed_at=tick_at,
+        )
+    finally:
+        await host.aclose()
+
+    assert result.text == reply.text
+    provider_request = json.loads(reply.calls[-1][1]["content"])
+    model_context = json.loads(provider_request["request"]["model_content_json"])
+    assert "pinned_time" in model_context
+    assert model_context["pinned_time"]["source_ref"].startswith("pinned-time:sha256:")
+    assert "current_situation" in model_context["slices"]
+    assert model_context["slices"]["current_situation"]["items"][0]["source_ref"]
+    serialized_context = json.dumps(model_context, ensure_ascii=False)
+    assert "phone_attention" not in serialized_context
+    assert "attention-view." not in serialized_context
+    assert "idle_phone_hours" not in serialized_context
+    assert "withdrawal_affect" not in serialized_context
+    assert "消息一来就能看到" not in serialized_context
+    assert "手机扣在旁边" not in serialized_context
+    assert "看到通知也可能先放着" not in serialized_context
 
 
 def _candidate(
@@ -139,7 +232,6 @@ async def test_current_disappointment_and_thread_advice_reach_reply_model_withou
         bootstrap_at=NOW,
         model=reply,
         advisory_model=advisory,
-        immediate_emotion_gate_model=_ImmediateEmotionGateModel(),
     )
     try:
         result = await host.respond(
@@ -153,17 +245,58 @@ async def test_current_disappointment_and_thread_advice_reach_reply_model_withou
         await host.aclose()
 
     assert result.text == reply.text
+    # Same-turn semantic advice is source-bound input to the role model, not a
+    # durable Appraisal/Affect write that forces a second character call.
     assert len(reply.calls) == 1
-    # The one pre-cursor advisory is already incorporated into the combined
-    # cognition result; cached Flash expression rebinding must not classify it
-    # a second time.
     assert advisory.calls == 1
-    assert len(reply.calls) == 1
-    model_request = reply.calls[0][1]["content"]
+    model_request = reply.calls[-1][1]["content"]
     assert "user_affect.signal" in model_request
     assert "disappointed" in model_request
     assert "continuity.thread_signal" in model_request
     assert "possible_unfinished_share" in model_request
+
+
+@pytest.mark.asyncio
+async def test_foreground_advisory_provider_is_part_of_whole_turn_provider_spans(
+    tmp_path,
+) -> None:
+    reply = _ExactTransportReplyModel("我按自己的想法接这句。")
+    advisory = _ExactTransportAdvisoryModel(
+        [_candidate(field="user_affect.signal", value="disappointed")]
+    )
+    message_id = "message:advisory-provider-span"
+    host = build_http_v2_capture_host(
+        settings=Settings(
+            database_path=tmp_path / "advisory-provider-span.sqlite",
+            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_RECALL_SEMANTIC_ENABLED=False,
+        ),
+        bootstrap_at=NOW,
+        model=reply,
+        advisory_model=advisory,
+    )
+    try:
+        result = await host.respond(
+            platform="simulator",
+            platform_user_id="geoff",
+            platform_message_id=message_id,
+            text="我刚才其实有点失望。",
+            observed_at=NOW,
+        )
+        trace = host._host._application._latency.get(  # noqa: SLF001
+            f"trace:http-v2:simulator:geoff:{message_id}"
+        )
+        assert trace is not None
+        calls = trace.role_provider_timing_evidence()["calls"]
+    finally:
+        await host.aclose()
+        await host.wait_for_shutdown_quiescence()
+
+    assert result.text == reply.text
+    assert len(calls) == 2
+    assert calls[0]["provider_call_id"] != calls[1]["provider_call_id"]
+    assert all(call["status"] == "completed" for call in calls)
+    assert [call["provider_kind"] for call in calls] == ["auxiliary", "role"]
 
 
 @pytest.mark.asyncio
@@ -187,7 +320,6 @@ async def test_high_severity_same_turn_advice_can_select_thinking_while_ordinary
         model=flash,
         thinking_model=thinking,
         advisory_model=advisory,
-        immediate_emotion_gate_model=_ImmediateEmotionGateModel(),
     )
     try:
         result = await host.respond(
@@ -210,11 +342,14 @@ async def test_slow_semantic_advice_fails_open_with_a_bounded_delay_and_flash_re
     tmp_path,
 ) -> None:
     flash = _ReplyModel("先按我现在能确认的内容回应你。")
-    advisory = _AdvisoryModel([], delay=0.2)
+    advisory = _AdvisoryModel([], delay=2.0)
     host = build_http_v2_capture_host(
         settings=Settings(
             database_path=tmp_path / "advisory-timeout.sqlite",
-                WORLD_V2_ADVISORY_TIMEOUT_SECONDS=0.05,
+                # The compiler's own ceiling is deliberately longer than the
+                # ingress-to-provider budget. PinnedTurn must shorten it
+                # internally and fail open instead of charging both waits.
+                WORLD_V2_ADVISORY_TIMEOUT_SECONDS=2.0,
                 # Keep this advisory-timeout test independent of the developer
                 # machine's optional local appraisal and semantic-recall endpoints.
                 LOCAL_APPRAISAL_ENABLED=False,
@@ -261,7 +396,6 @@ async def test_qq_production_composition_uses_the_same_same_turn_semantic_module
         bootstrap_at=NOW,
         model=reply,
         advisory_model=advisory,
-        immediate_emotion_gate_model=_ImmediateEmotionGateModel(),
         delivery=delivery,
     )
     try:
@@ -277,6 +411,6 @@ async def test_qq_production_composition_uses_the_same_same_turn_semantic_module
     assert result.action_id is not None
     assert delivery.sent == [("10001", reply.text)]
     assert len(reply.calls) == 1
-    assert "appraisal_draft" in reply.calls[0][0]["content"]
-    assert "user_affect.signal" in reply.calls[0][1]["content"]
-    assert "withdrawing" in reply.calls[0][1]["content"]
+    assert "appraisal_draft" not in reply.calls[0][0]["content"]
+    assert "user_affect.signal" in reply.calls[-1][1]["content"]
+    assert "withdrawing" in reply.calls[-1][1]["content"]

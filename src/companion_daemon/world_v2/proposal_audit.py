@@ -7,7 +7,13 @@ import hashlib
 import json
 from pydantic import Field
 
-from .deliberation import DeliberationResult, ModelResultAudit, ModelRoute
+from .deliberation import (
+    AuthoredCandidateInvocationAudit,
+    DeliberationResult,
+    ModelResultAudit,
+    ModelRoute,
+    ProviderSubcallAudit,
+)
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .proposal_audit_schemas import (
@@ -35,6 +41,7 @@ class ProposalAuditContext(FrozenModel):
     evaluated_world_revision: int = Field(ge=0)
     expected_commit_world_revision: int = Field(ge=0)
     expected_deliberation_revision: int = Field(ge=0)
+    expected_ledger_sequence: int = Field(ge=0)
 
 
 class ProposalAuditCommit(FrozenModel):
@@ -90,12 +97,30 @@ class ProposalAuditRecorder:
             *lineage,
             proposal.proposal_id if proposal is not None else "no-proposal",
         )
-        committed = self._ledger.commit(
-            events,
-            expected_world_revision=context.expected_commit_world_revision,
-            expected_deliberation_revision=context.expected_deliberation_revision,
-            commit_id=commit_id,
-        )
+        if proposal is not None:
+            # Wording and proposed effects are meaningful only against the
+            # complete snapshot the role model saw. A world-only Clock/Action
+            # append must therefore invalidate the candidate just as surely as
+            # another deliberation append.
+            committed = self._ledger.commit_at_cursor(
+                events,
+                expected_cursor=ProjectionCursor(
+                    world_revision=context.expected_commit_world_revision,
+                    deliberation_revision=context.expected_deliberation_revision,
+                    ledger_sequence=context.expected_ledger_sequence,
+                ),
+                commit_id=commit_id,
+            )
+        else:
+            # A content-free terminal audit carries no wording or proposed
+            # effect. PinnedTurn separately revalidates its exact durable
+            # attempt before rebasing this technical result at the current head.
+            committed = self._ledger.commit(
+                events,
+                expected_world_revision=context.expected_commit_world_revision,
+                expected_deliberation_revision=context.expected_deliberation_revision,
+                commit_id=commit_id,
+            )
         return ProposalAuditCommit(
             result=committed,
             model_result_ref=validated.audit.model_result_ref,
@@ -125,12 +150,18 @@ class ProposalAuditRecorder:
         )
 
         model_events: list[WorldEvent] = []
+        authored_candidates: list[
+            tuple[ModelResultAudit, AuthoredCandidateInvocationAudit]
+        ] = []
+        provider_subcalls: list[tuple[ModelResultAudit, ProviderSubcallAudit]] = []
         previous_cause = context.causation_id
         for index, audit in enumerate(result.attempt_audits):
             audit_json = model_audit_json(audit)  # type: ignore[arg-type]
             model_payload = ModelResultRecordedPayload(
                 audit_contract=(
-                    "model-result-audit.4"
+                    "model-result-audit.5"
+                    if audit.presented_prefetch_traces
+                    else "model-result-audit.4"
                     if audit.recall_trace is not None
                     or audit.prefetch_trace is not None
                     else "model-result-audit.3"
@@ -161,6 +192,102 @@ class ProposalAuditRecorder:
             )
             model_events.append(model_event)
             previous_cause = model_event.event_id
+            authored_candidates.extend(
+                (audit, candidate)
+                for candidate in audit.authored_candidate_audits
+            )
+            provider_subcalls.extend(
+                (audit, subcall) for subcall in audit.provider_subcall_audits
+            )
+        # Keep the authored main/recovery attempts as the first complete
+        # deliberation group. Earlier author candidates and reviewer
+        # invocations are adjacent independent single-attempt groups and
+        # therefore cannot alter primary/recovery attempt semantics.
+        for parent_audit, candidate in authored_candidates:
+            candidate_audit = authored_candidate_model_audit(
+                candidate,
+                attempt_id=parent_audit.attempt_id,
+            )
+            candidate_audit_json = model_audit_json(candidate_audit)  # type: ignore[arg-type]
+            candidate_result_id = "deliberation:" + sha256(
+                canonical_json(
+                    {
+                        "capsule_id": result.capsule_id,
+                        "proposal_hash": None,
+                        "attempt_audits": [json.loads(candidate_audit_json)],
+                    }
+                )
+            )
+            candidate_payload = ModelResultRecordedPayload(
+                audit_contract="model-result-audit.3",
+                model_result_ref=candidate_audit.model_result_ref,
+                deliberation_result_id=candidate_result_id,
+                proposal_hash=None,
+                model_call_id=candidate_audit.model_call_id,
+                attempt_id=candidate_audit.attempt_id,
+                capsule_id=result.capsule_id,
+                trigger_ref=context.trigger_ref,
+                evaluated_world_revision=evaluated_world_revision,
+                attempt_index=0,
+                attempt_count=1,
+                audit_json=candidate_audit_json,
+                audit_hash=sha256(candidate_audit_json),
+            )
+            candidate_event = _event(
+                context,
+                event_type="ModelResultRecorded",
+                identity=(
+                    candidate_audit.model_call_id,
+                    candidate_audit.model_result_ref,
+                ),
+                payload=candidate_payload.model_dump(mode="json"),
+                causation_id=previous_cause,
+            )
+            model_events.append(candidate_event)
+            previous_cause = candidate_event.event_id
+        for parent_audit, subcall in provider_subcalls:
+            provider_audit = provider_subcall_model_audit(
+                subcall,
+                attempt_id=parent_audit.attempt_id,
+            )
+            provider_audit_json = model_audit_json(provider_audit)  # type: ignore[arg-type]
+            provider_result_id = "deliberation:" + sha256(
+                canonical_json(
+                    {
+                        "capsule_id": result.capsule_id,
+                        "proposal_hash": None,
+                        "attempt_audits": [json.loads(provider_audit_json)],
+                    }
+                )
+            )
+            provider_payload = ModelResultRecordedPayload(
+                audit_contract="model-result-audit.3",
+                model_result_ref=provider_audit.model_result_ref,
+                deliberation_result_id=provider_result_id,
+                proposal_hash=None,
+                model_call_id=provider_audit.model_call_id,
+                parent_model_call_id=provider_audit.parent_model_call_id,
+                attempt_id=provider_audit.attempt_id,
+                capsule_id=result.capsule_id,
+                trigger_ref=context.trigger_ref,
+                evaluated_world_revision=evaluated_world_revision,
+                attempt_index=0,
+                attempt_count=1,
+                audit_json=provider_audit_json,
+                audit_hash=sha256(provider_audit_json),
+            )
+            provider_event = _event(
+                context,
+                event_type="ModelResultRecorded",
+                identity=(
+                    provider_audit.model_call_id,
+                    provider_audit.model_result_ref,
+                ),
+                payload=provider_payload.model_dump(mode="json"),
+                causation_id=previous_cause,
+            )
+            model_events.append(provider_event)
+            previous_cause = provider_event.event_id
         if proposal is None:
             return tuple(model_events)
         proposal_json = canonical_json(proposal.model_dump(mode="json"))
@@ -213,18 +340,59 @@ def _strict_result(value: DeliberationResult) -> DeliberationResult:
 
 
 def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
+    raw_candidates = value.authored_candidate_audits
+    raw_subcalls = value.provider_subcall_audits
+    if (
+        not isinstance(raw_candidates, tuple)
+        or len(raw_candidates) > 8
+        or not isinstance(raw_subcalls, tuple)
+        or len(raw_subcalls) > 16
+    ):
+        raise ValueError("nested provider audit count is out of bounds")
+    candidates = tuple(
+        AuthoredCandidateInvocationAudit(
+            purpose=item.purpose,
+            model_call_id=item.model_call_id,
+            request_hash=item.request_hash,
+            response_hash=item.response_hash,
+            model_id=item.model_id,
+            model_version=item.model_version,
+            outcome=item.outcome,
+            usage=item.usage,
+        )
+        for item in raw_candidates
+    )
+    subcalls = tuple(
+        ProviderSubcallAudit(
+            purpose=item.purpose,
+            parent_model_call_id=item.parent_model_call_id,
+            model_call_id=item.model_call_id,
+            request_hash=item.request_hash,
+            model_id=item.model_id,
+            model_version=item.model_version,
+            lane=item.lane,
+            outcome=item.outcome,
+            failure_code=item.failure_code,
+            response_hash=item.response_hash,
+            usage=item.usage,
+        )
+        for item in raw_subcalls
+    )
     route = ModelRoute(
         tier=value.route.tier,
         reason_code=value.route.reason_code,
         router_version=value.route.router_version,
     )
-    return ModelResultAudit(
+    audit = ModelResultAudit(
         model_call_id=value.model_call_id,
+        parent_model_call_id=value.parent_model_call_id,
         model_result_ref=value.model_result_ref,
         attempt_id=value.attempt_id,
         route=route,
         model_id=value.model_id,
         model_version=value.model_version,
+        attempted_model_id=value.attempted_model_id,
+        attempted_model_version=value.attempted_model_version,
         request_hash=value.request_hash,
         response_hash=value.response_hash,
         status=value.status,
@@ -236,6 +404,145 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         usage=value.usage,
         recall_trace=value.recall_trace,
         prefetch_trace=value.prefetch_trace,
+        presented_prefetch_traces=value.presented_prefetch_traces,
+        provider_subcall_audits=subcalls,
+        authored_candidate_audits=candidates,
+    )
+    if audit.parent_model_call_id is not None:
+        raise ValueError("authored model attempt cannot claim a parent model call")
+    candidate_ids = tuple(
+        candidate.model_call_id for candidate in audit.authored_candidate_audits
+    )
+    allowed_parents = {audit.model_call_id, *candidate_ids}
+    all_call_ids = (
+        audit.model_call_id,
+        *candidate_ids,
+        *(subcall.model_call_id for subcall in audit.provider_subcall_audits),
+    )
+    if len(all_call_ids) != len(set(all_call_ids)):
+        raise ValueError("nested provider invocation identities are not unique")
+    if any(
+        subcall.parent_model_call_id not in allowed_parents
+        or subcall.parent_model_call_id == subcall.model_call_id
+        for subcall in audit.provider_subcall_audits
+    ):
+        raise ValueError(
+            "provider subcall parent has no batch-persisted author attempt"
+        )
+    return audit
+
+
+def authored_candidate_model_audit(
+    value: AuthoredCandidateInvocationAudit,
+    *,
+    attempt_id: str,
+) -> ModelResultAudit:
+    """Expand one non-final author invocation into an immutable audit record."""
+
+    corrective = value.purpose not in {
+        "primary_initial",
+        "quick_recovery_initial",
+        "provisional_initial",
+    }
+    unresolved = value.outcome == "validation_unresolved"
+    model_result_ref = "model-result:" + sha256(
+        canonical_json(
+            {
+                "model_call_id": value.model_call_id,
+                "response_hash": value.response_hash,
+            }
+        )
+    )
+    return ModelResultAudit(
+        model_call_id=value.model_call_id,
+        model_result_ref=model_result_ref,
+        attempt_id=attempt_id,
+        route=ModelRoute(
+            tier="flash",
+            reason_code=(
+                f"author_candidate.{value.purpose}.{value.outcome}"[:128]
+            ),
+            router_version="authored-candidate-audit.1",
+        ),
+        model_id=value.model_id,
+        model_version=value.model_version,
+        request_hash=value.request_hash,
+        response_hash=value.response_hash,
+        status="candidate_returned" if unresolved else "main_invalid",
+        failure_code=(
+            None
+            if unresolved
+            else "corrective_invalid"
+            if corrective
+            else "primary_invalid"
+        ),
+        slot="corrective" if corrective else "primary",
+        outcome="returned" if unresolved else "invalid",
+        input_tokens=value.usage.input_tokens if value.usage is not None else None,
+        output_tokens=value.usage.output_tokens if value.usage is not None else None,
+        usage=value.usage,
+    )
+
+
+def provider_subcall_model_audit(
+    value: ProviderSubcallAudit,
+    *,
+    attempt_id: str,
+) -> ModelResultAudit:
+    """Expand one nested provider identity into an immutable audit record."""
+
+    succeeded = value.outcome == "winner"
+    response_hash = value.response_hash if succeeded else None
+    model_result_ref = "model-result:" + sha256(
+        canonical_json(
+            {
+                "model_call_id": value.model_call_id,
+                "response_hash": response_hash,
+            }
+        )
+    )
+    return ModelResultAudit(
+        model_call_id=value.model_call_id,
+        parent_model_call_id=value.parent_model_call_id,
+        model_result_ref=model_result_ref,
+        attempt_id=attempt_id,
+        route=ModelRoute(
+            tier="flash",
+            reason_code=f"validation.{value.purpose}"[:128],
+            router_version="provider-subcall-audit.1",
+        ),
+        model_id=value.model_id if succeeded else None,
+        model_version=value.model_version if succeeded else None,
+        attempted_model_id=None if succeeded else value.model_id,
+        attempted_model_version=None if succeeded else value.model_version,
+        request_hash=value.request_hash,
+        response_hash=response_hash,
+        status=(
+            "proposal_validated"
+            if succeeded
+            else "main_timeout"
+            if value.outcome == "timeout"
+            else "main_exception"
+        ),
+        failure_code=(
+            None
+            if succeeded
+            else value.failure_code
+            or (
+                "source_review_timeout"
+                if value.outcome == "timeout"
+                else "source_review_exception"
+            )
+        ),
+        slot=(
+            "primary"
+            if value.lane in {"primary", "direct"}
+            else "backup"
+        ),
+        outcome=value.outcome,
+        input_tokens=value.usage.input_tokens if value.usage is not None else None,
+        output_tokens=value.usage.output_tokens if value.usage is not None else None,
+        usage=value.usage,
     )
 
 
@@ -275,4 +582,9 @@ def _event(
     )
 
 
-__all__ = ["ProposalAuditCommit", "ProposalAuditContext", "ProposalAuditRecorder"]
+__all__ = [
+    "ProposalAuditCommit",
+    "ProposalAuditContext",
+    "ProposalAuditRecorder",
+    "provider_subcall_model_audit",
+]

@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
 from threading import RLock
+from time import monotonic
 from uuid import uuid4
 
 import httpx
 
 from companion_daemon.config import Settings
+from companion_daemon.llm import (
+    mark_model_request_completed,
+    mark_model_request_emitted,
+)
 
 from .recall_index import RecallEmbedding, RecallEmbeddingUnavailable
 from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
@@ -21,6 +26,11 @@ from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_writ
 
 _MAX_CACHED_VECTORS_TOTAL = 8_192
 _MAX_CACHED_VECTOR_BYTES_TOTAL = 32 * 1024 * 1024
+_TRANSIENT_FAILURE_CODE = "semantic recall provider unavailable"
+
+
+class _RecallEmbeddingCooldown(RecallEmbeddingUnavailable):
+    """Fast local rejection proving no provider request was started."""
 
 
 class OpenAICompatibleRecallEmbedding:
@@ -55,6 +65,8 @@ class OpenAICompatibleRecallEmbedding:
         monthly_budget_cny: float = 1.0,
         usd_per_million_tokens: float = 0.02,
         cny_per_usd: float = 7.2,
+        failure_cooldown_seconds: float = 120.0,
+        monotonic_clock: Callable[[], float] = monotonic,
     ) -> None:
         if not api_key or not model:
             raise ValueError("semantic recall embedding requires a key and model")
@@ -71,6 +83,8 @@ class OpenAICompatibleRecallEmbedding:
             or cny_per_usd <= 0
         ):
             raise ValueError("semantic recall embedding budget is invalid")
+        if not 0 <= failure_cooldown_seconds <= 3_600:
+            raise ValueError("semantic recall embedding failure cooldown is invalid")
         normalized_base_url = base_url.rstrip("/")
         endpoint_identity = hashlib.sha256(normalized_base_url.encode("utf-8")).hexdigest()[:16]
         self.version = (
@@ -85,6 +99,10 @@ class OpenAICompatibleRecallEmbedding:
         self.usd_per_million_tokens = usd_per_million_tokens
         self.cny_per_usd = cny_per_usd
         self.last_usage_tokens = 0
+        self.failure_cooldown_seconds = failure_cooldown_seconds
+        self._monotonic_clock = monotonic_clock
+        self._availability_lock = RLock()
+        self._cooldown_until = 0.0
         options: dict[str, object] = {
             "timeout": timeout_seconds,
             "trust_env": False,
@@ -102,29 +120,42 @@ class OpenAICompatibleRecallEmbedding:
     def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         if not texts:
             return ()
+        with self._availability_lock:
+            return self._embed_serialized(texts)
+
+    def _embed_serialized(
+        self,
+        texts: tuple[str, ...],
+    ) -> tuple[tuple[float, ...], ...]:
+        if self._monotonic_clock() < self._cooldown_until:
+            raise _RecallEmbeddingCooldown(_TRANSIENT_FAILURE_CODE)
         output: list[tuple[float, ...]] = []
         usage_tokens = 0
         for offset in range(0, len(texts), 64):
             batch = texts[offset : offset + 64]
             try:
-                response = self._client.post(
-                    self._url,
-                    headers=self._headers,
-                    json={
-                        "model": self._model,
-                        "input": list(batch),
-                        "dimensions": self.dimensions,
-                    },
-                )
+                request_span = mark_model_request_emitted()
+                try:
+                    response = self._client.post(
+                        self._url,
+                        headers=self._headers,
+                        json={
+                            "model": self._model,
+                            "input": list(batch),
+                            "dimensions": self.dimensions,
+                        },
+                    )
+                finally:
+                    mark_model_request_completed(request_span)
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in {408, 429} or exc.response.status_code >= 500:
-                    raise RecallEmbeddingUnavailable(
-                        "semantic recall provider unavailable"
-                    ) from exc
+                    self._open_failure_cooldown()
+                    raise RecallEmbeddingUnavailable(_TRANSIENT_FAILURE_CODE) from exc
                 raise ValueError("semantic recall provider rejected its configuration") from exc
             except (httpx.TransportError, httpx.TimeoutException) as exc:
-                raise RecallEmbeddingUnavailable("semantic recall provider unavailable") from exc
+                self._open_failure_cooldown()
+                raise RecallEmbeddingUnavailable(_TRANSIENT_FAILURE_CODE) from exc
             payload = response.json()
             data = payload.get("data") if isinstance(payload, dict) else None
             if not isinstance(data, list) or len(data) != len(batch):
@@ -160,10 +191,15 @@ class OpenAICompatibleRecallEmbedding:
             usage_tokens += max(estimate, reported_tokens or 0)
             output.extend(item for item in ordered if item is not None)
         self.last_usage_tokens = usage_tokens
+        self._cooldown_until = 0.0
         return tuple(output)
 
+    def _open_failure_cooldown(self) -> None:
+        self._cooldown_until = self._monotonic_clock() + self.failure_cooldown_seconds
+
     def close(self) -> None:
-        self._client.close()
+        with self._availability_lock:
+            self._client.close()
 
 
 class SQLiteCachedRecallEmbedding:
@@ -282,6 +318,12 @@ class SQLiteCachedRecallEmbedding:
                 request_id = self._reserve_usage(missing_texts)
                 try:
                     vectors = self._delegate.embed(missing_texts)
+                except _RecallEmbeddingCooldown as exc:
+                    self._reject_reserved_usage(
+                        request_id,
+                        failure_code=(str(exc)[:128] or type(exc).__name__),
+                    )
+                    raise
                 except Exception as exc:
                     self._finalize_usage(
                         request_id,
@@ -415,6 +457,40 @@ class SQLiteCachedRecallEmbedding:
                 raise
         self._reservations[request_id] = (day, token_estimate, estimated_cost)
         return request_id
+
+    def _reject_reserved_usage(
+        self,
+        request_id: str,
+        *,
+        failure_code: str,
+    ) -> None:
+        """Undo a reservation when the delegate proves no request was sent."""
+
+        reservation = self._reservations.pop(request_id, None)
+        if reservation is None:
+            return
+        day, reserved_tokens, reserved_cost = reservation
+        with self._write_lock:
+            self._connection.execute(
+                """
+                UPDATE world_recall_embedding_usage_daily
+                SET consumed_tokens = consumed_tokens - ?,
+                    estimated_cost_cny = estimated_cost_cny - ?,
+                    request_count = request_count - 1,
+                    rejected_count = rejected_count + 1,
+                    last_status = 'rejected',
+                    last_failure_code = ?
+                WHERE world_id = ? AND usage_day = ?
+                """,
+                (
+                    reserved_tokens,
+                    reserved_cost,
+                    failure_code,
+                    self._world_id,
+                    day,
+                ),
+            )
+            self._connection.commit()
 
     def _usage_totals(self, field: str, value: str) -> tuple[int, float]:
         row = self._connection.execute(
@@ -763,6 +839,9 @@ def configured_recall_embedding(
         model=settings.world_v2_recall_embedding_model,
         dimensions=settings.world_v2_recall_embedding_dimensions,
         timeout_seconds=settings.world_v2_recall_embedding_timeout_seconds,
+        failure_cooldown_seconds=(
+            settings.world_v2_recall_embedding_failure_cooldown_seconds
+        ),
         proxy_url=settings.openai_proxy_url,
         daily_token_budget=settings.world_v2_recall_embedding_daily_token_budget,
         monthly_token_budget=settings.world_v2_recall_embedding_monthly_token_budget,

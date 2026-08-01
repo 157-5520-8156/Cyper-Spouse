@@ -208,13 +208,16 @@ async def test_full_wins_before_provisional_authorization_and_only_full_is_sent(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("text", ["稍等，我在想。", "让我看看再说。", "我在想一下。"])
-async def test_placeholder_provisional_is_rejected(text: str) -> None:
+async def test_provisional_wording_is_not_semantically_rejected_by_the_host(
+    text: str,
+) -> None:
     authorizer = Authorizer()
 
     async def provisional(seed, _observation, _budget):  # type: ignore[no-untyped-def]
         return candidate("provisional", seed=seed, text=text)
 
     async def full(seed, _observation, _budget):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(0.05)
         return FullCognitionResult(
             disposition="complete_without_more",
             candidate=candidate("full", seed=seed),
@@ -230,9 +233,10 @@ async def test_placeholder_provisional_is_rejected(text: str) -> None:
         observation(), InteractiveTurnBudgetPolicy().start()
     )
 
-    assert result.winner == "full"
-    assert [item.phase for item in authorizer.calls] == ["full"]
-    assert "provisional.placeholder" in result.rejections
+    assert result.winner == "provisional"
+    assert [item.phase for item in authorizer.calls] == ["provisional"]
+    assert all("placeholder" not in item for item in result.rejections)
+    await episode.aclose()
 
 
 @pytest.mark.asyncio

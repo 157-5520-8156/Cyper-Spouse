@@ -21,7 +21,7 @@ from companion_daemon.world_v2.http_capture_host import (
     HttpV2CaptureHost,
     build_http_v2_capture_host,
 )
-from companion_daemon.world_v2.errors import IdempotencyConflict
+from companion_daemon.world_v2.errors import IdempotencyConflict, LedgerIntegrityError
 from companion_daemon.world_v2.platform_action_executor import MediaProviderTransport
 from companion_daemon.world_v2.production_turn_application import MediaPreviewDeployment
 from companion_daemon.world_v2.world_v2_dashboard_ui import (
@@ -63,10 +63,46 @@ class HttpV2ASGIDeployment:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    yield
-    capture = _existing_http_v2_capture(_app)
-    if capture is not None:
-        await capture.aclose()
+    _app.state.http_v2_closing = False
+    try:
+        yield
+    finally:
+        shutdown = getattr(_app.state, "http_v2_shutdown_task", None)
+        if shutdown is None:
+            shutdown = asyncio.create_task(
+                _shutdown_http_v2_capture(_app),
+                name="http-v2-asgi-shutdown",
+            )
+            _app.state.http_v2_shutdown_task = shutdown
+        # The owner survives cancellation of an individual lifespan waiter,
+        # just like the capture/semantic close owners below it.
+        await asyncio.shield(shutdown)
+
+
+async def _shutdown_http_v2_capture(asgi_app: FastAPI) -> None:
+    """Join the private warmup owner, then close whatever it installed."""
+
+    asgi_app.state.http_v2_closing = True
+    warmup_owner = getattr(asgi_app.state, "http_v2_warmup_owner_task", None)
+    if warmup_owner is not None:
+        try:
+            await asyncio.shield(warmup_owner)
+        except Exception:
+            # A failed warmup owns no successfully composed capture. Its
+            # exception is reported by the owner callback; shutdown still
+            # closes any earlier installed capture.
+            pass
+    capture = _existing_http_v2_capture(asgi_app)
+    if capture is None:
+        return
+    await capture.aclose()
+    wait_for_quiescence = getattr(
+        capture,
+        "wait_for_shutdown_quiescence",
+        None,
+    )
+    if callable(wait_for_quiescence):
+        await wait_for_quiescence()
 
 
 # Route declarations below are collected first and split into two explicit
@@ -123,6 +159,8 @@ def _http_v2_capture(
 ) -> HttpV2CaptureHost:
     global http_v2_capture
     target_app = asgi_app or app
+    if getattr(target_app.state, "http_v2_closing", False):
+        raise RuntimeError("HTTP World-v2 capture is shutting down")
     existing = _existing_http_v2_capture(target_app)
     if existing is not None:
         return existing
@@ -148,12 +186,26 @@ def _http_v2_capture(
 def _schedule_http_v2_warmup(*, asgi_app: FastAPI) -> None:
     """Start one shared off-loop capture build for readiness/first ingress."""
 
+    if getattr(asgi_app.state, "http_v2_closing", False):
+        return
     if _existing_http_v2_capture(asgi_app) is not None:
         return
     existing_task = getattr(asgi_app.state, "http_v2_warmup_task", None)
-    if existing_task is not None and not existing_task.done():
+    # A readiness probe owns only the first cold-start attempt.  In
+    # particular, it must not turn a persistent ledger-integrity failure into
+    # a probe-frequency retry loop.  Explicit ingress may replace a completed
+    # failed task in ``_http_v2_capture_async`` below.
+    if existing_task is not None:
         return
-    task = asyncio.create_task(asyncio.to_thread(_http_v2_capture, asgi_app=asgi_app))
+    owner = asyncio.create_task(
+        asyncio.to_thread(_http_v2_capture, asgi_app=asgi_app),
+        name="http-v2-warmup-owner",
+    )
+
+    async def join_owner() -> object:
+        return await asyncio.shield(owner)
+
+    task = asyncio.create_task(join_owner(), name="http-v2-warmup-waiter")
 
     def report_warmup_failure(completed: asyncio.Task[object]) -> None:
         if not completed.cancelled():
@@ -161,8 +213,31 @@ def _schedule_http_v2_warmup(*, asgi_app: FastAPI) -> None:
             if error is not None:
                 _LOG.error("HTTP World v2 capture warmup failed", exc_info=error)
 
-    task.add_done_callback(report_warmup_failure)
+    owner.add_done_callback(report_warmup_failure)
+    asgi_app.state.http_v2_warmup_owner_task = owner
     asgi_app.state.http_v2_warmup_task = task
+
+
+def _http_v2_capture_health(*, asgi_app: FastAPI) -> dict[str, str]:
+    """Return a redacted capture lifecycle state for the public health DTO."""
+
+    if _existing_http_v2_capture(asgi_app) is not None:
+        return {"status": "ready"}
+    task = getattr(asgi_app.state, "http_v2_warmup_task", None)
+    if task is None:
+        return {"status": "cold"}
+    if not task.done():
+        return {"status": "warming"}
+    if task.cancelled():
+        return {"status": "failed", "failure_code": "warmup_cancelled"}
+    error = task.exception()
+    if isinstance(error, LedgerIntegrityError):
+        failure_code = "ledger_integrity_error"
+    elif error is not None:
+        failure_code = "capture_initialization_failed"
+    else:
+        failure_code = "capture_not_installed"
+    return {"status": "failed", "failure_code": failure_code}
 
 
 async def _http_v2_capture_async(
@@ -173,14 +248,38 @@ async def _http_v2_capture_async(
 ) -> HttpV2CaptureHost:
     """Await readiness-triggered warmup without blocking uvloop."""
 
+    if getattr(asgi_app.state, "http_v2_closing", False):
+        raise HttpV2NotReady("World-v2 capture is shutting down")
     existing = _existing_http_v2_capture(asgi_app)
     if existing is not None:
         return existing
     task = getattr(asgi_app.state, "http_v2_warmup_task", None)
-    if task is None or task.done():
+    owner = getattr(asgi_app.state, "http_v2_warmup_owner_task", None)
+    if owner is not None and not owner.done() and (task is None or task.done()):
+
+        async def rejoin_owner() -> object:
+            return await asyncio.shield(owner)
+
         task = asyncio.create_task(
-            asyncio.to_thread(_http_v2_capture, asgi_app=asgi_app, bootstrap_at=bootstrap_at)
+            rejoin_owner(),
+            name="http-v2-warmup-waiter",
         )
+        asgi_app.state.http_v2_warmup_task = task
+    elif owner is None or owner.done():
+        owner = asyncio.create_task(
+            asyncio.to_thread(
+                _http_v2_capture,
+                asgi_app=asgi_app,
+                bootstrap_at=bootstrap_at,
+            ),
+            name="http-v2-warmup-owner",
+        )
+
+        async def join_owner() -> object:
+            return await asyncio.shield(owner)
+
+        task = asyncio.create_task(join_owner(), name="http-v2-warmup-waiter")
+        asgi_app.state.http_v2_warmup_owner_task = owner
         asgi_app.state.http_v2_warmup_task = task
     # ``shield`` is essential: timing out the caller must not cancel the
     # process-wide warmup task.  The worker continues its immutable replay and
@@ -226,6 +325,10 @@ def create_http_asgi_app(
     configured.exception_handlers.update(app.exception_handlers)
     configured.state.http_v2_deployment = deployment
     configured.state.http_v2_capture = None
+    configured.state.http_v2_closing = False
+    configured.state.http_v2_warmup_owner_task = None
+    configured.state.http_v2_warmup_task = None
+    configured.state.http_v2_shutdown_task = None
     configured.state.dashboard_session_secret = secrets.token_bytes(32)
     return configured
 
@@ -350,13 +453,23 @@ class WorldV2DrainRequest(BaseModel):
 
 
 @app.get("/health")
-async def health(request: Request) -> dict[str, str]:
+async def health(request: Request) -> dict[str, object]:
     # The first World-v2 capture build performs a one-time immutable ledger
     # verification.  Do it behind the readiness probe, off the uvloop thread,
     # so the first real chat does not unexpectedly pay the cold-start cost.
     if _existing_http_v2_capture(request.app) is None:
         _schedule_http_v2_warmup(asgi_app=request.app)
-    return {"status": "ok"}
+    capture_health = _http_v2_capture_health(asgi_app=request.app)
+    response: dict[str, object] = {
+        "status": "degraded" if capture_health["status"] == "failed" else "ok",
+        "world_v2_capture": capture_health,
+    }
+    capture = _existing_http_v2_capture(request.app)
+    if capture is not None:
+        response["proactive_source_authority"] = (
+            capture.proactive_source_authority_health()
+        )
+    return response
 
 
 @app.get("/dashboard", response_class=HTMLResponse)

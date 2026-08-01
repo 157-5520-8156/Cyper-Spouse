@@ -245,6 +245,7 @@ def _audited_proposal(*, ledger, target, source_event, source_commit, result_pay
             evaluated_world_revision=head.world_revision,
             expected_commit_world_revision=head.world_revision,
             expected_deliberation_revision=head.deliberation_revision,
+            expected_ledger_sequence=head.ledger_sequence,
         ),
     )
 

@@ -13,6 +13,7 @@ from datetime import datetime
 import hashlib
 import hmac
 import json
+import math
 import time
 from typing import Any, Literal, Protocol, Self
 
@@ -470,9 +471,27 @@ class AdvisoryCompiler:
         self._outstanding_tasks: dict[str, asyncio.Task[object]] = {}
         self._fused_until: dict[str, float] = {}
 
-    async def compile(self, request: AdvisoryCompileRequest) -> AdvisoryCompilation:
+    async def compile(
+        self,
+        request: AdvisoryCompileRequest,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> AdvisoryCompilation:
         # Frozen Pydantic objects can still be forged with ``model_construct``.  The public
         # seam never trusts its nominal type and validates a fresh complete representation.
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+            or timeout_seconds > 10
+        ):
+            raise ValueError("advisory timeout override must be in (0, 10] seconds")
+        effective_timeout = min(
+            self._timeout_seconds,
+            timeout_seconds
+            if timeout_seconds is not None
+            else self._timeout_seconds,
+        )
         self._preflight_request(request)
         request = AdvisoryCompileRequest.model_validate(
             request.model_dump(mode="python", warnings=False), strict=True
@@ -482,7 +501,11 @@ class AdvisoryCompiler:
             raise ValueError("resolver proof authentication failed")
         results = await asyncio.gather(
             *(
-                self._call(adapter, AdvisoryAdapterInput(**request.model_dump()))
+                self._call(
+                    adapter,
+                    AdvisoryAdapterInput(**request.model_dump()),
+                    timeout_seconds=effective_timeout,
+                )
                 for adapter in self._adapters
             )
         )
@@ -557,6 +580,8 @@ class AdvisoryCompiler:
         self,
         adapter: AdvisoryClassifierAdapter,
         request: AdvisoryAdapterInput,
+        *,
+        timeout_seconds: float,
     ) -> tuple[tuple[CandidateDistribution, ...], TraceStatus, str | None]:
         if self._adapter_is_in_cooldown(adapter.adapter_id):
             return (), "unavailable", "adapter_fused"
@@ -566,7 +591,7 @@ class AdvisoryCompiler:
             task = asyncio.create_task(adapter.classify(request))
             self._outstanding_tasks[adapter.adapter_id] = task
             self._track_outstanding_task(adapter.adapter_id, task)
-            done, _ = await asyncio.wait({task}, timeout=self._timeout_seconds)
+            done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
             if not done:
                 task.cancel()
                 self._fused_until[adapter.adapter_id] = (
@@ -635,6 +660,25 @@ class AdvisoryCompiler:
     @property
     def outstanding_task_count(self) -> int:
         return len(self._outstanding_tasks)
+
+    @property
+    def shutdown_pending_task_count(self) -> int:
+        """Return classifier tasks that still lease their model dependencies."""
+
+        return len(self._outstanding_tasks)
+
+    async def wait_for_shutdown_quiescence(self) -> None:
+        """Wait for cancellation-suppressing classifier work without cancelling it again."""
+
+        while tasks := tuple(self._outstanding_tasks.values()):
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tasks),
+                return_exceptions=True,
+            )
+            # Task done callbacks own removal from ``_outstanding_tasks``.
+            # Give those callbacks a scheduling turn before checking the lease
+            # registry again.
+            await asyncio.sleep(0)
 
     @property
     def fused_adapter_ids(self) -> tuple[str, ...]:

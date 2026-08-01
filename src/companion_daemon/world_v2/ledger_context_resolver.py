@@ -68,8 +68,9 @@ from .context_resolver import (
 )
 from .ledger import LedgerPort
 from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
-from .life_content import LifeContentCompiler
+from .life_content import LifeContentCompiler, RecentExperienceContextItem
 from .life_content_store import ImmutableLifeContentStore
+from .life_development_runtime import LifeDevelopmentProposalReader
 from .perception_result_context import (
     PerceptionResultContextCompiler,
     PerceptionResultContextItem,
@@ -85,7 +86,10 @@ from .recall_corpus import (
     required_recall_authority_refs,
     select_recall_authority_bindings,
 )
-from .recall_attention import build_automatic_recall_request
+from .recall_attention import (
+    build_automatic_recall_request,
+    select_recent_dialogue_for_automatic_recall,
+)
 from .recall_index import RecallCursor, RecallSourceBinding
 from .recall_runtime import RecallCoordinator
 from .schema_core import PrivacyClass
@@ -102,6 +106,7 @@ from .schemas import (
 )
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
 from .world_life_context import (
+    ActiveWorldOccurrenceContextItem,
     BiographicalWorldContextItem,
     WorldLifeContextCompiler,
     WorldLifeContextItem,
@@ -128,6 +133,14 @@ _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
     "advisories": "private",
 }
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
+_EXPERIENCE_CONTENT_UNAVAILABLE_REASONS = frozenset(
+    {
+        "descriptor_missing",
+        "source_proof_failed",
+        "content_missing",
+        "hash_mismatch",
+    }
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -272,6 +285,22 @@ def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tupl
         return tuple(sorted(claim.authority_event_ref for claim in item.source_claims))
     if isinstance(item, MemoryRetrievalItem):
         return tuple(sorted({source.authority_event_ref for source in item.source_excerpts}))
+    if isinstance(item, RecentExperienceContextItem):
+        return tuple(
+            sorted(
+                (
+                    item.content.authority_event_ref,
+                    item.content.descriptor_event_ref,
+                )
+            )
+        )
+    if isinstance(item, ActiveWorldOccurrenceContextItem):
+        return tuple(
+            sorted(
+                binding.authority_event_ref
+                for binding in item.source_bindings
+            )
+        )
     if isinstance(item, WorldLifeContextItem):
         refs = {item.source.authority_event_ref}
         if item.content is not None:
@@ -378,6 +407,34 @@ def _typed_authority_claims(
                         item.observation_event_payload_hash,
                     ),
                 )
+            )
+        )
+    if isinstance(item, RecentExperienceContextItem):
+        return tuple(
+            sorted(
+                (
+                    (
+                        item.content.authority_event_ref,
+                        item.content.authority_world_revision,
+                        item.content.authority_payload_hash,
+                    ),
+                    (
+                        item.content.descriptor_event_ref,
+                        item.content.descriptor_world_revision,
+                        item.content.descriptor_payload_hash,
+                    ),
+                )
+            )
+        )
+    if isinstance(item, ActiveWorldOccurrenceContextItem):
+        return tuple(
+            sorted(
+                (
+                    binding.authority_event_ref,
+                    binding.authority_world_revision,
+                    binding.authority_payload_hash,
+                )
+                for binding in item.source_bindings
             )
         )
     if isinstance(item, WorldLifeContextItem):
@@ -489,6 +546,7 @@ def _recency_bp(item: BaseModel, logical_time: datetime | None) -> int:
         getattr(item, "opened_at", None),
         getattr(getattr(item, "values", None), "occurred_to", None),
         getattr(item, "settled_at", None),
+        getattr(item, "activated_at", None),
         getattr(item, "occurred_at", None),
     )
     instant = next((value for value in instants if value is not None), None)
@@ -834,8 +892,17 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             ledger=ledger, expression_payload_store=expression_payload_store
         )
         self._conversation_continuity = ConversationContinuityCompiler()
+        self._life_content = LifeContentCompiler(store=life_content_store)
         self._world_life = WorldLifeContextCompiler(
-            life_content=LifeContentCompiler(store=life_content_store),
+            life_content=self._life_content,
+            active_occurrence_reader=(
+                LifeDevelopmentProposalReader(
+                    ledger=ledger,
+                    content_store=life_content_store,
+                )
+                if life_content_store is not None
+                else None
+            ),
             biography=biographical_catalog,
             biography_timezone=(
                 ZoneInfo(biographical_timezone_name)
@@ -1088,12 +1155,13 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
 
         subject_refs = scope.subject_refs
         domain_phase_started = time.perf_counter()
-        dialogue_candidates = self._recent_dialogue.compile(
+        recent_dialogue = self._recent_dialogue.compile_with_acknowledgements(
             projection=projection,
             actor_ref=query.actor_ref,
             subject_refs=subject_refs,
             max_user_items=64,
         )
+        dialogue_candidates = recent_dialogue.dialogue
         recent_dialogue_ms = (time.perf_counter() - domain_phase_started) * 1000
         domain_phase_started = time.perf_counter()
         scoped_facts = tuple(
@@ -1116,12 +1184,32 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         scoped_threads = tuple(
             item for item in projection.threads if item.values.subject_ref in subject_refs
         )
+        life_content = self._life_content.compile(
+            cursor=query.cursor,
+            actor_ref=query.actor_ref,
+            viewer_privacy_ceiling="private",
+            projection=projection,
+        )
         scoped_experiences = tuple(
             item
+            for item in life_content.experience_items
+            if query.actor_ref in item.values.participant_refs
+        )
+        expected_experience_ids = {
+            item.experience_id
             for item in projection.experiences
             if hasattr(item, "origin")
             and query.actor_ref in item.values.participant_refs
-            and set(item.values.participant_refs).issubset(subject_refs)
+        }
+        experience_content_unavailable = any(
+            item.source_entity_id in expected_experience_ids
+            and item.reason in _EXPERIENCE_CONTENT_UNAVAILABLE_REASONS
+            for item in life_content.suppressions
+        )
+        recent_experiences_domain = (
+            scoped_experiences
+            if scoped_experiences or not experience_content_unavailable
+            else None
         )
         world_life = self._world_life.compile(
             projection=projection,
@@ -1216,6 +1304,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         continuity = self._conversation_continuity.compile(
             dialogue=dialogue_candidates,
             trigger_ref=query.trigger_ref,
+            acknowledged_observation_event_refs=recent_dialogue.acknowledged_observation_event_refs,
             retrieval_candidates=(
                 *(
                     ContinuityRetrievalCandidate(
@@ -1492,7 +1581,9 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     private_impressions=tuple(
                         item
                         for item in projection.private_impressions
-                        if item.subject_ref in subject_refs and item.origin is not None
+                        if item.status == "active"
+                        and item.subject_ref in subject_refs
+                        and item.origin is not None
                     ),
                 )
                 required_authority_refs = required_recall_authority_refs(recall_sources)
@@ -1533,20 +1624,22 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     None,
                 )
                 if trigger_dialogue is not None:
-                    recent_attention_dialogue = tuple(
-                        item.model_dump(mode="json")
-                        for item in sorted(
-                            (
-                                candidate
-                                for candidate in dialogue_candidates
-                                if candidate.dialogue_id != trigger_dialogue.dialogue_id
-                            ),
-                            key=lambda candidate: (
-                                candidate.occurred_at,
-                                candidate.sequence,
-                                candidate.dialogue_id,
-                            ),
-                        )[-4:]
+                    recent_attention_dialogue = select_recent_dialogue_for_automatic_recall(
+                        tuple(
+                            item.model_dump(mode="json")
+                            for item in sorted(
+                                (
+                                    candidate
+                                    for candidate in dialogue_candidates
+                                    if candidate.dialogue_id != trigger_dialogue.dialogue_id
+                                ),
+                                key=lambda candidate: (
+                                    candidate.sequence,
+                                    candidate.occurred_at,
+                                    candidate.dialogue_id,
+                                ),
+                            )
+                        )
                     )
                     attention_request = build_automatic_recall_request(
                         observation_text=trigger_dialogue.text,
@@ -1581,30 +1674,48 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                         ),
                         limit=4,
                     )
-                    self._recall.schedule_prefetch(
-                        query_text=attention_request.query_text,
-                        lexical_text=attention_request.lexical_text,
-                        occurred_from=attention_request.occurred_from,
-                        occurred_to=attention_request.occurred_to,
-                        link_refs=attention_request.link_refs,
-                        memory_kinds=attention_request.memory_kinds,
-                        accessibility_seed=(
-                            f"recall-prefetch:{query.trigger_ref}:{query.ledger_sequence}"
-                        ),
-                        trigger_ref=query.trigger_ref,
-                        limit=attention_request.limit,
-                    )
+                    try:
+                        self._recall.schedule_prefetch(
+                            expected_cursor=recall_cursor,
+                            query_text=attention_request.query_text,
+                            lexical_text=attention_request.lexical_text,
+                            occurred_from=attention_request.occurred_from,
+                            occurred_to=attention_request.occurred_to,
+                            link_refs=attention_request.link_refs,
+                            memory_kinds=attention_request.memory_kinds,
+                            accessibility_seed=(
+                                f"recall-prefetch:{query.trigger_ref}:{query.ledger_sequence}"
+                            ),
+                            trigger_ref=query.trigger_ref,
+                            limit=attention_request.limit,
+                        )
+                    except Exception as exc:
+                        # Automatic attention is optional; the successfully
+                        # refreshed cursor-pinned snapshot must remain
+                        # available for a later character-chosen pull.  Treat
+                        # only the failed job as degraded instead of rolling
+                        # back the whole recall context.
+                        self._recall.discard_scheduled_prefetch(
+                            recall_cursor,
+                            trigger_ref=query.trigger_ref,
+                        )
+                        _LOG.warning(
+                            "world v2 recall prefetch unavailable world=%s "
+                            "cursor=%s failure=%s",
+                            query.world_id,
+                            query.ledger_sequence,
+                            type(exc).__name__,
+                        )
             except Exception as exc:
                 self._recall.discard(
                     recall_cursor,
                     trigger_ref=query.trigger_ref,
                 )
                 _LOG.warning(
-                    "world v2 recall sidecar unavailable world=%s cursor=%s error=%s:%s",
+                    "world v2 recall sidecar unavailable world=%s cursor=%s failure=%s",
                     query.world_id,
                     query.ledger_sequence,
                     type(exc).__name__,
-                    exc,
                 )
         budget_authority_refs = self._budget_authority_refs(projection)
         budget_ms = (time.perf_counter() - domain_phase_started) * 1000
@@ -1623,7 +1734,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             "affect_episodes": scoped_affect,
             "open_threads": tuple(item for item in scoped_threads if item.values.status == "open"),
             "relevant_facts": context_facts,
-            "recent_experiences": scoped_experiences,
+            "recent_experiences": recent_experiences_domain,
             "world_life": world_life,
             "active_memory_candidates": context_memories,
             "available_capabilities": tuple(

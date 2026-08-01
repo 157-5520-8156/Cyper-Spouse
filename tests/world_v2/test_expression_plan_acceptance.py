@@ -27,6 +27,7 @@ from companion_daemon.world_v2.proposal_envelope import (
     DecisionProposal,
     ProposalActionIntent,
     ProposalEvidenceRef,
+    ProactiveOpportunityDecision,
     TypedChange,
 )
 from companion_daemon.world_v2.reducers import ReducerState, make_projection, reduce_event
@@ -188,6 +189,128 @@ def _material():
         trace_id="trace:1",
         correlation_id="correlation:1",
     )
+
+
+def _proactive_v2_audit(*, tamper: str | None = None) -> ProposalAuditProjection:
+    proposal = _proposal()
+    source_hash = _hash("proactive-source")
+    drafts = proposal.proposed_changes[0].payload.value()["beat_drafts"]
+    binding: dict[str, object] = {
+        "source_kind": "thread",
+        "source_event_ref": "event:proactive-source:1",
+        "source_payload_hash": source_hash,
+        "source_world_revision": 4,
+        "plan_id": "plan:expression:multi:1",
+        "beat_payload_hashes": [item["payload_hash"] for item in drafts],
+        "target_ref": "user:primary",
+    }
+    if tamper == "hash":
+        binding["beat_payload_hashes"] = [_hash("tampered"), drafts[1]["payload_hash"]]
+    if tamper == "target":
+        binding["target_ref"] = "user:other"
+    payload = {
+        **proposal.proposed_changes[0].payload.value(),
+        "proactive_source_plan_binding_v2": binding,
+    }
+    change = proposal.proposed_changes[0].model_copy(
+        update={
+            "evidence_refs": ("event:proactive-source:1",),
+            "payload": CanonicalTypedPayload.from_value(
+                payload_schema="expression_plan_transition.v1", value=payload
+            ),
+        }
+    )
+    proposal = proposal.model_copy(
+        update={
+            "trigger_ref": "event:proactive-source:1",
+            "evidence_refs": (
+                ProposalEvidenceRef(
+                    ref_id="event:proactive-source:1",
+                    evidence_kind="active_plan",
+                    source_world_revision=4,
+                    immutable_hash=source_hash,
+                ),
+            ),
+            "proposed_changes": (change,),
+            "proactive_opportunity_decision": ProactiveOpportunityDecision(
+                source_kind="thread",
+                source_event_ref="event:proactive-source:1",
+                source_payload_hash=source_hash,
+                source_world_revision=4,
+                disposition="engage_now",
+                decision_origin="model",
+            ),
+        }
+    )
+    return ProposalAuditProjection(
+        proposal_id=proposal.proposal_id,
+        proposal_kind="decision",
+        model_result_ref="model-result:proactive-v2",
+        deliberation_result_id="deliberation:proactive-v2",
+        model_call_id="model-call:proactive-v2",
+        attempt_id="attempt:proactive-v2",
+        capsule_id="b" * 64,
+        trigger_ref=proposal.trigger_ref,
+        evaluated_world_revision=4,
+        proposal_json=canonical_json(proposal.model_dump(mode="json")),
+        proposal_hash=proposal.proposal_hash,
+        event_ref="event:proposal:proactive-v2",
+        event_payload_hash="c" * 64,
+    )
+
+
+@pytest.mark.parametrize("tamper", ("hash", "target"))
+def test_acceptance_rejects_tampered_proactive_v2_plan_source_binding(tamper: str) -> None:
+    with pytest.raises(ExpressionPlanAcceptanceError, match="proactive_source_plan_binding_invalid"):
+        derive_expression_plan_material(
+            audit=_proactive_v2_audit(tamper=tamper),
+            cursor=ProjectionCursor(world_revision=4, deliberation_revision=2, ledger_sequence=7),
+            world_id=WORLD,
+            policy=_policy(),
+            account=BudgetAccount(
+                account_id="account:chat:1", category="chat", window_id="window:1", limit=1000
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:proactive-v2",
+            correlation_id="correlation:proactive-v2",
+        )
+
+
+def test_acceptance_rejects_a_tampered_deferred_non_text_beat() -> None:
+    proposal = _proposal()
+    payload = proposal.proposed_changes[0].payload.value()
+    beats = [dict(item) for item in payload["beat_drafts"]]
+    beats[1]["content_type"] = "application/vnd.world-v2.sticker+json"
+    change = proposal.proposed_changes[0].model_copy(
+        update={
+            "payload": CanonicalTypedPayload.from_value(
+                payload_schema="expression_plan_transition.v1",
+                value={**payload, "beat_drafts": beats},
+            )
+        }
+    )
+    proposal = proposal.model_copy(update={"proposed_changes": (change,)})
+    audit = _audit().model_copy(
+        update={
+            "proposal_json": canonical_json(proposal.model_dump(mode="json")),
+            "proposal_hash": proposal.proposal_hash,
+        }
+    )
+    with pytest.raises(ExpressionPlanAcceptanceError, match="deferred_expression_modality_invalid"):
+        derive_expression_plan_material(
+            audit=audit,
+            cursor=ProjectionCursor(world_revision=4, deliberation_revision=2, ledger_sequence=7),
+            world_id=WORLD,
+            policy=_policy(),
+            account=BudgetAccount(
+                account_id="account:chat:1", category="chat", window_id="window:1", limit=1000
+            ),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:deferred-modality",
+            correlation_id="correlation:deferred-modality",
+        )
 
 
 def _event_share_audit(*, claim_updates: dict[str, object]) -> ProposalAuditProjection:

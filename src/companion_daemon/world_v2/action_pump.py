@@ -15,7 +15,7 @@ import json
 import logging
 from typing import Literal, Protocol
 
-from .errors import ConcurrencyConflict, IdempotencyConflict
+from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
 from .expression_reconsideration import expression_beat_is_gated
 from .ledger import LedgerPort
@@ -37,15 +37,86 @@ def _digest(value: object) -> str:
 
 
 class ActionExecutor(Protocol):
-    """Pure side-effect port; receipt settlement remains owned by Runtime."""
+    """Pure side-effect port; receipt settlement remains owned by Runtime.
+
+    An implementation may raise :class:`TerminalPreDispatchFailure` only while
+    it can prove that its current provider operation has not started.  Once a
+    provider call begins, uncertainty must be returned as a receipt/pending
+    result or propagated as a non-preflight infrastructure exception.
+    """
 
     async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None: ...
 
     async def lookup_result(self, action: Action) -> ProviderReceipt | DispatchPending | None: ...
 
 
+class ProviderAcceptedReconciliationGate(Protocol):
+    """Process-local guard for the terminal tail of an acknowledged Action.
+
+    The gate never controls initial dispatch.  It only prevents a historical
+    ``provider_accepted`` verification from committing while a visible reply
+    owns a cursor-pinned character turn.
+    """
+
+    async def try_acquire_reconciliation(self) -> bool: ...
+
+    async def release_reconciliation(self) -> None: ...
+
+
+PreDispatchFailureCode = Literal[
+    "local_preflight_action_unsupported",
+    "local_preflight_authorization_rejected",
+    "local_preflight_payload_unavailable",
+    "local_preflight_payload_binding_mismatch",
+    "local_preflight_payload_content_type_rejected",
+    "local_preflight_payload_hash_mismatch",
+    "local_preflight_payload_semantics_rejected",
+]
+
+_PRE_DISPATCH_FAILURE_CODES: frozenset[str] = frozenset(
+    {
+        "local_preflight_action_unsupported",
+        "local_preflight_authorization_rejected",
+        "local_preflight_payload_unavailable",
+        "local_preflight_payload_binding_mismatch",
+        "local_preflight_payload_content_type_rejected",
+        "local_preflight_payload_hash_mismatch",
+        "local_preflight_payload_semantics_rejected",
+    }
+)
+
+
+class TerminalPreDispatchFailure(ValueError):
+    """Executor-declared, provider-before failure safe for durable settlement.
+
+    ActionPump deliberately catches only this type.  Ordinary ``ValueError``,
+    ``RuntimeError`` and transport exceptions remain observable programming or
+    infrastructure failures.  The finite code set is the only material copied
+    into a receipt, so resolver details and local paths cannot leak through the
+    ledger or health surface.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        error_class: PreDispatchFailureCode,
+        message: str,
+    ) -> None:
+        if not provider:
+            raise ValueError("pre-dispatch failure provider is required")
+        if error_class not in _PRE_DISPATCH_FAILURE_CODES:
+            raise ValueError("pre-dispatch failure code is not registered")
+        super().__init__(message)
+        self.provider = provider
+        self.error_class = error_class
+
+
 class ActionPumpResult(FrozenModel):
     action_id: str | None = None
+    # Immutable Action metadata carried through the platform seam so adapters
+    # never infer user visibility from an opaque id or a workflow status.
+    action_kind: str | None = None
     status: Literal[
         "idle",
         "not_due",
@@ -55,6 +126,7 @@ class ActionPumpResult(FrozenModel):
         "settled",
         "marked_unknown",
         "expired",
+        "deferred_visible_turn",
     ]
     # The pump status describes workflow progress; this separately carries
     # the provider observation that was durably settled during this call.
@@ -88,21 +160,37 @@ class ActionPump:
         self._source = source
         self._excluded_action_kinds = excluded_action_kinds
 
-    async def drain_once(self) -> ActionPumpResult:
+    async def drain_once(
+        self,
+        *,
+        provider_accepted_reconciliation_gate: (
+            ProviderAcceptedReconciliationGate | None
+        ) = None,
+    ) -> ActionPumpResult:
         """Advance one eligible Action or recover one started dispatch.
 
-        A crash after ``ActionDispatchStarted`` is intentionally observable in
-        the ledger.  ``none`` policy becomes ``unknown`` without re-dispatch;
-        idempotent policies first query then reuse the same provider key.
+        ``ActionDispatchStarted`` records the durable hand-off to an executor,
+        not proof that the provider RPC began.  A crash after that boundary is
+        therefore intentionally ambiguous: ``none`` becomes ``unknown``
+        without re-dispatch; idempotent policies first query then reuse the
+        same provider key.
         """
 
         for _attempt in range(3):
             try:
-                return await self._drain_once()
-            except (ConcurrencyConflict, IdempotencyConflict):
+                return await self._drain_once(
+                    provider_accepted_reconciliation_gate=(
+                        provider_accepted_reconciliation_gate
+                    )
+                )
+            except ConcurrencyConflict:
                 # A different runtime won the ledger CAS. Re-read the single
                 # authority before deciding whether there is work left; never
                 # continue an external effect from a stale in-memory Action.
+                #
+                # IdempotencyConflict is different: immutable content reused
+                # an existing identity. Re-reading cannot repair that
+                # permanent contract violation, so it must remain observable.
                 continue
         raise ConcurrencyConflict("action pump did not converge after ledger contention")
 
@@ -120,11 +208,18 @@ class ActionPump:
         for _attempt in range(3):
             try:
                 return await self._drain_once(target_action_id=action_id)
-            except (ConcurrencyConflict, IdempotencyConflict):
+            except ConcurrencyConflict:
                 continue
         raise ConcurrencyConflict("targeted action pump did not converge after ledger contention")
 
-    async def _drain_once(self, *, target_action_id: str | None = None) -> ActionPumpResult:
+    async def _drain_once(
+        self,
+        *,
+        target_action_id: str | None = None,
+        provider_accepted_reconciliation_gate: (
+            ProviderAcceptedReconciliationGate | None
+        ) = None,
+    ) -> ActionPumpResult:
         projection = await self._project()
         expired = next(
             (
@@ -228,7 +323,10 @@ class ActionPump:
             None,
         )
         if action is not None:
-            return await self._recover_provider_accepted(action)
+            return await self._recover_provider_accepted(
+                action,
+                reconciliation_gate=provider_accepted_reconciliation_gate,
+            )
         return ActionPumpResult(status="idle")
 
     async def _fast_start_and_dispatch(self, *, action: Action, projection) -> ActionPumpResult:
@@ -326,8 +424,14 @@ class ActionPump:
                 current.expression_plan_id or "none",
                 max(0.0, (observed_at - current.not_before).total_seconds() * 1_000),
             )
-        await self._enforce_executor_authority(action=current, projection=latest)
-        result = await self._executor.dispatch(current)
+        result = await self._call_executor(
+            action=current,
+            operation="dispatch",
+            projection=latest,
+            prior_dispatch_may_have_started=False,
+        )
+        if isinstance(result, ActionPumpResult):
+            return result
         return await self._settle_or_pending(action=current, result=result, dispatched=True)
 
     def _is_eligible(self, action: Action, target_action_id: str | None) -> bool:
@@ -385,7 +489,6 @@ class ActionPump:
             # executor call.  Never hand the frozen old payload to a provider
             # while its reconsideration gate is unresolved.
             return ActionPumpResult(action_id=action.action_id, status="not_due")
-        await self._enforce_executor_authority(action=current, projection=projection)
         action = current
         at = projection.logical_time or action.logical_time
         if action.not_before is not None:
@@ -410,17 +513,30 @@ class ActionPump:
             suffix=f"dispatch:{action.claim_lease.attempt_id}",
             at=at,
         )
-        result = await self._executor.dispatch(action)
+        # Payload/authorization preflight intentionally runs after the durable
+        # hand-off event but before the provider.  A declared local rejection
+        # can therefore use the existing failed-settlement lifecycle, while an
+        # unclassified bug remains visible and a restart remains conservative.
+        result = await self._call_executor(
+            action=action,
+            operation="dispatch",
+            projection=await self._project(),
+            prior_dispatch_may_have_started=False,
+        )
+        if isinstance(result, ActionPumpResult):
+            return result
         return await self._settle_or_pending(action=action, result=result, dispatched=True)
 
     async def _enforce_executor_authority(self, *, action: Action, projection) -> None:
         """Call an executor's optional, narrow pre-dispatch authority seam.
 
-        The legacy platform executor intentionally has no such method, so
-        ordinary message/reaction Actions retain their existing contract.  A
-        provider-media executor implements it; the check happens after the
-        final CAS re-read and before ``ActionDispatchStarted``, making a stale
-        consent/privacy revision incapable of reaching the provider.
+        Executors without such a method retain their existing contract.
+        Media-bearing executors implement it.  The check happens against the
+        final post-CAS projection after the durable dispatch hand-off but
+        before the executor can call a provider, making a stale
+        consent/privacy revision incapable of reaching the provider while
+        retaining one auditable lifecycle predecessor for local terminal
+        failures.
         """
 
         checker = getattr(self._executor, "assert_dispatch_authorized", None)
@@ -457,7 +573,14 @@ class ActionPump:
         )
 
     async def _recover_dispatch(self, action: Action) -> ActionPumpResult:
-        current_time = (await self._project()).logical_time or action.logical_time
+        projection = await self._project()
+        current_time = projection.logical_time or action.logical_time
+        persisted = await self._resume_persisted_result(
+            action=action,
+            projection=projection,
+        )
+        if persisted is not None:
+            return persisted
         pending = action.dispatch_pending
         if pending is not None:
             if current_time < pending.lookup_after:
@@ -471,13 +594,25 @@ class ActionPump:
                     result=self._external_observation(action=action, receipt=receipt),
                 )
                 return ActionPumpResult(action_id=action.action_id, status="marked_unknown")
-            await self._enforce_executor_authority(action=action, projection=await self._project())
-            result = await self._executor.lookup_result(action)
+            result = await self._call_executor(
+                action=action,
+                operation="lookup",
+                projection=await self._project(),
+                prior_dispatch_may_have_started=True,
+            )
+            if isinstance(result, ActionPumpResult):
+                return result
             if result is None:
                 if action.recovery_policy == "none":
                     return ActionPumpResult(action_id=action.action_id, status="pending")
-                await self._enforce_executor_authority(action=action, projection=await self._project())
-                result = await self._executor.dispatch(action)
+                result = await self._call_executor(
+                    action=action,
+                    operation="dispatch",
+                    projection=await self._project(),
+                    prior_dispatch_may_have_started=True,
+                )
+                if isinstance(result, ActionPumpResult):
+                    return result
             return await self._settle_or_pending(action=action, result=result, dispatched=False)
         if action.claim_lease is not None and current_time < action.claim_lease.expires_at:
             # ``dispatch_started`` is the durable hand-off to an in-flight
@@ -492,16 +627,108 @@ class ActionPump:
             return ActionPumpResult(action_id=action.action_id, status="marked_unknown")
         if action.recovery_policy not in {"effect_once", "result_lookup"}:
             raise ValueError(f"unsupported Action recovery policy {action.recovery_policy!r}")
-        await self._enforce_executor_authority(action=action, projection=await self._project())
-        result = await self._executor.lookup_result(action)
+        result = await self._call_executor(
+            action=action,
+            operation="lookup",
+            projection=await self._project(),
+            prior_dispatch_may_have_started=True,
+        )
+        if isinstance(result, ActionPumpResult):
+            return result
         if result is None:
-            await self._enforce_executor_authority(action=action, projection=await self._project())
-            result = await self._executor.dispatch(action)
+            result = await self._call_executor(
+                action=action,
+                operation="dispatch",
+                projection=await self._project(),
+                prior_dispatch_may_have_started=True,
+            )
+            if isinstance(result, ActionPumpResult):
+                return result
         return await self._settle_or_pending(action=action, result=result, dispatched=False)
 
-    async def _recover_provider_accepted(self, action: Action) -> ActionPumpResult:
+    async def _resume_persisted_result(
+        self,
+        *,
+        action: Action,
+        projection,
+        reconciliation_gate: ProviderAcceptedReconciliationGate | None = None,
+    ) -> ActionPumpResult | None:
+        persisted_result = next(
+            (
+                result
+                for result in projection.pending_external_observations
+                if result.kind == "execution_receipt"
+                and result.world_id == action.world_id
+                and result.action_id == action.action_id
+                and result.idempotency_key == action.idempotency_key
+            ),
+            None,
+        )
+        if persisted_result is None:
+            return None
+        # The provider result already crossed the durable inbox boundary.
+        # Resume that exact settlement before any lookup or re-dispatch; after
+        # a cold restart it is stronger evidence than a transport's empty
+        # process-local cache.
+        if not await self._try_settle_provider_accepted_result(
+            action=action,
+            result=persisted_result,
+            reconciliation_gate=reconciliation_gate,
+        ):
+            return ActionPumpResult(
+                action_id=action.action_id,
+                status="deferred_visible_turn",
+            )
+        provider_status = (
+            persisted_result.status
+            if persisted_result.status
+            in {"provider_accepted", "delivered", "failed", "unknown"}
+            else None
+        )
+        return ActionPumpResult(
+            action_id=action.action_id,
+            action_kind=action.kind,
+            status="settled",
+            provider_status=provider_status,
+        )
+
+    async def _recover_provider_accepted(
+        self,
+        action: Action,
+        *,
+        reconciliation_gate: ProviderAcceptedReconciliationGate | None = None,
+    ) -> ActionPumpResult:
         projection = await self._project()
-        await self._enforce_executor_authority(action=action, projection=projection)
+        persisted = await self._resume_persisted_result(
+            action=action,
+            projection=projection,
+            reconciliation_gate=reconciliation_gate,
+        )
+        if persisted is not None:
+            return persisted
+        try:
+            await self._enforce_executor_authority(action=action, projection=projection)
+        except TerminalPreDispatchFailure as failure:
+            # A provider acknowledgement proves that an external call already
+            # crossed its boundary.  A newly-invalid local authorization can
+            # stop verification, but it cannot rewrite that history as a
+            # definite provider failure.
+            acquired = await self._try_acquire_provider_reconciliation(
+                reconciliation_gate
+            )
+            if not acquired:
+                return ActionPumpResult(
+                    action_id=action.action_id,
+                    status="deferred_visible_turn",
+                )
+            try:
+                return await self._settle_pre_dispatch_failure(
+                    action=action,
+                    failure=failure,
+                    prior_dispatch_may_have_started=True,
+                )
+            finally:
+                await self._release_provider_reconciliation(reconciliation_gate)
         current_time = projection.logical_time or action.logical_time
         if action.claim_lease is not None and current_time < action.claim_lease.expires_at:
             return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
@@ -524,12 +751,22 @@ class ActionPump:
             if ack is not None:
                 verified = await verify(action, provider_ref=ack.provider_ref)
                 if verified is not None and verified.status in {"delivered", "failed"}:
-                    await self._settle_checked(
+                    result = self._external_observation(
                         action=action,
-                        result=self._external_observation(action=action, receipt=verified),
+                        receipt=verified,
                     )
+                    if not await self._try_settle_provider_accepted_result(
+                        action=action,
+                        result=result,
+                        reconciliation_gate=reconciliation_gate,
+                    ):
+                        return ActionPumpResult(
+                            action_id=action.action_id,
+                            status="deferred_visible_turn",
+                        )
                     return ActionPumpResult(
                         action_id=action.action_id,
+                        action_kind=action.kind,
                         status="settled",
                         provider_status=verified.status,
                     )
@@ -539,10 +776,116 @@ class ActionPump:
         receipt = await self._unknown_receipt(
             action, error_class="provider_accepted_without_terminal_receipt"
         )
-        await self._settle_checked(
-            action=action, result=self._external_observation(action=action, receipt=receipt)
-        )
+        if not await self._try_settle_provider_accepted_result(
+            action=action,
+            result=self._external_observation(action=action, receipt=receipt),
+            reconciliation_gate=reconciliation_gate,
+        ):
+            return ActionPumpResult(
+                action_id=action.action_id,
+                status="deferred_visible_turn",
+            )
         return ActionPumpResult(action_id=action.action_id, status="marked_unknown")
+
+    @staticmethod
+    async def _try_acquire_provider_reconciliation(
+        gate: ProviderAcceptedReconciliationGate | None,
+    ) -> bool:
+        return gate is None or await gate.try_acquire_reconciliation()
+
+    @staticmethod
+    async def _release_provider_reconciliation(
+        gate: ProviderAcceptedReconciliationGate | None,
+    ) -> None:
+        if gate is not None:
+            await gate.release_reconciliation()
+
+    async def _try_settle_provider_accepted_result(
+        self,
+        *,
+        action: Action,
+        result: ExternalObservation,
+        reconciliation_gate: ProviderAcceptedReconciliationGate | None,
+    ) -> bool:
+        """Commit one old terminal receipt only outside a visible turn."""
+
+        if not await self._try_acquire_provider_reconciliation(reconciliation_gate):
+            return False
+        try:
+            await self._settle_checked(action=action, result=result)
+        finally:
+            await self._release_provider_reconciliation(reconciliation_gate)
+        return True
+
+    async def _call_executor(
+        self,
+        *,
+        action: Action,
+        operation: Literal["dispatch", "lookup"],
+        projection,
+        prior_dispatch_may_have_started: bool,
+    ) -> ProviderReceipt | DispatchPending | None | ActionPumpResult:
+        """Run one executor boundary and handle only its declared preflight type."""
+
+        try:
+            await self._enforce_executor_authority(action=action, projection=projection)
+            if operation == "dispatch":
+                return await self._executor.dispatch(action)
+            return await self._executor.lookup_result(action)
+        except TerminalPreDispatchFailure as failure:
+            return await self._settle_pre_dispatch_failure(
+                action=action,
+                failure=failure,
+                prior_dispatch_may_have_started=prior_dispatch_may_have_started,
+            )
+
+    async def _settle_pre_dispatch_failure(
+        self,
+        *,
+        action: Action,
+        failure: TerminalPreDispatchFailure,
+        prior_dispatch_may_have_started: bool,
+    ) -> ActionPumpResult:
+        """Settle sanitized local evidence without guessing provider behavior."""
+
+        status: Literal["failed", "unknown"] = (
+            "unknown" if prior_dispatch_may_have_started else "failed"
+        )
+        at = (await self._project()).logical_time or action.logical_time
+        source_event_id = "local-preflight:" + _digest(
+            [action.action_id, action.idempotency_key, failure.error_class, status]
+        )
+        pending = action.dispatch_pending
+        provider = pending.provider if pending is not None else failure.provider
+        provider_ref = (
+            pending.provider_ref
+            if pending is not None and pending.provider_ref is not None
+            else source_event_id
+        )
+        receipt = ProviderReceipt(
+            provider_receipt_id=f"receipt:action-preflight:{action.action_id}:{status}",
+            action_id=action.action_id,
+            idempotency_key=action.idempotency_key,
+            provider=provider,
+            provider_ref=provider_ref,
+            status=status,
+            artifact_refs=(),
+            cost_actual=0,
+            error_class=failure.error_class,
+            received_at=at,
+            raw_payload_hash="sha256:"
+            + _digest([action.action_id, source_event_id, failure.error_class]),
+        )
+        await self._settle_checked(
+            action=action,
+            result=self._external_observation(action=action, receipt=receipt),
+        )
+        return ActionPumpResult(
+            action_id=action.action_id,
+            action_kind=action.kind,
+            status="settled",
+            provider_status=status,
+        )
 
     async def _settle_or_pending(
         self, *, action: Action, result: ProviderReceipt | DispatchPending | None, dispatched: bool
@@ -560,6 +903,7 @@ class ActionPump:
         )
         return ActionPumpResult(
             action_id=action.action_id,
+            action_kind=action.kind,
             status="settled",
             provider_status=result.status,
         )
@@ -778,7 +1122,23 @@ class ActionPump:
                 and dependency.expression_plan_id == action.expression_plan_id
             ):
                 continue
+            # A model-selected typing pulse is an ephemeral, best-effort
+            # prelude. Once its attempt has a terminal local/provider outcome,
+            # it cannot suppress the substantive beat the character authored.
+            if (
+                dependency.kind == "typing"
+                and dependency.state in {"failed", "unknown", "expired"}
+                and action.expression_plan_id is not None
+                and dependency.expression_plan_id == action.expression_plan_id
+            ):
+                continue
             return False
         return True
 
-__all__ = ["ActionExecutor", "ActionPump", "ActionPumpResult"]
+__all__ = [
+    "ActionExecutor",
+    "ActionPump",
+    "ActionPumpResult",
+    "PreDispatchFailureCode",
+    "TerminalPreDispatchFailure",
+]

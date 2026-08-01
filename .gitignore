@@ -11,8 +11,12 @@ data/
 logs/
 botpy.log*
 assets/life/
+output/
+tmp/
+var/
 training/runs/
 training/datasets/
+training/civitai-packages/
 
 .DS_Store
 .idea/

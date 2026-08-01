@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
+import time
 
 import pytest
+
+from companion_daemon.llm import (
+    mark_model_request_completed,
+    mark_model_request_emitted,
+    model_request_emission_scope,
+)
 
 from companion_daemon.world_v2.recall_audit import (
     CharacterRecallRequest,
@@ -64,6 +71,14 @@ class _CountingSemanticFixtureEmbedding(_SemanticFixtureEmbedding):
         return super().embed(texts)
 
 
+class _CloseTrackingSemanticFixtureEmbedding(_SemanticFixtureEmbedding):
+    def __init__(self) -> None:
+        self.close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
 class _CalibratedSemanticFixtureEmbedding:
     version = "calibrated-semantic-fixture.1"
     dimensions = 2
@@ -102,6 +117,18 @@ class _UniformEmbedding:
 
     def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple((1.0, 0.0) for _text in texts)
+
+
+class _SlowSemanticFixtureEmbedding(_SemanticFixtureEmbedding):
+    """One measured warm-provider RTT fits; two serial RTTs do not."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        self.calls.append(texts)
+        time.sleep(0.34)
+        return super().embed(texts)
 
 
 def _bindings(*refs: str, revision: int) -> tuple[RecallSourceBinding, ...]:
@@ -594,6 +621,42 @@ def test_recall_result_is_bounded_before_durable_audit() -> None:
     assert len(encoded) <= MAX_RECALL_AUDIT_BYTES
 
 
+def test_production_sized_utf8_attention_request_fits_durable_audit() -> None:
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(cursor=CURSOR, documents=())
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=NOW,
+        trigger_ref="trigger:utf8-attention",
+    )
+
+    trace = verify_trusted_recall_trace(
+        coordinator.recall(
+            request=CharacterRecallRequest(
+                query_text="忆" * 1_024,
+                lexical_text="话" * 768,
+                limit=4,
+            ),
+            accessibility_seed="draw:utf8-attention",
+            expected_cursor=CURSOR,
+            trigger_ref="trigger:utf8-attention",
+        )
+    )
+    encoded = json.dumps(
+        trace.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    assert trace.hits == ()
+    assert len(encoded) <= MAX_RECALL_AUDIT_BYTES
+    assert RecallAuditTrace.model_validate_json(encoded) == trace
+
+
 def test_semantic_embedding_serves_automatic_attention_and_character_pull() -> None:
     semantic = _CountingSemanticFixtureEmbedding()
     primary = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
@@ -608,6 +671,7 @@ def test_semantic_embedding_serves_automatic_attention_and_character_pull() -> N
     )
 
     coordinator.prefetch(
+        expected_cursor=CURSOR,
         query_text="乌龙茶",
         accessibility_seed="draw:local-prefetch",
         trigger_ref="trigger:semantic-on-pull",
@@ -625,6 +689,130 @@ def test_semantic_embedding_serves_automatic_attention_and_character_pull() -> N
 
     assert "泡茶工具" in semantic.embedded_texts
     assert "她上周买了一个白色盖碗。" in semantic.embedded_texts
+
+
+@pytest.mark.asyncio
+async def test_cold_semantic_prefetch_batches_documents_and_query_inside_first_pass_join() -> None:
+    semantic = _SlowSemanticFixtureEmbedding()
+    primary = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    primary.rebuild(cursor=CURSOR, documents=_documents())
+    coordinator = RecallCoordinator.from_built_index(
+        index=primary,
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=NOW,
+        semantic_embedding=semantic,
+        trigger_ref="trigger:cold-semantic-prefetch",
+    )
+
+    token = coordinator.schedule_prefetch(
+        expected_cursor=CURSOR,
+        query_text="泡茶工具",
+        accessibility_seed="draw:cold-semantic-prefetch",
+        trigger_ref="trigger:cold-semantic-prefetch",
+    )
+    try:
+        trace = await coordinator.await_scheduled_prefetch(
+            expected_cursor=CURSOR,
+            trigger_ref="trigger:cold-semantic-prefetch",
+            job_token=token,
+        )
+    finally:
+        coordinator.close()
+
+    assert trace is not None
+    audit = verify_trusted_recall_trace(trace)
+    assert audit.embedding_version == semantic.version
+    hits = {hit.document.document_id: hit for hit in audit.hits}
+    assert "recall:experience:gaiwan" in hits
+    assert "dense" in hits["recall:experience:gaiwan"].match_channels
+    assert len(semantic.calls) == 1
+    assert "泡茶工具" in semantic.calls[0]
+    assert "她上周买了一个白色盖碗。" in semantic.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_prefetch_carries_provider_span_scope_into_worker_thread() -> None:
+    events: list[tuple[str, str]] = []
+
+    class _ObservedSemanticEmbedding(_SlowSemanticFixtureEmbedding):
+        def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+            request_span = mark_model_request_emitted()
+            try:
+                return super().embed(texts)
+            finally:
+                mark_model_request_completed(request_span)
+
+    semantic = _ObservedSemanticEmbedding()
+    primary = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    primary.rebuild(cursor=CURSOR, documents=_documents())
+    coordinator = RecallCoordinator.from_built_index(
+        index=primary,
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=NOW,
+        semantic_embedding=semantic,
+        trigger_ref="trigger:observed-semantic-prefetch",
+    )
+
+    try:
+        with model_request_emission_scope(
+            provider_call_id="model-call:scheduled-prefetch",
+            entry_marker=lambda call_id: events.append(("entry", call_id)),
+            completion_marker=lambda call_id: events.append(("completion", call_id)),
+        ):
+            token = coordinator.schedule_prefetch(
+                expected_cursor=CURSOR,
+                query_text="泡茶工具",
+                accessibility_seed="draw:observed-semantic-prefetch",
+                trigger_ref="trigger:observed-semantic-prefetch",
+            )
+            trace = await coordinator.await_scheduled_prefetch(
+                expected_cursor=CURSOR,
+                trigger_ref="trigger:observed-semantic-prefetch",
+                job_token=token,
+            )
+    finally:
+        coordinator.close()
+
+    assert trace is not None
+    assert events == [
+        ("entry", "model-call:scheduled-prefetch"),
+        ("completion", "model-call:scheduled-prefetch"),
+    ]
+
+
+def test_repeated_character_recall_leaves_shutdown_drained() -> None:
+    """Each public pull must release exactly the one active-recall lease it acquired."""
+
+    semantic = _CloseTrackingSemanticFixtureEmbedding()
+    primary = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    primary.rebuild(cursor=CURSOR, documents=_documents())
+    coordinator = RecallCoordinator.from_built_index(
+        index=primary,
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        logical_time=NOW,
+        semantic_embedding=semantic,
+    )
+
+    for ordinal in range(2):
+        trace = verify_trusted_recall_trace(
+            coordinator.recall(
+                request=CharacterRecallRequest(query_text="泡茶工具"),
+                accessibility_seed=f"draw:shutdown-drained:{ordinal}",
+                expected_cursor=CURSOR,
+                trigger_ref="trigger:shutdown-drained",
+            )
+        )
+        assert trace.hits
+
+    coordinator.close()
+
+    assert semantic.close_count == 1
 
 
 def test_paired_carry_accepts_only_the_target_context_exact_predecessor() -> None:

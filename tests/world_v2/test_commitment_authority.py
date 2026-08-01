@@ -584,7 +584,7 @@ def test_sqlite_commitment_roundtrip_and_rebuild(tmp_path) -> None:
             ),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.44"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.46"
     assert migrated.project().commitments == expected.commitments
     assert migrated.rebuild() == migrated.project()
     migrated.close()

@@ -72,7 +72,11 @@ from .biographical_timeline_authority import BIOGRAPHICAL_TIMELINE_PAYLOAD_MODEL
 from .life_content_events import LIFE_CONTENT_PAYLOAD_MODELS
 from .expression_payload_events import EXPRESSION_PAYLOAD_EVENT_MODELS
 from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
-from .proposal_audit_schemas import ModelResultRecordedPayload, ProposalRecordedV2Payload
+from .proposal_audit_schemas import (
+    LifeDevelopmentRecallResultRecordedPayload,
+    ModelResultRecordedPayload,
+    ProposalRecordedV2Payload,
+)
 from .acceptance_manifest import parse_acceptance_manifest_v2
 from .accepted_effect_contracts import rehydrate_acceptance_manifest_v3
 from .appraisal_acceptance_manifest import (
@@ -153,7 +157,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.44"
+    reducer_bundle: str = "world-v2-reducers.46"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -372,6 +376,18 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "TriggerProcessReclaimed": _payload_model(
             "TriggerProcessReclaimedPayload", {"process": (TriggerProcess, ...)}
         ),
+        "ExpressionRepinReserved": _payload_model(
+            "ExpressionRepinReservedPayload",
+            {
+                "process": (TriggerProcess, ...),
+                "reservation_id": _ID,
+                "attempt_id": _ID,
+                "repin_ordinal": (int, Field(ge=1, le=2)),
+                "reserved_world_revision": (int, Field(ge=0)),
+                "reserved_deliberation_revision": (int, Field(ge=0)),
+                "reserved_ledger_sequence": (int, Field(ge=0)),
+            },
+        ),
         "TriggerProcessCompleted": _payload_model(
             "TriggerProcessCompletedPayload",
             {
@@ -380,6 +396,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
                 "attempt_id": _ID,
                 "completed_at": (datetime, ...),
                 "runtime_outcome_ref": _ID,
+                "superseding_observation_event_ref": (str | None, None),
                 "cadence_draw_event_ref": (str | None, None),
                 "cadence_delay_seconds": (int | None, None),
                 "cadence_reused": (bool, False),
@@ -405,6 +422,9 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "FactCommitProposalRecorded": FactCommitProposalRecordedPayloadV2,
         "FactCommittedV2": FactCommitMaterializedPayloadV2,
         "ModelResultRecorded": ModelResultRecordedPayload,
+        "LifeDevelopmentRecallResultRecorded": (
+            LifeDevelopmentRecallResultRecordedPayload
+        ),
         "AdvisoryAcceptanceRejected": _payload_model(
             "AdvisoryAcceptanceRejectedPayload",
             {
@@ -535,6 +555,9 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "TriggerProcessClaimed": "world_id+trigger_id+attempt_id+claimed",
         "TriggerProcessOpened": "world_id+trigger_id+opened",
         "TriggerProcessReclaimed": "world_id+trigger_id+attempt_id+reclaimed",
+        "ExpressionRepinReserved": (
+            "world_id+trigger_id+attempt_id+repin_ordinal+reserved_cursor"
+        ),
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
         "InteractionFactTechnicalFailureRecorded": (
             "world_id+trigger_id+attempt_id+technical_failure"
@@ -560,6 +583,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "PerceptionResultAccepted": "world_id+result_id",
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
         "ModelResultRecorded": "world_id+model_call_id+model_result_ref",
+        "LifeDevelopmentRecallResultRecorded": "world_id+result_id",
         "AdvisoryAcceptanceRejected": "world_id+proposal_id+stage+failure_fingerprint",
         "AcceptanceRecorded": "v2:world_id+manifest_version+acceptance_id;legacy:proposal+revision",
         "MessagePayloadStored": "world_id+acceptance_id+payload_ref+payload_hash",
@@ -937,6 +961,22 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 successors=("ProposalRecorded", "TriggerProcessCompleted"),
             ),
             _contract(
+                "ExpressionRepinReserved",
+                "world_runtime",
+                "deliberation",
+                "ExpressionRepinReservedPayload",
+                allowed_predecessors=(
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                    "ExpressionRepinReserved",
+                ),
+                evidence_types=("claimed_expression_attempt", "fresh_projection_cursor"),
+                successors=(
+                    "ExpressionRepinReserved",
+                    "ModelResultRecorded",
+                ),
+            ),
+            _contract(
                 "TriggerProcessCompleted",
                 "world_runtime",
                 "deliberation",
@@ -1030,6 +1070,18 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 ),
                 evidence_types=("model_result", "context_capsule"),
                 successors=("ModelResultRecorded", "ProposalRecorded"),
+            ),
+            _contract(
+                "LifeDevelopmentRecallResultRecorded",
+                "life_development",
+                "deliberation",
+                "LifeDevelopmentRecallResultRecordedPayload",
+                allowed_predecessors=("ProposalRecorded",),
+                evidence_types=(
+                    "character_recall_request",
+                    "cursor_pinned_read_only_recall",
+                ),
+                successors=("ModelResultRecorded",),
             ),
             _contract(
                 "ProposalRecorded",

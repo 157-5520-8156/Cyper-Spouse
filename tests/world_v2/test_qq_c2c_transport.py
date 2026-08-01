@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime
 import hashlib
+import json
+from pathlib import Path
+import stat
 
+import httpx
 import pytest
 
+import companion_daemon.world_v2.qq_c2c_transport as qq_c2c_transport
+from companion_daemon.world_v2.action_pump import TerminalPreDispatchFailure
 from companion_daemon.world_v2.platform_action_executor import (
     PlatformActionExecutor,
     PlatformDispatchRequest,
@@ -38,6 +45,28 @@ class _Delivery:
 
     async def send_typing(self, recipient_id: str, *, state: str) -> dict[str, object]:
         self.sent.append((recipient_id, f"typing:{state}"))
+        return self.response
+
+
+class _FailingDelivery(_Delivery):
+    def __init__(self, error: Exception) -> None:
+        super().__init__({})
+        self.error = error
+
+    async def send_text(self, recipient_id: str, text: str) -> dict[str, object]:
+        self.sent.append((recipient_id, text))
+        raise self.error
+
+
+class _ImageDelivery(_Delivery):
+    def __init__(self, response: dict[str, object]) -> None:
+        super().__init__(response)
+        self.images: list[tuple[str, Path]] = []
+
+    async def send_image_message(
+        self, recipient_id: str, *, image_path: Path
+    ) -> dict[str, object]:
+        self.images.append((recipient_id, image_path))
         return self.response
 
 
@@ -87,6 +116,57 @@ async def test_qq_c2c_transport_preserves_an_explicit_provider_rejection() -> No
     assert receipt.status == "failed"
     assert receipt.error_class == "provider_rejected"
     assert receipt.provider_ref.startswith("qq-c2c:rejected:")
+
+
+@pytest.mark.asyncio
+async def test_qq_c2c_transport_settles_http_provider_exception_as_unknown_once() -> None:
+    request = httpx.Request("POST", "http://127.0.0.1:3000/send_private_msg")
+    response = httpx.Response(502, request=request)
+    delivery = _FailingDelivery(
+        httpx.HTTPStatusError(
+            "NapCat is offline",
+            request=request,
+            response=response,
+        )
+    )
+    transport = QQC2CPlatformTransport(
+        delivery=delivery,
+        recipients_by_target={"conversation:qq:c2c:owner": "open-id-1"},
+        now=lambda: NOW,
+    )
+
+    first = await transport.send(_request())
+    replay = await transport.send(_request())
+
+    assert delivery.sent == [("open-id-1", "我在。")]
+    assert replay == first
+    assert first.status == "unknown"
+    assert first.error_class == "provider_http_502"
+    assert first.provider_ref.startswith("qq-c2c:unknown:")
+    assert first.request_fingerprint == _request().fingerprint
+
+
+@pytest.mark.asyncio
+async def test_qq_c2c_lookup_without_durable_provider_result_closes_old_action_as_unknown() -> None:
+    delivery = _Delivery({"message_id": "must-not-send"})
+    transport = QQC2CPlatformTransport(
+        delivery=delivery,
+        recipients_by_target={"conversation:qq:c2c:owner": "open-id-1"},
+        now=lambda: NOW,
+    )
+    request = _request()
+
+    recovered = await transport.lookup(
+        idempotency_key=request.idempotency_key,
+        request_fingerprint=request.fingerprint,
+    )
+    replay = await transport.send(request)
+
+    assert recovered is not None
+    assert recovered.status == "unknown"
+    assert recovered.error_class == "provider_result_unavailable"
+    assert replay == recovered
+    assert delivery.sent == []
 
 
 @pytest.mark.asyncio
@@ -229,6 +309,71 @@ async def test_qq_c2c_transport_executes_each_authorized_expression_modality(
 
     assert delivery.sent == [("open-id-1", sent)]
     assert receipt.status == "provider_accepted"
+
+
+@pytest.mark.asyncio
+async def test_qq_c2c_media_copy_is_private_exact_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outbox = tmp_path / "private-media"
+    monkeypatch.setattr(qq_c2c_transport, "_MEDIA_DELIVERY_OUTBOX", outbox)
+    image = b"\x89PNG\r\n\x1a\nprivate-image"
+    body = json.dumps(
+        {"encoding": "base64", "bytes": base64.b64encode(image).decode("ascii")}
+    )
+    request = _request().model_copy(
+        update={
+            "action_id": "action:qq-c2c:media",
+            "kind": "media_delivery",
+            "payload_ref": "payload:qq-c2c:media",
+            "payload_hash": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+            "content_type": "application/vnd.world-v2.media-artifact+json",
+            "body": body,
+            "idempotency_key": "idempotency:qq-c2c:media",
+        }
+    )
+    delivery = _ImageDelivery({"message_id": "qq-media-receipt"})
+    transport = QQC2CPlatformTransport(
+        delivery=delivery,
+        recipients_by_target={"conversation:qq:c2c:owner": "open-id-1"},
+        now=lambda: NOW,
+    )
+
+    receipt = await transport.send(request)
+    replay = await transport.send(request)
+
+    assert receipt == replay
+    assert len(delivery.images) == 1
+    image_path = delivery.images[0][1]
+    assert image_path.read_bytes() == image
+    assert stat.S_IMODE(image_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(outbox.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_qq_c2c_media_without_provider_capability_is_declared_preflight_failure() -> None:
+    image = b"\x89PNG\r\n\x1a\nprivate-image"
+    body = json.dumps(
+        {"encoding": "base64", "bytes": base64.b64encode(image).decode("ascii")}
+    )
+    request = _request().model_copy(
+        update={
+            "kind": "media_delivery",
+            "content_type": "application/vnd.world-v2.media-artifact+json",
+            "body": body,
+        }
+    )
+    transport = QQC2CPlatformTransport(
+        delivery=_Delivery({"message_id": "must-not-send"}),
+        recipients_by_target={"conversation:qq:c2c:owner": "open-id-1"},
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(TerminalPreDispatchFailure) as caught:
+        await transport.send(request)
+
+    assert caught.value.error_class == "local_preflight_action_unsupported"
 
 
 class _VerifiableDelivery(_Delivery):

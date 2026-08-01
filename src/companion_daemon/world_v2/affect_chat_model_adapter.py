@@ -10,8 +10,16 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .chat_model_deliberation_adapter import ChatCompletionModel
-from .deliberation import ModelInput, ModelOutput
+from .affect_target_bounds import (
+    AffectTargetBelowMinimumError,
+    target_reselection_instruction,
+    validate_model_authored_targets,
+)
+from .chat_model_deliberation_adapter import (
+    ChatCompletionModel,
+    complete_bounded_validation_reselection,
+)
+from .deliberation import ModelInput, ModelOutput, ValidationTechnicalFailure
 from .proposal_envelope import (
     CanonicalTypedPayload,
     DecisionProposal,
@@ -50,7 +58,7 @@ def _parse_object(raw: str) -> dict[str, object]:
 
 
 class AffectDraftDeliberationAdapter:
-    VERSION = "affect-draft-adapter.1"
+    VERSION = "affect-draft-adapter.3"
 
     def __init__(
         self, *, model: ChatCompletionModel, model_id: str | None = None, temperature: float = 0.2
@@ -62,11 +70,46 @@ class AffectDraftDeliberationAdapter:
         self._temperature = temperature
 
     async def propose(self, request: ModelInput) -> ModelOutput:
-        raw = await self._model.complete(self._messages(request), temperature=self._temperature)
+        messages = self._messages(request)
+        raw = await self._model.complete(messages, temperature=self._temperature)
+        usage = None
+        winning_model_call_id = None
+        winning_request_hash = None
+        try:
+            proposal = _proposal_from_draft(raw=raw, request=request)
+        except AffectTargetBelowMinimumError as error:
+            corrected = await complete_bounded_validation_reselection(
+                model=self._model,
+                messages=messages,
+                raw=raw,
+                instruction=target_reselection_instruction(error),
+                temperature=self._temperature,
+                timeout_seconds=8.0,
+                parent_call_id=request.call_id,
+            )
+            try:
+                proposal = _proposal_from_draft(raw=corrected.raw, request=request)
+            except (TypeError, ValueError) as second_error:
+                raise ValidationTechnicalFailure(
+                    "affect_target_reselection_invalid",
+                    model_call_id=corrected.winning_model_call_id,
+                    request_hash=corrected.winning_request_hash,
+                    attempted_model_id=self._model_id,
+                    attempted_model_version=self.VERSION,
+                    usage=corrected.usage,
+                ) from second_error
+            usage = corrected.usage
+            winning_model_call_id = corrected.winning_model_call_id
+            winning_request_hash = corrected.winning_request_hash
         return ModelOutput(
             model_id=self._model_id,
             model_version=self.VERSION,
-            raw_proposal=_proposal_from_draft(raw=raw, request=request),
+            raw_proposal=proposal,
+            input_tokens=usage.input_tokens if usage is not None else None,
+            output_tokens=usage.output_tokens if usage is not None else None,
+            usage=usage,
+            winning_model_call_id=winning_model_call_id,
+            winning_request_hash=winning_request_hash,
         )
 
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
@@ -87,9 +130,13 @@ class AffectDraftDeliberationAdapter:
                     "brief_rationale, behavior_tendency, stance, display_strategy, and confidence (0-10000). "
                     "When affect is open, return components: 1-8 unique items with dimension one of "
                     + ", ".join(sorted(_DIMENSIONS))
-                    + " and intensity_bp (1-10000). Do not return appraisal references, evidence, IDs, hashes, "
+                    + " and target_intensity_bp (1-10000), meaning the absolute intensity the component "
+                    "should have after this appraisal, not an amount to add. Do not return appraisal "
+                    "references, evidence, IDs, hashes, "
                     "decay policies, Actions, memories, or world mutations. An affect is fallible and not a fact "
-                    "about the user; choose no_change when it should not persist."
+                    "about the user; choose no_change when it should not persist. The supplied "
+                    "affect_target_bounds are pinned hard numeric minima, not emotion advice; each selected "
+                    "target must be at or above its dimension's minimum_target_intensity_bp."
                 ),
             },
             {
@@ -121,6 +168,7 @@ def _proposal_from_draft(*, raw: str, request: ModelInput) -> dict[str, object]:
     evidence = _trigger_evidence(request)
     appraisal_change_id = _accepted_appraisal_change_id(request)
     components = _components(draft.get("components"))
+    validate_model_authored_targets(components, request.affect_target_bounds)
     identity = _identity(
         request=request, affect="open", rationale=rationale, components=components
     )
@@ -129,7 +177,7 @@ def _proposal_from_draft(*, raw: str, request: ModelInput) -> dict[str, object]:
     payload = {
         "episode_id": f"affect:affect-draft:{identity}",
         "appraisal_change_refs": [appraisal_change_id],
-        "component_deltas": components,
+        "component_targets": components,
         "decay_config": {
             "object_ref": "policy:decay:standard",
             "schema_version": "affect-decay.1",
@@ -193,7 +241,7 @@ def _components(value: object) -> list[dict[str, object]]:
     for item in value:
         if not isinstance(item, dict):
             raise ValueError("AffectDraft component is invalid")
-        dimension, intensity = item.get("dimension"), item.get("intensity_bp")
+        dimension, intensity = item.get("dimension"), item.get("target_intensity_bp")
         if (
             not isinstance(dimension, str)
             or dimension not in _DIMENSIONS
@@ -202,8 +250,8 @@ def _components(value: object) -> list[dict[str, object]]:
             or not 1 <= intensity <= 10_000
         ):
             raise ValueError("AffectDraft component is invalid")
-        result.append({"name": dimension, "value": intensity})
-    if len({item["name"] for item in result}) != len(result):
+        result.append({"dimension": dimension, "target_intensity_bp": intensity})
+    if len({item["dimension"] for item in result}) != len(result):
         raise ValueError("AffectDraft dimensions must be unique")
     return result
 

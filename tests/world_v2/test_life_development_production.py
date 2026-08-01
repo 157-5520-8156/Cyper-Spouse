@@ -59,6 +59,7 @@ class _Transport:
 
 class _NoOpWorldAuthor:
     model = "test-production-world-author"
+    semantic_authority_id = "semantic-authority:test:production-world-author"
 
     def __init__(self, *, forbidden: bool = False) -> None:
         self.calls = 0
@@ -96,6 +97,7 @@ class _NeverCharacterModel:
 
 class _UnavailableWorldAuthor:
     model = "test-production-unavailable-world-author"
+    semantic_authority_id = "semantic-authority:test:production-unavailable-world-author"
 
     def __init__(self) -> None:
         self.calls = 0
@@ -113,6 +115,7 @@ class _UnavailableWorldAuthor:
 
 class _PlanWorldAuthor:
     model = "test-production-plan-world-author"
+    semantic_authority_id = "semantic-authority:test:production-plan-world-author"
 
     def __init__(self, *, wake_event_ref: str) -> None:
         self.calls = 0
@@ -210,6 +213,42 @@ class _AcceptCharacterModel:
                 "participant_refs": [],
             },
             ensure_ascii=False,
+        )
+
+
+class _SupportingSourceReviewer:
+    model = "test-production-independent-life-source-reviewer"
+    semantic_authority_id = (
+        "semantic-authority:test:production-independent-life-source-reviewer"
+    )
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.0,
+    ) -> str:
+        del temperature
+        if "focused novel-origin critic" in messages[0]["content"]:
+            return json.dumps(
+                {
+                    "decision": "supported",
+                    "unsupported_claims": [],
+                    "unsupported_provisional_npcs": [],
+                    "unsupported_outcome_prerequisites": [],
+                    "undeclared_premise_fragments": [],
+                    "reason": "No prior history or imported prerequisite is present.",
+                }
+            )
+        return json.dumps(
+            {
+                "decision": "supported",
+                "unsupported_claim_ids": [],
+                "undeclared_fact_fragments": [],
+                "undeclared_fact_paths": [],
+                "typed_location_conflicts": [],
+                "reason": "Proposal-scoped novel facts are declared and source-closed.",
+            }
         )
 
 
@@ -626,6 +665,7 @@ async def test_production_dynamic_character_plan_opens_aftermath_from_frozen_out
         activity_lifecycle_model=_SelectFirstLifecycle(),
         life_world_author_model=world_author,
         life_character_model=character_model,
+        life_source_closure_reviewer=_SupportingSourceReviewer(),
         now=NOW,
     )
     try:

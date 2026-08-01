@@ -20,6 +20,10 @@ PROVIDER_MEDIA_ACTION_KINDS = frozenset(
 )
 
 
+class ProviderMediaGrantError(ValueError):
+    """A declared provider-media authorization rejection."""
+
+
 class ProviderMediaGrantRecordedPayload(FrozenModel):
     grant: ProviderMediaGrant
 
@@ -34,27 +38,41 @@ def require_provider_media_grant(
     """Return the exact active grant or fail closed before a provider call."""
 
     if not is_provider_media_action(action):
-        raise ValueError("provider media grant verifier received a non-provider-media Action")
+        raise ProviderMediaGrantError(
+            "provider media grant verifier received a non-provider-media Action"
+        )
     if action.layer != "media_action" or action.provider_media_grant is None:
-        raise ValueError("provider media Action lacks an enforcement grant binding")
+        raise ProviderMediaGrantError(
+            "provider media Action lacks an enforcement grant binding"
+        )
     binding = action.provider_media_grant
     matches = tuple(item for item in projection.provider_media_grants if item.grant_id == binding.grant_id)
     if len(matches) != 1 or matches[0].entity_revision != binding.grant_revision:
-        raise ValueError("provider media grant binding is missing or stale")
+        raise ProviderMediaGrantError(
+            "provider media grant binding is missing or stale"
+        )
     grant = matches[0]
     if grant.capability_kind != action.kind or grant.provider_ref != action.target:
-        raise ValueError("provider media grant does not bind this Action kind and provider")
+        raise ProviderMediaGrantError(
+            "provider media grant does not bind this Action kind and provider"
+        )
     if grant.actor_ref != action.actor:
-        raise ValueError("provider media grant actor does not bind this Action")
+        raise ProviderMediaGrantError(
+            "provider media grant actor does not bind this Action"
+        )
     if logical_time < grant.issued_at or (grant.expires_at is not None and logical_time >= grant.expires_at):
-        raise ValueError("provider media grant is outside its validity window")
+        raise ProviderMediaGrantError(
+            "provider media grant is outside its validity window"
+        )
 
     capability = _exact(
         projection.capability_grants, "grant_id", grant.capability_grant_id,
         "provider media capability grant",
     )
     if capability.entity_revision != grant.capability_grant_revision:
-        raise ValueError("provider media capability grant revision is stale")
+        raise ProviderMediaGrantError(
+            "provider media capability grant revision is stale"
+        )
     if (
         not capability.origin.enforcement_eligible
         or capability.origin.attestation_environment != "enforcement"
@@ -64,11 +82,13 @@ def require_provider_media_grant(
         or "provider:media" not in capability.values.target_scope_refs
         or not _active(capability.values.valid_from, capability.values.expires_at, logical_time)
     ):
-        raise ValueError("provider media capability is not enforcement eligible and active")
+        raise ProviderMediaGrantError(
+            "provider media capability is not enforcement eligible and active"
+        )
 
     consent = _exact(projection.consent_grants, "consent_id", grant.consent_id, "provider media consent")
     if consent.entity_revision != grant.consent_revision:
-        raise ValueError("provider media consent revision is stale")
+        raise ProviderMediaGrantError("provider media consent revision is stale")
     if (
         not consent.origin.enforcement_eligible
         or consent.origin.attestation_environment != "enforcement"
@@ -79,13 +99,17 @@ def require_provider_media_grant(
         or "data:attachment" not in consent.values.data_scope_refs
         or not _active(consent.values.valid_from, consent.values.expires_at, logical_time)
     ):
-        raise ValueError("provider media consent is not enforcement eligible and active")
+        raise ProviderMediaGrantError(
+            "provider media consent is not enforcement eligible and active"
+        )
 
     privacy = _exact(
         projection.privacy_policies, "policy_id", grant.privacy_policy_id, "provider media privacy policy"
     )
     if privacy.entity_revision != grant.privacy_policy_revision:
-        raise ValueError("provider media privacy policy revision is stale")
+        raise ProviderMediaGrantError(
+            "provider media privacy policy revision is stale"
+        )
     if (
         not privacy.origin.enforcement_eligible
         or privacy.origin.attestation_environment != "enforcement"
@@ -96,7 +120,9 @@ def require_provider_media_grant(
         or "media:private_only" not in privacy.values.media_rule_refs
         or not _active(privacy.values.effective_at, privacy.values.expires_at, logical_time)
     ):
-        raise ValueError("provider media privacy policy is not enforcement eligible and active")
+        raise ProviderMediaGrantError(
+            "provider media privacy policy is not enforcement eligible and active"
+        )
     return grant
 
 
@@ -146,12 +172,13 @@ def _active(start: datetime, end: datetime | None, logical_time: datetime) -> bo
 def _exact(items: tuple[object, ...], attribute: str, value: str, label: str):
     matches = tuple(item for item in items if getattr(item, attribute) == value)
     if len(matches) != 1:
-        raise ValueError(f"{label} is missing or ambiguous")
+        raise ProviderMediaGrantError(f"{label} is missing or ambiguous")
     return matches[0]
 
 
 __all__ = [
     "PROVIDER_MEDIA_ACTION_KINDS",
+    "ProviderMediaGrantError",
     "ProviderMediaGrantRecordedPayload",
     "is_provider_media_action",
     "require_provider_media_grant",

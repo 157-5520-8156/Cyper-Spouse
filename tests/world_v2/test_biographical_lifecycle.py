@@ -315,7 +315,7 @@ def test_life_arc_is_event_sourced_and_cold_replays(tmp_path: Path) -> None:
 
     migrated = SQLiteWorldLedger(path=path, world_id=world_id)
     reopened = migrated.project()
-    assert reopened.reducer_bundle_version == "world-v2-reducers.44"
+    assert reopened.reducer_bundle_version == "world-v2-reducers.46"
     assert reopened.life_arcs == projected.life_arcs
     assert migrated.rebuild() == reopened
     migrated.close()

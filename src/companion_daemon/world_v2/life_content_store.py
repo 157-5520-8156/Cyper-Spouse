@@ -1,10 +1,12 @@
-"""Immutable text sidecar for source-bound lived-world content.
+"""Immutable text sidecar for lived-world content and bounded model audit bytes.
 
 The ledger decides *whether* a content record is visible.  This module only
 stores and retrieves exact UTF-8 bytes by an immutable reference; it knows no
 occurrence, Experience, Context, or proposal semantics.  Keeping that policy
 out of the store is what lets :mod:`life_content` remain the one read module
-that validates a descriptor against a pinned ledger cursor.
+that validates a descriptor against a pinned ledger cursor.  The
+``raw_model_result`` kind is internal audit material and has no
+``LifeContentRecorded`` visibility descriptor.
 """
 
 from __future__ import annotations
@@ -24,7 +26,10 @@ LifeContentKind = Literal[
     "experience_summary",
     "provisional_npc_introduction",
     "dynamic_life_arc_context",
+    "raw_model_result",
 ]
+MAX_LIFE_CONTENT_CHARACTERS = 12_000
+MAX_RAW_MODEL_RESULT_UTF8_BYTES = 64_000
 
 
 def life_content_payload_hash(text: str) -> str:
@@ -57,9 +62,18 @@ class StoredLifeContent:
             "experience_summary",
             "provisional_npc_introduction",
             "dynamic_life_arc_context",
+            "raw_model_result",
         }:
             raise ValueError("unsupported life content kind")
-        if len(self.text) > 12_000:
+        if (
+            self.content_kind == "raw_model_result"
+            and len(self.text.encode("utf-8")) > MAX_RAW_MODEL_RESULT_UTF8_BYTES
+        ):
+            raise ValueError("raw model result exceeds the audit byte limit")
+        if (
+            self.content_kind != "raw_model_result"
+            and len(self.text) > MAX_LIFE_CONTENT_CHARACTERS
+        ):
             raise ValueError("life content exceeds the maximum size")
         if self.content_payload_hash != life_content_payload_hash(self.text):
             raise ValueError("life content hash does not match exact UTF-8 text")
@@ -190,6 +204,8 @@ __all__ = [
     "ImmutableLifeContentStore",
     "InMemoryImmutableLifeContentStore",
     "LifeContentKind",
+    "MAX_LIFE_CONTENT_CHARACTERS",
+    "MAX_RAW_MODEL_RESULT_UTF8_BYTES",
     "SQLiteImmutableLifeContentStore",
     "StoredLifeContent",
     "life_content_payload_hash",

@@ -128,29 +128,40 @@ LongMemEval 正是把 extraction、cross-session reasoning、temporal reasoning�
   语义模型。远端语义召回默认关闭，避免仅因存在通用聊天凭据就把私密或 `withhold` 来源
   发送给额外供应商；部署者显式设置 `WORLD_V2_RECALL_SEMANTIC_ENABLED=true` 后使用 512 维
   `text-embedding-3-small`，并可用
-  `WORLD_V2_RECALL_EMBEDDING_MODEL` 替换兼容模型。远端 embedding 只在角色已经选择
-  `recall_request` 后、于事件循环外执行；自动预取和精确当前 Context 不等待远端
-  embedding。语义向量按 provider endpoint、模型版本、维度和文本哈希
+  `WORLD_V2_RECALL_EMBEDDING_MODEL` 替换兼容模型。远端 embedding 在独立线程中执行；
+  自动预取与角色自主 `recall_request` 都可使用该通道，但首轮永远有来源闭包完整的
+  本地 lexical / structured / temporal 候选兜底，且不会无界等待网络结果。语义向量按
+  provider endpoint、模型版本、维度和文本哈希
   写入最多 8192 条且序列化向量总量最多 32 MiB 的 SQLite 可重建缓存；同文档跨 pull、
   跨重启复用，仅新增文本调用供应商。调用前由跨进程 SQLite reservation 同时检查日/月 token
   和人民币预算，调用后用供应商 usage 结算；拒绝、失败、用量和估算成本进入只读健康状态。
   供应商故障或预算耗尽只降级 dense 通道，不阻断其余检索或聊天回复，实际降级原因同时进入
   Recall trace，不能再伪装成一次正常的 semantic 命中。
-- Context 本身同步携带精确当前的短工作记忆；最多四项的本地预取在线程中并行准备，只允许
-  一个 300ms 上限的本地调度 join，绝不调用或等待远端 embedding。若候选及时完成，它以
-  标准 Capsule item 形状进入角色首轮上下文并
-  立即获得审计；满载 slice 会优先保留实际被审计的候选，主模型转交备用模型时也携带同一
-  provenance。若本地预取超出上限，首轮不再等待，它仍可在角色选择 `recall_request` 后与
-  自主 query 共同进入第二轮；只有该角色自主 recall 才允许调用远端语义 embedding。角色
-  直接作答后丢弃未完成、从未被她看见的候选。候选始终只是
-  有来源的参考而非行为建议，系统不按话题或动机替她决定如何使用。
+- Context 本身同步携带精确当前的短工作记忆；最多四项的自动预取在线程中并行准备，只允许
+  一个 300ms 上限的首轮 join。若已缓存或及时完成的 semantic 候选赶上该窗口，它以标准
+  Capsule item 形状进入角色首轮上下文并立即获得审计；若网络 semantic 未赶上，首轮立即
+  使用本地候选，远端工作继续但不再增加首答等待。完成后的 semantic 结果会替换同一
+  pinned turn 的本地 replay；当角色本来就选择 `recall_request`、或既有技术恢复本来就要
+  再调用一次角色模型时，下一次调用会零等待吸收已完成结果。已经生成且不再经过角色模型的
+  普通首答不能在事后冒充“看过”晚到记忆；此类 `late_ready` / `late_consumed` /
+  `late_unpresented` 与首轮本地、首轮 semantic 数量均进入只读健康指标。满载 slice 会优先
+  保留实际被审计的候选，主模型转交备用模型时也携带同一 provenance。候选始终只是有来源
+  的参考而非行为建议，系统不按话题或动机替她决定如何使用。
+- 每次并行预取都有单调 generation token。等待、消费和正常回收都按 token
+  compare-and-remove；旧调用的超时、双重清理或关闭竞态不能删除、消费或回填同一
+  cursor/trigger 下后来建立的新任务。关闭会保留对活动 consumer 的可取消所有权，且关闭后
+  禁止重新发布 replay。
 - appraisal + expression 配对认知与普通 expression 两条生产路径均支持同一次角色自主
   recall。最多一个额外模型往返，并复用原 turn 的第二调用预算；没有第三次检索或隐藏重试。
 - 被首轮或第二轮模型实际看见的预取和每次角色 pull 都固定完整执行 query（actor、subject、时间、
   隐私、过滤条件与可重放 seed）、各通道分数、随机 accessibility offset、结果、
   embedding/index 版本、精确 cursor、文档和 source binding，并进入
-  `model-result-audit.4`；未被模型看见的并行预取不伪装成模型证据。冷重放读取已记录
+  `model-result-audit.5` 的有序 presentation 序列（历史单 trace 仍以
+  `model-result-audit.4` 重放）；未被模型看见的并行预取不伪装成模型证据。冷重放读取已记录
   proposal/result，不重新检索或调模型。
+- 主动联系的首次角色调用只与 prefetch 并行，不等待也不注入；只有角色自己选择
+  `recall_request` 后，后续调用才会零等待吸收已经完成的 prefetch。这样自动注意力不能替
+  角色制造主动动机，也不会产生一次 300ms 的无效等待。
 - 进程内保留最多 16 个不可变 cursor 搜索快照，避免并发后台认知刷新最新 sidecar 时污染
   已经 pinned 的前台回忆；SQLite 仍只保存一个最新可重建索引，不按 cursor 复制整套文档。
   paired appraisal → expression 的跨提交复用使用显式 `paired_cognition_carry` 契约：
@@ -158,8 +169,9 @@ LongMemEval 正是把 extraction、cross-session reasoning、temporal reasoning�
   runtime 签发 source/target 完整游标的 transition hash，且 trace 只能携带一次；普通
   recall 必须与 Capsule cursor 完全相等。同游标不同 trigger 的快照和预取身份也彼此隔离。
 - sidecar 损坏、锁冲突或 embedding 故障会把该 cursor 的 recall 标记为不可用并记录诊断，
-  Context 继续以空 recall 材料编译。单次结果、单条 trace 和总语料都有独立上限，防止审计
-  超过不可变 Model Result 的 32 KB 合同或让一次自主 recall 扫描无界语料。
+  Context 继续以空 recall 材料编译。单次结果、单条 trace 和总语料都有独立上限；包含最多
+  四次实际 presentation 的新 Model Result 审计有独立 256 KiB 上限，避免一次自主 recall
+  扫描或审计无界增长。
 
 尚未被代码实现“证明”的部分是效果结论，而不是上述主链：语义 embedding 已具备显式启用、
 预算和降级路径，但是否值得在某个部署持续开启，以及角色自写 reflection 是否确实改善自然连续性而

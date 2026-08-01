@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import json
@@ -13,8 +14,14 @@ from companion_daemon.world_v2.deliberation import (
     ModelRoute,
     RouteRequest,
 )
-from companion_daemon.world_v2.chat_model_deliberation_adapter import ChatModelDeliberationAdapter
-from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
+from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+    ChatModelDeliberationAdapter,
+    CompanionIdentityFrame,
+)
+from companion_daemon.world_v2.appraisal_chat_model_adapter import (
+    AppraisalDraftDeliberationAdapter,
+    FastAppraisalDraftDeliberationAdapter,
+)
 from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDeliberationAdapter
 from companion_daemon.world_v2.relationship_draft_deliberation_adapter import (
     RelationshipDraftDeliberationAdapter,
@@ -24,6 +31,7 @@ from companion_daemon.world_v2.platform_action_executor import PlatformDispatchR
 from companion_daemon.world_v2.production_turn_application import (
     MediaContinuationComposition,
     MediaSelectionAcceptanceComposition,
+    WorldV2TurnApplication,
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
@@ -150,6 +158,29 @@ class _DraftChatModel:
         )
 
 
+class _NaturalCurrentReportUptakeChatModel:
+    model = "test-natural-current-report-uptake"
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        return json.dumps(
+            {
+                "timing_choice": "now",
+                "beats": [
+                    {
+                        "modality": "text",
+                        "text": "总算做完了，确实该松口气了。最后是怎么收尾的？",
+                    }
+                ],
+                "stance": "take_up_current_report",
+                "brief_rationale": "Naturally take up only the exact current report.",
+                "confidence": 8100,
+                "world_claims": [],
+            },
+            ensure_ascii=False,
+        )
+
+
 class _TwoBeatChatModel:
     model = "test-flash-two-beat"
 
@@ -247,15 +278,24 @@ class _TimingDraftChatModel:
 class _SequenceTimingDraftChatModel:
     model = "test-flash-timing-sequence"
 
-    def __init__(self, choices: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        choices: tuple[str, ...],
+        *,
+        private_turn_state: dict[str, object] | None = None,
+    ) -> None:
         self.choices = choices
+        self.private_turn_state = private_turn_state
         self.calls = 0
 
     async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
         choice = self.choices[self.calls]
         self.calls += 1
-        value: dict[str, object] = {
+        value: dict[str, object] = {}
+        if self.private_turn_state is not None:
+            value["private_turn_state"] = self.private_turn_state
+        value.update({
             "timing_choice": choice,
             "beats": [] if choice == "silent" else [
                 {"modality": "text", "text": f"第{self.calls}次稍后接着说。"}
@@ -263,7 +303,7 @@ class _SequenceTimingDraftChatModel:
             "stance": "defer" if choice == "later" else "answer_without_world_claims",
             "brief_rationale": "测试同一主草案的时机选择",
             "confidence": 7000,
-        }
+        })
         if choice == "later":
             value.update(delay_seconds=60, expires_after_seconds=600)
         return json.dumps(value, ensure_ascii=False)
@@ -419,10 +459,40 @@ class _ImmediateEmotionChat:
                 "attribution": "user",
                 "severity": 7800,
                 "components": [
-                    {"dimension": "hurt", "intensity_bp": 6200},
-                    {"dimension": "anger", "intensity_bp": 4100},
+                    {"dimension": "hurt", "target_intensity_bp": 6200},
+                    {"dimension": "anger", "target_intensity_bp": 4100},
                 ],
             }
+        )
+
+
+class _LocalQwenEmotionChat:
+    """A valid response in the deployed small-model contract."""
+
+    model = "mlx-community/Qwen3-1.7B-4bit"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        self.calls += 1
+        return json.dumps(
+            {
+                "appraise": True,
+                "brief_rationale": "角色把这次落空理解成了一次关系上的失望。",
+                "behavior_tendency": "先消化这份失落",
+                "stance": "保留但在意",
+                "display_strategy": "暂时克制",
+                "confidence": 7600,
+                "meaning": "disappointment",
+                "attribution": "user",
+                "severity": 7200,
+                "open_affect": True,
+                "affect_dimension": "sadness",
+                "affect_target_intensity_bp": 6400,
+            },
+            ensure_ascii=False,
         )
 
 
@@ -439,7 +509,7 @@ class _OpenAffectChat:
                 "stance": "care_despite_hurt",
                 "display_strategy": "partial_disclosure",
                 "confidence": 7200,
-                "components": [{"dimension": "hurt", "intensity_bp": 4200}],
+                "components": [{"dimension": "hurt", "target_intensity_bp": 4200}],
             }
         )
 
@@ -590,6 +660,62 @@ def _config() -> WorldV2TurnApplicationConfig:
         reply_target="user:user.1",
         action_pump_owner="pump:production-turn-application",
     )
+
+
+def test_character_agency_side_verticals_are_opt_in_by_default() -> None:
+    assert _config().quick_reaction_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_async_close_defers_shared_store_close_until_deliberation_is_quiescent() -> None:
+    """A bounded provider detach must retain the resources it can still read."""
+
+    release = asyncio.Event()
+
+    class _LingeringDeliberation:
+        async def aclose(self) -> None:
+            return None
+
+        @property
+        def shutdown_pending_task_count(self) -> int:
+            return 0 if release.is_set() else 1
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            await release.wait()
+
+    class _Store:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    app = object.__new__(WorldV2TurnApplication)
+    ledger = _Store()
+    life = _Store()
+    expression = _Store()
+    media = _Store()
+    app._ledger = ledger  # type: ignore[assignment]  # noqa: SLF001
+    app._life_content_store = life  # type: ignore[assignment]  # noqa: SLF001
+    app._expression_payload_store = expression  # type: ignore[assignment]  # noqa: SLF001
+    app._media_payload_store = media  # type: ignore[assignment]  # noqa: SLF001
+    app._recall_coordinator = None  # noqa: SLF001
+    app._recall_index = None  # noqa: SLF001
+    app._owned_deliberations = (_LingeringDeliberation(),)  # noqa: SLF001
+    app._closed = False  # noqa: SLF001
+    app._close_task = None  # noqa: SLF001
+    app._deferred_store_close_task = None  # noqa: SLF001
+
+    await app.aclose()
+
+    assert not any(store.closed for store in (ledger, life, expression, media))
+    assert app.shutdown_pending_task_count == 1
+
+    release.set()
+    await asyncio.wait_for(app.wait_for_shutdown_quiescence(), timeout=1)
+
+    assert all(store.closed for store in (ledger, life, expression, media))
+    assert app.shutdown_pending_task_count == 0
 
 
 @pytest.mark.asyncio
@@ -1858,6 +1984,55 @@ async def test_production_application_materializes_a_chat_draft_and_settles_one_
 
 
 @pytest.mark.asyncio
+async def test_current_report_uptake_does_not_promote_expression_into_world_memory(
+    tmp_path: Path,
+) -> None:
+    """Natural report uptake stays expression, not companion biography."""
+
+    transport = _DeliveredTransport()
+    model = ChatModelDeliberationAdapter(model=_NaturalCurrentReportUptakeChatModel())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-current-report-uptake.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=model,
+        quick_recovery=model,
+        transport=transport,
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:current-report-uptake",
+                text="我今天终于把那件麻烦事做完了。",
+                observed_at=NOW,
+                trace_id="trace:production-current-report-uptake",
+            )
+        )
+        delivery = await app.drain_actions_once()
+        projection = await app.action_due_projection()
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert delivery is not None and delivery.status == "settled"
+    assert transport.bodies == ["总算做完了，确实该松口气了。最后是怎么收尾的？"]
+    assert projection.world_occurrences == ()
+    assert projection.experiences == ()
+    assert projection.experience_transitions == ()
+    assert projection.experience_proposals == ()
+    assert projection.facts == ()
+    assert projection.fact_transitions == ()
+    assert projection.fact_proposals == ()
+    assert projection.memory_candidates == ()
+    assert projection.memory_candidate_transitions == ()
+    assert projection.memory_candidate_proposals == ()
+
+
+@pytest.mark.asyncio
 async def test_production_application_delivers_every_ordered_expression_beat(
     tmp_path: Path,
 ) -> None:
@@ -2106,6 +2281,7 @@ class _ReconsiderationCancelBackgroundModel:
 
     def __init__(self) -> None:
         self.review_calls = 0
+        self.review_materials: list[dict[str, object]] = []
 
     async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
@@ -2114,6 +2290,7 @@ class _ReconsiderationCancelBackgroundModel:
             "the background model was consulted by an unexpected lane in this test"
         )
         self.review_calls += 1
+        self.review_materials.append(json.loads(messages[1]["content"]))
         return '{"disposition":"cancel"}'
 
 
@@ -2130,7 +2307,14 @@ async def test_production_composes_reconsideration_reviewer_from_background_mode
     the same background model that carries proactive cognition.
     """
 
-    model = _SequenceTimingDraftChatModel(("later", "silent"))
+    model = _SequenceTimingDraftChatModel(
+        ("later", "silent"),
+        private_turn_state={
+            "contract": "private-turn-state.1",
+            "inner_state_summary": "刚才本来想稍后接着说，新消息来了以后要重新判断。",
+            "attended_source_refs": [],
+        },
+    )
     adapter = ChatModelDeliberationAdapter(model=model)
     background = _ReconsiderationCancelBackgroundModel()
     app = build_sqlite_world_v2_turn_application(
@@ -2138,6 +2322,11 @@ async def test_production_composes_reconsideration_reviewer_from_background_mode
         config=_config(), identities=_Identities(), router=_Router(),
         main_model=adapter, quick_recovery=adapter, transport=_Transport(), now=NOW,
         proactive_model=background,
+        proactive_identity_frame=CompanionIdentityFrame(
+            companion_name="枝枝",
+            counterpart_name="user.1",
+            personality_frame="有自己的生活和判断。",
+        ),
     )
     try:
         first = await app.respond(InboundTurn(
@@ -2159,6 +2348,47 @@ async def test_production_composes_reconsideration_reviewer_from_background_mode
     assert first.status == "deferred"
     assert cancelled is not None and cancelled.status == "cancelled"
     assert background.review_calls == 1
+    supplied = background.review_materials[0]
+    context = supplied["conversation_context"]
+    assert context["identity_frame"]["value"]["companion_name"] == "枝枝"
+    assert context["identity_frame"]["source_refs"]["stable_identity"].startswith(
+        "identity-frame:sha256:"
+    )
+    assert context["current_self_state"]["contract"] == "current-self-state.1"
+    dialogue = context["recent_dialogue"]
+    assert dialogue["availability"] == "available"
+    assert all(item.get("source_ref") for item in dialogue["items"])
+    assert any(
+        item["value"].get("speaker_ref") == "user:user.1"
+        for item in dialogue["items"]
+    )
+    pending = context["old_pending_expression"]
+    pending_beat = next(
+        item
+        for item in projection.expression_beats
+        if item.beat_id == pending["beat_id"]
+    )
+    assert pending["source_ref"] == pending_beat.event_ref
+    old_private_state = context["old_private_turn_state"]
+    pending_audit = next(
+        item
+        for item in projection.proposal_audits
+        if item.proposal_id == pending_beat.proposal_id
+    )
+    assert old_private_state == {
+        "value": {
+            "contract": "private-turn-state.1",
+            "inner_state_summary": "刚才本来想稍后接着说，新消息来了以后要重新判断。",
+            "attended_source_refs": [],
+        },
+        "proposal_id": pending_beat.proposal_id,
+        "proposal_ref": pending_audit.event_ref,
+        "authority": "turn_local_audit_only",
+        "fact_authority": False,
+    }
+    assert supplied["new_observation"]["source_ref"].startswith(
+        "event:trigger:observation:"
+    )
     gates = [
         item for item in projection.trigger_processes
         if item.process_kind == "expression_reconsideration"
@@ -2171,7 +2401,7 @@ async def test_production_composes_reconsideration_reviewer_from_background_mode
     )
 
 @pytest.mark.asyncio
-async def test_production_application_resolves_no_change_appraisal_before_the_visible_reply(
+async def test_production_application_persists_no_change_appraisal_in_background_without_state(
     tmp_path: Path,
 ) -> None:
     transport = _DeliveredTransport()
@@ -2206,8 +2436,8 @@ async def test_production_application_resolves_no_change_appraisal_before_the_vi
 
     assert outcome.status == "action_authorized"
     assert background is not None
-    assert background.status == "idle"
-    assert background.work_status is None
+    assert background.status == "processed"
+    assert background.work_status == "no_change"
     assert projection.appraisals == ()
     assert projection.affect_episodes == ()
     assert projection.relationship_states == ()
@@ -2398,10 +2628,10 @@ async def test_next_turn_context_replays_recent_user_and_delivered_companion_tex
 
 
 @pytest.mark.asyncio
-async def test_significant_emotion_is_durable_and_visible_to_the_same_turn_reply(
+async def test_significant_emotion_becomes_durable_in_background_without_reauthoring_reply(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "world-v2-same-turn-emotion.sqlite"
+    path = tmp_path / "world-v2-background-emotion.sqlite"
     reply_chat = _CapturingDraftChatModel()
     immediate_chat = _ImmediateEmotionChat()
     reply_model = ChatModelDeliberationAdapter(model=reply_chat)
@@ -2427,19 +2657,20 @@ async def test_significant_emotion_is_durable_and_visible_to_the_same_turn_reply
                 trace_id="trace:same-turn-emotion",
             )
         )
+        before_background = app._ledger.project()  # noqa: SLF001 - production vertical evidence
+        request = json.loads(reply_chat.requests[0][1]["content"])["request"]
+        reply_context = json.loads(request["model_content_json"])
         background = await app.drain_background_once()
         projection = app._ledger.project()  # noqa: SLF001 - production vertical evidence
-        observation_refs = [
-            (item.event_id, item.world_revision, item.payload_hash)
-            for item in projection.committed_world_event_refs
-            if item.event_type == "ObservationRecorded"
-        ]
     finally:
         app.close()
 
     assert outcome.status == "action_authorized"
+    assert before_background.appraisals == before_background.affect_episodes == ()
+    assert reply_context["slices"]["affect_episodes"]["items"] == []
     assert immediate_chat.calls == 1
-    assert background is not None and background.status == "idle"
+    assert background is not None and background.status == "processed"
+    assert background.work_status == "accepted"
     assert not any(
         item.process_kind == "interaction_appraisal" and item.state != "terminal"
         for item in projection.trigger_processes
@@ -2452,23 +2683,8 @@ async def test_significant_emotion_is_durable_and_visible_to_the_same_turn_reply
     ]
 
     assert len(reply_chat.requests) == 1
-    request = json.loads(reply_chat.requests[0][1]["content"])["request"]
-    context = json.loads(request["model_content_json"])
-    affect_items = context["slices"]["affect_episodes"]["items"]
     expected_evidence_ref = projection.affect_episodes[0].evidence_refs[0].ref_id
     assert "same-turn-emotion" in expected_evidence_ref
-    assert affect_items
-    observation_event_ref = observation_refs[0][0]
-    assert any(
-        item["value"]["components"][0]["dimension"] == "hurt"
-        and item["value"]["evidence_refs"][0]["ref_id"]
-        == observation_event_ref
-        # The chat-facing derivative keeps one copyable semantic source
-        # token; full source bindings and hashes remain on the immutable
-        # Context Capsule rather than competing with affect for attention.
-        and item["source_ref"] == projection.affect_episodes[0].episode_id
-        for item in affect_items
-    )
 
 
 @pytest.mark.asyncio
@@ -2549,7 +2765,9 @@ async def test_production_application_carries_accepted_appraisal_into_an_affect_
     finally:
         app.close()
 
-    assert background is None or background.work_status is None
+    assert background is not None
+    assert background.status == "processed"
+    assert background.work_status == "accepted"
     ledger = SQLiteWorldLedger(path=path, world_id=_config().world_id)
     try:
         episode = ledger.project().affect_episodes
@@ -2610,7 +2828,8 @@ async def test_significant_interaction_state_is_consumed_by_the_next_visible_tur
         app.close()
 
     assert first.status == second.status == "action_authorized"
-    assert [job.work_status for job in jobs if job is not None].count("accepted") == 2
+    assert [job.work_status for job in jobs if job is not None].count("accepted") == 3
+    assert jobs[-1] is not None and jobs[-1].status == "idle"
     assert projection.appraisals[0].hypotheses[0].meaning == "boundary_violation"
     assert projection.affect_episodes[0].components[0].dimension == "hurt"
     assert projection.relationship_states[0].variables.trust_bp == 240
@@ -2627,6 +2846,66 @@ async def test_significant_interaction_state_is_consumed_by_the_next_visible_tur
     assert any(
         item["value"]["variables"]["trust_bp"] == 240 for item in relationship_items
     ), relationship_items
+
+
+@pytest.mark.asyncio
+async def test_local_appraisal_persists_affect_in_background_for_the_next_current_self(
+    tmp_path: Path,
+) -> None:
+    """The small model's own valid meaning becomes context, not a write-only hint."""
+
+    chat = _CapturingDraftChatModel()
+    local = _LocalQwenEmotionChat()
+    reply_model = ChatModelDeliberationAdapter(model=chat)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-local-appraisal-current-self.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=reply_model,
+        quick_recovery=reply_model,
+        appraisal_model=FastAppraisalDraftDeliberationAdapter(model=local),
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        first = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:local-affect-source",
+                text="你刚才那样让我挺失望的。",
+                observed_at=NOW,
+                trace_id="trace:local-affect-source",
+            )
+        )
+        before_background = app._ledger.project()  # noqa: SLF001 - production seam evidence
+        background = await app.drain_background_once()
+        persisted = app._ledger.project()  # noqa: SLF001 - production seam evidence
+        second = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:local-affect-consumer",
+                text="那我们继续说吧。",
+                observed_at=NOW + timedelta(minutes=1),
+                trace_id="trace:local-affect-consumer",
+            )
+        )
+    finally:
+        app.close()
+
+    assert first.status == second.status == "action_authorized"
+    assert before_background.appraisals == before_background.affect_episodes == ()
+    assert background is not None and background.work_status == "accepted"
+    assert local.calls == 1
+    assert persisted.appraisals[0].hypotheses[0].meaning == "disappointment"
+    assert persisted.affect_episodes[0].components[0].dimension == "sadness"
+
+    provider_input = json.loads(chat.requests[1][1]["content"])
+    current = provider_input["current_self_state"]
+    assert current["appraisals"][0]["hypotheses"][0]["meaning"] == "disappointment"
+    assert current["affect"][0]["components"][0]["dimension"] == "sadness"
 
 
 @pytest.mark.asyncio
@@ -2665,12 +2944,14 @@ async def test_production_application_builds_first_relationship_from_appraisal(
         )
         signal = await app.drain_background_once()
         adjustment = await app.drain_background_once()
+        relationship = await app.drain_background_once()
         idle = await app.drain_background_once()
     finally:
         app.close()
 
     assert signal is not None and signal.work_status == "accepted"
     assert adjustment is not None and adjustment.work_status == "accepted"
+    assert relationship is not None and relationship.work_status == "accepted"
     assert idle is not None and idle.status == "idle"
     ledger = SQLiteWorldLedger(path=path, world_id=_config().world_id)
     try:
@@ -2698,7 +2979,7 @@ async def test_sustained_interaction_is_source_bound_context_for_model_owned_rel
         router=_Router(),
         main_model=reply_model,
         quick_recovery=reply_model,
-        appraisal_model=AppraisalDraftDeliberationAdapter(model=_AppraisingChat()),
+        appraisal_model=AppraisalDraftDeliberationAdapter(model=_NoChangeAppraisalChat()),
         relationship_model=RelationshipDraftDeliberationAdapter(model=relationship_chat),
         transport=_DeliveredTransport(),
         now=NOW,
@@ -2727,7 +3008,28 @@ async def test_sustained_interaction_is_source_bound_context_for_model_owned_rel
 
     assert projection.relationship_states[0].variables.closeness_bp == 80
     assert projection.relationship_states[0].variables.mutuality_bp == 100
+    assert len(relationship_chat.messages) == 1
+    continuity_processes = tuple(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "relationship_deliberation"
+        and item.trigger_ref.startswith("relationship-continuity:")
+    )
+    assert len(continuity_processes) == 1
+    assert continuity_processes[0].state == "terminal"
     model_capsule = json.loads(relationship_chat.messages[0][1]["content"])
+    assert model_capsule["interaction_source_summary"] == json.dumps(
+        {
+            "delivery_state": "observed",
+            "occurred_at": "2026-07-15T12:01:00+00:00",
+            "source_kind": "ordinary_interaction",
+            "speaker": "counterpart",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert model_capsule["accepted_appraisal_summary"] is None
     continuity = model_capsule["interaction_continuity"]
     assert continuity["counterpart_turn_count"] == 2
     assert len(continuity["source_items"]) >= 2

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+import json
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +24,14 @@ from companion_daemon.world_v2.deliberation import (
     ModelRoute,
     RouteRequest,
 )
+from companion_daemon.world_v2.expression_episode_lifecycle import (
+    expression_episode_claim_event,
+    expression_episode_complete_event,
+    expression_episode_open_event,
+    next_expression_retry_due,
+)
+from companion_daemon.world_v2.errors import IdempotencyConflict, LedgerIntegrityError
+from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.batch_invariants import interaction_appraisal_trigger_identity
 from companion_daemon.world_v2.ledger_context_resolver import (
@@ -30,6 +41,7 @@ from companion_daemon.world_v2.ledger_context_resolver import (
 from companion_daemon.world_v2.pinned_turn import PinnedTurnCompiler
 from companion_daemon.world_v2.minimal_reply_acceptance import ReplyBudgetPolicy
 from companion_daemon.world_v2.minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
+from companion_daemon.world_v2.perception_trigger import perception_trigger_event
 from companion_daemon.world_v2.proposal_envelope import (
     CanonicalTypedPayload,
     DecisionProposal,
@@ -39,7 +51,14 @@ from companion_daemon.world_v2.proposal_envelope import (
     TypedChange,
 )
 from companion_daemon.world_v2.runtime import WorldRuntime
-from companion_daemon.world_v2.schemas import BudgetAccount, Observation, ProjectionCursor, WorldEvent
+from companion_daemon.world_v2.schemas import (
+    BudgetAccount,
+    Observation,
+    ProjectionCursor,
+    TriggerProcess,
+    WorldEvent,
+)
+from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.matrix_catalog import (
     CandidateDistribution,
     ClassificationCandidate,
@@ -75,6 +94,27 @@ class _InvalidQuick:
     async def recover(self, _request: ModelInput, _failure: str) -> ModelOutput:
         return ModelOutput(
             model_id="test-quick",
+            model_version="test.1",
+            raw_proposal={},
+            input_tokens=1,
+            output_tokens=1,
+        )
+
+
+class _BlockingInvalidModel(_InvalidModel):
+    """Hold the provider result while an unrelated durable event advances head."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        self.request = request
+        self.started.set()
+        await self.release.wait()
+        return ModelOutput(
+            model_id="test-main",
             model_version="test.1",
             raw_proposal={},
             input_tokens=1,
@@ -154,8 +194,10 @@ class _MinimalReplyModel:
 class _DecisionAppraisalModel:
     def __init__(self, *, evidence_hash: str) -> None:
         self._evidence_hash = evidence_hash
+        self.request: ModelInput | None = None
 
     async def propose(self, request: ModelInput) -> ModelOutput:
+        self.request = request
         proposal = DecisionProposal(
             proposal_id="proposal:pinned-turn:appraisal:1",
             trigger_ref=request.trigger_ref,
@@ -357,6 +399,53 @@ def _world_started() -> WorldEvent:
     )
 
 
+def _observation_event(observation: Observation) -> WorldEvent:
+    payload = observation.model_dump(mode="json")
+    return WorldEvent.from_payload(
+        schema_version=observation.schema_version,
+        event_id=f"event:trigger:observation:{observation.source}:{observation.source_event_id}",
+        world_id=observation.world_id,
+        event_type="ObservationRecorded",
+        logical_time=observation.logical_time,
+        created_at=observation.created_at,
+        actor=observation.actor,
+        source=observation.source,
+        trace_id=observation.trace_id,
+        causation_id=observation.causation_id,
+        correlation_id=observation.correlation_id,
+        idempotency_key=domain_idempotency_key(
+            event_type="ObservationRecorded",
+            world_id=observation.world_id,
+            payload=payload,
+        )
+        or f"observation:{observation.source}:{observation.source_event_id}",
+        payload=payload,
+    )
+
+
+def _expression_episode_events(
+    observation: Observation,
+    observation_event: WorldEvent,
+) -> tuple[WorldEvent, WorldEvent, TriggerProcess]:
+    opened_event = expression_episode_open_event(
+        observation=observation,
+        observation_event=observation_event,
+    )
+    opened_process = TriggerProcess.model_validate_json(
+        json.dumps(opened_event.payload()["process"])
+    )
+    claimed_event, claimed_process = expression_episode_claim_event(
+        world_id=observation.world_id,
+        process=opened_process,
+        owner_id="worker:test:expression-episode",
+        at=observation.logical_time,
+        trace_id=observation.trace_id,
+        correlation_id=observation.correlation_id,
+        technical_failure_count=0,
+    )
+    return opened_event, claimed_event, claimed_process
+
+
 def _budget_configured(*, limit: int = 100) -> WorldEvent:
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
@@ -387,11 +476,12 @@ async def test_runtime_audits_one_cursor_pinned_turn_without_authorizing_effects
     ledger = WorldLedger.in_memory(world_id=WORLD)
     ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
     capsules: ContextCapsuleCompiler = context_capsule_compiler_from_ledger(ledger=ledger)
+    expression_model = _InvalidModel()
     turn = PinnedTurnCompiler(
         ledger=ledger,
         capsule_compiler=capsules,
         deliberation=Deliberation(
-            router=_Router(), main_model=_InvalidModel(), quick_recovery=_InvalidQuick()
+            router=_Router(), main_model=expression_model, quick_recovery=_InvalidQuick()
         ),
         companion_actor_ref="agent:companion",
     )
@@ -403,9 +493,330 @@ async def test_runtime_audits_one_cursor_pinned_turn_without_authorizing_effects
     assert first == duplicate
     projection = ledger.project()
     assert projection.world_revision == 2
-    assert projection.deliberation_revision == 2
+    # Two model-result audits plus the open/claim lifecycle that makes the
+    # technical failure restart-recoverable.
+    assert projection.deliberation_revision == 4
     assert len(projection.model_result_audits) == 2
     assert projection.proposal_audits == ()
+    assert expression_model.request is not None
+    assert expression_model.request.affect_target_bounds is None
+    assert "affect_target_bounds" not in expression_model.request.model_dump(mode="json")
+    retry = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "expression_episode"
+    )
+    assert retry.state == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_content_free_technical_result_rebases_after_unrelated_head_advance(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Receipt-like head progress must not turn a typed model failure into lost speech.
+
+    A content-bearing Proposal remains cursor-pinned.  This regression covers
+    only a proposal-free technical result whose exact expression attempt is
+    still claimed: recording that audit at the latest head preserves durable
+    retry semantics without granting stale text any authority.
+    """
+
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "content-free-technical-result-rebase.sqlite",
+        world_id=WORLD,
+    )
+    request.addfinalizer(ledger.close)
+    ledger.commit(
+        (_world_started(),),
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    observation = _observation()
+    observation_event = _observation_event(observation)
+    opened_event, claimed_event, claimed = _expression_episode_events(
+        observation,
+        observation_event,
+    )
+    committed = ledger.commit(
+        (observation_event, opened_event, claimed_event),
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    cursor = ProjectionCursor(
+        world_revision=committed.world_revision,
+        deliberation_revision=committed.deliberation_revision,
+        ledger_sequence=committed.ledger_sequence,
+    )
+    model = _BlockingInvalidModel()
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(),
+            main_model=model,
+            quick_recovery=_InvalidQuick(),
+        ),
+        companion_actor_ref="agent:companion",
+    )
+
+    task = asyncio.create_task(
+        turn.audit_observation(
+            observation=observation,
+            observation_event=observation_event,
+            cursor=cursor,
+            expression_attempt_id=claimed.claim_lease.attempt_id,
+        )
+    )
+    await model.started.wait()
+    head = ledger.project()
+    ledger.commit(
+        (
+            perception_trigger_event(
+                observation=observation,
+                observation_event=observation_event,
+            ),
+        ),
+        expected_world_revision=head.world_revision,
+        expected_deliberation_revision=head.deliberation_revision,
+    )
+    advanced_head = ledger.project()
+    assert advanced_head.deliberation_revision > cursor.deliberation_revision
+    assert advanced_head.ledger_sequence > cursor.ledger_sequence
+    model.release.set()
+
+    audited = await task
+
+    assert audited.proposal_id is None
+    projection = ledger.project()
+    assert len(projection.model_result_audits) == 2
+    assert {
+        item.attempt_id for item in projection.model_result_audits
+    } == {claimed.claim_lease.attempt_id}
+    assert {
+        item.evaluated_world_revision for item in projection.model_result_audits
+    } == {cursor.world_revision}
+    assert projection.proposal_audits == ()
+    assert projection.actions == ()
+    process = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "expression_episode"
+    )
+    assert process.state == "claimed"
+    assert process.claim_lease is not None
+    assert process.claim_lease.attempt_id == claimed.claim_lease.attempt_id
+    assert next_expression_retry_due(projection) == NOW + timedelta(minutes=10)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_content_free_rebases_join_one_exact_audit(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "content-free-technical-result-effect-once.sqlite",
+        world_id=WORLD,
+    )
+    request.addfinalizer(ledger.close)
+    ledger.commit(
+        (_world_started(),),
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    observation = _observation()
+    observation_event = _observation_event(observation)
+    opened_event, claimed_event, claimed = _expression_episode_events(
+        observation,
+        observation_event,
+    )
+    committed = ledger.commit(
+        (observation_event, opened_event, claimed_event),
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    cursor = ProjectionCursor(
+        world_revision=committed.world_revision,
+        deliberation_revision=committed.deliberation_revision,
+        ledger_sequence=committed.ledger_sequence,
+    )
+    first_model = _BlockingInvalidModel()
+    second_model = _BlockingInvalidModel()
+
+    def compiler(model: _BlockingInvalidModel) -> PinnedTurnCompiler:
+        return PinnedTurnCompiler(
+            ledger=ledger,
+            capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+            deliberation=Deliberation(
+                router=_Router(),
+                main_model=model,
+                quick_recovery=_InvalidQuick(),
+            ),
+            companion_actor_ref="agent:companion",
+        )
+
+    first = asyncio.create_task(
+        compiler(first_model).audit_observation(
+            observation=observation,
+            observation_event=observation_event,
+            cursor=cursor,
+            expression_attempt_id=claimed.claim_lease.attempt_id,
+        )
+    )
+    second = asyncio.create_task(
+        compiler(second_model).audit_observation(
+            observation=observation,
+            observation_event=observation_event,
+            cursor=cursor,
+            expression_attempt_id=claimed.claim_lease.attempt_id,
+        )
+    )
+    await asyncio.gather(first_model.started.wait(), second_model.started.wait())
+    head = ledger.project()
+    ledger.commit(
+        (
+            perception_trigger_event(
+                observation=observation,
+                observation_event=observation_event,
+            ),
+        ),
+        expected_world_revision=head.world_revision,
+        expected_deliberation_revision=head.deliberation_revision,
+    )
+    first_model.release.set()
+    second_model.release.set()
+
+    first_audit, second_audit = await asyncio.gather(first, second)
+
+    assert first_audit == second_audit
+    projection = ledger.project()
+    assert len(projection.model_result_audits) == 2
+    assert projection.proposal_audits == ()
+    assert projection.actions == ()
+
+
+@pytest.mark.asyncio
+async def test_content_free_idempotency_conflict_fails_closed_without_rebase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An identity collision is corruption evidence, never a cursor race."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit(
+        (_world_started(),),
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    observation = _observation()
+    observation_event = _observation_event(observation)
+    opened_event, claimed_event, claimed = _expression_episode_events(
+        observation,
+        observation_event,
+    )
+    committed = ledger.commit(
+        (observation_event, opened_event, claimed_event),
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(),
+            main_model=_InvalidModel(),
+            quick_recovery=_InvalidQuick(),
+        ),
+        companion_actor_ref="agent:companion",
+    )
+    record_calls = 0
+
+    async def conflicting_record(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal record_calls
+        record_calls += 1
+        raise IdempotencyConflict("same identity has different persisted content")
+
+    monkeypatch.setattr(turn, "_record", conflicting_record)
+
+    with pytest.raises(IdempotencyConflict, match="different persisted content"):
+        await turn.audit_observation(
+            observation=observation,
+            observation_event=observation_event,
+            cursor=ProjectionCursor(
+                world_revision=committed.world_revision,
+                deliberation_revision=committed.deliberation_revision,
+                ledger_sequence=committed.ledger_sequence,
+            ),
+            expression_attempt_id=claimed.claim_lease.attempt_id,
+        )
+
+    assert record_calls == 1
+    assert ledger.project().model_result_audits == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "message"),
+    (
+        (LedgerIntegrityError, "prefix proof mismatch"),
+        (ValueError, "capsule contract mismatch"),
+        (TypeError, "resolver returned the wrong contract type"),
+    ),
+)
+async def test_snapshot_hard_failure_is_not_recorded_as_model_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    """Integrity and programmer-contract failures must surface unchanged."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit(
+        (_world_started(),),
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    observation = _observation()
+    observation_event = _observation_event(observation)
+    opened_event, claimed_event, claimed = _expression_episode_events(
+        observation,
+        observation_event,
+    )
+    committed = ledger.commit(
+        (observation_event, opened_event, claimed_event),
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    model = _InvalidModel()
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(),
+            main_model=model,
+            quick_recovery=_InvalidQuick(),
+        ),
+        companion_actor_ref="agent:companion",
+    )
+
+    async def corrupt_snapshot(_cursor):  # type: ignore[no-untyped-def]
+        raise error_type(message)
+
+    monkeypatch.setattr(turn, "_project_at", corrupt_snapshot)
+
+    with pytest.raises(error_type, match=message):
+        await turn.audit_observation(
+            observation=observation,
+            observation_event=observation_event,
+            cursor=ProjectionCursor(
+                world_revision=committed.world_revision,
+                deliberation_revision=committed.deliberation_revision,
+                ledger_sequence=committed.ledger_sequence,
+            ),
+            expression_attempt_id=claimed.claim_lease.attempt_id,
+        )
+
+    assert model.request is None
+    assert ledger.project().model_result_audits == ()
 
 
 @pytest.mark.asyncio
@@ -491,6 +902,14 @@ async def test_runtime_defers_an_audited_reply_when_the_budget_is_unavailable() 
     assert projection.expression_beats == ()
     assert projection.pending_actions == ()
     assert projection.budget_accounts[0].reserved == 0
+    assert projection.acceptance_decisions[-1].status == "rejected"
+    episode = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "expression_episode"
+    )
+    assert episode.state == "claimed"
+    assert next_expression_retry_due(projection) == NOW + timedelta(minutes=10)
 
 
 @pytest.mark.asyncio
@@ -542,15 +961,17 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id=WORLD, accepted_batch_issuer=issuer)
     ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    appraisal_model = _DecisionAppraisalModel(evidence_hash=observation_event.payload_hash)
     turn = PinnedTurnCompiler(
         ledger=ledger,
         capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
         deliberation=Deliberation(
             router=_Router(),
-            main_model=_DecisionAppraisalModel(evidence_hash=observation_event.payload_hash),
+            main_model=appraisal_model,
             quick_recovery=_InvalidQuick(),
         ),
         companion_actor_ref="agent:companion",
+        affect_target_bounds_enabled=True,
     )
     acceptance = AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
     runtime = WorldRuntime(
@@ -573,9 +994,28 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
     assert outcome.status == "observed_only", outcome
     projection = ledger.project()
     assert projection.appraisals[0].hypotheses[0].meaning == "disappointment"
-    assert projection.trigger_processes[0].state == "terminal"
-    assert projection.trigger_processes[1].process_kind == "affect_deliberation"
-    assert projection.trigger_processes[1].state == "claimed"
+    assert appraisal_model.request is not None
+    appraisal_bounds = appraisal_model.request.affect_target_bounds
+    assert appraisal_bounds is not None
+    assert appraisal_bounds.source_world_revision == (
+        appraisal_model.request.evaluated_world_revision
+    )
+    assert appraisal_bounds.source_ledger_sequence == (
+        appraisal_model.request.evaluated_ledger_sequence
+    )
+    assert appraisal_bounds.minimum_for("hurt") == 500
+    interaction = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "interaction_appraisal"
+    )
+    affect = next(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "affect_deliberation"
+    )
+    assert interaction.state == "terminal"
+    assert affect.state == "claimed"
 
     appraisal_event_ref = next(
         ref.event_id
@@ -609,6 +1049,7 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
             quick_recovery=_InvalidQuick(),
         ),
         companion_actor_ref="agent:companion",
+        affect_target_bounds_enabled=True,
     )
     affect_acceptance = AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
     affect_worker = AffectDeliberationWorker(
@@ -629,6 +1070,19 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
         ),
     )
     assert audited.proposal_id is not None
+    assert affect_model.request is not None
+    affect_bounds = affect_model.request.affect_target_bounds
+    assert affect_bounds is not None
+    assert (
+        affect_bounds.source_world_revision,
+        affect_bounds.source_deliberation_revision,
+        affect_bounds.source_ledger_sequence,
+    ) == (
+        projection.world_revision,
+        projection.deliberation_revision,
+        projection.ledger_sequence,
+    )
+    assert affect_bounds.minimum_for("hurt") == 500
     after_audit = ledger.project()
     # Simulate a process death after the acceptance batch and before trigger
     # completion. The recovery runtime must detect that durable effect and
@@ -643,7 +1097,11 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
         appraisal_event=appraisal_event,
     )
     assert affect_result.status == "accepted"
-    assert ledger.project().trigger_processes[1].state == "claimed"
+    assert next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "affect_deliberation"
+    ).state == "claimed"
     affect_runtime = WorldRuntime(
         world_id=WORLD,
         ledger=ledger,
@@ -695,7 +1153,7 @@ async def test_pinned_turn_passes_source_bound_advisory_candidates_to_deliberati
     assert advice.received.trigger["text"] == "我好像有点失望，你刚刚没怎么接住我。"
     projection = ledger.project()
     assert projection.world_revision == 2
-    assert projection.deliberation_revision == 2
+    assert projection.deliberation_revision == 4
 
 
 @pytest.mark.asyncio
@@ -754,3 +1212,121 @@ async def test_pinned_turn_rejects_observation_not_equal_to_committed_event_payl
                 ledger_sequence=commit.ledger_sequence,
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_pinned_turn_rejects_expression_attempt_claimed_for_another_observation() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    first = _observation()
+    first_event = _observation_event(first)
+    first_opened, first_claimed, _ = _expression_episode_events(first, first_event)
+    first_commit = ledger.commit(
+        (first_event, first_opened, first_claimed),
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    second = first.model_copy(
+        update={
+            "observation_id": "observation:pinned-turn:2",
+            "source_event_id": "message:pinned-turn:2",
+            "payload_ref": "payload:pinned-turn:2",
+            "payload_hash": "sha256:" + "b" * 64,
+            "text": "第二条消息。",
+        }
+    )
+    second_event = _observation_event(second)
+    second_opened, second_claimed, second_process = _expression_episode_events(
+        second,
+        second_event,
+    )
+    latest = ledger.commit(
+        (second_event, second_opened, second_claimed),
+        expected_world_revision=first_commit.world_revision,
+        expected_deliberation_revision=first_commit.deliberation_revision,
+    )
+    model = _InvalidModel()
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(),
+            main_model=model,
+            quick_recovery=_InvalidQuick(),
+        ),
+        companion_actor_ref="agent:companion",
+    )
+
+    assert second_process.claim_lease is not None
+    with pytest.raises(
+        ValueError,
+        match="current expression episode claim",
+    ):
+        await turn.audit_observation(
+            observation=first,
+            observation_event=first_event,
+            cursor=ProjectionCursor(
+                world_revision=latest.world_revision,
+                deliberation_revision=latest.deliberation_revision,
+                ledger_sequence=latest.ledger_sequence,
+            ),
+            expression_attempt_id=second_process.claim_lease.attempt_id,
+        )
+
+    assert model.request is None
+
+
+@pytest.mark.asyncio
+async def test_pinned_turn_rejects_a_terminal_expression_attempt() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    observation = _observation()
+    observation_event = _observation_event(observation)
+    opened_event, claimed_event, claimed_process = _expression_episode_events(
+        observation,
+        observation_event,
+    )
+    claimed_commit = ledger.commit(
+        (observation_event, opened_event, claimed_event),
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    completed_event = expression_episode_complete_event(
+        world_id=WORLD,
+        process=claimed_process,
+        at=observation.logical_time,
+        trace_id=observation.trace_id,
+        correlation_id=observation.correlation_id,
+        outcome_ref="runtime-outcome:pinned-turn:terminal",
+    )
+    latest = ledger.commit(
+        (completed_event,),
+        expected_world_revision=claimed_commit.world_revision,
+        expected_deliberation_revision=claimed_commit.deliberation_revision,
+    )
+    model = _InvalidModel()
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(),
+            main_model=model,
+            quick_recovery=_InvalidQuick(),
+        ),
+        companion_actor_ref="agent:companion",
+    )
+
+    assert claimed_process.claim_lease is not None
+    with pytest.raises(ValueError, match="current expression episode claim"):
+        await turn.audit_observation(
+            observation=observation,
+            observation_event=observation_event,
+            cursor=ProjectionCursor(
+                world_revision=latest.world_revision,
+                deliberation_revision=latest.deliberation_revision,
+                ledger_sequence=latest.ledger_sequence,
+            ),
+            expression_attempt_id=claimed_process.claim_lease.attempt_id,
+        )
+
+    assert model.request is None

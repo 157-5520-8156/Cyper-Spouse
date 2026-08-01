@@ -55,6 +55,7 @@ class ConversationContinuityCompiler:
         *,
         dialogue: tuple[RecentDialogueItem, ...],
         trigger_ref: str,
+        acknowledged_observation_event_refs: frozenset[str] = frozenset(),
         retrieval_candidates: tuple[ContinuityRetrievalCandidate, ...] = (),
     ) -> ConversationContinuitySelection:
         if not dialogue:
@@ -63,7 +64,7 @@ class ConversationContinuityCompiler:
         ordered = tuple(
             sorted(
                 dialogue,
-                key=lambda item: (item.occurred_at, item.sequence, item.dialogue_id),
+                key=lambda item: (item.sequence, item.occurred_at, item.dialogue_id),
             )
         )
         current = next(
@@ -79,7 +80,7 @@ class ConversationContinuityCompiler:
         )
         if current is None:
             return ConversationContinuitySelection(
-                dialogue=tuple(reversed(ordered[-self._max_items :]))
+                dialogue=ordered[-self._max_items :]
             )
 
         selected: dict[str, tuple[RecentDialogueItem, set[str], int]] = {}
@@ -97,19 +98,18 @@ class ConversationContinuityCompiler:
             item
             for item in ordered
             if item.speaker == "companion"
-            and (item.occurred_at, item.sequence) < (current.occurred_at, current.sequence)
+            and (item.sequence, item.occurred_at) < (current.sequence, current.occurred_at)
         )
-        acknowledged_event_refs = {
-            ref
-            for item in companions_before
-            for ref in item.acknowledges_observation_event_refs
-        }
+        acknowledged_event_refs = set(acknowledged_observation_event_refs)
+        acknowledged_event_refs.update(
+            ref for item in companions_before for ref in item.acknowledges_observation_event_refs
+        )
         pending = tuple(
             item
             for item in ordered
             if item.speaker == "counterpart"
             and item.dialogue_id != current.dialogue_id
-            and (item.occurred_at, item.sequence) < (current.occurred_at, current.sequence)
+            and (item.sequence, item.occurred_at) < (current.sequence, current.occurred_at)
             and not any(
                 claim.authority_event_ref in acknowledged_event_refs
                 for claim in item.source_claims
@@ -153,10 +153,15 @@ class ConversationContinuityCompiler:
             ),
         )[: self._max_items]
         selected_dialogue = tuple(
-            item.model_copy(
-                update={"continuity_reasons": tuple(sorted(reasons))}
+            sorted(
+                (
+                    item.model_copy(
+                        update={"continuity_reasons": tuple(sorted(reasons))}
+                    )
+                    for item, reasons, _ in ranked
+                ),
+                key=lambda item: (item.sequence, item.occurred_at, item.dialogue_id),
             )
-            for item, reasons, _ in ranked
         )
         rank_overrides = self._associative_recall.compile(
             cue_text=current.text,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from threading import Barrier
 
 import pytest
 
@@ -20,6 +21,7 @@ from companion_daemon.world_v2.projection import (
     ProjectionCapabilityIssuer,
     ProjectionGrant,
 )
+from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
@@ -69,6 +71,26 @@ class AmbiguousClockCommitLedger(WorldLedger):
             self._fail_clock_once = False
             raise IdempotencyConflict("simulated ambiguous concurrent commit")
         return result
+
+
+class BarrierSQLiteWorldLedger(SQLiteWorldLedger):
+    """Make two independent Runtime instances commit from the same old head."""
+
+    def __init__(self, *, barrier: Barrier, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._test_barrier = barrier
+        self._blocked_observation_once = False
+
+    def commit(self, events, **kwargs):  # type: ignore[no-untyped-def]
+        events = tuple(events)
+        if (
+            not self._blocked_observation_once
+            and events
+            and events[0].event_type == "ObservationRecorded"
+        ):
+            self._blocked_observation_once = True
+            self._test_barrier.wait(timeout=5)
+        return super().commit(events, **kwargs)
 
 
 def bind_operator(access: ProjectionAuthority, request: ProjectionRequest) -> ProjectionRequest:
@@ -133,6 +155,89 @@ async def test_duplicate_ingest_joins_one_trigger_and_advances_world_once() -> N
     assert projection.world_revision == 1
     assert projection.view.debug_observation_refs == ("obs-http-message-1",)
     assert len(projection.projection_hash) == 64
+
+
+@pytest.mark.asyncio
+async def test_independent_runtimes_rebase_and_retry_concurrent_sqlite_ingress(
+    tmp_path,
+) -> None:
+    """A legal second message must not remain claimed after a shared-head race."""
+
+    path = tmp_path / "concurrent-runtime-ingress.sqlite"
+    barrier = Barrier(2)
+    left_ledger = BarrierSQLiteWorldLedger(
+        path=path,
+        world_id="world-v2-test",
+        barrier=barrier,
+    )
+    right_ledger = BarrierSQLiteWorldLedger(
+        path=path,
+        world_id="world-v2-test",
+        barrier=barrier,
+    )
+    left = WorldRuntime(world_id="world-v2-test", ledger=left_ledger)
+    right = WorldRuntime(world_id="world-v2-test", ledger=right_ledger)
+    first = observation()
+    second = first.model_copy(
+        update={
+            "observation_id": "obs-http-message-2",
+            "source_event_id": "message-2",
+            "causation_id": "http:message-2",
+            "payload_ref": "inline:test-payload-2",
+            "payload_hash": "sha256:test-payload-2",
+        }
+    )
+    try:
+        outcomes = await asyncio.gather(
+            left.ingest(first),
+            right.ingest(second),
+        )
+        projection = left_ledger.project()
+    finally:
+        left_ledger.close()
+        right_ledger.close()
+
+    assert [item.status for item in outcomes] == ["observed_only", "observed_only"]
+    assert {item.source_event_id for item in projection.message_observations} == {
+        "message-1",
+        "message-2",
+    }
+    assert projection.world_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_independent_runtimes_join_the_same_sqlite_ingress_identity(
+    tmp_path,
+) -> None:
+    path = tmp_path / "duplicate-runtime-ingress.sqlite"
+    barrier = Barrier(2)
+    left_ledger = BarrierSQLiteWorldLedger(
+        path=path,
+        world_id="world-v2-test",
+        barrier=barrier,
+    )
+    right_ledger = BarrierSQLiteWorldLedger(
+        path=path,
+        world_id="world-v2-test",
+        barrier=barrier,
+    )
+    left = WorldRuntime(world_id="world-v2-test", ledger=left_ledger)
+    right = WorldRuntime(world_id="world-v2-test", ledger=right_ledger)
+    incoming = observation()
+    try:
+        first, duplicate = await asyncio.gather(
+            left.ingest(incoming),
+            right.ingest(incoming),
+        )
+        projection = left_ledger.project()
+    finally:
+        left_ledger.close()
+        right_ledger.close()
+
+    assert first == duplicate
+    assert first.status == "observed_only"
+    assert len(projection.message_observations) == 1
+    assert projection.world_revision == 1
 
 
 @pytest.mark.asyncio

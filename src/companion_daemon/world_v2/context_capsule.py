@@ -22,6 +22,7 @@ from .context_resolver import (
     context_query_hash,
     resolver_capability_is_valid,
 )
+from .life_content import RecentExperienceContextItem
 from .memory_retrieval import MemoryRetrievalItem
 from .schema_core import PrivacyClass
 from .schemas import (
@@ -30,7 +31,6 @@ from .schemas import (
     BudgetAccount,
     CapabilityStateProjection,
     CharacterCoreProjection,
-    ExperienceProjection,
     FactProjection,
     MemoryCandidateProjection,
     PrivateImpressionProjection,
@@ -39,6 +39,7 @@ from .schemas import (
 )
 from .situation_compiler import SituationProjection
 from .world_life_context import (
+    ActiveWorldOccurrenceContextItem,
     BiographicalWorldContextItem,
     WorldLifeContextItem,
     WorldLifeModelContextItem,
@@ -465,7 +466,20 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
         # compaction strips the proof envelopes before the prompt.
         default_factory=lambda: SliceBudget(max_items=16, max_fields=192, max_characters=24_000)
     )
-    recent_experiences: SliceBudget = Field(default_factory=SliceBudget)
+    recent_experiences: SliceBudget = Field(
+        # A source-closed Experience includes the committed Experience and
+        # LifeContentRecorded bindings plus its exact settlement lineage.
+        # The generic 4k envelope can therefore discard one otherwise valid
+        # autobiographical item before global compaction gets a chance to
+        # preserve the recent-self floor.  Provider-facing compaction strips
+        # these proof envelopes, so this raises audit capacity rather than
+        # prompt prose.
+        default_factory=lambda: SliceBudget(
+            max_items=8,
+            max_fields=128,
+            max_characters=8_000,
+        )
+    )
     world_life: SliceBudget = Field(default_factory=SliceBudget)
     perception_results: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=4, max_fields=72, max_characters=4_000)
@@ -515,7 +529,9 @@ class ContextCapsuleRequest(_FrozenModel):
     affect_episodes: ResolvedSlice[tuple[AffectEpisodeProjection, ...]] | None = None
     open_threads: ResolvedSlice[tuple[ThreadProjection, ...]] | None = None
     relevant_facts: ResolvedSlice[tuple[FactProjection | FactRecallItem, ...]] | None = None
-    recent_experiences: ResolvedSlice[tuple[ExperienceProjection, ...]] | None = None
+    recent_experiences: (
+        ResolvedSlice[tuple[RecentExperienceContextItem, ...]] | None
+    ) = None
     world_life: ResolvedSlice[tuple[WorldLifeModelContextItem, ...]] | None = None
     perception_results: ResolvedSlice[tuple[PerceptionResultContextItem, ...]] | None = None
     active_memory_candidates: (
@@ -684,15 +700,23 @@ class RelationshipEvaluationContext(_FrozenModel):
     """
 
     subject_ref: str = Field(min_length=1)
-    trigger_appraisal_id: str = Field(min_length=1)
-    appraisal_summary_json: str = Field(min_length=2)
+    trigger_appraisal_id: str | None = Field(default=None, min_length=1)
+    appraisal_summary_json: str | None = Field(default=None, min_length=2)
+    interaction_source_summary_json: str | None = Field(default=None, min_length=2)
     relationship_summary_json: str = Field(min_length=2)
-    appraisal_source: RelationshipEvaluationSource
+    appraisal_source: RelationshipEvaluationSource | None = None
+    interaction_source: RelationshipEvaluationSource | None = None
     relationship_source: RelationshipEvaluationSource | None = None
 
-    @field_validator("appraisal_summary_json", "relationship_summary_json")
+    @field_validator(
+        "appraisal_summary_json",
+        "interaction_source_summary_json",
+        "relationship_summary_json",
+    )
     @classmethod
-    def summaries_are_canonical_objects(cls, value: str) -> str:
+    def summaries_are_canonical_objects(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         try:
             decoded = json.loads(value)
         except json.JSONDecodeError as exc:
@@ -700,6 +724,30 @@ class RelationshipEvaluationContext(_FrozenModel):
         if not isinstance(decoded, dict) or _canonical_json(decoded) != value:
             raise ValueError("relationship evaluation summary must be canonical JSON object")
         return value
+
+    @model_validator(mode="after")
+    def exact_source_is_complete(self) -> "RelationshipEvaluationContext":
+        appraisal = (
+            self.trigger_appraisal_id is not None
+            and self.appraisal_summary_json is not None
+            and self.appraisal_source is not None
+        )
+        interaction = (
+            self.interaction_source_summary_json is not None
+            and self.interaction_source is not None
+        )
+        if appraisal == interaction:
+            raise ValueError("relationship evaluation requires exactly one exact source")
+        if not appraisal and any(
+            value is not None
+            for value in (
+                self.trigger_appraisal_id,
+                self.appraisal_summary_json,
+                self.appraisal_source,
+            )
+        ):
+            raise ValueError("relationship evaluation appraisal source is partial")
+        return self
 
 
 class ContextCapsule(_FrozenModel):
@@ -931,6 +979,13 @@ def derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyClas
         typed.append(item.privacy_class)
     if slice_name in {"open_threads", "recent_experiences"}:
         typed.append(item.values.privacy_class)
+        if isinstance(item, RecentExperienceContextItem):
+            typed.append(item.content.privacy_class)
+    if slice_name == "world_life" and isinstance(
+        item,
+        (WorldLifeContextItem, ActiveWorldOccurrenceContextItem),
+    ):
+        typed.append(item.privacy_class)
     if slice_name == "relevant_facts":
         typed.append(
             item.privacy_class if isinstance(item, FactRecallItem) else item.values.privacy_class
@@ -963,10 +1018,30 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
             refs.add(item.content.descriptor_event_ref)
         return tuple(sorted(refs))
     if slice_name == "world_life" and isinstance(
+        item, ActiveWorldOccurrenceContextItem
+    ):
+        return tuple(
+            sorted(
+                binding.authority_event_ref
+                for binding in item.source_bindings
+            )
+        )
+    if slice_name == "world_life" and isinstance(
         item, BiographicalWorldContextItem
     ):
         return tuple(
             sorted(binding.authority_event_ref for binding in item.source_bindings)
+        )
+    if slice_name == "recent_experiences" and isinstance(
+        item, RecentExperienceContextItem
+    ):
+        return tuple(
+            sorted(
+                (
+                    item.content.authority_event_ref,
+                    item.content.descriptor_event_ref,
+                )
+            )
         )
     if slice_name == "perception_results" and isinstance(item, PerceptionResultContextItem):
         return tuple(sorted({item.source.result_event_ref, item.source.receipt_event_ref}))
@@ -1034,6 +1109,25 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
                 )
             )
         )
+    if isinstance(item, RecentExperienceContextItem):
+        return tuple(
+            sorted(
+                (
+                    (
+                        "committed_event",
+                        item.content.authority_event_ref,
+                        item.content.authority_world_revision,
+                        item.content.authority_payload_hash,
+                    ),
+                    (
+                        "committed_event",
+                        item.content.descriptor_event_ref,
+                        item.content.descriptor_world_revision,
+                        item.content.descriptor_payload_hash,
+                    ),
+                )
+            )
+        )
     if isinstance(item, WorldLifeContextItem):
         authorities = {
             (
@@ -1053,6 +1147,18 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
                 )
             )
         return tuple(sorted(authorities))
+    if isinstance(item, ActiveWorldOccurrenceContextItem):
+        return tuple(
+            sorted(
+                (
+                    "committed_event",
+                    binding.authority_event_ref,
+                    binding.authority_world_revision,
+                    binding.authority_payload_hash,
+                )
+                for binding in item.source_bindings
+            )
+        )
     if isinstance(item, BiographicalWorldContextItem):
         return tuple(
             sorted(
@@ -1663,38 +1769,64 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
 def _relationship_evaluation_context(
     request: ContextCapsuleRequest,
 ) -> RelationshipEvaluationContext | None:
-    """Derive the relationship lane's compact view from untruncated authority."""
+    """Derive the relationship lane's compact view from untruncated authority.
 
-    if not request.relationship_evaluation_requested or request.appraisals is None:
+    The exact source can be an accepted Appraisal or an ordinary observed
+    counterpart turn.  The latter carries no sentiment or relationship score;
+    it merely keeps source identity available after dialogue proof compaction.
+    """
+
+    if not request.relationship_evaluation_requested:
         return None
-    appraisals = _values(request.appraisals)
-    matches = tuple(
-        item
-        for item in appraisals
-        if isinstance(item, AppraisalProjection)
-        and item.origin.accepted_event_ref == request.trigger_ref
-    )
-    if len(matches) != 1:
+    appraisal = None
+    appraisal_metadata = None
+    if request.appraisals is not None:
+        matches = tuple(
+            item
+            for item in _values(request.appraisals)
+            if isinstance(item, AppraisalProjection)
+            and item.origin.accepted_event_ref == request.trigger_ref
+        )
+        if len(matches) > 1:
+            return None
+        if matches:
+            appraisal = matches[0]
+            appraisal_metadata = next(
+                item
+                for item in request.appraisals.item_metadata
+                if item.item_ref == appraisal.appraisal_id
+            )
+    interaction = None
+    interaction_metadata = None
+    if appraisal is None and request.recent_dialogue is not None:
+        matches = tuple(
+            item
+            for item in _values(request.recent_dialogue)
+            if isinstance(item, RecentDialogueItem)
+            and item.speaker == "counterpart"
+            and item.speaker_ref is not None
+            and any(
+                claim.authority_event_ref == request.trigger_ref
+                for claim in item.source_claims
+            )
+        )
+        if len(matches) != 1:
+            return None
+        interaction = matches[0]
+        interaction_metadata = next(
+            item
+            for item in request.recent_dialogue.item_metadata
+            if item.item_ref == interaction.dialogue_id
+        )
+    if appraisal is None and interaction is None:
         return None
-    appraisal = matches[0]
-    appraisal_metadata = next(
-        item for item in request.appraisals.item_metadata if item.item_ref == appraisal.appraisal_id
+    subject_ref = (
+        appraisal.subject_ref
+        if appraisal is not None
+        else interaction.speaker_ref
     )
-    appraisal_summary = {
-        "status": appraisal.status,
-        "confidence_bp": appraisal.confidence_bp,
-        "expires_at": appraisal.expires_at.isoformat(),
-        "hypotheses": [
-            {
-                "meaning": item.meaning,
-                "attribution": item.attribution,
-                "controllability": item.controllability,
-                "severity": item.severity,
-                "weight_bp": item.weight_bp,
-            }
-            for item in appraisal.hypotheses
-        ],
-    }
+    if subject_ref is None:
+        return None
     relationship = None
     relationship_source = None
     if request.relationship_slice is not None:
@@ -1703,7 +1835,7 @@ def _relationship_evaluation_context(
             item
             for item in states
             if isinstance(item, RelationshipStateProjection)
-            and item.subject_ref == appraisal.subject_ref
+            and item.subject_ref == subject_ref
         )
         if len(matching_states) == 1:
             relationship = matching_states[0]
@@ -1738,19 +1870,59 @@ def _relationship_evaluation_context(
             "temperature": "ordinary",
         }
     )
-    return RelationshipEvaluationContext(
-        subject_ref=appraisal.subject_ref,
-        trigger_appraisal_id=appraisal.appraisal_id,
-        appraisal_summary_json=_canonical_json(appraisal_summary),
-        relationship_summary_json=_canonical_json(relationship_summary),
-        appraisal_source=RelationshipEvaluationSource(
-            item_ref=appraisal_metadata.item_ref,
-            source_bindings=appraisal_metadata.source_bindings,
-            source_hash=appraisal_metadata.source_hash,
-            value_hash=appraisal_metadata.value_hash,
-        ),
-        relationship_source=relationship_source,
-    )
+    common: dict[str, object] = {
+        "subject_ref": subject_ref,
+        "relationship_summary_json": _canonical_json(relationship_summary),
+        "relationship_source": relationship_source,
+    }
+    if appraisal is not None and appraisal_metadata is not None:
+        appraisal_summary = {
+            "status": appraisal.status,
+            "confidence_bp": appraisal.confidence_bp,
+            "expires_at": appraisal.expires_at.isoformat(),
+            "hypotheses": [
+                {
+                    "meaning": item.meaning,
+                    "attribution": item.attribution,
+                    "controllability": item.controllability,
+                    "severity": item.severity,
+                    "weight_bp": item.weight_bp,
+                }
+                for item in appraisal.hypotheses
+            ],
+        }
+        common.update(
+            {
+                "trigger_appraisal_id": appraisal.appraisal_id,
+                "appraisal_summary_json": _canonical_json(appraisal_summary),
+                "appraisal_source": RelationshipEvaluationSource(
+                    item_ref=appraisal_metadata.item_ref,
+                    source_bindings=appraisal_metadata.source_bindings,
+                    source_hash=appraisal_metadata.source_hash,
+                    value_hash=appraisal_metadata.value_hash,
+                ),
+            }
+        )
+    elif interaction is not None and interaction_metadata is not None:
+        common.update(
+            {
+                "interaction_source_summary_json": _canonical_json(
+                    {
+                        "source_kind": "ordinary_interaction",
+                        "speaker": interaction.speaker,
+                        "occurred_at": interaction.occurred_at.isoformat(),
+                        "delivery_state": interaction.delivery_state,
+                    }
+                ),
+                "interaction_source": RelationshipEvaluationSource(
+                    item_ref=interaction_metadata.item_ref,
+                    source_bindings=interaction_metadata.source_bindings,
+                    source_hash=interaction_metadata.source_hash,
+                    value_hash=interaction_metadata.value_hash,
+                ),
+            }
+        )
+    return RelationshipEvaluationContext.model_validate(common)
 
 
 def _context_model_content(

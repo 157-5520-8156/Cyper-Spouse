@@ -112,11 +112,10 @@ class Settings(BaseSettings):
         default=True,
         alias="NAPCAT_ACCEPT_UNAUTHENTICATED_LOCAL_EVENTS",
     )
-    # Every scheduler pass advances the durable clock and performs several
-    # ledger commits.  Message replies are ingress-driven and do not wait for
-    # this interval; it only bounds background wake latency (proactive,
-    # activity lifecycle, recovery), so 30s trades imperceptible staleness for
-    # roughly half the background ledger churn of the old 15s default.
+    # The 30-second scheduler pass is normally read-only: it checks recovery,
+    # exact Action/retry deadlines and WAL maintenance. Durable ClockAdvanced
+    # events are ingress/due driven with the idle heartbeat below as a
+    # ten-minute fallback, so visible replies never wait for this interval.
     qq_c2c_scheduler_interval_seconds: float = Field(
         default=30.0,
         alias="QQ_C2C_SCHEDULER_INTERVAL_SECONDS",
@@ -203,6 +202,12 @@ class Settings(BaseSettings):
         le=10.0,
         alias="WORLD_V2_RECALL_EMBEDDING_TIMEOUT_SECONDS",
     )
+    world_v2_recall_embedding_failure_cooldown_seconds: float = Field(
+        default=120.0,
+        ge=0.0,
+        le=3600.0,
+        alias="WORLD_V2_RECALL_EMBEDDING_FAILURE_COOLDOWN_SECONDS",
+    )
     world_v2_recall_embedding_daily_token_budget: int = Field(
         default=250_000,
         ge=1,
@@ -241,6 +246,73 @@ class Settings(BaseSettings):
     hermes_private_prompt_model: str = Field(
         default="nousresearch/hermes-4-70b", alias="HERMES_PRIVATE_PROMPT_MODEL"
     )
+    world_v2_source_review_redundancy_enabled: bool = Field(
+        default=False,
+        alias="WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED",
+    )
+    world_v2_source_review_secondary_model: str = Field(
+        default="qwen/qwen-plus",
+        alias="WORLD_V2_SOURCE_REVIEW_SECONDARY_MODEL",
+    )
+    world_v2_source_review_fallback_model: str = Field(
+        # This reviewer is deliberately separate from WORLD_V2_FALLBACK_MODEL:
+        # the latter authors recovery speech and therefore cannot also judge
+        # the source closure of its own candidate.
+        default="gpt-4.1-mini",
+        alias="WORLD_V2_SOURCE_REVIEW_FALLBACK_MODEL",
+    )
+    world_v2_source_review_recovery_model: str = Field(
+        default="qwen/qwen-plus",
+        alias="WORLD_V2_SOURCE_REVIEW_RECOVERY_MODEL",
+    )
+    world_v2_source_review_recovery_fallback_model: str = Field(
+        default="gpt-4.1-mini",
+        alias="WORLD_V2_SOURCE_REVIEW_RECOVERY_FALLBACK_MODEL",
+    )
+    world_v2_source_inventory_enabled: bool = Field(
+        # Inventory V5 is an optimization over the established full source
+        # review, not a correctness requirement. Composition still fails closed
+        # unless the exact endpoint/model/contract has release-pinned evidence.
+        default=True,
+        alias="WORLD_V2_SOURCE_INVENTORY_ENABLED",
+    )
+    world_v2_source_inventory_model: str = Field(
+        default="openai/gpt-5.4-nano",
+        alias="WORLD_V2_SOURCE_INVENTORY_MODEL",
+    )
+    world_v2_source_inventory_fallback_model: str = Field(
+        default="openai/gpt-5.4-mini",
+        alias="WORLD_V2_SOURCE_INVENTORY_FALLBACK_MODEL",
+    )
+    world_v2_source_inventory_timeout_seconds: float = Field(
+        # Compatibility ceiling for the primary Inventory probe. Production
+        # clamps it to three seconds and reserves eight seconds for the
+        # independently qualified direct fallback, all inside the existing
+        # 22-second Inventory boundary.
+        default=10.0,
+        ge=0.1,
+        le=10.0,
+        alias="WORLD_V2_SOURCE_INVENTORY_TIMEOUT_SECONDS",
+    )
+    world_v2_source_review_hedge_after_seconds: float = Field(
+        # Historical setting name retained for deployment compatibility. It is
+        # now the primary review attempt timeout; the reserve reviewer is not
+        # started until that call has failed or been cancelled at this bound.
+        default=8.0,
+        ge=0.1,
+        le=15.0,
+        alias="WORLD_V2_SOURCE_REVIEW_HEDGE_AFTER_SECONDS",
+    )
+    world_v2_source_review_deadline_seconds: float = Field(
+        # Compatibility-preserving requested ceiling. The expression
+        # composition clamps it below its 22-second caller bound, retaining a
+        # short reserve in which the authority can publish its own terminal
+        # exhaustion instead of being cancelled and retried by the caller.
+        default=30.0,
+        ge=1.0,
+        le=30.0,
+        alias="WORLD_V2_SOURCE_REVIEW_DEADLINE_SECONDS",
+    )
     world_v2_fallback_model: str = Field(
         default="gpt-5.6-luna", alias="WORLD_V2_FALLBACK_MODEL"
     )
@@ -275,8 +347,12 @@ class Settings(BaseSettings):
         default="local",
         alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_API_KEY",
     )
-    world_v2_expression_episode_mode: Literal["off", "shadow", "on"] = Field(
-        default="off", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
+    # ADR 0014 keeps the single-beat provisional lane observational in every
+    # production deployment.  The lower World-v2 composition still accepts
+    # ``on`` for explicit lifecycle tests, but an environment setting must not
+    # turn that incomplete candidate into user-visible behavior.
+    world_v2_expression_episode_mode: Literal["off", "shadow"] = Field(
+        default="shadow", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
     )
     world_v2_recorded_cadence_mode: Literal["off", "shadow", "on"] = Field(
         default="shadow", alias="WORLD_V2_RECORDED_CADENCE_MODE"

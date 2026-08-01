@@ -14,6 +14,7 @@ from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
+from .private_turn_state import PrivateTurnState
 from .schema_core import FrozenModel, PrivacyClass
 
 
@@ -237,10 +238,13 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
         {
             "episode_id": str,
             "appraisal_change_refs": list,
-            "component_deltas": dict,
             "decay_config": dict,
             "residue_config": dict,
-        }
+        },
+        {
+            "component_deltas": list,
+            "component_targets": list,
+        },
     ),
     "private_impression_transition": _PayloadContract(
         {
@@ -545,6 +549,11 @@ class NamedFixedPoint(FrozenModel):
     value: int = Field(ge=-1_000_000_000, le=1_000_000_000)
 
 
+class AffectComponentTarget(FrozenModel):
+    dimension: BoundedLabel
+    target_intensity_bp: int = Field(ge=1, le=10_000)
+
+
 class TimeRange(FrozenModel):
     starts_at: datetime
     ends_at: datetime
@@ -693,9 +702,25 @@ class AppraisalPayload(FrozenModel):
 class AffectPayload(FrozenModel):
     episode_id: BoundedRef
     appraisal_change_refs: list[BoundedRef] = Field(min_length=1, max_length=32)
-    component_deltas: list[NamedFixedPoint] = Field(min_length=1, max_length=32)
+    # ``component_deltas`` is retained only for immutable v1 proposals that
+    # already expressed a signed change. New model adapters emit the explicit
+    # target form so an absolute intensity can never be mistaken for a delta.
+    component_deltas: list[NamedFixedPoint] | None = Field(
+        default=None, min_length=1, max_length=32
+    )
+    component_targets: list[AffectComponentTarget] | None = Field(
+        default=None, min_length=1, max_length=32
+    )
     decay_config: TypedObjectBinding
     residue_config: TypedObjectBinding
+
+    @model_validator(mode="after")
+    def has_one_unambiguous_component_contract(self) -> Self:
+        if (self.component_deltas is None) == (self.component_targets is None):
+            raise ValueError(
+                "affect payload requires exactly one of component_deltas or component_targets"
+            )
+        return self
 
 
 class InterpretationCandidate(FrozenModel):
@@ -847,6 +872,53 @@ class ProactiveExpressionSourceBinding(FrozenModel):
     target_ref: BoundedRef
 
 
+class ProactiveExpressionPlanSourceBindingV2(FrozenModel):
+    """Bind every beat of a proactive plan to one causal opportunity.
+
+    ``ProactiveExpressionSourceBinding`` remains readable for historical,
+    single-beat ledger entries.  New plans bind their complete ordered effect
+    set rather than silently pretending only their first bubble exists.
+    """
+
+    source_kind: Literal[
+        "settled_world_event",
+        "thread",
+        "commitment",
+        "spontaneous_contact",
+        "response_gap",
+        "ambient_presence",
+        "situation_change",
+    ]
+    source_event_ref: BoundedRef
+    source_payload_hash: str = Field(pattern=_HASH_PATTERN)
+    source_world_revision: int = Field(ge=1)
+    plan_id: BoundedRef
+    beat_payload_hashes: list[str] = Field(min_length=1, max_length=32)
+    target_ref: BoundedRef
+
+    @model_validator(mode="after")
+    def beat_hashes_are_closed(self) -> "ProactiveExpressionPlanSourceBindingV2":
+        if any(not re.fullmatch(_HASH_PATTERN, value) for value in self.beat_payload_hashes):
+            raise ValueError("proactive plan binding requires sha256 beat payload hashes")
+        return self
+
+
+class EventShareBeatClaimBinding(FrozenModel):
+    beat_id: BoundedRef
+    claim_text: str = Field(min_length=1, max_length=4_096)
+    payload_hash: str = Field(pattern=_HASH_PATTERN)
+
+
+class EventSharePlanClaimBindingV2(FrozenModel):
+    """Source closure for each text beat in a settled-event share."""
+
+    recipient_ref: BoundedRef
+    source_event_ref: BoundedRef
+    source_payload_hash: str = Field(pattern=_HASH_PATTERN)
+    source_world_revision: int = Field(ge=1)
+    beats: list[EventShareBeatClaimBinding] = Field(min_length=1, max_length=32)
+
+
 class ProactiveOpportunityDecision(FrozenModel):
     """Durable proof that a proactive opportunity was evaluated, including silence."""
 
@@ -924,6 +996,8 @@ class ExpressionPlanPayload(FrozenModel):
     response_expectation: ResponseExpectationDraftPayload | None = None
     event_share_claim: EventShareClaimBinding | None = None
     proactive_source_binding: ProactiveExpressionSourceBinding | None = None
+    event_share_plan_claim_v2: EventSharePlanClaimBindingV2 | None = None
+    proactive_source_plan_binding_v2: ProactiveExpressionPlanSourceBindingV2 | None = None
     world_claims: list[ExpressionPlanWorldClaim] = Field(default_factory=list, max_length=8)
 
 
@@ -1341,9 +1415,30 @@ class ProposalEnvelope(FrozenModel):
         )
         return _sha256(canonical)
 
+    @property
+    def effect_hash(self) -> str:
+        """Canonical effect identity with turn-local audit state removed.
+
+        ``private_turn_state`` records the character model's same-turn
+        decision state for audit.  It is deliberately not authority for a
+        TypedChange or Action, so changing only that field must not mint new
+        effect identities.  Proposals without the field retain their exact
+        historical hash bytes.
+        """
+
+        value = self.model_dump(mode="json")
+        value.pop("private_turn_state", None)
+        return _sha256(_canonical_json(value))
+
 
 class DecisionProposal(ProposalEnvelope):
     proposal_kind: Literal["decision"] = "decision"
+    # Turn-local model audit only.  It is intentionally outside every
+    # TypedChange and therefore cannot authorize a World or Action effect.
+    # ``exclude_if`` preserves historical proposal bytes exactly.
+    private_turn_state: PrivateTurnState | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     appraisals: tuple[AppraisalSummary, ...] = Field(default=(), max_length=32)
     affect_tendencies: tuple[BoundedLabel, ...] = Field(default=(), max_length=32)
     affect_decision: Literal["no_change", "propose"] = "no_change"
@@ -1460,6 +1555,9 @@ class ContinuationProposal(ProposalEnvelope):
 
 class MinimalProposal(ProposalEnvelope):
     proposal_kind: Literal["minimal"] = "minimal"
+    private_turn_state: PrivateTurnState | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     source_model_result: str = Field(min_length=1, max_length=_MAX_REF_LENGTH)
     response_text: str = Field(min_length=1, max_length=4_096)
     stance: Literal["defer", "acknowledge_briefly", "answer_without_world_claims"]
@@ -1546,7 +1644,9 @@ __all__ = [
     "CHANGE_TRANSITION_REGISTRY",
     "ContinuationProposal",
     "DecisionProposal",
+    "EventShareBeatClaimBinding",
     "EventShareClaimBinding",
+    "EventSharePlanClaimBindingV2",
     "ExpressionBeatDraft",
     "MinimalProposal",
     "PROPOSAL_SCHEMA_REGISTRY_VERSION",
@@ -1554,6 +1654,7 @@ __all__ = [
     "ProposalActionIntent",
     "ProposalEnvelope",
     "ProposalEvidenceRef",
+    "ProactiveExpressionPlanSourceBindingV2",
     "ReferencedSummary",
     "TypedChange",
     "TypedObjectBinding",

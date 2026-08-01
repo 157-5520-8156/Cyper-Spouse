@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from concurrent.futures import Future
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import hmac
 import json
 import logging
+import math
 import secrets
 import threading
 import time
@@ -21,6 +23,7 @@ from pydantic import Field
 from .recall_corpus import RecallCorpusCompiler, RecallCorpusSources
 from .recall_audit import (
     CharacterRecallRequest,
+    PrefetchPresentationAudit,
     RecallAuditHit,
     RecallAuditTrace,
     paired_recall_transition_hash,
@@ -45,12 +48,24 @@ _MAX_PINNED_RECALL_CONTEXTS = 16
 # The first cognition call may wait this long for a local prefetch that is
 # still searching.  A lexical search over the in-process index finishes in a
 # few milliseconds; a semantic search additionally spends one query-embedding
-# provider call (cached documents embed once).  The bound exists so a
-# pathological search can never hold the visible reply hostage — a prefetch
-# that misses the join stays available for the character-chosen pull.
-_PREFETCH_FIRST_PASS_JOIN_SECONDS = 0.3
+# provider call (cached documents embed once). Production samples through the
+# configured proxy are typically 310–420 ms warm, so a 300 ms bound made the
+# semantic lane structurally dark despite healthy results. The bound remains
+# below half a second so a pathological search cannot hold the visible reply
+# hostage — a prefetch that misses the join stays available for the
+# character-chosen pull.
+PREFETCH_FIRST_PASS_JOIN_SECONDS = 0.45
 _RecallContextKey = tuple[RecallCursor, str | None]
 _RecallPrefetchKey = tuple[RecallCursor, str]
+
+
+@dataclass(frozen=True, slots=True)
+class PrefetchJobToken:
+    """Generation identity for compare-and-remove cleanup."""
+
+    expected_cursor: RecallCursor
+    trigger_ref: str
+    epoch: int
 
 
 def _canonical_json(value: object) -> str:
@@ -70,6 +85,64 @@ class TrustedRecallTrace(FrozenModel):
     authority_seal: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class PresentedPrefetchTrace(FrozenModel):
+    """Live proof of one prefetch actually exposed to a role-model call."""
+
+    phase: Literal[
+        "initial",
+        "recall_followup",
+        "recovery_initial",
+        "delegated_initial",
+    ]
+    model_call_id: str = Field(min_length=1, max_length=256)
+    trace: TrustedRecallTrace
+
+    def recorded(self) -> PrefetchPresentationAudit:
+        return PrefetchPresentationAudit(
+            phase=self.phase,
+            model_call_id=self.model_call_id,
+            trace=verify_trusted_recall_trace(self.trace),
+        )
+
+
+def append_presented_prefetch(
+    presentations: tuple[PresentedPrefetchTrace, ...],
+    *,
+    phase: Literal[
+        "initial",
+        "recall_followup",
+        "recovery_initial",
+        "delegated_initial",
+    ],
+    model_call_id: str,
+    trace: TrustedRecallTrace | None,
+) -> tuple[PresentedPrefetchTrace, ...]:
+    """Record each provider-visible presentation in model-call order."""
+
+    if trace is None:
+        return presentations
+    audit = verify_trusted_recall_trace(trace)
+    if audit.mode != "prefetch":
+        raise ValueError("only a prefetch trace can be presented as automatic recall")
+    if any(
+        item.phase == phase
+        and item.model_call_id == model_call_id
+        and item.trace.audit.result_hash == audit.result_hash
+        for item in presentations
+    ):
+        return presentations
+    if len(presentations) >= 4:
+        raise ValueError("prefetch presentation sequence exceeds its bounded budget")
+    return (
+        *presentations,
+        PresentedPrefetchTrace(
+            phase=phase,
+            model_call_id=model_call_id,
+            trace=trace,
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _PinnedRecallContext:
     snapshot: RecallIndexSnapshot
@@ -78,6 +151,34 @@ class _PinnedRecallContext:
     logical_time: datetime
     trigger_ref: str | None
     paired_predecessor_cursor: RecallCursor | None
+
+
+class _PinnedBatchRecallEmbedding:
+    """Replay one provider batch through the ordinary index/search contract."""
+
+    def __init__(
+        self,
+        *,
+        source: RecallEmbedding,
+        texts: tuple[str, ...],
+        vectors: tuple[tuple[float, ...], ...],
+    ) -> None:
+        if len(texts) != len(vectors):
+            raise ValueError("semantic recall batch count is invalid")
+        self.version = source.version
+        self.dimensions = source.dimensions
+        self.dense_match_threshold_bp = int(
+            getattr(source, "dense_match_threshold_bp", 5_500)
+        )
+        self._vectors = dict(zip(texts, vectors, strict=True))
+
+    def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        try:
+            return tuple(self._vectors[text] for text in texts)
+        except KeyError as exc:
+            raise ValueError(
+                "semantic recall batch was reused for unpinned text"
+            ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +203,17 @@ class _PrefetchHealth:
     match_channels: tuple[str, ...] = ()
     fallback_channels: tuple[str, ...] = ()
     embedding_status: str = "unknown"
+
+
+@dataclass(slots=True)
+class _PrefetchDeliveryHealth:
+    epoch: int = 0
+    last_status: str = "unknown"
+    first_pass_local_count: int = 0
+    first_pass_semantic_count: int = 0
+    late_semantic_ready_count: int = 0
+    late_semantic_consumed_count: int = 0
+    late_semantic_unpresented_count: int = 0
 
 
 def _trace_seal(audit: RecallAuditTrace) -> str:
@@ -147,13 +259,27 @@ async def perform_character_recall_with_prefetch(
     expected_cursor: RecallCursor,
     trigger_ref: str,
     timeout_seconds: float,
+    prefetch_job_token: PrefetchJobToken | None = None,
 ) -> tuple[TrustedRecallTrace | None, TrustedRecallTrace]:
     """Join preparatory local attention and the character's chosen pull."""
 
+    if prefetch_job_token is None:
+        return (
+            None,
+            await perform_character_recall(
+                coordinator,
+                request=request,
+                accessibility_seed=accessibility_seed,
+                expected_cursor=expected_cursor,
+                trigger_ref=trigger_ref,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
     prefetch_task = asyncio.create_task(
         coordinator.consume_scheduled_prefetch(
             expected_cursor=expected_cursor,
             trigger_ref=trigger_ref,
+            job_token=prefetch_job_token,
         )
     )
     try:
@@ -194,11 +320,46 @@ class RecallCoordinator:
         self._active_recalls = 0
         self._active_recalls_drained = threading.Event()
         self._active_recalls_drained.set()
+        # Context compilation can run concurrently for foreground ingress and
+        # background cognition.  The disposable SQLite index has one mutable
+        # head, while every turn must retain the immutable snapshot at its
+        # exact ledger cursor.  Guard rebuild+snapshot+publication as one
+        # operation and never make a later lookup depend on the global latest
+        # cursor.
+        self._context_guard = threading.RLock()
         self._context_key: _RecallContextKey | None = None
         self._contexts: OrderedDict[_RecallContextKey, _PinnedRecallContext] = OrderedDict()
         self._prefetch_slots = threading.BoundedSemaphore(value=4)
+        self._prefetch_state_guard = threading.RLock()
         self._prefetch_futures: OrderedDict[_RecallPrefetchKey, _PrefetchJob] = OrderedDict()
         self._prefetch_join_attempted: set[_RecallPrefetchKey] = set()
+        self._active_prefetch_consumers: set[
+            tuple[_RecallPrefetchKey, int]
+        ] = set()
+        self._prefetch_trace_epochs: OrderedDict[tuple[str, str], int] = (
+            OrderedDict()
+        )
+        self._presented_prefetch_results: OrderedDict[
+            tuple[str, str],
+            None,
+        ] = OrderedDict()
+        self._presented_local_prefetch_keys: OrderedDict[
+            tuple[_RecallPrefetchKey, int],
+            None,
+        ] = OrderedDict()
+        self._prefetch_late_ready_recorded: OrderedDict[
+            tuple[_RecallPrefetchKey, int],
+            None,
+        ] = OrderedDict()
+        # One provider attempt may time out after already consuming the
+        # cursor-pinned automatic recall.  Keep that read-only trace available
+        # to the technical recovery model at the same exact turn identity;
+        # otherwise fallback changes not only provider but remembered
+        # context.  Entries are bounded and evicted with their pinned Context.
+        self._prefetch_replays: OrderedDict[
+            _RecallPrefetchKey,
+            TrustedRecallTrace,
+        ] = OrderedDict()
         # Futures leave the keyed map when a caller consumes or abandons
         # them, but their non-cancellable provider threads may still be
         # running. Keep an independent shutdown registry until thread exit.
@@ -211,6 +372,8 @@ class RecallCoordinator:
             status="unknown",
             failure_code=None,
         )
+        self._prefetch_delivery_lock = threading.Lock()
+        self._prefetch_delivery_health = _PrefetchDeliveryHealth()
 
     @classmethod
     def from_built_index(
@@ -246,23 +409,51 @@ class RecallCoordinator:
 
     @property
     def cursor(self) -> RecallCursor | None:
-        return self._context_key[0] if self._context_key is not None else None
+        with self._context_guard:
+            return self._context_key[0] if self._context_key is not None else None
 
     @property
     def is_closed(self) -> bool:
-        return self._closed
+        with self._active_recall_guard:
+            return self._closed
 
     def semantic_health(self) -> dict[str, object]:
         with self._prefetch_health_lock:
             health = self._prefetch_health
+        with self._prefetch_delivery_lock:
+            delivery = _PrefetchDeliveryHealth(
+                epoch=self._prefetch_delivery_health.epoch,
+                last_status=self._prefetch_delivery_health.last_status,
+                first_pass_local_count=(self._prefetch_delivery_health.first_pass_local_count),
+                first_pass_semantic_count=(
+                    self._prefetch_delivery_health.first_pass_semantic_count
+                ),
+                late_semantic_ready_count=(
+                    self._prefetch_delivery_health.late_semantic_ready_count
+                ),
+                late_semantic_consumed_count=(
+                    self._prefetch_delivery_health.late_semantic_consumed_count
+                ),
+                late_semantic_unpresented_count=(
+                    self._prefetch_delivery_health.late_semantic_unpresented_count
+                ),
+            )
+        with self._context_guard:
+            hot_context_ready = self._context_key is not None
         prefetch = {
             "last_prefetch_status": health.status,
             "last_prefetch_failure_code": health.failure_code,
             "last_prefetch_hit_count": health.hit_count,
             "last_prefetch_match_channels": list(health.match_channels),
             "last_prefetch_embedding_status": health.embedding_status,
+            "last_prefetch_delivery_status": delivery.last_status,
+            "prefetch_first_pass_local_count": delivery.first_pass_local_count,
+            "prefetch_first_pass_semantic_count": delivery.first_pass_semantic_count,
+            "prefetch_late_semantic_ready_count": delivery.late_semantic_ready_count,
+            "prefetch_late_semantic_consumed_count": (delivery.late_semantic_consumed_count),
+            "prefetch_late_semantic_unpresented_count": (delivery.late_semantic_unpresented_count),
             "turn_summary": {
-                "hot_context": "ready" if self._context_key is not None else "unavailable",
+                "hot_context": "ready" if hot_context_ready else "unavailable",
                 "recall": health.status,
                 "fallback_channels": list(health.fallback_channels),
                 "hits": health.hit_count,
@@ -308,16 +499,24 @@ class RecallCoordinator:
         *,
         trigger_ref: str | None = None,
     ) -> None:
-        keys = tuple(
-            key
-            for key in self._contexts
-            if key[0] == cursor and (trigger_ref is None or key[1] == trigger_ref)
-        )
-        for key in keys:
-            self._contexts.pop(key, None)
+        with self._context_guard:
+            keys = tuple(
+                key
+                for key in self._contexts
+                if key[0] == cursor and (trigger_ref is None or key[1] == trigger_ref)
+            )
+            for key in keys:
+                self._contexts.pop(key, None)
+            if self._context_key in keys:
+                self._context_key = next(reversed(self._contexts), None)
+            replay_keys = tuple(
+                key
+                for key in self._prefetch_replays
+                if key[0] == cursor and (trigger_ref is None or key[1] == trigger_ref)
+            )
+            for key in replay_keys:
+                self._prefetch_replays.pop(key, None)
         self.discard_scheduled_prefetch(cursor, trigger_ref=trigger_ref)
-        if self._context_key in keys:
-            self._context_key = next(reversed(self._contexts), None)
 
     def refresh(
         self,
@@ -335,32 +534,34 @@ class RecallCoordinator:
             subject_refs=subject_refs,
             sources=sources,
         )
-        self._index.rebuild(cursor=cursor, documents=documents)
-        snapshot = self._index.snapshot()
-        if snapshot.cursor != cursor:
-            raise ValueError("recall sidecar changed while its Context was being pinned")
-        key = (cursor, trigger_ref)
-        existing = self._contexts.get(key)
-        predecessor = (
-            existing.paired_predecessor_cursor
-            if existing is not None and existing.trigger_ref == trigger_ref
-            else self._latest_context_cursor(excluding=cursor)
-        )
-        self._remember(
-            key=key,
-            context=_PinnedRecallContext(
-                snapshot=snapshot,
-                actor_ref=actor_ref,
-                subject_refs=subject_refs,
-                logical_time=logical_time,
-                trigger_ref=trigger_ref,
-                paired_predecessor_cursor=predecessor,
-            ),
-        )
+        with self._context_guard:
+            self._index.rebuild(cursor=cursor, documents=documents)
+            snapshot = self._index.snapshot()
+            if snapshot.cursor != cursor:
+                raise ValueError("recall sidecar changed while its Context was being pinned")
+            key = (cursor, trigger_ref)
+            existing = self._contexts.get(key)
+            predecessor = (
+                existing.paired_predecessor_cursor
+                if existing is not None and existing.trigger_ref == trigger_ref
+                else self._latest_context_cursor(excluding=cursor)
+            )
+            self._remember(
+                key=key,
+                context=_PinnedRecallContext(
+                    snapshot=snapshot,
+                    actor_ref=actor_ref,
+                    subject_refs=subject_refs,
+                    logical_time=logical_time,
+                    trigger_ref=trigger_ref,
+                    paired_predecessor_cursor=predecessor,
+                ),
+            )
 
     def prefetch(
         self,
         *,
+        expected_cursor: RecallCursor,
         query_text: str,
         lexical_text: str | None = None,
         occurred_from: datetime | None = None,
@@ -371,13 +572,9 @@ class RecallCoordinator:
         trigger_ref: str,
         limit: int = 4,
     ) -> TrustedRecallTrace:
-        context_key = self._context_key
-        if context_key is None:
-            raise ValueError("recall corpus has not been refreshed")
-        cursor = context_key[0]
-        context = self._context_for(cursor, trigger_ref=trigger_ref)
+        context = self._context_for(expected_cursor, trigger_ref=trigger_ref)
         if context is None:
-            raise ValueError("prefetch trigger does not match the pinned Context")
+            raise ValueError("prefetch request does not match the pinned Context")
         request = CharacterRecallRequest(
             query_text=query_text,
             lexical_text=lexical_text,
@@ -398,13 +595,14 @@ class RecallCoordinator:
             trigger_ref=trigger_ref,
             request=request,
             result=result,
-            evaluated_cursor=cursor,
+            evaluated_cursor=expected_cursor,
         )
         return trace
 
     def schedule_prefetch(
         self,
         *,
+        expected_cursor: RecallCursor,
         query_text: str,
         lexical_text: str | None = None,
         occurred_from: datetime | None = None,
@@ -414,20 +612,16 @@ class RecallCoordinator:
         accessibility_seed: str,
         trigger_ref: str,
         limit: int = 4,
-    ) -> None:
+    ) -> PrefetchJobToken:
         """Start bounded local attention search without delaying the first model call."""
 
         with self._active_recall_guard:
             if self._closed:
                 raise RuntimeError("recall coordinator is closed")
-        context_key = self._context_key
-        if context_key is None:
-            raise ValueError("recall corpus has not been refreshed")
-        cursor = context_key[0]
-        context = self._context_for(cursor, trigger_ref=trigger_ref)
+        context = self._context_for(expected_cursor, trigger_ref=trigger_ref)
         if context is None:
-            raise ValueError("prefetch trigger does not match the pinned Context")
-        prefetch_key = (cursor, trigger_ref)
+            raise ValueError("prefetch request does not match the pinned Context")
+        prefetch_key = (expected_cursor, trigger_ref)
         request = CharacterRecallRequest(
             query_text=query_text,
             lexical_text=lexical_text,
@@ -447,84 +641,121 @@ class RecallCoordinator:
                 accessibility_seed=accessibility_seed,
                 semantic=False,
             ),
-            evaluated_cursor=cursor,
+            evaluated_cursor=expected_cursor,
         )
-        previous = self._prefetch_futures.pop(prefetch_key, None)
-        self._prefetch_join_attempted.discard(prefetch_key)
+        with self._context_guard:
+            self._prefetch_replays.pop(prefetch_key, None)
+        has_worker_slot = self._prefetch_slots.acquire(blocking=False)
+        previous: _PrefetchJob | None = None
+        evicted_jobs: list[_PrefetchJob] = []
+        capacity_fallback = False
+        with self._active_recall_guard:
+            if self._closed:
+                if has_worker_slot:
+                    self._prefetch_slots.release()
+                raise RuntimeError("recall coordinator is closed")
+            with self._prefetch_state_guard:
+                previous = self._prefetch_futures.pop(prefetch_key, None)
+                self._prefetch_join_attempted.discard(prefetch_key)
+                self._prefetch_epoch += 1
+                epoch = self._prefetch_epoch
+                future: Future[TrustedRecallTrace | None] = Future()
+                cancelled = threading.Event()
+                thread: threading.Thread | None = None
+                if has_worker_slot:
+                    inherited_context = copy_context()
+                    thread = threading.Thread(
+                        target=inherited_context.run,
+                        args=(self._run_prefetch_job,),
+                        kwargs={
+                            "future": future,
+                            "cancelled": cancelled,
+                            "context": context,
+                            "request": request,
+                            "accessibility_seed": accessibility_seed,
+                            "trigger_ref": trigger_ref,
+                            "evaluated_cursor": expected_cursor,
+                            "epoch": epoch,
+                            "local_fallback": local_fallback,
+                        },
+                        name="world-v2-recall-prefetch",
+                        daemon=True,
+                    )
+                else:
+                    # Provider saturation must not darken automatic memory:
+                    # publish the already source-bound local search as a
+                    # completed generation for this exact Context.
+                    future.set_result(local_fallback)
+                    capacity_fallback = True
+                job = _PrefetchJob(
+                    future=future,
+                    cancelled=cancelled,
+                    thread=thread,
+                    epoch=epoch,
+                    local_fallback=local_fallback,
+                )
+                self._prefetch_futures[prefetch_key] = job
+                self._remember_prefetch_trace_epoch_locked(
+                    (
+                        local_fallback.audit.result_hash,
+                        local_fallback.audit.embedding_version,
+                    ),
+                    epoch,
+                )
+                while len(self._prefetch_futures) > _MAX_PINNED_RECALL_CONTEXTS:
+                    evicted_key, evicted = self._prefetch_futures.popitem(last=False)
+                    self._prefetch_join_attempted.discard(evicted_key)
+                    evicted_jobs.append(evicted)
+            if thread is not None:
+                with self._prefetch_worker_guard:
+                    self._prefetch_worker_threads.add(thread)
+                    thread.start()
         if previous is not None:
             previous.cancel()
-        if not self._prefetch_slots.acquire(blocking=False):
-            # Provider saturation must not darken the automatic memory lane:
-            # the source-bound local result is already available, so publish
-            # it as a completed job for this exact Context identity.
-            self._prefetch_epoch += 1
-            future: Future[TrustedRecallTrace | None] = Future()
-            future.set_result(local_fallback)
-            self._prefetch_futures[prefetch_key] = _PrefetchJob(
-                future=future,
-                cancelled=threading.Event(),
-                thread=None,
-                epoch=self._prefetch_epoch,
-                local_fallback=local_fallback,
-            )
+        for evicted in evicted_jobs:
+            evicted.cancel()
+        if capacity_fallback:
             self._set_prefetch_health(
-                epoch=self._prefetch_epoch,
+                epoch=epoch,
                 status="degraded",
                 failure_code="prefetch_capacity",
                 trace=local_fallback,
             )
-            while len(self._prefetch_futures) > _MAX_PINNED_RECALL_CONTEXTS:
-                evicted_key, evicted = self._prefetch_futures.popitem(last=False)
-                self._prefetch_join_attempted.discard(evicted_key)
-                evicted.cancel()
-            return
-        self._prefetch_epoch += 1
-        epoch = self._prefetch_epoch
-        future: Future[TrustedRecallTrace | None] = Future()
-        cancelled = threading.Event()
-        thread = threading.Thread(
-            target=self._run_prefetch_job,
-            kwargs={
-                "future": future,
-                "cancelled": cancelled,
-                "context": context,
-                "request": request,
-                "accessibility_seed": accessibility_seed,
-                "trigger_ref": trigger_ref,
-                "evaluated_cursor": cursor,
-                "epoch": epoch,
-                "local_fallback": local_fallback,
-            },
-            name="world-v2-recall-prefetch",
-            daemon=True,
-        )
-        job = _PrefetchJob(
-            future=future,
-            cancelled=cancelled,
-            thread=thread,
+        return PrefetchJobToken(
+            expected_cursor=expected_cursor,
+            trigger_ref=trigger_ref,
             epoch=epoch,
-            local_fallback=local_fallback,
         )
-        self._prefetch_futures[prefetch_key] = job
-        # Closing the embedding and publishing a new provider worker share the
-        # same lifecycle latch.  If close won the race, unwind the unstarted
-        # job; if schedule won, close will see the worker registry before it
-        # can close the shared provider.
-        with self._active_recall_guard:
-            if self._closed:
-                if self._prefetch_futures.get(prefetch_key) is job:
-                    self._prefetch_futures.pop(prefetch_key, None)
-                self._prefetch_join_attempted.discard(prefetch_key)
-                job.cancel()
-                self._prefetch_slots.release()
-                return
-            with self._prefetch_worker_guard:
-                self._prefetch_worker_threads.add(thread)
-                thread.start()
-        while len(self._prefetch_futures) > _MAX_PINNED_RECALL_CONTEXTS:
-            evicted_key, evicted = self._prefetch_futures.popitem(last=False)
-            self._prefetch_join_attempted.discard(evicted_key)
-            evicted.cancel()
+
+    def scheduled_prefetch_token(
+        self,
+        *,
+        expected_cursor: RecallCursor,
+        trigger_ref: str,
+    ) -> PrefetchJobToken | None:
+        """Snapshot the current generation for one cleanup/consume owner."""
+
+        key = (expected_cursor, trigger_ref)
+        with self._prefetch_state_guard:
+            job = self._prefetch_futures.get(key)
+            if job is None:
+                return None
+            return PrefetchJobToken(
+                expected_cursor=expected_cursor,
+                trigger_ref=trigger_ref,
+                epoch=job.epoch,
+            )
+
+    @staticmethod
+    def _job_matches_token(
+        key: _RecallPrefetchKey,
+        job: _PrefetchJob,
+        token: PrefetchJobToken | None,
+    ) -> bool:
+        return token is None or (
+            key == (token.expected_cursor, token.trigger_ref)
+            and job.epoch == token.epoch
+        )
 
     async def consume_scheduled_prefetch(
         self,
@@ -532,6 +763,7 @@ class RecallCoordinator:
         expected_cursor: RecallCursor,
         trigger_ref: str,
         timeout_seconds: float = 0.05,
+        job_token: PrefetchJobToken | None = None,
     ) -> TrustedRecallTrace | None:
         """Return candidates only when the character chose a second recall pass.
 
@@ -539,23 +771,54 @@ class RecallCoordinator:
         failure is fail-empty because this sidecar is not World authority.
         """
 
-        job = self._prefetch_futures.pop(
-            (expected_cursor, trigger_ref),
-            None,
-        )
-        self._prefetch_join_attempted.discard((expected_cursor, trigger_ref))
+        key = (expected_cursor, trigger_ref)
+        with self._prefetch_state_guard:
+            job = self._prefetch_futures.get(key)
+            if job is not None and not self._job_matches_token(
+                key,
+                job,
+                job_token,
+            ):
+                job = None
+            if job is not None:
+                self._active_prefetch_consumers.add((key, job.epoch))
+                self._prefetch_join_attempted.discard(key)
         if job is None:
             return None
         try:
             async with asyncio.timeout(timeout_seconds):
-                trace = await asyncio.wrap_future(job.future)
+                while not job.future.done():
+                    if job.cancelled.is_set():
+                        return None
+                    await asyncio.sleep(0.005)
+                trace = job.future.result()
+        except asyncio.CancelledError:
+            with self._active_recall_guard:
+                if self._closed:
+                    return None
+            raise
         except Exception:
             job.cancel()
             return None
+        finally:
+            with self._prefetch_state_guard:
+                self._active_prefetch_consumers.discard((key, job.epoch))
+                if self._prefetch_futures.get(key) is job:
+                    self._prefetch_futures.pop(key, None)
+                self._prefetch_join_attempted.discard(key)
         if trace is None:
             return None
         audit = verify_trusted_recall_trace(trace)
-        if audit.trigger_ref != trigger_ref:
+        if (
+            audit.trigger_ref != trigger_ref
+            or audit.evaluated_cursor != expected_cursor
+        ):
+            return None
+        if not self._remember_prefetch_replay(
+            key=key,
+            trace=trace,
+            expected_epoch=job.epoch,
+        ):
             return None
         return trace
 
@@ -564,6 +827,7 @@ class RecallCoordinator:
         *,
         expected_cursor: RecallCursor,
         trigger_ref: str,
+        job_token: PrefetchJobToken | None = None,
     ) -> TrustedRecallTrace | None:
         """Take an already-finished candidate set without waiting at all.
 
@@ -574,11 +838,17 @@ class RecallCoordinator:
         """
 
         key = (expected_cursor, trigger_ref)
-        job = self._prefetch_futures.get(key)
-        if job is None or not job.future.done():
-            return None
-        self._prefetch_futures.pop(key, None)
-        self._prefetch_join_attempted.discard(key)
+        with self._prefetch_state_guard:
+            job = self._prefetch_futures.get(key)
+            if (
+                job is None
+                or not self._job_matches_token(key, job, job_token)
+                or not job.future.done()
+            ):
+                return None
+            if self._prefetch_futures.get(key) is job:
+                self._prefetch_futures.pop(key, None)
+            self._prefetch_join_attempted.discard(key)
         try:
             trace = job.future.result()
             if trace is None:
@@ -589,6 +859,12 @@ class RecallCoordinator:
             return None
         if audit.trigger_ref != trigger_ref or audit.evaluated_cursor != expected_cursor:
             return None
+        if not self._remember_prefetch_replay(
+            key=key,
+            trace=trace,
+            expected_epoch=job.epoch,
+        ):
+            return None
         return trace
 
     async def await_scheduled_prefetch(
@@ -596,7 +872,8 @@ class RecallCoordinator:
         *,
         expected_cursor: RecallCursor,
         trigger_ref: str,
-        timeout_seconds: float = _PREFETCH_FIRST_PASS_JOIN_SECONDS,
+        timeout_seconds: float = PREFETCH_FIRST_PASS_JOIN_SECONDS,
+        job_token: PrefetchJobToken | None = None,
     ) -> TrustedRecallTrace | None:
         """Join a pending prefetch within a small bound before the first call.
 
@@ -610,8 +887,57 @@ class RecallCoordinator:
         logged so a dark recall channel is observable instead of silent.
         """
 
+        if (
+            isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds < 0
+        ):
+            raise ValueError("recall prefetch join timeout must be finite and non-negative")
         key = (expected_cursor, trigger_ref)
-        job = self._prefetch_futures.get(key)
+        with self._active_recall_guard:
+            if self._closed:
+                return None
+        # A bounded first-pass miss stores the local trace for immediate model
+        # continuity but deliberately leaves the semantic worker alive.  Once
+        # that worker finishes, its source-bound result is the better attention
+        # candidate for every later phase of this exact pinned turn.  Check the
+        # future before the replay; otherwise the local trace permanently
+        # shadows a completed semantic result.
+        ready = self.take_ready_scheduled_prefetch(
+            expected_cursor=expected_cursor,
+            trigger_ref=trigger_ref,
+            job_token=job_token,
+        )
+        if ready is not None:
+            return ready
+        with self._context_guard:
+            replay = self._prefetch_replays.get(key)
+        if replay is not None and job_token is not None:
+            with self._prefetch_state_guard:
+                replay_epoch = self._prefetch_trace_epochs.get(
+                    (
+                        replay.audit.result_hash,
+                        replay.audit.embedding_version,
+                    )
+                )
+            if replay_epoch != job_token.epoch:
+                replay = None
+        if replay is not None:
+            with self._context_guard:
+                if self._prefetch_replays.get(key) is replay:
+                    self._prefetch_replays.move_to_end(key)
+            with self._active_recall_guard:
+                if self._closed:
+                    return None
+            return replay
+        with self._prefetch_state_guard:
+            job = self._prefetch_futures.get(key)
+            if job is not None and not self._job_matches_token(
+                key,
+                job,
+                job_token,
+            ):
+                job = None
         if job is None:
             logger.debug(
                 "recall prefetch unavailable at first pass: trigger=%s cursor=%s",
@@ -624,9 +950,32 @@ class RecallCoordinator:
             # search one small bounded join even when no semantic provider is
             # configured; otherwise the first call races past useful lexical
             # memories on nearly every cold thread.
-            if key in self._prefetch_join_attempted:
+            reuse_local_fallback = False
+            with self._prefetch_state_guard:
+                if self._prefetch_futures.get(key) is not job:
+                    return None
+                if key in self._prefetch_join_attempted:
+                    reuse_local_fallback = True
+                else:
+                    self._prefetch_join_attempted.add(key)
+            if reuse_local_fallback:
+                with self._active_recall_guard:
+                    if self._closed:
+                        return None
                 return job.local_fallback
-            self._prefetch_join_attempted.add(key)
+            if timeout_seconds == 0:
+                logger.debug(
+                    "recall prefetch used immediate local fallback because the "
+                    "ingress-to-provider budget was exhausted: trigger=%s",
+                    trigger_ref,
+                )
+                if not self._remember_prefetch_replay(
+                    key=key,
+                    trace=job.local_fallback,
+                    expected_epoch=job.epoch,
+                ):
+                    return None
+                return job.local_fallback
             try:
                 async with asyncio.timeout(timeout_seconds):
                     await asyncio.shield(asyncio.wrap_future(job.future))
@@ -638,17 +987,33 @@ class RecallCoordinator:
                     timeout_seconds * 1000,
                     trigger_ref,
                 )
+                if not self._remember_prefetch_replay(
+                    key=key,
+                    trace=job.local_fallback,
+                    expected_epoch=job.epoch,
+                ):
+                    return None
                 return job.local_fallback
             except Exception:
-                self._prefetch_futures.pop(key, None)
-                self._prefetch_join_attempted.discard(key)
+                with self._prefetch_state_guard:
+                    if self._prefetch_futures.get(key) is job:
+                        self._prefetch_futures.pop(key, None)
+                    self._prefetch_join_attempted.discard(key)
                 job.cancel()
                 logger.warning(
                     "recall prefetch search failed: trigger=%s", trigger_ref, exc_info=True
                 )
+                if not self._remember_prefetch_replay(
+                    key=key,
+                    trace=job.local_fallback,
+                    expected_epoch=job.epoch,
+                ):
+                    return None
                 return job.local_fallback
-        self._prefetch_futures.pop(key, None)
-        self._prefetch_join_attempted.discard(key)
+        with self._prefetch_state_guard:
+            if self._prefetch_futures.get(key) is job:
+                self._prefetch_futures.pop(key, None)
+            self._prefetch_join_attempted.discard(key)
         try:
             trace = job.future.result()
             if trace is None:
@@ -669,6 +1034,12 @@ class RecallCoordinator:
                 audit.evaluated_cursor,
             )
             return None
+        if not self._remember_prefetch_replay(
+            key=key,
+            trace=trace,
+            expected_epoch=job.epoch,
+        ):
+            return None
         return trace
 
     def discard_scheduled_prefetch(
@@ -676,15 +1047,58 @@ class RecallCoordinator:
         cursor: RecallCursor,
         *,
         trigger_ref: str | None = None,
+        job_token: PrefetchJobToken | None = None,
     ) -> None:
-        keys = tuple(
-            key
-            for key in self._prefetch_futures
-            if key[0] == cursor and (trigger_ref is None or key[1] == trigger_ref)
-        )
-        for key in keys:
-            self._prefetch_futures.pop(key).cancel()
-            self._prefetch_join_attempted.discard(key)
+        if job_token is not None and (
+            job_token.expected_cursor != cursor
+            or (
+                trigger_ref is not None
+                and job_token.trigger_ref != trigger_ref
+            )
+        ):
+            raise ValueError("prefetch cleanup token does not match its target")
+        removed: list[tuple[_RecallPrefetchKey, _PrefetchJob, bool]] = []
+        with self._prefetch_state_guard:
+            keys = tuple(
+                key
+                for key in self._prefetch_futures
+                if key[0] == cursor and (trigger_ref is None or key[1] == trigger_ref)
+            )
+            for key in keys:
+                job = self._prefetch_futures.get(key)
+                if job is None:
+                    continue
+                if job_token is not None and (
+                    key != (
+                        job_token.expected_cursor,
+                        job_token.trigger_ref,
+                    )
+                    or job.epoch != job_token.epoch
+                ):
+                    continue
+                if self._prefetch_futures.get(key) is job:
+                    self._prefetch_futures.pop(key, None)
+                    self._prefetch_join_attempted.discard(key)
+                    removed.append(
+                        (
+                            key,
+                            job,
+                            (key, job.epoch)
+                            in self._presented_local_prefetch_keys,
+                        )
+                    )
+        for key, job, local_replay_was_presented in removed:
+            if local_replay_was_presented and self._semantic_embedding is not None:
+                status = "semantic_pending_unpresented"
+                if job.future.done():
+                    try:
+                        completed = job.future.result()
+                    except Exception:
+                        completed = None
+                    if completed is not None and self._is_semantic_trace(completed):
+                        status = "semantic_late_unpresented"
+                self._record_prefetch_delivery(epoch=job.epoch, status=status)
+            job.cancel()
 
     def recall(
         self,
@@ -870,8 +1284,35 @@ class RecallCoordinator:
                 failure_code=trace.audit.embedding_failure_code,
                 trace=trace,
             )
+            with self._prefetch_state_guard:
+                self._remember_prefetch_trace_epoch_locked(
+                    (
+                        trace.audit.result_hash,
+                        trace.audit.embedding_version,
+                    ),
+                    epoch,
+                )
             if not future.done() and not cancelled.is_set():
                 future.set_result(trace)
+            key = (evaluated_cursor, trigger_ref)
+            record_late_ready = False
+            with self._prefetch_state_guard:
+                late_ready_key = (key, epoch)
+                if (
+                    (key, epoch) in self._presented_local_prefetch_keys
+                    and self._is_semantic_trace(trace)
+                    and late_ready_key not in self._prefetch_late_ready_recorded
+                ):
+                    self._remember_prefetch_marker_locked(
+                        self._prefetch_late_ready_recorded,
+                        late_ready_key,
+                    )
+                    record_late_ready = True
+            if record_late_ready:
+                self._record_prefetch_delivery(
+                    epoch=epoch,
+                    status="semantic_late_ready",
+                )
         except BaseException as exc:
             if not cancelled.is_set():
                 self._set_prefetch_health(
@@ -913,28 +1354,18 @@ class RecallCoordinator:
                 match_channels=(
                     tuple(
                         sorted(
-                            {
-                                channel
-                                for hit in trace.audit.hits
-                                for channel in hit.match_channels
-                            }
+                            {channel for hit in trace.audit.hits for channel in hit.match_channels}
                         )
                     )
                     if trace is not None
                     else ()
                 ),
-                embedding_status=(
-                    trace.audit.embedding_status if trace is not None else "unknown"
-                ),
+                embedding_status=(trace.audit.embedding_status if trace is not None else "unknown"),
                 fallback_channels=(
                     tuple(
                         (
                             "lexical",
-                            *(
-                                ("structured",)
-                                if trace.audit.request.link_refs
-                                else ()
-                            ),
+                            *(("structured",) if trace.audit.request.link_refs else ()),
                             *(
                                 ("temporal",)
                                 if trace.audit.request.occurred_from is not None
@@ -943,11 +1374,124 @@ class RecallCoordinator:
                             ),
                         )
                     )
-                    if trace is not None
-                    and status in {"degraded", "technical_failure"}
+                    if trace is not None and status in {"degraded", "technical_failure"}
                     else ()
                 ),
             )
+
+    def _is_semantic_trace(self, trace: TrustedRecallTrace) -> bool:
+        semantic = self._semantic_embedding
+        return (
+            semantic is not None
+            and trace.audit.embedding_version == semantic.version
+            and trace.audit.embedding_status == "used"
+        )
+
+    def record_prefetch_presentation(
+        self,
+        presentation: PresentedPrefetchTrace,
+    ) -> None:
+        """Count only source material actually shown to a successful role call."""
+
+        audit = verify_trusted_recall_trace(presentation.trace)
+        if audit.mode != "prefetch":
+            raise ValueError("prefetch presentation requires a prefetch trace")
+        key = (audit.evaluated_cursor or audit.index_cursor, audit.trigger_ref)
+        record_status: str | None = None
+        record_late_ready = False
+        with self._prefetch_state_guard:
+            trace_identity = (audit.result_hash, audit.embedding_version)
+            if trace_identity in self._presented_prefetch_results:
+                self._presented_prefetch_results.move_to_end(trace_identity)
+                return
+            self._presented_prefetch_results[trace_identity] = None
+            while len(self._presented_prefetch_results) > 64:
+                self._presented_prefetch_results.popitem(last=False)
+            epoch = self._prefetch_trace_epochs.get(
+                trace_identity,
+                self._prefetch_epoch,
+            )
+            local_presentation_key = (key, epoch)
+            if self._is_semantic_trace(presentation.trace):
+                record_status = (
+                    "semantic_late_consumed"
+                    if local_presentation_key
+                    in self._presented_local_prefetch_keys
+                    else "semantic_first_pass"
+                )
+            else:
+                self._remember_prefetch_marker_locked(
+                    self._presented_local_prefetch_keys,
+                    local_presentation_key,
+                )
+                record_status = "local_first_pass"
+                job = self._prefetch_futures.get(key)
+                late_ready_key = (key, epoch)
+                if (
+                    job is not None
+                    and job.future.done()
+                    and late_ready_key not in self._prefetch_late_ready_recorded
+                ):
+                    try:
+                        completed = job.future.result()
+                    except Exception:
+                        completed = None
+                    if completed is not None and self._is_semantic_trace(completed):
+                        self._remember_prefetch_marker_locked(
+                            self._prefetch_late_ready_recorded,
+                            late_ready_key,
+                        )
+                        record_late_ready = True
+        if record_status is not None:
+            self._record_prefetch_delivery(epoch=epoch, status=record_status)
+        if record_late_ready:
+            self._record_prefetch_delivery(
+                epoch=epoch,
+                status="semantic_late_ready",
+            )
+
+    def _remember_prefetch_trace_epoch_locked(
+        self,
+        trace_identity: tuple[str, str],
+        epoch: int,
+    ) -> None:
+        existing = self._prefetch_trace_epochs.get(trace_identity)
+        if existing is not None and existing > epoch:
+            return
+        self._prefetch_trace_epochs.pop(trace_identity, None)
+        self._prefetch_trace_epochs[trace_identity] = epoch
+        while len(self._prefetch_trace_epochs) > 64:
+            self._prefetch_trace_epochs.popitem(last=False)
+
+    @staticmethod
+    def _remember_prefetch_marker_locked(
+        values: OrderedDict[tuple[_RecallPrefetchKey, int], None],
+        key: tuple[_RecallPrefetchKey, int],
+    ) -> None:
+        values.pop(key, None)
+        values[key] = None
+        while len(values) > 64:
+            values.popitem(last=False)
+
+    def _record_prefetch_delivery(self, *, epoch: int, status: str) -> None:
+        with self._prefetch_delivery_lock:
+            health = self._prefetch_delivery_health
+            if status in {"local_first_pass", "local_fallback_first_pass"}:
+                health.first_pass_local_count += 1
+            elif status == "semantic_first_pass":
+                health.first_pass_semantic_count += 1
+            elif status == "semantic_late_ready":
+                health.late_semantic_ready_count += 1
+            elif status == "semantic_late_consumed":
+                health.late_semantic_consumed_count += 1
+            elif status in {
+                "semantic_late_unpresented",
+                "semantic_pending_unpresented",
+            }:
+                health.late_semantic_unpresented_count += 1
+            if epoch >= health.epoch:
+                health.epoch = epoch
+                health.last_status = status
 
     def _search(
         self,
@@ -976,10 +1520,30 @@ class RecallCoordinator:
         if not semantic or self._semantic_embedding is None:
             return context.snapshot.search(query)
         try:
-            semantic_index = InMemoryRecallIndex(embedding=self._semantic_embedding)
+            # A cold corpus used to spend one provider round-trip embedding
+            # documents during rebuild and a second embedding the query during
+            # search. The bounded first-pass join would therefore publish the
+            # lexical fallback even when the completed semantic result had a
+            # valid hit. Freeze documents and query in one provider batch, then
+            # replay those exact vectors through the unchanged eligibility,
+            # ranking, source-binding, and audit path.
+            documents = context.snapshot.documents
+            document_texts = tuple(
+                document.retrieval_text or document.text
+                for document in documents
+            )
+            batch_texts = (*document_texts, query.query_text)
+            batch_vectors = self._semantic_embedding.embed(batch_texts)
+            semantic_index = InMemoryRecallIndex(
+                embedding=_PinnedBatchRecallEmbedding(
+                    source=self._semantic_embedding,
+                    texts=batch_texts,
+                    vectors=batch_vectors,
+                )
+            )
             semantic_index.rebuild(
                 cursor=context.snapshot.cursor,
-                documents=context.snapshot.documents,
+                documents=documents,
             )
             return semantic_index.search(query)
         except (RecallEmbeddingUnavailable, ValueError) as exc:
@@ -989,10 +1553,15 @@ class RecallCoordinator:
             # trace and health surface retain the exact degraded reason.
             logger.warning("semantic recall degraded to local index", exc_info=True)
             local = context.snapshot.search(query)
+            failure_code = (
+                str(exc)[:128]
+                if isinstance(exc, RecallEmbeddingUnavailable)
+                else f"{type(exc).__name__}:{str(exc)}"[:128]
+            )
             return local.model_copy(
                 update={
                     "embedding_status": "degraded",
-                    "embedding_failure_code": (f"{type(exc).__name__}:{str(exc)}"[:128]),
+                    "embedding_failure_code": failure_code,
                 }
             )
 
@@ -1007,10 +1576,47 @@ class RecallCoordinator:
         self._context_key = key
         while len(self._contexts) > _MAX_PINNED_RECALL_CONTEXTS:
             evicted_key, _ = self._contexts.popitem(last=False)
+            self._prefetch_replays.pop(
+                (evicted_key[0], evicted_key[1]),
+                None,
+            )
             self.discard_scheduled_prefetch(
                 evicted_key[0],
                 trigger_ref=evicted_key[1],
             )
+
+    def _remember_prefetch_replay(
+        self,
+        *,
+        key: _RecallPrefetchKey,
+        trace: TrustedRecallTrace,
+        expected_epoch: int,
+    ) -> bool:
+        audit = verify_trusted_recall_trace(trace)
+        if audit.evaluated_cursor != key[0] or audit.trigger_ref != key[1]:
+            raise ValueError("prefetch replay identity does not match its pinned Context")
+        with self._active_recall_guard:
+            if self._closed:
+                return False
+            with self._context_guard:
+                with self._prefetch_state_guard:
+                    current = self._prefetch_futures.get(key)
+                    trace_epoch = self._prefetch_trace_epochs.get(
+                        (
+                            audit.result_hash,
+                            audit.embedding_version,
+                        )
+                    )
+                    if trace_epoch != expected_epoch or (
+                        current is not None
+                        and current.epoch != expected_epoch
+                    ):
+                        return False
+                self._prefetch_replays.pop(key, None)
+                self._prefetch_replays[key] = trace
+                while len(self._prefetch_replays) > _MAX_PINNED_RECALL_CONTEXTS:
+                    self._prefetch_replays.popitem(last=False)
+        return True
 
     def _latest_context_cursor(
         self,
@@ -1028,22 +1634,26 @@ class RecallCoordinator:
         *,
         trigger_ref: str | None,
     ) -> _PinnedRecallContext | None:
-        if trigger_ref is not None:
-            exact = self._contexts.get((cursor, trigger_ref))
-            if exact is not None:
-                return exact
-        return self._contexts.get((cursor, None))
+        with self._context_guard:
+            if trigger_ref is not None:
+                exact = self._contexts.get((cursor, trigger_ref))
+                if exact is not None:
+                    return exact
+            return self._contexts.get((cursor, None))
 
     def close(self) -> None:
         with self._active_recall_guard:
             if self._closed:
                 return
             self._closed = True
-        jobs = tuple(self._prefetch_futures.values())
+            with self._prefetch_state_guard:
+                jobs = tuple(self._prefetch_futures.values())
+                self._prefetch_futures.clear()
+                self._prefetch_join_attempted.clear()
         for job in jobs:
             job.cancel()
-        self._prefetch_futures.clear()
-        self._prefetch_join_attempted.clear()
+        with self._context_guard:
+            self._prefetch_replays.clear()
         with self._prefetch_worker_guard:
             worker_threads = tuple(self._prefetch_worker_threads)
         close_embedding = getattr(self._semantic_embedding, "close", None)
@@ -1092,6 +1702,10 @@ def recall_evidence_json(trace: RecallAuditTrace) -> str:
                 {
                     "memory_kind": hit.document.memory_kind,
                     "authority": hit.document.authority,
+                    "epistemic_scope": hit.document.effective_epistemic_scope,
+                    "actor_ref": hit.document.actor_ref,
+                    "speaker_ref": hit.document.speaker_ref,
+                    "subject_refs": hit.document.subject_refs,
                     "text": hit.document.text,
                     "source_refs": hit.document.source_refs,
                     "source_slice": hit.document.source_slice,
@@ -1186,6 +1800,10 @@ def augment_model_content_with_recall(
                 "value": {
                     "memory_kind": document.memory_kind,
                     "authority": document.authority,
+                    "epistemic_scope": document.effective_epistemic_scope,
+                    "actor_ref": document.actor_ref,
+                    "speaker_ref": document.speaker_ref,
+                    "subject_refs": document.subject_refs,
                     "text": document.text,
                     "source_refs": document.source_refs,
                     "occurred_from": document.occurred_from.isoformat(),
@@ -1234,8 +1852,12 @@ def model_content_allows_recall(model_content_json: str) -> bool:
 
 
 __all__ = [
+    "append_presented_prefetch",
     "augment_model_content_with_recall",
     "CharacterRecallRequest",
+    "PREFETCH_FIRST_PASS_JOIN_SECONDS",
+    "PrefetchJobToken",
+    "PresentedPrefetchTrace",
     "RecallAuditTrace",
     "RecallCoordinator",
     "TrustedRecallTrace",

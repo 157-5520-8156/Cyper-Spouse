@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.affect_acceptance_runtime import AffectAcceptanceRuntime
-from companion_daemon.world_v2.affect_proposal_compiler import AffectProposalCompiler
+from companion_daemon.world_v2.affect_proposal_compiler import (
+    AffectProposalCompilation,
+    AffectProposalCompiler,
+)
 from companion_daemon.world_v2.appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
 from companion_daemon.world_v2.appraisal_proposal_compiler import AppraisalProposalCompiler
 from companion_daemon.world_v2.appraisal_proposal_worker import AppraisalProposalWorker
@@ -12,6 +17,9 @@ from companion_daemon.world_v2.batch_invariants import interaction_appraisal_tri
 from companion_daemon.world_v2.deliberation import DeliberationResult, ModelResultAudit
 from companion_daemon.world_v2.immediate_emotion_proposal_worker import (
     ImmediateEmotionProposalWorker,
+)
+from companion_daemon.world_v2.interaction_appraisal_trigger_runtime import (
+    InteractionAppraisalTriggerRuntime,
 )
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
@@ -22,12 +30,16 @@ from companion_daemon.world_v2.proposal_envelope import (
     TypedChange,
 )
 from companion_daemon.world_v2.schemas import (
+    AffectBaselineProjection,
     AffectProposalProjection,
     ClaimLease,
+    ClockObservation,
     EvidenceRef,
+    ProjectionCursor,
     TriggerProcess,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from companion_daemon.world_v2.runtime import WorldRuntime
 
 from test_appraisal_authority import (
     NOW,
@@ -40,15 +52,24 @@ from test_appraisal_authority import (
 from test_proposal_audit import _digest, _result
 
 
-def _additional_claimed_interaction(ledger, *, sequence: int):
+def _additional_claimed_interaction(ledger, *, sequence: int, at=NOW):
     observation_id = f"message:{sequence}"
+    payload = message_payload(observation_id)
+    payload.update(
+        {
+            "logical_time": at.isoformat(),
+            "created_at": at.isoformat(),
+            "received_at": at.isoformat(),
+        }
+    )
     commit(
         ledger,
         [
             event(
                 f"message-event:{sequence}",
                 "ObservationRecorded",
-                message_payload(observation_id),
+                payload,
+                at=at,
             )
         ],
     )
@@ -66,6 +87,7 @@ def _additional_claimed_interaction(ledger, *, sequence: int):
                 f"interaction-trigger-opened:{sequence}",
                 "TriggerProcessOpened",
                 {"process": opened.model_dump(mode="json")},
+                at=at,
             )
         ],
     )
@@ -75,8 +97,8 @@ def _additional_claimed_interaction(ledger, *, sequence: int):
             "claim_lease": ClaimLease(
                 owner_id="worker:interaction-appraisal",
                 attempt_id=f"attempt:interaction:{sequence}",
-                acquired_at=NOW,
-                expires_at=NOW + timedelta(minutes=2),
+                acquired_at=at,
+                expires_at=at + timedelta(minutes=2),
             ),
             "attempt_ids": (f"attempt:interaction:{sequence}",),
         }
@@ -88,6 +110,7 @@ def _additional_claimed_interaction(ledger, *, sequence: int):
                 f"interaction-trigger-claimed:{sequence}",
                 "TriggerProcessClaimed",
                 {"process": claimed.model_dump(mode="json")},
+                at=at,
             )
         ],
     )
@@ -107,12 +130,17 @@ def _record_combined_emotion_proposal(
     ledger,
     *,
     sequence: int = 1,
+    proposal_kind: str = "immediate-emotion",
     component_deltas: list[dict[str, object]] | None = None,
+    component_targets: list[dict[str, object]] | None = None,
+    at=NOW,
 ):
+    if component_deltas is not None and component_targets is not None:
+        raise ValueError("choose legacy deltas or target intensities, not both")
     if sequence == 1:
         _observation, _trigger, evidence = prepare_claimed_interaction(ledger)
     else:
-        evidence = _additional_claimed_interaction(ledger, sequence=sequence)
+        evidence = _additional_claimed_interaction(ledger, sequence=sequence, at=at)
     appraisal_change = TypedChange(
         change_id=f"change:immediate-emotion:appraisal:{sequence}",
         kind="appraisal_transition",
@@ -147,9 +175,15 @@ def _record_combined_emotion_proposal(
             value={
                 "episode_id": "affect:model-hint",
                 "appraisal_change_refs": [appraisal_change.change_id],
-                "component_deltas": component_deltas
-                if component_deltas is not None
-                else [{"name": "hurt", "value": 4200}],
+                **(
+                    {"component_targets": component_targets}
+                    if component_targets is not None
+                    else {
+                        "component_deltas": component_deltas
+                        if component_deltas is not None
+                        else [{"name": "hurt", "value": 4200}]
+                    }
+                ),
                 "decay_config": {
                     "object_ref": "policy:decay:standard",
                     "schema_version": "affect-decay.1",
@@ -164,7 +198,7 @@ def _record_combined_emotion_proposal(
         ),
     )
     proposal = DecisionProposal(
-        proposal_id=f"proposal:immediate-emotion:{sequence}",
+        proposal_id=f"proposal:{proposal_kind}:{sequence}",
         trigger_ref=f"message-event:{sequence}",
         evaluated_world_revision=ledger.project().world_revision,
         evidence_refs=(
@@ -222,8 +256,8 @@ def _record_combined_emotion_proposal(
         ProposalAuditContext(
             world_id=WORLD_ID,
             trigger_ref=proposal.trigger_ref,
-            logical_time=NOW,
-            created_at=NOW,
+            logical_time=at,
+            created_at=at,
             actor="agent:companion",
             source="test:immediate-emotion",
             trace_id="trace:immediate-emotion",
@@ -232,6 +266,7 @@ def _record_combined_emotion_proposal(
             evaluated_world_revision=head.world_revision,
             expected_commit_world_revision=head.world_revision,
             expected_deliberation_revision=head.deliberation_revision,
+            expected_ledger_sequence=head.ledger_sequence,
         ),
     )
     return proposal, recorded.cursor
@@ -248,6 +283,177 @@ def _worker(*, ledger, issuer):
         affect_acceptance=AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
         actor="worker:immediate-affect",
     )
+
+
+class _CurrentProjectionBaselineOverlay:
+    """Test port that simulates one baseline commit after the audit cursor."""
+
+    def __init__(self, ledger, *, cursor: ProjectionCursor, baseline_bp: int) -> None:
+        self._ledger = ledger
+        self._cursor = cursor
+        self._baseline = AffectBaselineProjection(
+            dimension="hurt",
+            baseline_bp=baseline_bp,
+            calibration_revision=3,
+            policy_version="affect-baseline-calibration.1",
+            last_calibrated_at=NOW,
+            calibrated_through=NOW,
+            last_calibration_basis_hash="d" * 64,
+        )
+
+    @property
+    def world_id(self):
+        return self._ledger.world_id
+
+    def project_at(self, cursor):
+        projection = self._ledger.project_at(cursor)
+        if cursor == self._cursor:
+            return projection.model_copy(update={"affect_baselines": (self._baseline,)})
+        return projection
+
+    def __getattr__(self, name):
+        return getattr(self._ledger, name)
+
+
+class _BoundChangedAffectCompiler(AffectProposalCompiler):
+    def record_rebased(
+        self,
+        *,
+        world_id,
+        audit_cursor,
+        current_cursor,
+        proposal_id,
+    ):
+        del world_id, audit_cursor, current_cursor
+        return AffectProposalCompilation(
+            status="no_change",
+            source_proposal_id=proposal_id,
+            source_proposal_event_ref="event:proposal-audit:bound-changed",
+            skip_reason="affect_proposal_compiler.target_lower_bound_changed_after_pin",
+        )
+
+
+class _UnusedPinnedTurn:
+    async def audit_observation(self, **_kwargs):
+        raise AssertionError("the existing cursor-bound decision audit must be reused")
+
+
+def test_immediate_worker_marks_a_bound_change_for_fresh_affect_consideration() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    proposal, audit_cursor = _record_combined_emotion_proposal(
+        ledger,
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 2000}],
+    )
+    worker = ImmediateEmotionProposalWorker(
+        appraisal_worker=AppraisalProposalWorker(
+            compiler=AppraisalProposalCompiler(ledger=ledger),
+            acceptance=AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+            actor="worker:immediate-appraisal",
+        ),
+        affect_compiler=_BoundChangedAffectCompiler(ledger=ledger),
+        affect_acceptance=AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:immediate-affect",
+    )
+
+    result = worker.process(
+        world_id=WORLD_ID,
+        audit_cursor=audit_cursor,
+        proposal_id=proposal.proposal_id,
+    )
+
+    assert result.status == "appraisal_only"
+    assert result.requires_fresh_affect_consideration is True
+    assert result.affect_skip_reason == (
+        "affect_proposal_compiler.target_lower_bound_changed_after_pin"
+    )
+    assert len(ledger.project().appraisals) == 1
+    assert ledger.project().affect_episodes == ()
+
+
+@pytest.mark.asyncio
+async def test_runtime_opens_fresh_affect_trigger_when_the_pinned_bound_changed() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    _record_combined_emotion_proposal(
+        ledger,
+        proposal_kind="interaction-appraisal",
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 2000}],
+    )
+    appraisal_worker = AppraisalProposalWorker(
+        compiler=AppraisalProposalCompiler(ledger=ledger),
+        acceptance=AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:immediate-appraisal",
+    )
+    immediate_worker = ImmediateEmotionProposalWorker(
+        appraisal_worker=appraisal_worker,
+        affect_compiler=_BoundChangedAffectCompiler(ledger=ledger),
+        affect_acceptance=AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:immediate-affect",
+    )
+    runtime = InteractionAppraisalTriggerRuntime(
+        ledger=ledger,
+        pinned_turn=_UnusedPinnedTurn(),  # type: ignore[arg-type]
+        worker=appraisal_worker,
+        owner_id="worker:interaction-appraisal",
+        affect_owner_id="worker:affect",
+        immediate_emotion_worker=immediate_worker,
+    )
+
+    result = await runtime.drain_one()
+    projection = ledger.project()
+
+    assert result.work_status == "accepted"
+    assert len(projection.appraisals) == 1
+    assert projection.affect_episodes == ()
+    assert any(
+        process.process_kind == "affect_deliberation" and process.state != "terminal"
+        for process in projection.trigger_processes
+    )
+
+
+def test_bound_change_after_pin_preserves_appraisal_and_requests_fresh_affect_consideration() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    proposal, audit_cursor = _record_combined_emotion_proposal(
+        ledger,
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 2000}],
+    )
+    appraisal = AppraisalProposalWorker(
+        compiler=AppraisalProposalCompiler(ledger=ledger),
+        acceptance=AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:immediate-appraisal",
+    ).process(
+        world_id=WORLD_ID,
+        cursor=audit_cursor,
+        proposal_id=proposal.proposal_id,
+    )
+    assert appraisal.status == "accepted"
+    head = ledger.project()
+    current_cursor = ProjectionCursor(
+        world_revision=head.world_revision,
+        deliberation_revision=head.deliberation_revision,
+        ledger_sequence=head.ledger_sequence,
+    )
+    compiler = AffectProposalCompiler(
+        ledger=_CurrentProjectionBaselineOverlay(
+            ledger,
+            cursor=current_cursor,
+            baseline_bp=4500,
+        )
+    )
+
+    result = compiler.record_rebased(
+        world_id=WORLD_ID,
+        audit_cursor=audit_cursor,
+        current_cursor=current_cursor,
+        proposal_id=proposal.proposal_id,
+    )
+
+    assert result.status == "no_change"
+    assert result.skip_reason == "affect_proposal_compiler.target_lower_bound_changed_after_pin"
+    assert len(ledger.project().appraisals) == 1
+    assert ledger.project().affect_episodes == ()
 
 
 def test_one_audited_emotion_proposal_accepts_appraisal_then_rebased_affect_without_model_call() -> None:
@@ -379,6 +585,117 @@ def test_second_same_cluster_dimension_merges_into_existing_episode_without_anot
     assert ledger.project() == projection
 
 
+def test_target_intensity_replaces_the_same_causal_component_instead_of_accumulating() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    worker = _worker(ledger=ledger, issuer=issuer)
+    first, first_cursor = _record_combined_emotion_proposal(
+        ledger,
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 5000}],
+    )
+    worker.process(
+        world_id=WORLD_ID,
+        audit_cursor=first_cursor,
+        proposal_id=first.proposal_id,
+    )
+    second, second_cursor = _record_combined_emotion_proposal(
+        ledger,
+        sequence=2,
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 6000}],
+    )
+
+    result = worker.process(
+        world_id=WORLD_ID,
+        audit_cursor=second_cursor,
+        proposal_id=second.proposal_id,
+    )
+
+    assert result.status == "accepted"
+    assert ledger.project().affect_episodes[0].components[0].intensity_bp == 6000
+
+
+def test_repeated_same_target_intensity_does_not_stack() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    worker = _worker(ledger=ledger, issuer=issuer)
+    first, first_cursor = _record_combined_emotion_proposal(
+        ledger,
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 3000}],
+    )
+    worker.process(
+        world_id=WORLD_ID,
+        audit_cursor=first_cursor,
+        proposal_id=first.proposal_id,
+    )
+    second, second_cursor = _record_combined_emotion_proposal(
+        ledger,
+        sequence=2,
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 3000}],
+    )
+
+    result = worker.process(
+        world_id=WORLD_ID,
+        audit_cursor=second_cursor,
+        proposal_id=second.proposal_id,
+    )
+
+    projection = ledger.project()
+    assert result.status == "accepted"
+    assert projection.affect_episodes[0].entity_revision == 2
+    assert projection.affect_episodes[0].components[0].intensity_bp == 3000
+
+
+@pytest.mark.asyncio
+async def test_target_intensity_is_applied_after_materializing_decay() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    worker = _worker(ledger=ledger, issuer=issuer)
+    first, first_cursor = _record_combined_emotion_proposal(
+        ledger,
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 8000}],
+    )
+    worker.process(
+        world_id=WORLD_ID,
+        audit_cursor=first_cursor,
+        proposal_id=first.proposal_id,
+    )
+    later = NOW + timedelta(minutes=10)
+    await WorldRuntime(world_id=WORLD_ID, ledger=ledger).advance(
+        ClockObservation(
+            schema_version="world-v2.1",
+            tick_id="affect-target-after-decay:1",
+            world_id=WORLD_ID,
+            logical_time=NOW,
+            created_at=later,
+            trace_id="trace:affect-target-after-decay",
+            causation_id="scheduler:affect-target-after-decay",
+            correlation_id="correlation:affect-target-after-decay",
+            logical_time_from=NOW,
+            logical_time_to=later,
+            reason="scheduled_tick",
+        )
+    )
+    decayed = ledger.project().affect_episodes[0].components[0].intensity_bp
+    assert 6000 < decayed < 8000
+    second, second_cursor = _record_combined_emotion_proposal(
+        ledger,
+        sequence=2,
+        at=later,
+        component_targets=[{"dimension": "hurt", "target_intensity_bp": 6000}],
+    )
+
+    result = worker.process(
+        world_id=WORLD_ID,
+        audit_cursor=second_cursor,
+        proposal_id=second.proposal_id,
+    )
+
+    projection = ledger.project()
+    assert result.status == "accepted"
+    assert len(projection.affect_episodes) == 1
+    assert projection.affect_episodes[0].components[0].intensity_bp == 6000
+
+
 def test_restart_after_second_appraisal_recovers_the_same_merge_update(tmp_path) -> None:
     path = tmp_path / "immediate-emotion-merge-recovery.sqlite3"
     first_issuer = AcceptedLedgerBatchIssuer()
@@ -442,6 +759,7 @@ def test_restart_after_second_appraisal_recovers_the_same_merge_update(tmp_path)
         )
         assert joined.status == "accepted"
         assert reopened.project() == projection
+        assert reopened.rebuild() == projection
     finally:
         reopened.close()
 

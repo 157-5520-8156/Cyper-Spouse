@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
 from .schema_core import FrozenModel
 from .schemas import ProjectionCursor, WorldEvent
@@ -122,7 +123,7 @@ class RandomAuthority:
     ) -> RandomDrawRecordedPayload:
         projection = self._ledger.project()
         if projection.logical_time != logical_time:
-            raise ValueError("random draw requires current logical time")
+            raise ConcurrencyConflict("random draw requires current logical time")
         refs = tuple(sorted(set(candidate_refs)))
         if not refs:
             raise ValueError("random draw needs candidates")

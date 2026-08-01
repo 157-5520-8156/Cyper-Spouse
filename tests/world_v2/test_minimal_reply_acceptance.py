@@ -26,6 +26,7 @@ from companion_daemon.world_v2.proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
+from companion_daemon.world_v2.private_turn_state import PrivateTurnState
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import (
     BudgetAccount,
@@ -198,6 +199,47 @@ def test_derives_reply_action_and_reservation_only_from_audited_minimal_proposal
     assert material.reservation.category == "chat"
     assert material.action.payload_hash == material.beat.payload.payload_hash
     assert material.action.budget_reservation_id == material.reservation.reservation_id
+
+
+def test_private_turn_state_does_not_change_minimal_reply_effect_identity() -> None:
+    base = _proposal()
+    proposals = tuple(
+        base.model_copy(
+            update={
+                "private_turn_state": PrivateTurnState(
+                    inner_state_summary=summary,
+                    attended_source_refs=("event:observation:1",),
+                )
+            }
+        )
+        for summary in (
+            "我想先承认刚才没接住，再把回应说清楚。",
+            "我有点歉疚，想直接而温和地补上回应。",
+        )
+    )
+
+    materials = tuple(
+        derive_minimal_reply_material(
+            audit=_audit(proposal),
+            cursor=ProjectionCursor(
+                world_revision=4, deliberation_revision=2, ledger_sequence=7
+            ),
+            world_id=WORLD,
+            policy=_policy(),
+            account=_account(),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:1",
+            correlation_id="correlation:1",
+        )
+        for proposal in proposals
+    )
+
+    assert proposals[0].proposal_hash != proposals[1].proposal_hash
+    assert proposals[0].effect_hash == proposals[1].effect_hash
+    assert materials[0].action.action_id == materials[1].action.action_id
+    assert materials[0].action.idempotency_key == materials[1].action.idempotency_key
+    assert materials[0].reservation.reservation_id == materials[1].reservation.reservation_id
 
 
 def test_rejects_stale_or_unaffordable_reply_without_deriving_an_action() -> None:

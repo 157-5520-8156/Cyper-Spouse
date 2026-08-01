@@ -201,6 +201,23 @@ async def test_timeout_exception_and_invalid_output_fail_open_with_bounded_trace
 
 
 @pytest.mark.asyncio
+async def test_call_site_may_shorten_but_not_extend_the_compiler_timeout() -> None:
+    adapter = StubAdapter("slow", (_distribution(producer="slow@classifier-1"),), delay=0.05)
+    compiler = AdvisoryCompiler(
+        catalog=default_matrix_catalog(),
+        adapters=(adapter,),
+        timeout_seconds=0.2,
+    )
+
+    shortened = await compiler.compile(_request(), timeout_seconds=0.01)
+
+    assert shortened.advisories == ()
+    assert shortened.trace[0].status == "timeout"
+    with pytest.raises(ValueError, match="timeout override"):
+        await compiler.compile(_request(), timeout_seconds=0)
+
+
+@pytest.mark.asyncio
 async def test_timeout_does_not_wait_for_adapter_that_suppresses_cancellation() -> None:
     class CancellationSuppressingAdapter(StubAdapter):
         async def classify(
@@ -260,7 +277,15 @@ async def test_timed_out_adapter_has_one_outstanding_slot_and_is_permanently_fus
     assert compiler.fused_adapter_ids == ("persistent",)
     await compiler.aclose(timeout_seconds=0)
     assert compiler.outstanding_task_count == 1
-    await asyncio.sleep(0.22)
+    assert compiler.shutdown_pending_task_count == 1
+
+    quiescence = asyncio.create_task(compiler.wait_for_shutdown_quiescence())
+    await asyncio.sleep(0)
+    assert quiescence.done() is False
+
+    await asyncio.wait_for(quiescence, timeout=1)
+    assert compiler.outstanding_task_count == 0
+    assert compiler.shutdown_pending_task_count == 0
 
 
 @pytest.mark.asyncio

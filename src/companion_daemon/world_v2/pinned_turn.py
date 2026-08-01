@@ -16,6 +16,8 @@ import logging
 import time
 from typing import Literal
 
+from companion_daemon.llm import model_request_emission_scope
+
 from .advisory_compiler import (
     AdvisoryCompilation,
     AdvisoryCompileRequest,
@@ -27,25 +29,37 @@ from .advisory_compiler import (
     canonical_trigger_hash,
     source_authority_bindings_hash,
 )
+from .affect_target_bounds import lower_bounds_from_projection
 from .context_capsule import (
     ContextCapsuleCompiler,
     InnerAdvisoryCandidate,
     InnerAdvisoryProjection,
 )
 from .context_resolver import query_from_projection
-from .deliberation import Deliberation, DeliberationResult, TriggerMessage, _digest
+from .deliberation import (
+    Deliberation,
+    DeliberationResult,
+    ModelResultAudit,
+    ModelRoute,
+    TriggerMessage,
+    _digest,
+    _model_result_ref,
+)
 from .expression_cadence import CadenceDraw
-from .interactive_turn_budget import InteractiveTurnBudget
-from .errors import ConcurrencyConflict, IdempotencyConflict
+from .expression_episode_lifecycle import expression_episode_trigger_id
+from .interactive_turn_budget import (
+    FIRST_PROVIDER_ENTRY_RESERVE_SECONDS,
+    InteractiveTurnBudget,
+)
+from .errors import ConcurrencyConflict
 from .ledger import LedgerPort
 from .model_facing_context import mechanism_consumption_summary
 from .proposal_audit import ProposalAuditCommit, ProposalAuditContext, ProposalAuditRecorder
 from .proposal_envelope import DecisionProposal, ProposalEvidenceRef
 from .production_latency_trace import ProductionLatencyRecorder, TurnLatencyTrace
+from .recall_index import RecallEmbeddingUnavailable
 from .aspiration_view import active_aspiration_advisories
-from .attention_view import phone_attention_advisories
 from .change_phase_view import change_phase_advisories
-from .local_chronology import LocalChronology
 from .npc_relationship_view import npc_relationship_advisories
 from .shared_private_invitation import pending_shared_private_invitation_advisories
 from .response_expectation_view import (
@@ -56,6 +70,12 @@ from .schemas import LedgerProjection, Observation, ProjectionCursor, WorldEvent
 
 
 _LOG = logging.getLogger(__name__)
+_RETRYABLE_CONTEXT_PREPARATION_ERRORS = (
+    ConnectionError,
+    OSError,
+    TimeoutError,
+    RecallEmbeddingUnavailable,
+)
 
 
 def _attempt_id(
@@ -97,9 +117,8 @@ class PinnedTurnCompiler:
         change_phase_advisory: bool = False,
         npc_relationship_advisory: bool = False,
         shared_private_invitation_advisory: bool = False,
-        attention_advisory: bool = False,
-        attention_chronology: LocalChronology | None = None,
         recorded_cadence_mode: str = "off",
+        affect_target_bounds_enabled: bool = False,
     ) -> None:
         if not companion_actor_ref:
             raise ValueError("Pinned turn companion actor is required")
@@ -127,12 +146,7 @@ class PinnedTurnCompiler:
         # A pending shared_private invitation plan she may still need to
         # voice (or is waiting on); read-only texture, never an obligation.
         self._shared_private_invitation_advisory = shared_private_invitation_advisory
-        # Phone attention (attention_view): where her attention actually is
-        # relative to the phone, derived from active Plans, the local civil
-        # hour, and active Affect.  Advisory texture for timing_choice only;
-        # it never schedules, delays, or vetoes anything by itself.
-        self._attention_advisory = attention_advisory
-        self._attention_chronology = attention_chronology or LocalChronology()
+        self._affect_target_bounds_enabled = affect_target_bounds_enabled
         if recorded_cadence_mode not in {"off", "shadow", "on"}:
             raise ValueError("recorded cadence mode must be off, shadow, or on")
         self._recorded_cadence_mode = recorded_cadence_mode
@@ -209,6 +223,7 @@ class PinnedTurnCompiler:
             evaluated_world_revision=projection.world_revision,
             expected_commit_world_revision=projection.world_revision,
             expected_deliberation_revision=projection.deliberation_revision,
+            expected_ledger_sequence=projection.ledger_sequence,
         )
         return await self._record(rebound_result, context), "append"
 
@@ -221,6 +236,7 @@ class PinnedTurnCompiler:
         skip_advisories: bool = False,
         turn_budget: InteractiveTurnBudget | None = None,
         recorded_cadence_draws: tuple[CadenceDraw, ...] = (),
+        expression_attempt_id: str | None = None,
     ) -> ProposalAuditCommit:
         """Compile an audit at a cursor that includes the committed Observation.
 
@@ -252,39 +268,131 @@ class PinnedTurnCompiler:
             raise ValueError("Pinned turn observation does not match its committed authority")
         observation = committed_observation
         started = time.perf_counter()
-        latency_trace = self._latency.get(observation.trace_id) if self._latency is not None else None
-        if latency_trace is None:
-            projection = await self._project_at(cursor)
-        else:
-            async with latency_trace.measure("snapshot"):
+        latency_trace = (
+            self._latency.get_active(observation.trace_id)
+            if self._latency is not None
+            else None
+        )
+        attempt_id = (
+            expression_attempt_id
+            or _attempt_id(trigger_ref=observation_event.event_id, cursor=cursor)
+        )
+        try:
+            if latency_trace is None:
                 projection = await self._project_at(cursor)
+            else:
+                async with latency_trace.measure("snapshot"):
+                    projection = await self._project_at(cursor)
+        except _RETRYABLE_CONTEXT_PREPARATION_ERRORS as exc:
+            # ``project_at`` is itself part of pre-provider Context
+            # preparation.  We may record a content-free technical result only
+            # when the current head still proves the exact supplied cursor and
+            # attempt authority; otherwise this is a genuine stale turn.
+            current = await self._project()
+            if (
+                current.world_revision != cursor.world_revision
+                or current.deliberation_revision != cursor.deliberation_revision
+                or current.ledger_sequence != cursor.ledger_sequence
+            ):
+                raise ConcurrencyConflict("Pinned turn cursor became stale") from exc
+            if expression_attempt_id is not None:
+                self._require_current_expression_attempt(
+                    projection=current,
+                    observation=observation,
+                    expression_attempt_id=expression_attempt_id,
+                )
+            context = ProposalAuditContext(
+                world_id=observation.world_id,
+                trigger_ref=observation_event.event_id,
+                logical_time=current.logical_time or observation.logical_time,
+                created_at=observation.created_at,
+                actor=self._companion_actor_ref,
+                source="world-runtime:pinned-turn",
+                trace_id=observation.trace_id,
+                causation_id=observation_event.event_id,
+                correlation_id=observation.correlation_id,
+                evaluated_world_revision=cursor.world_revision,
+                expected_commit_world_revision=cursor.world_revision,
+                expected_deliberation_revision=cursor.deliberation_revision,
+                expected_ledger_sequence=cursor.ledger_sequence,
+            )
+            _LOG.warning(
+                "pinned turn pre-provider preparation failed trace=%s error=%s",
+                observation.trace_id,
+                type(exc).__name__,
+            )
+            return await self._record_pre_provider_failure(
+                context=context,
+                cursor=cursor,
+                attempt_id=attempt_id,
+                observation=observation,
+                observation_event=observation_event,
+                observation_world_revision=stored[1].world_revision,
+                expression_attempt_id=expression_attempt_id,
+            )
+        if expression_attempt_id is not None:
+            self._require_current_expression_attempt(
+                projection=projection,
+                observation=observation,
+                expression_attempt_id=expression_attempt_id,
+            )
+        context = ProposalAuditContext(
+            world_id=observation.world_id,
+            trigger_ref=observation_event.event_id,
+            logical_time=projection.logical_time or observation.logical_time,
+            created_at=observation.created_at,
+            actor=self._companion_actor_ref,
+            source="world-runtime:pinned-turn",
+            trace_id=observation.trace_id,
+            causation_id=observation_event.event_id,
+            correlation_id=observation.correlation_id,
+            evaluated_world_revision=cursor.world_revision,
+            expected_commit_world_revision=cursor.world_revision,
+            expected_deliberation_revision=cursor.deliberation_revision,
+            expected_ledger_sequence=cursor.ledger_sequence,
+        )
         _LOG.warning(
             "pinned turn phases trace=%s phase=snapshot_ms value=%.1f",
             observation.trace_id,
             (time.perf_counter() - started) * 1000,
         )
-        query = query_from_projection(
-            projection,
-            actor_ref=self._companion_actor_ref,
-            trigger_ref=observation_event.event_id,
-        )
-        trigger_message = self._trigger_message(
-            observation,
-            observation_event,
-            source_world_revision=stored[1].world_revision,
-        )
-        advisory_already_incorporated = skip_advisories or self._deliberation.main_has_precomputed_advisory(
-            trigger_ref=observation_event.event_id,
-            observation_ref=observation.observation_id,
-            event_payload_hash=trigger_message.event_payload_hash,
-        )
+        if turn_budget is not None and turn_budget.author_remaining() <= 0:
+            return await self._record_pre_provider_failure(
+                context=context,
+                cursor=cursor,
+                attempt_id=attempt_id,
+                observation=observation,
+                observation_event=observation_event,
+                observation_world_revision=stored[1].world_revision,
+                expression_attempt_id=expression_attempt_id,
+                failure_code="interactive_budget_exhausted",
+            )
         try:
-            capsule = await self._compile_capsule_with_advisories(
+            query = query_from_projection(
+                projection,
+                actor_ref=self._companion_actor_ref,
+                trigger_ref=observation_event.event_id,
+            )
+            trigger_message = self._trigger_message(
+                observation,
+                observation_event,
+                source_world_revision=stored[1].world_revision,
+            )
+            advisory_already_incorporated = (
+                skip_advisories
+                or self._deliberation.main_has_precomputed_advisory(
+                    trigger_ref=observation_event.event_id,
+                    observation_ref=observation.observation_id,
+                    event_payload_hash=trigger_message.event_payload_hash,
+                )
+            )
+            capsule_operation = self._compile_capsule_with_advisories(
                 query=query,
                 projection=projection,
                 observation=observation,
                 observation_event=observation_event,
                 latency_trace=latency_trace,
+                turn_budget=turn_budget,
                 skip_advisories=advisory_already_incorporated,
                 expectation_advisories=(
                     *self._expectation_advisories(
@@ -294,12 +402,56 @@ class PinnedTurnCompiler:
                     ),
                     *self._aspiration_advisories(projection),
                     *self._change_phase_view_advisories(projection),
-                    *self._attention_view_advisories(projection),
                     *self._npc_relationship_view_advisories(projection),
                     *self._shared_private_invitation_view_advisories(projection),
                 ),
             )
+            if latency_trace is None:
+                capsule = await capsule_operation
+            else:
+                context_call_id = "model-call:foreground-context:" + _digest(
+                    {
+                        "trigger_ref": observation_event.event_id,
+                        "world_revision": cursor.world_revision,
+                        "deliberation_revision": cursor.deliberation_revision,
+                        "ledger_sequence": cursor.ledger_sequence,
+                    }
+                )
+                with model_request_emission_scope(
+                    provider_call_id=context_call_id,
+                    entry_marker=latency_trace.mark_auxiliary_provider_entry,
+                    completion_marker=latency_trace.mark_auxiliary_provider_completion,
+                ):
+                    capsule = await capsule_operation
+            # Keep an operator-readable answer to the most important
+            # production question: did the character mechanisms reach this
+            # turn at all? The summary contains only counts/statuses and never
+            # logs model-facing prose or private memory values.
+            mechanism_summary = mechanism_consumption_summary(
+                capsule.capsule.model_content_json
+            )
+        except _RETRYABLE_CONTEXT_PREPARATION_ERRORS as exc:
+            await self._raise_if_stale(cursor, exc)
+            _LOG.warning(
+                "pinned turn pre-provider preparation failed trace=%s error=%s",
+                observation.trace_id,
+                type(exc).__name__,
+            )
+            return await self._record_pre_provider_failure(
+                context=context,
+                cursor=cursor,
+                attempt_id=attempt_id,
+                observation=observation,
+                observation_event=observation_event,
+                observation_world_revision=stored[1].world_revision,
+                expression_attempt_id=expression_attempt_id,
+            )
         except ValueError as exc:
+            # Trusted resolvers that expose only the current projection reject
+            # a cursor when an independent background commit lands between
+            # snapshot and Context resolution. Translate only that proven
+            # head advance into the normal expression repin lifecycle; a
+            # genuine same-cursor validation error still propagates unchanged.
             await self._raise_if_stale(cursor, exc)
             raise
         _LOG.warning(
@@ -315,14 +467,14 @@ class PinnedTurnCompiler:
             "pinned turn mechanism consumption trace=%s summary=%s",
             observation.trace_id,
             json.dumps(
-                mechanism_consumption_summary(capsule.capsule.model_content_json),
+                mechanism_summary,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
             ),
         )
         deliberate_kwargs = dict(
-            attempt_id=_attempt_id(trigger_ref=observation_event.event_id, cursor=cursor),
+            attempt_id=attempt_id,
             trigger_evidence=(
                 ProposalEvidenceRef(
                     ref_id=observation.observation_id,
@@ -338,29 +490,22 @@ class PinnedTurnCompiler:
             ),
             recorded_cadence_draws=recorded_cadence_draws,
         )
-        if latency_trace is None:
-            result = await self._deliberation.deliberate(capsule, **deliberate_kwargs)
-        else:
-            async with latency_trace.measure("model_completion"):
-                result = await self._deliberation.deliberate(capsule, **deliberate_kwargs)
+        if latency_trace is not None:
+            deliberate_kwargs["first_role_provider_marker"] = (
+                latency_trace.mark_role_provider_entry
+            )
+            deliberate_kwargs["first_role_provider_completion_marker"] = (
+                latency_trace.mark_role_provider_completion
+            )
+        if self._affect_target_bounds_enabled:
+            deliberate_kwargs["affect_target_bounds"] = lower_bounds_from_projection(
+                projection
+            )
+        result = await self._deliberation.deliberate(capsule, **deliberate_kwargs)
         _LOG.warning(
             "pinned turn phases trace=%s phase=model_ms value=%.1f",
             observation.trace_id,
             (time.perf_counter() - started) * 1000,
-        )
-        context = ProposalAuditContext(
-            world_id=observation.world_id,
-            trigger_ref=observation_event.event_id,
-            logical_time=projection.logical_time or observation.logical_time,
-            created_at=observation.created_at,
-            actor=self._companion_actor_ref,
-            source="world-runtime:pinned-turn",
-            trace_id=observation.trace_id,
-            causation_id=observation_event.event_id,
-            correlation_id=observation.correlation_id,
-            evaluated_world_revision=cursor.world_revision,
-            expected_commit_world_revision=cursor.world_revision,
-            expected_deliberation_revision=cursor.deliberation_revision,
         )
         try:
             recorded = await self._record(result, context)
@@ -370,9 +515,341 @@ class PinnedTurnCompiler:
                 (time.perf_counter() - started) * 1000,
             )
             return recorded
-        except (ConcurrencyConflict, IdempotencyConflict) as exc:
+        except ConcurrencyConflict as exc:
+            if result.proposal is None and expression_attempt_id is not None:
+                return await self._record_content_free_result_at_current_head(
+                    result=result,
+                    context=context,
+                    observation=observation,
+                    observation_event=observation_event,
+                    observation_world_revision=stored[1].world_revision,
+                    expression_attempt_id=expression_attempt_id,
+                    cause=exc,
+                )
             await self._raise_if_stale(cursor, exc)
             raise
+
+    async def _record_content_free_result_at_current_head(
+        self,
+        *,
+        result: DeliberationResult,
+        context: ProposalAuditContext,
+        observation: Observation,
+        observation_event: WorldEvent,
+        observation_world_revision: int,
+        expression_attempt_id: str,
+        cause: Exception,
+    ) -> ProposalAuditCommit:
+        """Durably close a technical attempt after unrelated head progress.
+
+        A proposal-free result contains no wording, decision, or World effect
+        that could become semantically stale.  Rebinding only its write CAS
+        preserves the original Capsule, request, attempt, evaluated revision,
+        and timestamps while making the durable retry lifecycle observable.
+        A content-bearing Proposal never enters this path.
+        """
+
+        if result.proposal is not None or any(
+            audit.attempt_id != expression_attempt_id
+            for audit in result.attempt_audits
+        ):
+            raise ConcurrencyConflict(
+                "content-free expression result lost its attempt authority"
+            ) from cause
+        expected_result_refs = {
+            audit.model_result_ref for audit in result.attempt_audits
+        }
+        for _ in range(4):
+            current = await self._project()
+            try:
+                self._require_current_expression_attempt(
+                    projection=current,
+                    observation=observation,
+                    expression_attempt_id=expression_attempt_id,
+                )
+            except ValueError as exc:
+                raise ConcurrencyConflict(
+                    "content-free expression result is no longer current"
+                ) from exc
+            if any(
+                item.world_revision > observation_world_revision
+                for item in current.message_observations
+            ):
+                raise ConcurrencyConflict(
+                    "content-free expression result was superseded by newer inbound"
+                ) from cause
+
+            trigger_audits = tuple(
+                item
+                for item in current.model_result_audits
+                if item.trigger_ref == observation_event.event_id
+                and item.attempt_id == expression_attempt_id
+            )
+            if trigger_audits and {
+                item.model_result_ref for item in trigger_audits
+            } != expected_result_refs:
+                raise ConcurrencyConflict(
+                    "expression attempt already owns a different model result"
+                ) from cause
+
+            process = next(
+                item
+                for item in current.trigger_processes
+                if item.trigger_id
+                == expression_episode_trigger_id(
+                    observation.world_id,
+                    observation.observation_id,
+                )
+            )
+            bound_proposals = tuple(
+                item
+                for item in current.proposal_audits
+                if item.trigger_ref == observation_event.event_id
+                and item.attempt_id in process.attempt_ids
+            )
+            if any(
+                item.attempt_id == expression_attempt_id
+                for item in bound_proposals
+            ):
+                raise ConcurrencyConflict(
+                    "expression attempt already owns a content-bearing proposal"
+                ) from cause
+            bound_proposal_ids = {
+                item.proposal_id for item in bound_proposals
+            }
+            authorized_plan_ids = {
+                item.plan_id
+                for item in current.minimal_reply_manifests
+                if item.proposal_id in bound_proposal_ids
+            } | {
+                item.plan_id
+                for item in current.expression_plan_manifests
+                if item.proposal_id in bound_proposal_ids
+            }
+            if authorized_plan_ids and any(
+                action.expression_plan_id in authorized_plan_ids
+                for action in current.actions
+            ):
+                raise ConcurrencyConflict(
+                    "expression episode already owns an authorized Action"
+                ) from cause
+
+            rebased_context = context.model_copy(
+                update={
+                    "expected_commit_world_revision": current.world_revision,
+                    "expected_deliberation_revision": current.deliberation_revision,
+                    "expected_ledger_sequence": current.ledger_sequence,
+                }
+            )
+            try:
+                return await self._record(result, rebased_context)
+            except ConcurrencyConflict:
+                # A competing writer may have moved the head or committed the
+                # same deterministic audit. Reproject and revalidate every
+                # authority condition; the recorder joins an exact commit by
+                # its stable commit id on the next iteration.
+                continue
+        raise ConcurrencyConflict(
+            "content-free expression result rebase did not converge"
+        ) from cause
+
+    async def record_expression_repin_exhausted(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        cursor: ProjectionCursor,
+        expression_attempt_id: str,
+    ) -> ProposalAuditCommit:
+        """Close one attempt whose durable fresh-context allowance is spent.
+
+        This crosses no provider boundary and authors no character content. It
+        records only the technical terminal needed by the ordinary durable
+        retry schedule.
+        """
+
+        if (
+            observation.world_id != self._ledger.world_id
+            or observation_event.world_id != observation.world_id
+            or observation_event.event_type != "ObservationRecorded"
+        ):
+            raise ValueError(
+                "expression repin exhaustion requires its Observation authority"
+            )
+        stored = await self._lookup_event_commit(observation_event.event_id)
+        if stored is None or stored[0] != observation_event:
+            raise ValueError("expression repin exhaustion source is not committed")
+        committed_observation = Observation.model_validate_json(
+            stored[0].payload_json
+        )
+        if committed_observation != observation:
+            raise ValueError(
+                "expression repin exhaustion changed its committed observation"
+            )
+        current = await self._project()
+        self._require_current_expression_attempt(
+            projection=current,
+            observation=observation,
+            expression_attempt_id=expression_attempt_id,
+        )
+        context = ProposalAuditContext(
+            world_id=observation.world_id,
+            trigger_ref=observation_event.event_id,
+            logical_time=current.logical_time or observation.logical_time,
+            created_at=observation.created_at,
+            actor=self._companion_actor_ref,
+            source="world-runtime:pinned-turn",
+            trace_id=observation.trace_id,
+            causation_id=observation_event.event_id,
+            correlation_id=observation.correlation_id,
+            evaluated_world_revision=cursor.world_revision,
+            expected_commit_world_revision=cursor.world_revision,
+            expected_deliberation_revision=cursor.deliberation_revision,
+            expected_ledger_sequence=cursor.ledger_sequence,
+        )
+        return await self._record_pre_provider_failure(
+            context=context,
+            cursor=cursor,
+            attempt_id=expression_attempt_id,
+            observation=observation,
+            observation_event=observation_event,
+            observation_world_revision=stored[1].world_revision,
+            expression_attempt_id=expression_attempt_id,
+            failure_code="expression_fresh_context_repin_exhausted",
+        )
+
+    async def _record_pre_provider_failure(
+        self,
+        *,
+        context: ProposalAuditContext,
+        cursor: ProjectionCursor,
+        attempt_id: str,
+        observation: Observation,
+        observation_event: WorldEvent,
+        observation_world_revision: int,
+        expression_attempt_id: str | None,
+        failure_code: str = "main_exception",
+    ) -> ProposalAuditCommit:
+        """Persist one content-free technical result before any model call.
+
+        The identity binds only source authority, cursor and attempt. Neither
+        the exception message nor partially compiled Context is retained.
+        """
+
+        authority = {
+            "contract": "pinned-turn-pre-provider-failure.1",
+            "world_id": context.world_id,
+            "trigger_ref": context.trigger_ref,
+            "cursor": cursor.model_dump(mode="json"),
+            "attempt_id": attempt_id,
+        }
+        capsule_id = _digest({**authority, "artifact": "uncompiled-context"})
+        budget_exhausted = failure_code in {
+            "interactive_budget_exhausted",
+            "expression_fresh_context_repin_exhausted",
+        }
+        operation = (
+            "expression-fresh-context-repin"
+            if failure_code == "expression_fresh_context_repin_exhausted"
+            else "context-preparation"
+        )
+        model_call_id = (
+            "model-call:skipped-pre-provider:"
+            + _digest({**authority, "operation": operation})
+        )
+        audit = ModelResultAudit(
+            model_call_id=model_call_id,
+            model_result_ref=_model_result_ref(model_call_id, None),
+            attempt_id=attempt_id,
+            route=ModelRoute(
+                tier="flash",
+                reason_code=(
+                    "pre_provider_context_exception"
+                    if failure_code == "main_exception"
+                    else failure_code
+                ),
+                router_version="pinned-turn.1",
+            ),
+            request_hash=_digest(
+                {
+                    **authority,
+                    "request": (
+                        "reserve-expression-fresh-context-repin"
+                        if operation == "expression-fresh-context-repin"
+                        else "compile-source-bound-context"
+                    ),
+                }
+            ),
+            status="main_timeout" if budget_exhausted else "main_exception",
+            failure_code="primary_timeout" if budget_exhausted else failure_code,
+            slot="primary",
+            outcome=(
+                "budget_exhausted" if budget_exhausted else "exception"
+            ),
+        )
+        identity = {
+            "capsule_id": capsule_id,
+            "proposal_hash": None,
+            "attempt_audits": (audit.model_dump(mode="json"),),
+        }
+        result = DeliberationResult(
+            result_id=f"deliberation:{_digest(identity)}",
+            capsule_id=capsule_id,
+            proposal=None,
+            audit=audit,
+            attempt_audits=(audit,),
+        )
+        failure_context = context.model_copy(
+            update={"source": "world-runtime:pinned-turn-pre-provider-failure"}
+        )
+        try:
+            return await self._record(result, failure_context)
+        except ConcurrencyConflict as exc:
+            if expression_attempt_id is None:
+                raise
+            return await self._record_content_free_result_at_current_head(
+                result=result,
+                context=failure_context,
+                observation=observation,
+                observation_event=observation_event,
+                observation_world_revision=observation_world_revision,
+                expression_attempt_id=expression_attempt_id,
+                cause=exc,
+            )
+
+    @staticmethod
+    def _require_current_expression_attempt(
+        *,
+        projection: LedgerProjection,
+        observation: Observation,
+        expression_attempt_id: str,
+    ) -> None:
+        trigger_id = expression_episode_trigger_id(
+            observation.world_id,
+            observation.observation_id,
+        )
+        process = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id == trigger_id
+            ),
+            None,
+        )
+        if (
+            process is None
+            or process.process_kind != "expression_episode"
+            or process.source_evidence_ref != observation.observation_id
+            or process.state != "claimed"
+            or process.claim_lease is None
+            or process.claim_lease.attempt_id != expression_attempt_id
+            or not process.attempt_ids
+            or process.attempt_ids[-1] != expression_attempt_id
+        ):
+            raise ValueError(
+                "Pinned reply attempt must be the current expression episode claim "
+                "for its Observation"
+            )
 
     async def audit_appraisal_accepted(
         self,
@@ -421,8 +898,7 @@ class PinnedTurnCompiler:
         except ValueError as exc:
             await self._raise_if_stale(cursor, exc)
             raise
-        result = await self._deliberation.deliberate(
-            capsule,
+        deliberate_kwargs = dict(
             # Affect and relationship both deliberate after the same immutable
             # appraisal.  Their expensive calls must have distinct durable
             # attempt identities; otherwise the second lane aliases the first
@@ -441,6 +917,11 @@ class PinnedTurnCompiler:
                 ),
             ),
         )
+        if self._affect_target_bounds_enabled:
+            deliberate_kwargs["affect_target_bounds"] = lower_bounds_from_projection(
+                projection
+            )
+        result = await self._deliberation.deliberate(capsule, **deliberate_kwargs)
         context = ProposalAuditContext(
             world_id=appraisal_event.world_id,
             trigger_ref=appraisal_event.event_id,
@@ -454,10 +935,109 @@ class PinnedTurnCompiler:
             evaluated_world_revision=cursor.world_revision,
             expected_commit_world_revision=cursor.world_revision,
             expected_deliberation_revision=cursor.deliberation_revision,
+            expected_ledger_sequence=cursor.ledger_sequence,
         )
         try:
             return await self._record(result, context)
-        except (ConcurrencyConflict, IdempotencyConflict) as exc:
+        except ConcurrencyConflict as exc:
+            await self._raise_if_stale(cursor, exc)
+            raise
+
+    async def audit_relationship_source(
+        self,
+        *,
+        source_event: WorldEvent,
+        cursor: ProjectionCursor,
+    ) -> ProposalAuditCommit:
+        """Audit one relationship interpretation from exact committed source.
+
+        Accepted Appraisals retain their historical path and identities.
+        Ordinary ``ObservationRecorded`` messages use the same pinned Context
+        Capsule and relationship model without first inventing an appraisal or
+        assigning a deterministic social score.
+        """
+
+        if source_event.event_type == "AppraisalAccepted":
+            return await self.audit_appraisal_accepted(
+                appraisal_event=source_event,
+                cursor=cursor,
+                attempt_namespace="relationship",
+            )
+        if source_event.event_type != "ObservationRecorded":
+            raise ValueError("Pinned relationship source kind is unsupported")
+        if source_event.world_id != self._ledger.world_id:
+            raise ValueError("Pinned relationship source belongs to another world")
+        stored = await self._lookup_event_commit(source_event.event_id)
+        if (
+            stored is None
+            or stored[0] != source_event
+            or stored[1].ledger_sequence > cursor.ledger_sequence
+        ):
+            raise ValueError("Pinned relationship observation is not committed authority")
+        observation = Observation.model_validate_json(source_event.payload_json)
+        projection = await self._project_at(cursor)
+        reference = next(
+            (
+                item
+                for item in projection.message_observations
+                if item.observation_id == observation.observation_id
+                and item.source == observation.source
+                and item.source_event_id == observation.source_event_id
+            ),
+            None,
+        )
+        if (
+            reference is None
+            or reference.event_payload_hash != source_event.payload_hash
+            or reference.content_payload_hash != observation.payload_hash
+            or reference.world_revision != stored[1].world_revision
+            or reference.actor != observation.actor
+        ):
+            raise ValueError("Pinned relationship observation projection is not source-complete")
+        query = query_from_projection(
+            projection,
+            actor_ref=self._companion_actor_ref,
+            trigger_ref=source_event.event_id,
+        )
+        try:
+            capsule = await self._compile_capsule(query)
+        except ValueError as exc:
+            await self._raise_if_stale(cursor, exc)
+            raise
+        result = await self._deliberation.deliberate(
+            capsule,
+            attempt_id=_attempt_id(
+                trigger_ref=source_event.event_id,
+                cursor=cursor,
+                namespace="relationship",
+            ),
+            trigger_evidence=(
+                ProposalEvidenceRef(
+                    ref_id=source_event.event_id,
+                    evidence_kind="committed_world_event",
+                    source_world_revision=stored[1].world_revision,
+                    immutable_hash="sha256:" + source_event.payload_hash,
+                ),
+            ),
+        )
+        context = ProposalAuditContext(
+            world_id=source_event.world_id,
+            trigger_ref=source_event.event_id,
+            logical_time=projection.logical_time or source_event.logical_time,
+            created_at=source_event.created_at,
+            actor=self._companion_actor_ref,
+            source="world-runtime:pinned-relationship-turn",
+            trace_id=source_event.trace_id,
+            causation_id=source_event.event_id,
+            correlation_id=source_event.correlation_id,
+            evaluated_world_revision=cursor.world_revision,
+            expected_commit_world_revision=cursor.world_revision,
+            expected_deliberation_revision=cursor.deliberation_revision,
+            expected_ledger_sequence=cursor.ledger_sequence,
+        )
+        try:
+            return await self._record(result, context)
+        except ConcurrencyConflict as exc:
             await self._raise_if_stale(cursor, exc)
             raise
 
@@ -561,25 +1141,6 @@ class PinnedTurnCompiler:
         except (TypeError, ValueError):
             return ()
 
-    def _attention_view_advisories(
-        self, projection: LedgerProjection
-    ) -> tuple[InnerAdvisoryProjection, ...]:
-        """Derive the deterministic phone-attention advisory, if opted in.
-
-        Best-effort context like the Change Phase reading: "深夜她睡着了" and
-        "在自习室专注中" should reach the timing decision, but a defect here
-        must never fail an ordinary turn.
-        """
-
-        if not self._attention_advisory:
-            return ()
-        try:
-            return phone_attention_advisories(
-                projection, chronology=self._attention_chronology
-            )
-        except (TypeError, ValueError):
-            return ()
-
     def _npc_relationship_view_advisories(
         self, projection: LedgerProjection
     ) -> tuple[InnerAdvisoryProjection, ...]:
@@ -621,10 +1182,24 @@ class PinnedTurnCompiler:
         observation: Observation,
         observation_event: WorldEvent,
         latency_trace: TurnLatencyTrace | None = None,
+        turn_budget: InteractiveTurnBudget | None = None,
         skip_advisories: bool = False,
         expectation_advisories: tuple[InnerAdvisoryProjection, ...] = (),
     ):
-        if self._advisories is None or skip_advisories:
+        advisory_timeout = (
+            None
+            if turn_budget is None
+            else max(
+                0.0,
+                turn_budget.first_provider_entry_remaining()
+                - FIRST_PROVIDER_ENTRY_RESERVE_SECONDS,
+            )
+        )
+        if (
+            self._advisories is None
+            or skip_advisories
+            or advisory_timeout == 0
+        ):
             if latency_trace is None:
                 return await self._compile_capsule_with_extra(query, expectation_advisories)
             async with latency_trace.measure("context"):
@@ -646,6 +1221,21 @@ class PinnedTurnCompiler:
         # Classifiers are a latency-bounded optional side path.  The Context
         # compiler and AdvisoryCompiler consume the same pinned cursor but do
         # not depend on each other's output, so run them concurrently.
+        advisory_provider_call_id = "model-call:advisory:" + _digest(
+            {
+                "trigger_ref": request.trigger_ref,
+                "snapshot_hash": request.snapshot_hash,
+                "world_revision": request.world_revision,
+            }
+        )
+        context_provider_call_id = "model-call:context-provider:" + _digest(
+            {
+                "trigger_ref": request.trigger_ref,
+                "snapshot_hash": request.snapshot_hash,
+                "world_revision": request.world_revision,
+            }
+        )
+
         async def prepare():
             if latency_trace is None:
                 return await asyncio.to_thread(
@@ -654,26 +1244,37 @@ class PinnedTurnCompiler:
                     relationship_evaluation=self._relationship_evaluation,
                 )
             async with latency_trace.measure("context"):
-                return await asyncio.to_thread(
-                    self._capsules.prepare_for_deliberation,
-                    query,
-                    relationship_evaluation=self._relationship_evaluation,
-                )
+                with model_request_emission_scope(
+                    provider_call_id=context_provider_call_id,
+                    entry_marker=latency_trace.mark_auxiliary_provider_entry,
+                    completion_marker=latency_trace.mark_auxiliary_provider_completion,
+                ):
+                    return await asyncio.to_thread(
+                        self._capsules.prepare_for_deliberation,
+                        query,
+                        relationship_evaluation=self._relationship_evaluation,
+                    )
 
         async def classify():
             operation = self._advisories.compile(
-                self._advisories.issue_authenticated_request(request)
+                self._advisories.issue_authenticated_request(request),
+                timeout_seconds=advisory_timeout,
             )
             if latency_trace is None:
                 return await operation
             async with latency_trace.measure("advisor"):
-                return await operation
+                with model_request_emission_scope(
+                    provider_call_id=advisory_provider_call_id,
+                    entry_marker=latency_trace.mark_auxiliary_provider_entry,
+                    completion_marker=latency_trace.mark_auxiliary_provider_completion,
+                ):
+                    return await operation
 
         base_task = asyncio.create_task(prepare())
         advisory_task = asyncio.create_task(classify())
         try:
             prepared, compilation = await asyncio.gather(base_task, advisory_task)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, TimeoutError):
             prepared = await base_task
             if latency_trace is None:
                 return await self._finalize_prepared_with_extra(

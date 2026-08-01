@@ -19,7 +19,9 @@ from .expression_payload_contract import validate_materialized_expression_payloa
 from .proposal_audit_schemas import ProposalAuditProjection
 from .proposal_envelope import (
     EventShareClaimBinding,
+    EventSharePlanClaimBindingV2,
     ProposalInput,
+    ProactiveExpressionPlanSourceBindingV2,
     ResponseExpectationDraftPayload,
     validate_proposal_envelope,
 )
@@ -188,7 +190,26 @@ def derive_expression_plan_material(
     by_beat = {item.beat_ref: item for item in external_intents}
     if None in by_beat or len(by_beat) != len(external_intents):
         raise ExpressionPlanAcceptanceError("expression_intents_not_exact")
+    # No future provider contract exists for a reaction, sticker or typing
+    # pulse. This acceptance check mirrors the model-visible capability fact
+    # so a forged/tampered plan cannot turn a deferred non-text beat into an
+    # authorized external effect.
+    for draft, intent in zip(drafts, external_intents, strict=True):
+        if getattr(intent, "due_window", None) is not None and (
+            not isinstance(draft, dict)
+            or draft.get("content_type") != "text/plain"
+            or getattr(intent, "kind", None) != "followup"
+        ):
+            raise ExpressionPlanAcceptanceError("deferred_expression_modality_invalid")
     _validate_event_share_claim(
+        proposal=proposal,
+        change=change,
+        payload=payload,
+        drafts=drafts,
+        intents=external_intents,
+        policy=policy,
+    )
+    _validate_proactive_plan_source_binding(
         proposal=proposal,
         change=change,
         payload=payload,
@@ -223,7 +244,9 @@ def derive_expression_plan_material(
         "contract": "expression-plan-acceptance.1",
         "world_id": world_id,
         "proposal_id": proposal.proposal_id,
-        "proposal_hash": proposal.proposal_hash,
+        # Audit-only PrivateTurnState changes the immutable proposal record,
+        # but cannot authorize a distinct external effect.
+        "proposal_hash": proposal.effect_hash,
         "policy_digest": policy.digest,
         "plan_id": plan_id,
     }
@@ -524,9 +547,42 @@ def _validate_event_share_claim(
         item for item in proposal.evidence_refs if item.evidence_kind == "settled_world_event"
     )
     raw_claim = payload.get("event_share_claim")
-    if not settled and raw_claim is None:
+    raw_plan_claim = payload.get("event_share_plan_claim_v2")
+    if not settled and raw_claim is None and raw_plan_claim is None:
         return
-    if len(settled) != 1 or raw_claim is None or len(drafts) != 1 or len(intents) != 1:
+    if len(settled) != 1:
+        raise ExpressionPlanAcceptanceError("event_share_claim_invalid")
+    if raw_plan_claim is not None:
+        try:
+            claim_v2 = EventSharePlanClaimBindingV2.model_validate(raw_plan_claim)
+        except Exception as exc:
+            raise ExpressionPlanAcceptanceError("event_share_claim_invalid") from exc
+        source = settled[0]
+        if (
+            proposal.trigger_ref != source.ref_id
+            or change.evidence_refs != (source.ref_id,)
+            or claim_v2.source_event_ref != source.ref_id
+            or claim_v2.source_payload_hash != source.immutable_hash
+            or claim_v2.source_world_revision != source.source_world_revision
+            or claim_v2.recipient_ref not in policy.allowed_targets
+            or len(claim_v2.beats) != len(drafts)
+            or len(intents) != len(drafts)
+        ):
+            raise ExpressionPlanAcceptanceError("event_share_claim_invalid")
+        for indexed, (beat_claim, draft, intent) in enumerate(
+            zip(claim_v2.beats, drafts, intents, strict=True)
+        ):
+            if (
+                not isinstance(draft, dict)
+                or beat_claim.beat_id != draft.get("beat_id")
+                or beat_claim.claim_text != draft.get("inline_text")
+                or beat_claim.payload_hash != draft.get("payload_hash")
+                or beat_claim.payload_hash != getattr(intent, "payload_hash", None)
+                or claim_v2.recipient_ref != getattr(intent, "target", None)
+            ):
+                raise ExpressionPlanAcceptanceError("event_share_claim_invalid")
+        return
+    if raw_claim is None or len(drafts) != 1 or len(intents) != 1:
         raise ExpressionPlanAcceptanceError("event_share_claim_invalid")
     try:
         claim = EventShareClaimBinding.model_validate(raw_claim)
@@ -548,6 +604,61 @@ def _validate_event_share_claim(
         or claim.recipient_ref not in policy.allowed_targets
     ):
         raise ExpressionPlanAcceptanceError("event_share_claim_invalid")
+
+
+def _validate_proactive_plan_source_binding(
+    *,
+    proposal: ProposalInput,
+    change,
+    payload: dict[str, object],
+    drafts: list[object],
+    intents: tuple[object, ...],
+    policy: ExpressionPlanBudgetPolicy,
+) -> None:
+    """Close a V2 proactive plan at the authorization boundary.
+
+    Runtime preflight is helpful for scheduling diagnostics but is not an
+    authority seam.  This independently binds the exact source opportunity,
+    ordered payload bytes and recipient just before Actions are authorized.
+    Historical single-beat bindings remain valid because they omit V2.
+    """
+
+    raw_binding = payload.get("proactive_source_plan_binding_v2")
+    if raw_binding is None:
+        return
+    try:
+        binding = ProactiveExpressionPlanSourceBindingV2.model_validate(raw_binding)
+    except Exception as exc:
+        raise ExpressionPlanAcceptanceError("proactive_source_plan_binding_invalid") from exc
+    decision = getattr(proposal, "proactive_opportunity_decision", None)
+    if decision is None:
+        raise ExpressionPlanAcceptanceError("proactive_source_plan_binding_invalid")
+    plan_id = payload.get("plan_id")
+    draft_hashes = tuple(
+        draft.get("payload_hash") if isinstance(draft, dict) else None for draft in drafts
+    )
+    intent_hashes = tuple(getattr(intent, "payload_hash", None) for intent in intents)
+    matching_evidence = tuple(
+        item
+        for item in proposal.evidence_refs
+        if item.ref_id == binding.source_event_ref
+        and item.immutable_hash == binding.source_payload_hash
+        and item.source_world_revision == binding.source_world_revision
+    )
+    if (
+        not isinstance(plan_id, str)
+        or binding.plan_id != plan_id
+        or binding.source_kind != decision.source_kind
+        or binding.source_event_ref != decision.source_event_ref
+        or binding.source_payload_hash != decision.source_payload_hash
+        or binding.source_world_revision != decision.source_world_revision
+        or len(matching_evidence) != 1
+        or tuple(binding.beat_payload_hashes) != draft_hashes
+        or tuple(binding.beat_payload_hashes) != intent_hashes
+        or binding.target_ref not in policy.allowed_targets
+        or any(getattr(intent, "target", None) != binding.target_ref for intent in intents)
+    ):
+        raise ExpressionPlanAcceptanceError("proactive_source_plan_binding_invalid")
 
 
 __all__ = [

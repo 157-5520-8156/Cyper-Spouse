@@ -63,6 +63,46 @@ class _MemoryChat:
         )
 
 
+class _RelationshipConsequenceMemoryChat:
+    model = "test-experience-memory-relationship-consequence"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen_experience_text: str | None = None
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        assert temperature == 0.15
+        payload = json.loads(messages[-1]["content"])
+        assert payload["source_kind"] == "companion_lived_experience"
+        source_text = payload["verified_experience_text"]
+        assert isinstance(source_text, str)
+        assert ("多了一层信任" in source_text) or (
+            "关系需要之后修复" in source_text
+        )
+        self.seen_experience_text = source_text
+        return json.dumps(
+            {
+                "retain": True,
+                "cue_kind": "relationship",
+                "retention_rationales": [
+                    "relationship_continuity",
+                    "emotional_salience",
+                ],
+                "salience": {
+                    "autobiographical_relevance_bp": 7600,
+                    "relationship_relevance_bp": 9200,
+                    "emotional_residue_bp": 8500,
+                    "unfinished_business_bp": 5400,
+                    "recurrence_bp": 2800,
+                    "novelty_bp": 6100,
+                    "future_utility_bp": 6800,
+                    "world_continuity_bp": 7900,
+                },
+            }
+        )
+
+
 class _NeverMemoryChat:
     model = "test-experience-memory-never"
 
@@ -72,6 +112,34 @@ class _NeverMemoryChat:
     async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
         self.calls += 1
         raise AssertionError("durable Experience-memory decision must be rejoined")
+
+
+class _InvalidOnceThenRetainingMemoryChat(_MemoryChat):
+    """Fail one complete classify+correction attempt, then recover."""
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls <= 2:
+            return '{"retain":true,"cue_kind":"not-installed"}'
+        assert temperature == 0.15
+        assert "lived Experience from your own life" in messages[0]["content"]
+        return json.dumps(
+            {
+                "retain": True,
+                "cue_kind": "world_continuity",
+                "retention_rationales": ["world_continuity"],
+                "salience": {
+                    "autobiographical_relevance_bp": 7000,
+                    "relationship_relevance_bp": 2000,
+                    "emotional_residue_bp": 2000,
+                    "unfinished_business_bp": 1000,
+                    "recurrence_bp": 3000,
+                    "novelty_bp": 6000,
+                    "future_utility_bp": 5000,
+                    "world_continuity_bp": 9000,
+                },
+            }
+        )
 
 
 def test_legacy_story_fixture_offers_a_real_clock_bound_sleep_wake_opening(
@@ -457,6 +525,20 @@ life_author_catalog:
 """.strip(),
         encoding="utf-8",
     )
+    return path
+
+
+def _relationship_consequence_seed(path: Path) -> Path:
+    _social_seed(path)
+    source = path.read_text(encoding="utf-8")
+    source = source.replace(
+        "和范予安把读书会书单顺了一遍，聊得比预想中轻松。",
+        "和范予安谈开了之前的误会，这次相处让她对范予安多了一层信任。",
+    ).replace(
+        "和范予安核对书单时有点分歧，不过最后还是整理清楚了。",
+        "和范予安核对书单时争执起来；事情虽做完，她仍觉得委屈，关系需要之后修复。",
+    )
+    path.write_text(source, encoding="utf-8")
     return path
 
 
@@ -1487,6 +1569,82 @@ async def test_production_life_aftermath_requires_later_wake_and_survives_restar
 
 
 @pytest.mark.asyncio
+async def test_emotional_relationship_experience_can_be_retained_by_the_model(
+    tmp_path: Path,
+) -> None:
+    memory_model = _RelationshipConsequenceMemoryChat()
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "life-aftermath-relationship-memory.sqlite",
+        config=_config(
+            _relationship_consequence_seed(
+                tmp_path / "world-seed-relationship-memory.yaml"
+            )
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        outcome_draft_model=_SelectingOutcomeModel(),
+        memory_model=memory_model,
+        now=NOW,
+    )
+    try:
+        for tick_id, start, end in (
+            ("relationship-memory-plan", NOW, NOW + timedelta(hours=1)),
+            (
+                "relationship-memory-start",
+                NOW + timedelta(hours=1),
+                NOW + timedelta(hours=1, minutes=1),
+            ),
+            (
+                "relationship-memory-settle",
+                NOW + timedelta(hours=1, minutes=1),
+                NOW + timedelta(hours=1, minutes=46),
+            ),
+        ):
+            await app.tick(
+                tick_id=tick_id,
+                logical_time_from=start,
+                logical_time_to=end,
+                observed_at=end,
+                trace_id=f"trace:{tick_id}",
+                causation_id="scheduler:life-author",
+                correlation_id="correlation:relationship-memory",
+                reason="production-test",
+            )
+
+        projection = app._ledger.project()  # noqa: SLF001
+        assert memory_model.calls == 1
+        assert memory_model.seen_experience_text is not None
+        assert len(projection.experiences) == 1
+        assert len(projection.memory_candidates) == 1
+        candidate = projection.memory_candidates[0]
+        assert candidate.values.status == "active"
+        assert candidate.values.cue_kind == "relationship"
+        assert candidate.values.retention_rationales == (
+            "relationship_continuity",
+            "emotional_salience",
+        )
+        experience = projection.experiences[0]
+        decision_event, _ = app._ledger.lookup_event_commit(  # noqa: SLF001
+            experience_memory_decision_event_id(
+                experience_authority_event_ref=experience.origin.accepted_event_ref
+            )
+        )
+        assert decision_event.payload()["decision_kind"] == "retain"
+        assert {
+            binding.source_kind for binding in candidate.values.source_bindings
+        } == {"experience"}
+        assert {
+            binding.source_id for binding in candidate.values.source_bindings
+        } == {experience.experience_id}
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
 async def test_experience_memory_no_change_is_durable_and_never_reclassified(
     tmp_path: Path,
 ) -> None:
@@ -1609,7 +1767,7 @@ async def test_experience_memory_no_change_is_durable_and_never_reclassified(
         before_rebuild = restarted._ledger.project()  # noqa: SLF001
         rebuilt = restarted._ledger.rebuild()  # noqa: SLF001
         assert rebuilt.semantic_hash == before_rebuild.semantic_hash
-        assert rebuilt.reducer_bundle_version == "world-v2-reducers.44"
+        assert rebuilt.reducer_bundle_version == "world-v2-reducers.46"
     finally:
         restarted.close()
 
@@ -1639,5 +1797,133 @@ async def test_experience_memory_no_change_is_durable_and_never_reclassified(
         )
         assert never.calls == 0
         assert resumed._ledger.project().memory_candidates == ()  # noqa: SLF001
+    finally:
+        resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_experience_memory_failure_waits_for_source_scoped_retry_after_restart(
+    tmp_path: Path,
+) -> None:
+    """A bad model result must not retry on every unrelated Clock wake."""
+
+    database = tmp_path / "life-aftermath-memory-retry.sqlite"
+    config = _config(_social_seed(tmp_path / "world-seed-memory-retry.yaml"))
+    memory_model = _InvalidOnceThenRetainingMemoryChat()
+    app = build_sqlite_world_v2_turn_application(
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        outcome_draft_model=_SelectingOutcomeModel(),
+        memory_model=memory_model,
+        now=NOW,
+    )
+    settled_at = NOW + timedelta(hours=1, minutes=46)
+    try:
+        for tick_id, start, end in (
+            ("memory-retry-plan", NOW, NOW + timedelta(hours=1)),
+            (
+                "memory-retry-start",
+                NOW + timedelta(hours=1),
+                NOW + timedelta(hours=1, minutes=1),
+            ),
+            (
+                "memory-retry-settle",
+                NOW + timedelta(hours=1, minutes=1),
+                settled_at,
+            ),
+        ):
+            await app.tick(
+                tick_id=tick_id,
+                logical_time_from=start,
+                logical_time_to=end,
+                observed_at=end,
+                trace_id=f"trace:{tick_id}",
+                causation_id="scheduler:life-author",
+                correlation_id="correlation:memory-retry",
+                reason="production-test",
+            )
+
+        failed = app._ledger.project()  # noqa: SLF001
+        assert memory_model.calls == 2
+        assert len(failed.experiences) == 1
+        assert failed.memory_candidates == ()
+        retry = next(
+            item
+            for item in failed.contextual_life_retries
+            if item.lane == "experience_memory"
+        )
+        assert retry.source_event_ref == failed.experiences[0].origin.accepted_event_ref
+        assert retry.retry_ordinal == 1
+        assert retry.next_retry_at == settled_at + timedelta(minutes=10)
+        memory_health = (await app.world_health_diagnostics())["mechanisms"]["memory"]
+        assert memory_health["experience_memory_retry_count"] == 1
+        assert memory_health["experience_memory_retries"] == [
+            {
+                "source_event_ref": retry.source_event_ref,
+                "retry_ordinal": 1,
+                "consecutive_technical_failures": 1,
+                "failure_code": "invalid_output",
+                "failed_at": settled_at.isoformat(),
+                "next_retry_at": (settled_at + timedelta(minutes=10)).isoformat(),
+            }
+        ]
+
+        await app.tick(
+            tick_id="memory-retry-too-early",
+            logical_time_from=settled_at,
+            logical_time_to=settled_at + timedelta(minutes=5),
+            observed_at=settled_at + timedelta(minutes=5),
+            trace_id="trace:memory-retry-too-early",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:memory-retry",
+            reason="production-test",
+        )
+        assert memory_model.calls == 2
+        assert app._ledger.project().memory_candidates == ()  # noqa: SLF001
+    finally:
+        app.close()
+
+    resumed = build_sqlite_world_v2_turn_application(
+        path=database,
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_MainModel(),
+        quick_recovery=_QuickRecovery(),
+        transport=_Transport(),
+        activity_lifecycle_model=_SelectingAuthorAndLifecycleModel(),
+        outcome_draft_model=_SelectingOutcomeModel(),
+        memory_model=memory_model,
+        now=settled_at + timedelta(minutes=5),
+    )
+    try:
+        await resumed.tick(
+            tick_id="memory-retry-due",
+            logical_time_from=settled_at + timedelta(minutes=5),
+            logical_time_to=settled_at + timedelta(minutes=10),
+            observed_at=settled_at + timedelta(minutes=10),
+            trace_id="trace:memory-retry-due",
+            causation_id="scheduler:life-author",
+            correlation_id="correlation:memory-retry",
+            reason="production-test",
+        )
+        recovered = resumed._ledger.project()  # noqa: SLF001
+        assert memory_model.calls == 3
+        assert len(recovered.memory_candidates) == 1
+        assert recovered.memory_candidates[0].values.status == "active"
+        assert not any(
+            item.lane == "experience_memory"
+            for item in recovered.contextual_life_retries
+        )
+        before_rebuild = recovered
+        rebuilt = resumed._ledger.rebuild()  # noqa: SLF001
+        assert rebuilt.semantic_hash == before_rebuild.semantic_hash
+        assert rebuilt.reducer_bundle_version == "world-v2-reducers.46"
     finally:
         resumed.close()

@@ -15,6 +15,7 @@ from companion_daemon.world_v2.production_proposal_grammar import (
     PRODUCTION_PROPOSAL_GRAMMARS,
     ProductionProposalGrammarError,
     assert_production_proposal_grammar_coverage,
+    compose_production_deliberation,
     production_proposal_grammar,
 )
 from companion_daemon.world_v2.proposal_envelope import (
@@ -254,6 +255,22 @@ def test_catalogue_is_read_only_and_replacing_its_public_view_fails_closed(
     monkeypatch.setattr(grammar_module, "PRODUCTION_PROPOSAL_GRAMMARS", MappingProxyType({}))
     with pytest.raises(RuntimeError, match="public view was replaced"):
         assert_production_proposal_grammar_coverage()
+
+
+@pytest.mark.parametrize("lane", tuple(PRODUCTION_PROPOSAL_GRAMMARS))
+def test_every_production_deliberation_recovery_uses_its_typed_lane_grammar(
+    lane: str,
+) -> None:
+    """Background no-change recovery is a DecisionProposal, never a chat MinimalReply."""
+
+    deliberation = compose_production_deliberation(
+        lane_id=lane,  # type: ignore[arg-type]
+        router=object(),
+        main_model=object(),
+        quick_recovery=object(),
+    )
+
+    assert deliberation._recovery_mode == "proposal_grammar"  # noqa: SLF001
 
 
 @pytest.mark.parametrize(

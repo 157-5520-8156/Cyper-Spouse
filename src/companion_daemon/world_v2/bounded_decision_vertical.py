@@ -846,6 +846,7 @@ class AnchoredVerticalRuntime:
             evaluated_world_revision=head.world_revision,
             expected_commit_world_revision=head.world_revision,
             expected_deliberation_revision=head.deliberation_revision,
+            expected_ledger_sequence=head.ledger_sequence,
         )
         try:
             await self._ops.call(self._audits.record, result, context)
@@ -1436,6 +1437,7 @@ class InlineOnceVerticalWorker:
             evaluated_world_revision=cursor.world_revision,
             expected_commit_world_revision=cursor.world_revision,
             expected_deliberation_revision=cursor.deliberation_revision,
+            expected_ledger_sequence=cursor.ledger_sequence,
         )
         try:
             await self._ops.call(self._audits.record, result, context)

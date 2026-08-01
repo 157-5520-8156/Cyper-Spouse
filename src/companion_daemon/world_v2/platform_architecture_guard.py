@@ -59,11 +59,12 @@ _BOUNDARY_AUTHORITY_MODULES = frozenset(
     }
 )
 # The provider executor needs this one pure, projection-only enforcement check
-# immediately before dispatch.  Importing its Runtime class or any other symbol
-# from the module remains forbidden at the platform boundary.
+# immediately before dispatch and its declared rejection type.  Importing its
+# Runtime class or any other symbol from the module remains forbidden at the
+# platform boundary.
 _BOUNDARY_ALLOWED_IMPORTS = {
     f"{_WORLD_V2_PACKAGE}.media_delivery_runtime": frozenset(
-        {"require_current_media_delivery_approval"}
+        {"MediaDeliveryError", "require_current_media_delivery_approval"}
     )
 }
 _LEGACY_HTTP_WRITER_PREFIXES = (

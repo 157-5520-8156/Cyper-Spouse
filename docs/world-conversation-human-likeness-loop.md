@@ -69,7 +69,7 @@
 - 新增保守 `human_reply_contract`：只拦高置信言语行为违背、当前脆弱话题被旧健康事实劫持、早期关系越级和说明书式列点；普通请求建议和正常温暖表达保留通过测试。
 - 首候选与 repair 候选均在 world claim validator 之后、独立 grounded audit 之前经过同一门禁；事实审计顺序未改变。
 - 补齐吐槽、项目没人味担心和关系试探的确定性降级，避免再次落回泛化咨询模板。
-- 专项：`55 passed`；排除用户要求不得触碰的小屋/room/dashboard 视觉测试后，Python 回归 `588 passed, 1 warning`；`ruff check src tests scripts/run_world_conversation_audit.py` 通过。
+- 专项：`55 passed`；排除用户要求不得触碰的小屋/room/dashboard 视觉测试后，Python 回归 `588 passed, 1 warning`；当时的旧 World V1 审计脚本通过静态检查。该脚本现已随 V1 对话入口退役；当前隔离进程验收使用 `scripts/run_isolated_daemon_acceptance.py`。
 - 下一步：用真实模型重新跑 30 回合，并逐条记录 `speech_act / empathy / persona / grounding`，不能只记录异常数。
 
 ### 2026-07-12 / Iteration 2：真实回放第 12/16/19 轮增量红灯

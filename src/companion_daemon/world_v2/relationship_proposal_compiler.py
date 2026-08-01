@@ -16,11 +16,14 @@ from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .relationship_events import relationship_mutation_hash
-from .relationship_trigger import relationship_deliberation_trigger_id
+from .relationship_trigger import (
+    relationship_continuity_trigger_id,
+    relationship_deliberation_trigger_id,
+)
 from .schema_core import EvidenceRef, FrozenModel
 from .schemas import (
-    AppraisalProjection,
     CommitResult,
+    Observation,
     ProjectionCursor,
     RelationshipProposalAuditBinding,
     RelationshipProposalProjection,
@@ -128,16 +131,14 @@ class RelationshipProposalCompiler:
         )
 
     def _compile_signal(self, *, authority, change, projection) -> RelationshipProposalProjection:
-        source_event, appraisal = self._source_appraisal(
+        source_event, subject = self._source_relationship_subject(
             trigger_ref=authority.proposal.trigger_ref, projection=projection
         )
-        self._require_claimed_trigger(
-            appraisal_event=source_event, projection=projection
-        )
+        self._require_claimed_trigger(source_event=source_event, projection=projection)
         raw = change.payload.value()
         subject_ref = raw.get("subject_ref")
-        if subject_ref != appraisal.subject_ref:
-            raise RelationshipProposalCompilerError("subject_not_bound_to_appraisal")
+        if subject_ref != subject:
+            raise RelationshipProposalCompilerError("subject_not_bound_to_source")
         signal_code = raw.get("signal_code")
         confidence_bp = raw.get("confidence_bp")
         persistence = raw.get("persistence")
@@ -232,27 +233,67 @@ class RelationshipProposalCompiler:
             ),
         )
 
-    def _source_appraisal(self, *, trigger_ref: str, projection) -> tuple[WorldEvent, AppraisalProjection]:
+    def _source_relationship_subject(
+        self, *, trigger_ref: str, projection
+    ) -> tuple[WorldEvent, str]:
         located = self._ledger.lookup_event_commit(trigger_ref)
-        if located is None or located[0].event_type != "AppraisalAccepted":
-            raise RelationshipProposalCompilerError("source_appraisal_unavailable")
+        if located is None or located[0].event_type not in {
+            "AppraisalAccepted",
+            "ObservationRecorded",
+        }:
+            raise RelationshipProposalCompilerError("source_event_unavailable")
         event, commit = located
         if commit.world_revision > projection.world_revision:
-            raise RelationshipProposalCompilerError("source_appraisal_outside_cursor")
-        try:
-            appraisal = next(
+            raise RelationshipProposalCompilerError("source_event_outside_cursor")
+        if event.event_type == "AppraisalAccepted":
+            try:
+                appraisal = next(
+                    item
+                    for item in projection.appraisals
+                    if item.status == "active"
+                    and item.origin.accepted_event_ref == event.event_id
+                )
+            except StopIteration as exc:
+                raise RelationshipProposalCompilerError(
+                    "source_appraisal_not_active"
+                ) from exc
+            return event, appraisal.subject_ref
+        observation = Observation.model_validate_json(event.payload_json)
+        reference = next(
+            (
                 item
-                for item in projection.appraisals
-                if item.status == "active" and item.origin.accepted_event_ref == event.event_id
-            )
-        except StopIteration as exc:
-            raise RelationshipProposalCompilerError("source_appraisal_not_active") from exc
-        return event, appraisal
-
-    def _require_claimed_trigger(self, *, appraisal_event: WorldEvent, projection) -> None:
-        trigger_id = relationship_deliberation_trigger_id(
-            world_id=self._ledger.world_id, appraisal_event_id=appraisal_event.event_id
+                for item in projection.message_observations
+                if item.observation_id == observation.observation_id
+                and item.source == observation.source
+                and item.source_event_id == observation.source_event_id
+            ),
+            None,
         )
+        if (
+            reference is None
+            or reference.event_payload_hash != event.payload_hash
+            or reference.content_payload_hash != observation.payload_hash
+            or reference.world_revision != commit.world_revision
+            or reference.actor != observation.actor
+        ):
+            raise RelationshipProposalCompilerError(
+                "source_observation_not_authoritative"
+            )
+        return event, observation.actor
+
+    def _require_claimed_trigger(self, *, source_event: WorldEvent, projection) -> None:
+        if source_event.event_type == "AppraisalAccepted":
+            trigger_id = relationship_deliberation_trigger_id(
+                world_id=self._ledger.world_id,
+                appraisal_event_id=source_event.event_id,
+            )
+            trigger_ref = f"relationship:{source_event.event_id}"
+        else:
+            trigger_id = relationship_continuity_trigger_id(
+                world_id=self._ledger.world_id,
+                observation_event_id=source_event.event_id,
+            )
+            trigger_ref = f"relationship-continuity:{source_event.event_id}"
         process = next(
             (item for item in projection.trigger_processes if item.trigger_id == trigger_id), None
         )
@@ -260,8 +301,8 @@ class RelationshipProposalCompiler:
             process is None
             or process.process_kind != "relationship_deliberation"
             or process.state != "claimed"
-            or process.trigger_ref != f"relationship:{appraisal_event.event_id}"
-            or process.source_evidence_ref != appraisal_event.event_id
+            or process.trigger_ref != trigger_ref
+            or process.source_evidence_ref != source_event.event_id
         ):
             raise RelationshipProposalCompilerError("relationship_trigger_not_claimed")
 

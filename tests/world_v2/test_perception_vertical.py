@@ -441,6 +441,7 @@ async def test_audited_attachment_selection_compiles_without_model_supplied_byte
             evaluated_world_revision=head.world_revision,
             expected_commit_world_revision=head.world_revision,
             expected_deliberation_revision=head.deliberation_revision,
+            expected_ledger_sequence=head.ledger_sequence,
         ),
     )
     compiled = PerceptionProposalCompiler(

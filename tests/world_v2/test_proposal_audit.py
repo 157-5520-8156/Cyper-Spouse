@@ -10,10 +10,12 @@ from legacy_migration_support import read_head_state_json
 import pytest
 
 from companion_daemon.world_v2.deliberation import (
+    AuthoredCandidateInvocationAudit,
     DeliberationResult,
     ModelResultAudit,
     ModelRoute,
     ModelUsageProvenance,
+    ProviderSubcallAudit,
 )
 from companion_daemon.world_v2.acceptance_manifest import (
     AcceptanceManifestV2,
@@ -25,10 +27,15 @@ from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.errors import ConcurrencyConflict, LedgerIntegrityError
 from companion_daemon.world_v2.projection import InternalAuthorityReader
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
-from companion_daemon.world_v2.proposal_audit_schemas import RecordedModelResultAudit
+from companion_daemon.world_v2.proposal_audit_schemas import (
+    ModelResultRecordedPayload,
+    RecordedModelDecisionContext,
+    RecordedModelResultAudit,
+)
 from companion_daemon.world_v2.proposal_envelope import DecisionProposal
 from companion_daemon.world_v2.recall_audit import (
     CharacterRecallRequest,
+    PrefetchPresentationAudit,
     RecallAuditTrace,
 )
 from companion_daemon.world_v2.recall_index import (
@@ -205,6 +212,7 @@ def _context(
         evaluated_world_revision=1,
         expected_commit_world_revision=commit_world_revision,
         expected_deliberation_revision=deliberation_revision,
+        expected_ledger_sequence=commit_world_revision + deliberation_revision,
     )
 
 
@@ -428,6 +436,373 @@ def test_metered_model_usage_is_bound_through_sqlite_replay_and_cost_gate(tmp_pa
     assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
 
 
+def test_nested_source_review_provider_invocations_are_individually_immutable(
+    tmp_path,
+) -> None:
+    path = tmp_path / "audit-provider-subcalls.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    base = _result()
+    parent_call_id = base.audit.model_call_id
+    subcalls = (
+        ProviderSubcallAudit(
+            purpose="source_review",
+            parent_model_call_id=parent_call_id,
+            model_call_id="model-call:source-review:primary",
+            request_hash=_hash("source-review-primary-request"),
+            model_id="model:review-primary",
+            model_version="2026-07",
+            lane="primary",
+            outcome="exception",
+            failure_code="HTTPStatusError:http_403",
+        ),
+        ProviderSubcallAudit(
+            purpose="source_review",
+            parent_model_call_id=parent_call_id,
+            model_call_id="model-call:source-review:secondary",
+            request_hash=_hash("source-review-secondary-request"),
+            model_id="model:review-secondary",
+            model_version="2026-06",
+            lane="secondary",
+            outcome="winner",
+            response_hash=_hash("source-review-secondary-response"),
+        ),
+    )
+    audited = base.audit.model_copy(
+        update={"provider_subcall_audits": subcalls}
+    )
+    result = base.model_copy(
+        update={"audit": audited, "attempt_audits": (audited,)}
+    )
+
+    committed = ProposalAuditRecorder(ledger=ledger).record(result, _context())
+    projection = ledger.project()
+    assert len(committed.event_ids) == 4
+    assert [audit.model_call_id for audit in projection.model_result_audits] == [
+        parent_call_id,
+        "model-call:source-review:primary",
+        "model-call:source-review:secondary",
+    ]
+    assert projection.model_result_audits[1].parent_model_call_id == parent_call_id
+    assert projection.model_result_audits[2].parent_model_call_id == parent_call_id
+    primary = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[1].audit_json
+    )
+    assert primary.parent_model_call_id == parent_call_id
+    assert primary.attempted_model_id == "model:review-primary"
+    assert primary.request_hash == _hash("source-review-primary-request")
+    assert primary.outcome == "exception"
+    assert primary.failure_code == "HTTPStatusError:http_403"
+    secondary = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[2].audit_json
+    )
+    assert secondary.model_id == "model:review-secondary"
+    assert secondary.request_hash == _hash("source-review-secondary-request")
+    assert secondary.response_hash == _hash("source-review-secondary-response")
+    assert secondary.outcome == "winner"
+    assert projection.model_result_audits[1].deliberation_result_id != result.result_id
+    assert projection.model_result_audits[2].deliberation_result_id != result.result_id
+
+    ledger.close()
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
+    assert [
+        audit.model_call_id for audit in reopened.project().model_result_audits
+    ] == [
+        parent_call_id,
+        "model-call:source-review:primary",
+        "model-call:source-review:secondary",
+    ]
+    assert (
+        reopened.project().model_result_audits[1].parent_model_call_id
+        == parent_call_id
+    )
+
+
+def test_reviewer_technical_failure_is_durable_under_the_authored_candidate(
+    tmp_path,
+) -> None:
+    path = tmp_path / "audit-reviewer-technical-terminal.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    base = _result(metered=True)
+    assert base.audit.usage is not None
+    root_call_id = "model-call:orchestrator:technical-terminal"
+    author_call_id = "model-call:author:technical-terminal"
+    author = AuthoredCandidateInvocationAudit(
+        purpose="primary_initial",
+        model_call_id=author_call_id,
+        request_hash=_hash("author-technical-request"),
+        response_hash=_hash("author-technical-response"),
+        model_id="model:character-author",
+        model_version="2026-07",
+        outcome="validation_unresolved",
+        usage=base.audit.usage,
+    )
+    subcalls = (
+        ProviderSubcallAudit(
+            purpose="source_review",
+            parent_model_call_id=author_call_id,
+            model_call_id="model-call:review:technical-primary",
+            request_hash=_hash("review-technical-primary-request"),
+            model_id="model:review-primary",
+            model_version="2026-07",
+            lane="primary",
+            outcome="winner",
+            response_hash=_hash("review-technical-primary-response"),
+            usage=base.audit.usage,
+        ),
+        ProviderSubcallAudit(
+            purpose="source_review",
+            parent_model_call_id=author_call_id,
+            model_call_id="model-call:review:technical-secondary",
+            request_hash=_hash("review-technical-secondary-request"),
+            model_id="model:review-secondary",
+            model_version="2026-07",
+            lane="secondary",
+            outcome="timeout",
+        ),
+    )
+    audit = ModelResultAudit(
+        model_call_id=root_call_id,
+        model_result_ref=(
+            "model-result:"
+            + _digest(
+                {
+                    "model_call_id": root_call_id,
+                    "response_hash": None,
+                }
+            )
+        ),
+        attempt_id="attempt:audit:review-technical",
+        route=base.audit.route,
+        attempted_model_id="model:character-author",
+        attempted_model_version="2026-07",
+        request_hash=_hash("orchestrator-technical-request"),
+        status="main_exception",
+        failure_code="source_review_exception",
+        slot="primary",
+        outcome="exception",
+        provider_subcall_audits=subcalls,
+        authored_candidate_audits=(author,),
+    )
+    result = DeliberationResult(
+        result_id=(
+            "deliberation:"
+            + _digest(
+                {
+                    "capsule_id": base.capsule_id,
+                    "proposal_hash": None,
+                    "attempt_audits": [audit.model_dump(mode="json")],
+                }
+            )
+        ),
+        capsule_id=base.capsule_id,
+        proposal=None,
+        audit=audit,
+        attempt_audits=(audit,),
+    )
+
+    committed = ProposalAuditRecorder(ledger=ledger).record(result, _context())
+
+    assert len(committed.event_ids) == 4
+    projection = ledger.project()
+    assert [
+        item.model_call_id for item in projection.model_result_audits
+    ] == [
+        root_call_id,
+        author_call_id,
+        "model-call:review:technical-primary",
+        "model-call:review:technical-secondary",
+    ]
+    assert all(
+        item.parent_model_call_id == author_call_id
+        for item in projection.model_result_audits[2:]
+    )
+    top = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[0].audit_json
+    )
+    assert top.status == "main_exception"
+    assert top.failure_code == "source_review_exception"
+    assert top.attempted_model_id == "model:character-author"
+    recorded_author = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[1].audit_json
+    )
+    assert recorded_author.status == "candidate_returned"
+    assert recorded_author.outcome == "returned"
+    assert recorded_author.response_hash == author.response_hash
+    assert recorded_author.usage is not None
+    recorded_reviewer = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[2].audit_json
+    )
+    assert recorded_reviewer.status == "proposal_validated"
+    assert recorded_reviewer.usage is not None
+
+    ledger.close()
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
+    assert len(reopened.project().model_result_audits) == 4
+
+
+def test_provider_subcall_parent_must_match_its_owning_author_attempt() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    base = _result()
+    misbound = ProviderSubcallAudit(
+        purpose="source_review",
+        parent_model_call_id="model-call:another-author",
+        model_call_id="model-call:source-review:misbound",
+        request_hash=_hash("source-review-misbound-request"),
+        model_id="model:review-primary",
+        model_version="2026-07",
+        lane="primary",
+        outcome="winner",
+        response_hash=_hash("source-review-misbound-response"),
+    )
+    audited = base.audit.model_copy(
+        update={"provider_subcall_audits": (misbound,)}
+    )
+    result = base.model_copy(
+        update={"audit": audited, "attempt_audits": (audited,)}
+    )
+
+    with pytest.raises(ValueError, match="strict revalidation"):
+        ProposalAuditRecorder(ledger=ledger).build_events(result, _context())
+
+
+def test_reviewers_may_reference_a_batch_persisted_nonfinal_author_candidate(
+    tmp_path,
+) -> None:
+    path = tmp_path / "audit-candidate-review-lineage.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    base = _result()
+    initial_author = AuthoredCandidateInvocationAudit(
+        purpose="primary_initial",
+        model_call_id="model-call:author:initial",
+        request_hash=_hash("author-initial-request"),
+        response_hash=_hash("author-initial-response"),
+        model_id="model:character-author",
+        model_version="2026-07",
+        outcome="validation_rejected",
+    )
+    reviewers = (
+        ProviderSubcallAudit(
+            purpose="source_review",
+            parent_model_call_id=initial_author.model_call_id,
+            model_call_id="model-call:review:initial",
+            request_hash=_hash("review-initial-request"),
+            model_id="model:reviewer",
+            model_version="2026-07",
+            lane="primary",
+            outcome="winner",
+            response_hash=_hash("review-initial-response"),
+        ),
+        ProviderSubcallAudit(
+            purpose="source_review",
+            parent_model_call_id=base.audit.model_call_id,
+            model_call_id="model-call:review:corrective",
+            request_hash=_hash("review-corrective-request"),
+            model_id="model:reviewer",
+            model_version="2026-07",
+            lane="primary",
+            outcome="winner",
+            response_hash=_hash("review-corrective-response"),
+        ),
+    )
+    audited = base.audit.model_copy(
+        update={
+            "authored_candidate_audits": (initial_author,),
+            "provider_subcall_audits": reviewers,
+        }
+    )
+    result = base.model_copy(
+        update={"audit": audited, "attempt_audits": (audited,)}
+    )
+
+    committed = ProposalAuditRecorder(ledger=ledger).record(result, _context())
+
+    assert len(committed.event_ids) == 5
+    projection = ledger.project()
+    assert [
+        audit.model_call_id for audit in projection.model_result_audits
+    ] == [
+        base.audit.model_call_id,
+        initial_author.model_call_id,
+        "model-call:review:initial",
+        "model-call:review:corrective",
+    ]
+    recorded_initial = RecordedModelResultAudit.model_validate_json(
+        projection.model_result_audits[1].audit_json
+    )
+    assert recorded_initial.parent_model_call_id is None
+    assert recorded_initial.request_hash == initial_author.request_hash
+    assert recorded_initial.response_hash == initial_author.response_hash
+    assert recorded_initial.model_id == initial_author.model_id
+    assert projection.model_result_audits[2].parent_model_call_id == (
+        initial_author.model_call_id
+    )
+    assert projection.model_result_audits[3].parent_model_call_id == (
+        base.audit.model_call_id
+    )
+
+    ledger.close()
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
+    assert [
+        audit.model_call_id for audit in reopened.project().model_result_audits
+    ] == [
+        base.audit.model_call_id,
+        initial_author.model_call_id,
+        "model-call:review:initial",
+        "model-call:review:corrective",
+    ]
+
+
+def test_provider_subcalls_follow_the_complete_main_recovery_lineage() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    recovered = _recovered_result()
+    main, quick = recovered.attempt_audits
+    main = main.model_copy(
+        update={
+            "provider_subcall_audits": (
+                ProviderSubcallAudit(
+                    purpose="source_review",
+                    parent_model_call_id=main.model_call_id,
+                    model_call_id="model-call:source-review:before-recovery",
+                    request_hash=_hash("source-review-before-recovery"),
+                    model_id="model:review-primary",
+                    model_version="2026-07",
+                    lane="primary",
+                    outcome="exception",
+                ),
+            )
+        }
+    )
+    result = recovered.model_copy(
+        update={"attempt_audits": (main, quick)}
+    )
+
+    events = ProposalAuditRecorder(ledger=ledger).build_events(result, _context())
+    assert [event.event_type for event in events] == [
+        "ModelResultRecorded",
+        "ModelResultRecorded",
+        "ModelResultRecorded",
+        "ProposalRecorded",
+    ]
+    assert [
+        event.payload()["model_call_id"] for event in events[:3]
+    ] == [
+        main.model_call_id,
+        quick.model_call_id,
+        "model-call:source-review:before-recovery",
+    ]
+    committed = ProposalAuditRecorder(ledger=ledger).record(result, _context())
+    assert len(committed.event_ids) == 4
+    assert ledger.rebuild().semantic_hash == ledger.project().semantic_hash
+
+
 def test_recall_query_and_results_are_pinned_through_cold_replay(tmp_path) -> None:
     path = tmp_path / "audit-recall.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
@@ -495,6 +870,165 @@ def test_recall_query_and_results_are_pinned_through_cold_replay(tmp_path) -> No
     assert recorded.recall_trace is not None
     assert recorded.recall_trace.result_hash == trace.result_hash
     assert recorded.recall_trace.query.accessibility_seed == "draw:audit:recall"
+
+
+def test_life_character_recall_trace_cannot_change_outer_trigger_or_cursor() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    event = ProposalAuditRecorder(ledger=ledger).build_events(
+        _result(),
+        _context(),
+    )[0]
+    payload = event.payload()
+    audit = RecordedModelResultAudit.model_validate_json(payload["audit_json"])
+    decision_context = RecordedModelDecisionContext(
+        decision_subject_hash="d" * 64,
+        world_revision=1,
+        deliberation_revision=0,
+        ledger_sequence=1,
+    )
+    audit = audit.model_copy(update={"decision_context": decision_context})
+    cursor = RecallCursor(
+        world_revision=decision_context.world_revision,
+        deliberation_revision=decision_context.deliberation_revision,
+        ledger_sequence=decision_context.ledger_sequence,
+    )
+    request = CharacterRecallRequest(query_text="a Character-owned memory query")
+    query = RecallQuery(
+        query_text=request.query_text,
+        cursor=cursor,
+        actor_ref="actor:companion",
+        subject_refs=("actor:companion",),
+        viewer_privacy_ceiling="withhold",
+        at=NOW,
+        accessibility_seed="draw:life-recall-lineage",
+    )
+    query_hash = recall_query_hash(index_version="recall-index:test", query=query)
+    trace = RecallAuditTrace(
+        trigger_ref="trigger:other-life-opportunity",
+        request=request,
+        query=query,
+        query_hash=query_hash,
+        result_hash=recall_result_hash(
+            query_hash=query_hash,
+            cursor=cursor,
+            hit_values=[],
+        ),
+        index_version="recall-index:test",
+        embedding_version="embedding:test",
+        index_cursor=cursor,
+        evaluated_cursor=cursor,
+        hits=(),
+    )
+    life_audit = audit.model_copy(
+        update={
+            "route": audit.route.model_copy(
+                update={
+                    "reason_code": "life_development.character_model",
+                    "router_version": "life-development-router.2",
+                }
+            ),
+            "recall_trace": trace,
+        }
+    )
+    payload["audit_contract"] = "model-result-audit.4"
+    payload["audit_json"] = json.dumps(
+        life_audit.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    payload["audit_hash"] = _hash(payload["audit_json"])
+
+    with pytest.raises(ValueError, match="life recall trace.*outer"):
+        ModelResultRecordedPayload.model_validate(payload)
+
+
+def test_ordered_prefetch_presentations_survive_cold_replay(tmp_path) -> None:
+    path = tmp_path / "ordered-prefetch-audit.sqlite"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    base = _result()
+    cursor = RecallCursor(
+        world_revision=1,
+        deliberation_revision=0,
+        ledger_sequence=1,
+    )
+    request = CharacterRecallRequest(query_text="tea from last week")
+    query = RecallQuery(
+        query_text=request.query_text,
+        cursor=cursor,
+        actor_ref="actor:companion",
+        subject_refs=("actor:companion",),
+        viewer_privacy_ceiling="withhold",
+        at=NOW,
+        accessibility_seed="draw:audit:ordered-prefetch",
+    )
+    query_hash = recall_query_hash(index_version="recall-index:test", query=query)
+    trace = RecallAuditTrace(
+        mode="prefetch",
+        trigger_ref="trigger:audit:1",
+        request=request,
+        query=query,
+        query_hash=query_hash,
+        result_hash=recall_result_hash(
+            query_hash=query_hash,
+            cursor=cursor,
+            hit_values=[],
+        ),
+        index_version="recall-index:test",
+        embedding_version="embedding:test",
+        index_cursor=cursor,
+        hits=(),
+    )
+    presentations = (
+        PrefetchPresentationAudit(
+            phase="initial",
+            model_call_id="model-call:prefetch-initial",
+            trace=trace,
+        ),
+        PrefetchPresentationAudit(
+            phase="recall_followup",
+            model_call_id="model-call:prefetch-followup",
+            trace=trace,
+        ),
+    )
+    audit = base.audit.model_copy(
+        update={
+            # audit.5 uses the ordered presentation sequence as its source of
+            # truth; the legacy singular field must not duplicate the trace.
+            "prefetch_trace": None,
+            "presented_prefetch_traces": presentations,
+        }
+    )
+    result_identity = {
+        "capsule_id": base.capsule_id,
+        "proposal_hash": base.proposal.proposal_hash,
+        "attempt_audits": (audit.model_dump(mode="json"),),
+    }
+    result = base.model_copy(
+        update={
+            "audit": audit,
+            "attempt_audits": (audit,),
+            "result_id": f"deliberation:{_digest(result_identity)}",
+        }
+    )
+    ProposalAuditRecorder(ledger=ledger).record(result, _context())
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    replayed = reopened.rebuild().model_result_audits[0]
+    recorded = RecordedModelResultAudit.model_validate_json(replayed.audit_json)
+
+    assert replayed.audit_contract == "model-result-audit.5"
+    assert tuple(
+        item.model_call_id for item in recorded.presented_prefetch_traces
+    ) == (
+        "model-call:prefetch-initial",
+        "model-call:prefetch-followup",
+    )
+    assert recorded.prefetch_trace is None
+    assert "prefetch_trace" not in json.loads(replayed.audit_json)
 
 
 def test_recovery_records_every_provider_call_then_final_proposal() -> None:
@@ -857,7 +1391,7 @@ def test_v16_sqlite_head_migrates_to_v18_without_forged_audit_indexes(tmp_path) 
     connection.close()
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.44"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.46"
     assert migrated.project().semantic_hash == before.semantic_hash
     assert migrated.project().model_result_audits == ()
 
@@ -898,7 +1432,7 @@ def test_v17_sqlite_head_migrates_to_v18_preserving_proposal_audit(tmp_path) -> 
             ),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.44"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.46"
     assert migrated.project().proposal_audits == before.proposal_audits
     assert migrated.project().acceptance_manifests_v2 == ()
 

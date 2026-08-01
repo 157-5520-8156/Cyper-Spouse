@@ -862,7 +862,7 @@ FIXTURE_ACCEPTANCE_MANIFEST: tuple[FixtureAcceptance, ...] = (
         ("ProposalRecorded", "ActionProviderAccepted"),
         ("no Action after silent", "source-bound expression Action", "provider receipt"),
         (
-            "tests/world_v2/test_qq_c2c_host_migration.py::test_napcat_main_model_can_refuse_every_available_expression_without_action",
+            "tests/world_v2/test_qq_c2c_host_migration.py::test_napcat_main_model_can_choose_silence_without_host_owned_typing",
             "tests/world_v2/test_qq_c2c_host_migration.py::test_napcat_expression_is_selected_by_the_single_main_model_and_reaches_delivery",
             "tests/world_v2/test_http_v2_host_migration.py::test_http_production_profile_fails_closed_when_model_selects_unavailable_reaction",
             "tests/world_v2/test_expression_nontext_acceptance.py::test_nontext_acceptance_rejects_model_envelope_redirecting_reaction_target",

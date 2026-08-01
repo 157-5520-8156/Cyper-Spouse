@@ -8,7 +8,7 @@ acceptance, and dispatch so no nested adapter can restart the clock.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import math
 import time
@@ -16,20 +16,68 @@ import time
 
 Clock = Callable[[], float]
 Sleeper = Callable[[float], Awaitable[None]]
+FIRST_PROVIDER_ENTRY_RESERVE_SECONDS = 0.05
+
+
+@dataclass(slots=True)
+class _TechnicalRecoveryState:
+    """One-shot extension activated only after a real candidate failure."""
+
+    candidate_deadline: float | None = None
+
+
+@dataclass(slots=True)
+class _ValidationRecoveryState:
+    """Truth-boundary extensions keyed by the authored candidate they validate."""
+
+    candidate_deadlines: dict[str, float] = field(default_factory=dict)
+    reselection_deadlines: dict[str, float] = field(default_factory=dict)
+    active_candidate_key: str | None = None
+    active_phase: str | None = None
+
+
+@dataclass(slots=True)
+class _ActiveRecoveryState:
+    lane: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class InteractiveTurnBudgetPolicy:
     """Composition-owned timing policy for one interactive reply."""
 
-    # 12s total gives DeepSeek's real peak-hour completion latency (measured
-    # 5-10s at CN midnight on 07-24) headroom to finish inside the candidate
-    # deadline.  5.5s looked great against stubs but starved every live call,
-    # and a hedge to the same slow provider dies with it; the budget must
-    # cover the provider's actual p95, not the latency we wish it had.
-    total_seconds: float = 12.0
+    # Normal latency is still whatever the winning provider actually takes;
+    # this is only the cancellation ceiling. Live CN-midnight audits moved
+    # beyond the earlier 5-10s sample and repeatedly crossed a 10.8s author
+    # deadline. 18s preserves the fast path while avoiding deterministic
+    # cancellation of a still-progressing official Flash call.
+    total_seconds: float = 18.0
     hedge_after_seconds: float = 2.5
     acceptance_dispatch_reserve_seconds: float = 1.2
+    # One soft ingress-to-first-provider budget for API-external work. QQ's
+    # durable sender-rhythm window consumes part of this same interval; Recall
+    # may use only what remains instead of adding another independent wait.
+    first_provider_entry_seconds: float = 0.5
+    # The configured independent role provider also showed cold completions
+    # above 8s. This window opens only after a real author failure, so raising
+    # the ceiling does not slow an ordinary successful turn.
+    technical_recovery_seconds: float = 12.0
+    # Source review has a measured 22s per-attempt cancellation ceiling. Open
+    # one fixed 46s candidate-local phase before the first dispatch so a real
+    # first timeout and one complete retry both fit with 2s scheduling margin.
+    # The second call is still conditional on an actual first failure, and
+    # neither call can renew this deadline.
+    validation_recovery_seconds: float = 46.0
+    # An explicit unsupported verdict may then require the one doctrine-owned
+    # same-role re-selection, a fresh primary review, and candidate external-
+    # proposition coverage. These are
+    # serial provider calls, so they need a separate one-shot window rather
+    # than competing with the earlier reviewer retry. Eight seconds of bounded
+    # role repair plus the two concurrent review branches fit in 52s when no
+    # provider retries. Each branch may retry one malformed/transport result:
+    # inventory 44s then focused authority 44s is the longest finite chain,
+    # plus 8s repair and scheduling margin. This 100s ceiling exists only
+    # after a hard rejection; it never slows an ordinary successful reply.
+    validation_reselection_seconds: float = 100.0
     clock: Clock = time.monotonic
     sleep: Sleeper = __import__("asyncio").sleep
     wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC)
@@ -39,10 +87,13 @@ class InteractiveTurnBudgetPolicy:
             self.total_seconds,
             self.hedge_after_seconds,
             self.acceptance_dispatch_reserve_seconds,
+            self.first_provider_entry_seconds,
+            self.technical_recovery_seconds,
+            self.validation_recovery_seconds,
+            self.validation_reselection_seconds,
         )
         if any(
-            isinstance(value, bool) or not math.isfinite(value) or value <= 0
-            for value in values
+            isinstance(value, bool) or not math.isfinite(value) or value <= 0 for value in values
         ):
             raise ValueError("interactive turn budget values must be finite and positive")
         if self.hedge_after_seconds >= (
@@ -54,31 +105,44 @@ class InteractiveTurnBudgetPolicy:
         self,
         *,
         processing_started_at: datetime | None = None,
+        ingress_started_at: datetime | None = None,
         marker: Callable[[str], None] | None = None,
     ) -> "InteractiveTurnBudget":
-        """Create one immutable deadline, preserving elapsed durable queue work."""
+        """Create immutable author and first-provider timing deadlines."""
 
         now = self.clock()
-        elapsed = 0.0
-        if processing_started_at is not None:
-            if (
-                processing_started_at.tzinfo is None
-                or processing_started_at.utcoffset() is None
-            ):
-                raise ValueError("processing_started_at must be timezone-aware")
-            elapsed = max(
+        wall_now = self.wall_clock().astimezone(UTC)
+
+        def elapsed_since(value: datetime | None, *, label: str) -> float:
+            if value is None:
+                return 0.0
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{label} must be timezone-aware")
+            return max(
                 0.0,
-                (
-                    self.wall_clock().astimezone(UTC)
-                    - processing_started_at.astimezone(UTC)
-                ).total_seconds(),
+                (wall_now - value.astimezone(UTC)).total_seconds(),
             )
-        started = now - elapsed
+
+        processing_elapsed = elapsed_since(
+            processing_started_at,
+            label="processing_started_at",
+        )
+        ingress_elapsed = elapsed_since(
+            ingress_started_at or processing_started_at,
+            label="ingress_started_at",
+        )
+        started = now - processing_elapsed
         return InteractiveTurnBudget(
             started_at=started,
             deadline=started + self.total_seconds,
             hedge_at=started + self.hedge_after_seconds,
+            first_provider_entry_deadline=(
+                now - ingress_elapsed + self.first_provider_entry_seconds
+            ),
             acceptance_dispatch_reserve_seconds=self.acceptance_dispatch_reserve_seconds,
+            technical_recovery_seconds=self.technical_recovery_seconds,
+            validation_recovery_seconds=self.validation_recovery_seconds,
+            validation_reselection_seconds=self.validation_reselection_seconds,
             clock=self.clock,
             sleep=self.sleep,
             marker=marker,
@@ -92,22 +156,160 @@ class InteractiveTurnBudget:
     started_at: float
     deadline: float
     hedge_at: float
+    first_provider_entry_deadline: float
     acceptance_dispatch_reserve_seconds: float
+    technical_recovery_seconds: float
+    validation_recovery_seconds: float
+    validation_reselection_seconds: float
     clock: Clock
     sleep: Sleeper
     marker: Callable[[str], None] | None = None
+    _technical_recovery: _TechnicalRecoveryState = field(
+        default_factory=_TechnicalRecoveryState,
+        repr=False,
+        compare=False,
+    )
+    _validation_recovery: _ValidationRecoveryState = field(
+        default_factory=_ValidationRecoveryState,
+        repr=False,
+        compare=False,
+    )
+    _active_recovery: _ActiveRecoveryState = field(
+        default_factory=_ActiveRecoveryState,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def candidate_deadline(self) -> float:
+        if self._active_recovery.lane == "validation":
+            candidate_key = self._validation_recovery.active_candidate_key
+            assert candidate_key is not None
+            if self._validation_recovery.active_phase == "reselection":
+                return self._validation_recovery.reselection_deadlines[candidate_key]
+            return self._validation_recovery.candidate_deadlines[candidate_key]
+        if self._active_recovery.lane == "technical":
+            technical_deadline = self._technical_recovery.candidate_deadline
+            assert technical_deadline is not None
+            return technical_deadline
         return self.deadline - self.acceptance_dispatch_reserve_seconds
+
+    @property
+    def author_candidate_deadline(self) -> float:
+        """Return the deadline available to a newly authored candidate.
+
+        A validation extension belongs only to the already-authored bytes that
+        opened it.  A later Deliberation phase or recovery author must never
+        inherit that reviewer-only deadline.  The separate technical-recovery
+        lane does authorize one configured role author, so it remains visible
+        here while active.
+        """
+
+        technical_deadline = self._technical_recovery.candidate_deadline
+        if technical_deadline is not None and technical_deadline > self.clock():
+            return technical_deadline
+        return self.deadline - self.acceptance_dispatch_reserve_seconds
+
+    def begin_author_candidate(self) -> float:
+        """Activate the applicable role-author lane for a new candidate.
+
+        This clears only a previous candidate's validation lane. It neither
+        renews the ordinary deadline nor opens another technical recovery.
+        """
+
+        deadline = self.author_candidate_deadline
+        technical_deadline = self._technical_recovery.candidate_deadline
+        self._active_recovery.lane = (
+            "technical"
+            if technical_deadline is not None
+            and technical_deadline > self.clock()
+            and deadline == technical_deadline
+            else None
+        )
+        return deadline
 
     @property
     def hedge_after(self) -> float:
         return max(0.0, self.hedge_at - self.started_at)
 
     def remaining(self, *, include_reserve: bool = False) -> float:
-        endpoint = self.deadline if include_reserve else self.candidate_deadline
+        recovery_active = self._active_recovery.lane is not None
+        endpoint = self.candidate_deadline
+        if include_reserve:
+            endpoint = (
+                endpoint + self.acceptance_dispatch_reserve_seconds
+                if recovery_active
+                else self.deadline
+            )
         return max(0.0, endpoint - self.clock())
+
+    def author_remaining(self) -> float:
+        """Return time left for authorship without activating or renewing a lane."""
+
+        return max(0.0, self.author_candidate_deadline - self.clock())
+
+    def first_provider_entry_remaining(self) -> float:
+        """Return the unspent ingress-to-first-provider preparation interval."""
+
+        return max(0.0, self.first_provider_entry_deadline - self.clock())
+
+    def begin_technical_recovery(self) -> float | None:
+        """Open the one model-recovery window after an observed candidate failure.
+
+        Deliberation is the sole caller and only invokes this after the primary
+        candidate has actually failed or timed out.  The mutable one-shot cell
+        lets the same budget instance expose the renewed acceptance/dispatch
+        reserve to the host without letting ordinary successful turns exceed
+        their original absolute deadline.
+        """
+
+        if self._technical_recovery.candidate_deadline is not None:
+            return None
+        deadline = self.clock() + self.technical_recovery_seconds
+        self._technical_recovery.candidate_deadline = deadline
+        self._active_recovery.lane = "technical"
+        self.mark("technical_recovery_started")
+        return deadline
+
+    def begin_validation_recovery(self, *, candidate_key: str) -> float | None:
+        """Open one fixed reviewer window for one authored candidate.
+
+        This is deliberately independent from generic role-author recovery.
+        It starts before the first reviewer dispatch and contains that call plus
+        at most one complete retry after a real first failure. The distinct
+        reselection window covers any later doctrine-authorized same-role
+        correction plus final review. Neither phase can grant open-ended
+        authorship, Recall, or a hedge. Different candidates each receive one
+        window so an expired primary review cannot starve a later pinned
+        candidate.
+        """
+
+        if not candidate_key:
+            raise ValueError("validation recovery candidate key is required")
+        if candidate_key in self._validation_recovery.candidate_deadlines:
+            return None
+        deadline = self.clock() + self.validation_recovery_seconds
+        self._validation_recovery.candidate_deadlines[candidate_key] = deadline
+        self._validation_recovery.active_candidate_key = candidate_key
+        self._validation_recovery.active_phase = "review_retry"
+        self._active_recovery.lane = "validation"
+        self.mark("validation_recovery_started")
+        return deadline
+
+    def begin_validation_reselection(self, *, candidate_key: str) -> float | None:
+        """Open the candidate's only correction plus final-review window."""
+
+        if not candidate_key:
+            raise ValueError("validation reselection candidate key is required")
+        if candidate_key in self._validation_recovery.reselection_deadlines:
+            return None
+        deadline = self.clock() + self.validation_reselection_seconds
+        self._validation_recovery.reselection_deadlines[candidate_key] = deadline
+        self._validation_recovery.active_candidate_key = candidate_key
+        self._validation_recovery.active_phase = "reselection"
+        self._active_recovery.lane = "validation"
+        self.mark("validation_reselection_started")
+        return deadline
 
     def fit(
         self,

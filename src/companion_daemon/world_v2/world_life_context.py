@@ -1,17 +1,17 @@
-"""Read-only, source-bound life context for a companion's settled world events.
+"""Read-only, source-bound life context for a companion's lived world.
 
 ``WorldOccurrenceProjection`` is ledger authority, but it is intentionally not
 model input on its own.  This module is the narrow read seam between the two:
-it selects only settled occurrences that can be attributed to the companion
-through either an explicit participant reference or one of the companion-owned
-plans used as a precondition.  It never turns an opaque result reference into
-prose, and it never writes or advances an occurrence.
+it selects settled occurrences that can be attributed to the companion and,
+when an exact Life Development proposal reader is installed, exposes only the
+already-established premise of an active occurrence.  Candidate outcomes stay
+hidden until settlement.  This module never writes or advances an occurrence.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
@@ -19,7 +19,7 @@ from pydantic import Field, model_validator
 from .biographical_lifecycle import BiographicalLifecycleCatalog
 from .life_content import LifeContentCompiler, LifeContentExcerpt
 from .schema_core import FrozenModel, PrivacyClass
-from .schemas import LedgerProjection, ProjectionCursor
+from .schemas import DueWindow, LedgerProjection, ProjectionCursor
 
 
 class WorldLifeSourceBinding(FrozenModel):
@@ -52,6 +52,57 @@ class WorldLifeContextItem(FrozenModel):
     privacy_class: PrivacyClass
     source: WorldLifeSourceBinding
     content: LifeContentExcerpt | None = None
+
+
+class ActiveWorldOccurrencePremise(FrozenModel):
+    """Exact, source-reviewed premise bytes for one active occurrence."""
+
+    content_ref: str = Field(min_length=1, max_length=512)
+    content_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    text: str = Field(min_length=1, max_length=480)
+    truncated: bool
+
+
+class ActiveWorldOccurrenceProposalBinding(FrozenModel):
+    """Exact deliberation-event authority for the model-authored premise."""
+
+    authority_event_ref: str = Field(min_length=1)
+    authority_ledger_sequence: int = Field(ge=1)
+    authority_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ActiveWorldOccurrenceContextItem(FrozenModel):
+    """Current occurrence state without any unresolved outcome material."""
+
+    context_kind: Literal["active_world_occurrence"] = "active_world_occurrence"
+    occurrence_id: str = Field(min_length=1)
+    occurrence_entity_revision: int = Field(ge=2)
+    participant_refs: tuple[str, ...] = Field(min_length=1)
+    location_ref: str | None = Field(default=None, min_length=1)
+    time_window: DueWindow
+    activated_at: datetime
+    status: Literal["active"] = "active"
+    premise: ActiveWorldOccurrencePremise
+    privacy_class: PrivacyClass
+    proposal_source: ActiveWorldOccurrenceProposalBinding
+    source_bindings: tuple[
+        WorldLifeSourceBinding,
+        WorldLifeSourceBinding,
+    ]
+
+
+class ActiveWorldOccurrenceReader(Protocol):
+    """Read one cursor-pinned active premise through immutable authority."""
+
+    def read_active_occurrence(
+        self,
+        *,
+        occurrence_id: str,
+        expected_cursor: ProjectionCursor,
+        actor_ref: str,
+        viewer_privacy_ceiling: PrivacyClass,
+        max_premise_characters: int = 480,
+    ) -> ActiveWorldOccurrenceContextItem | None: ...
 
 
 class ActiveLifeArcContext(FrozenModel):
@@ -118,7 +169,11 @@ class BiographicalWorldContextItem(FrozenModel):
     source_bindings: tuple[WorldLifeSourceBinding, ...] = Field(min_length=1)
 
 
-WorldLifeModelContextItem = WorldLifeContextItem | BiographicalWorldContextItem
+WorldLifeModelContextItem = (
+    WorldLifeContextItem
+    | ActiveWorldOccurrenceContextItem
+    | BiographicalWorldContextItem
+)
 
 
 class WorldLifeContextCompiler:
@@ -128,10 +183,12 @@ class WorldLifeContextCompiler:
         self,
         *,
         life_content: LifeContentCompiler | None = None,
+        active_occurrence_reader: ActiveWorldOccurrenceReader | None = None,
         biography: BiographicalLifecycleCatalog | None = None,
         biography_timezone: ZoneInfo | None = None,
     ) -> None:
         self._life_content = life_content
+        self._active_occurrence_reader = active_occurrence_reader
         self._biography = biography
         self._biography_timezone = biography_timezone
 
@@ -155,24 +212,45 @@ class WorldLifeContextCompiler:
                     projection=projection,
                 ).settled_items
             }
-        owned_plan_ids = {
-            plan.plan_id
-            for plan in projection.plans
-            if plan.owner_actor_ref == actor_ref and plan.authority_origin is not None
-        }
         committed = {
             event.event_id: event for event in projection.committed_world_event_refs
         }
+        active_items: list[ActiveWorldOccurrenceContextItem] = []
         items: list[WorldLifeContextItem] = []
         for occurrence in projection.world_occurrences:
+            if (
+                occurrence.status == "active"
+                and cursor is not None
+                and self._active_occurrence_reader is not None
+                and actor_ref in occurrence.participant_refs
+            ):
+                try:
+                    active = self._active_occurrence_reader.read_active_occurrence(
+                        occurrence_id=occurrence.occurrence_id,
+                        expected_cursor=cursor,
+                        actor_ref=actor_ref,
+                        viewer_privacy_ceiling=viewer_privacy_ceiling,
+                    )
+                except Exception:
+                    # Active life is useful advisory Context, never a reason to
+                    # interrupt the foreground turn. The exact reader itself
+                    # remains fail-closed, and no fallback prose is invented.
+                    active = None
+                if (
+                    active is not None
+                    and active.occurrence_entity_revision
+                    == occurrence.entity_revision
+                    and active.participant_refs == occurrence.participant_refs
+                    and active.location_ref == occurrence.location_ref
+                    and active.time_window == occurrence.time_window
+                    and active.activated_at == occurrence.activated_at
+                    and active.privacy_class == occurrence.visibility
+                ):
+                    active_items.append(active)
+                continue
             if occurrence.status != "settled":
                 continue
-            associated_by_plan = any(
-                ref.removeprefix("plan:") in owned_plan_ids
-                for ref in occurrence.precondition_refs
-                if ref.startswith("plan:")
-            )
-            if actor_ref not in occurrence.participant_refs and not associated_by_plan:
+            if actor_ref not in occurrence.participant_refs:
                 continue
             if (
                 occurrence.settlement_event_ref is None
@@ -221,7 +299,16 @@ class WorldLifeContextCompiler:
         settled = tuple(
             sorted(items, key=lambda item: (-item.settled_at.timestamp(), item.occurrence_id))
         )
-        return ((biography,) if biography is not None else ()) + settled
+        active = tuple(
+            sorted(
+                active_items,
+                key=lambda item: (
+                    -item.activated_at.timestamp(),
+                    item.occurrence_id,
+                ),
+            )
+        )
+        return ((biography,) if biography is not None else ()) + active + settled
 
     def _biographical_item(
         self,
@@ -423,6 +510,10 @@ class WorldLifeContextCompiler:
 
 __all__ = [
     "ActiveLifeArcContext",
+    "ActiveWorldOccurrenceContextItem",
+    "ActiveWorldOccurrencePremise",
+    "ActiveWorldOccurrenceProposalBinding",
+    "ActiveWorldOccurrenceReader",
     "BiographicalWorldContextItem",
     "WorldLifeContextCompiler",
     "WorldLifeContextItem",

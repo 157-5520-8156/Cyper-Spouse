@@ -272,8 +272,86 @@ second truth store, does not flatten mixed feelings into one mood label, and
 keeps each emotional component bound to its accepted Appraisal cause. Local
 semantic advisories may contribute readable weighted candidates only after
 source binding; raw model drafts and operational scheduling verdicts never
-enter this state.
+enter this state. A production-visible turn may finish before its durable
+local Appraisal/Affect follow-up; once that source-bound follow-up is accepted,
+subsequent turns include it here. Local schema correction may ask the same
+model to reselect a valid value, but deterministic code never maps message
+keywords to Affect or invents an emotion-display relation. Its bounded recent
+self-experience view preserves representatives from both immediate World Life
+occurrences and committed Experiences so activity churn cannot erase durable
+personal experience from the character's own attention. The background local
+Appraisal lane receives only logical time, this sourced Current Self State, at
+most four recent dialogue items, and the current Observation; this is a
+model-facing performance projection, while the complete Capsule remains the
+validation and replay authority.
 _Avoid_: Current personality rewrite, emotion-to-expression rule
+
+## Private Turn State
+
+A concise, free-text, role-model-owned account of what is salient to the
+companion immediately before one Expression choice. It is the first field of
+the same model result that selects silence, timing, questions and Expression
+Beats, and its attended source refs must come from that Pinned Turn. It is
+audit material bound into Proposal identity, not hidden chain-of-thought,
+World truth, a behavior category, a reply-mode switch, or a durable memory.
+Attended refs record only what material was available to the character's
+attention; they are not fact evidence and the private summary does not enter a
+semantic truth review. Any external material later selected into visible text,
+a World claim, an Action payload, Memory, Relationship, or another durable
+effect must establish source closure again at that effect-bearing boundary and
+cannot inherit authority from this private state.
+When the character chooses bounded Recall, she forms one Private Turn State
+before requesting it and a new one from the augmented Context before the final
+Expression.
+_Avoid_: Post-hoc rationale, response policy, question quota, motive enum
+
+## Expression Reliability Lifecycle
+
+The durable, effect-once processing state for one inbound Expression choice.
+It is opened and claimed atomically with the Observation, binds each provider
+attempt to its Model Result, and distinguishes a character-authored silent
+Proposal from technical failure. A crash before a model result resumes the
+same failure ordinal: only that live Runtime instance may continue generation
+before its 120-second provider in-flight lease expires, while another Runtime
+waits to reclaim it. Snapshot, Context, or current-self preparation failure is
+itself a source-bound technical Model Result, so it cannot busy-spin an
+unaudited claim. The short ownership lease is independent of terminal
+technical retry deadlines, which remain 10, 30, then 120 minutes; and a
+durable now/later/silent Proposal may be continued exactly by any Runtime
+under CAS and effect-once without regenerating prose. It owns recovery and
+liveness only—it cannot choose whether the character speaks. A candidate
+from an older Observation is atomically superseded when a newer
+user Observation commits if it has not crossed the Action authorization
+boundary; this closes the old lifecycle without manufacturing another attempt.
+An already authorized Action remains under its original dispatch and
+settlement authority. A combined cognition candidate may be reused only under
+the exact originating ModelInput identity;
+if its call id, cursor, Capsule, route, or model-facing Context changes, the
+role model must be invoked again and the new Model Result must retain that
+actual request lineage rather than relabelling cached bytes or usage. Each
+provider invocation—including Recall, correction and reselection—has an
+identity derived from the messages and temperature the provider actually saw;
+follow-up calls retain their parent-call relation. A later cursor also requires
+a newly compiled, source-bound advisory. Technical quick recovery is still a
+full Character Decision over now/later/silent and Expression Beats; the
+Minimal Proposal format is only a lossless representation of the exact
+single-immediate-text subset, never a host-imposed reply policy. The normal
+successful path retains its 12-second budget and 1.2-second
+acceptance/dispatch reserve. Only an observed invalid/exception/timeout or an
+actually elapsed candidate deadline may open one independent, bounded
+eight-second technical-recovery window; it is not a speculative hedge. A
+failed primary correction may still be followed by that configured role-model
+recovery. Because that recovery is a newly authored candidate rather than
+cached primary bytes, it may receive one source/shape correction of its own;
+when the primary already used its correction this is a rare fourth role call.
+It cannot open another recovery author or a fifth call.
+_Avoid_: Forced reply, failure fallback text, silence inference
+
+The provider-visible request may include a compact hard-boundary manifest that
+maps only visible source refs to valid factual claim scopes and states numeric
+or cross-field schema constraints. It is an executable interface description,
+not behavioral advice; proof-only Capsule refs stay hidden and the full
+Capsule remains the Acceptance authority.
 
 ## User Request
 
@@ -387,6 +465,32 @@ The authority layer at which a proposed change belongs: internal state transitio
 
 A versioned, hashed record of a bounded model call, including its purpose, input capsule identity, parsed payload, latency, usage, and failure metadata. Replay reuses it and never silently calls a live model.
 _Avoid_: Unlogged model answer, replay-time inference
+
+## Source Review Qualification
+
+An endpoint/model may enter a strict source-review lane only when its exact
+schema digest has response evidence; sending a request or configuring an
+OpenAI-compatible URL is not qualification. As of 2026-08-01, Inventory V5 is
+release-qualified on both the OpenRouter `openai/gpt-5.4-nano` route (13/14
+exact wires) and the direct `gpt-5.4-mini` route (11/12 exact wires; 10/10
+semantic boundary cases). A qualified topology may therefore use them as one
+serial availability role with 3-second and 8-second attempts and 600-second
+route suppression. Coverage V5 remains dormant and unqualified. The active
+non-exhaustive path is `inventory_v5_guard_then_full_source_review.7`:
+Inventory contributes semantic decomposition only, and the independent RR.3 /
+V7 authority receives those locators and still owns every factual verdict. If
+Inventory is unavailable, the system falls back to full V7 and reports the
+degraded route rather than treating a technical failure as a semantic result.
+Production composition must prove that every possible character-author lane
+has a different exact semantic authority for source review before startup.
+An unqualified or self-reviewing ordinary route is a deployment error, not a
+per-message fallback. When the OpenAI recovery role authors a candidate, both
+possible reviewer transports must still be independently qualified and
+semantically distinct from every author lane. The old non-redundant
+role-reversal topology is no longer production-admissible; inability to prove
+this boundary fails startup before provider clients are allocated.
+_Avoid_: Configuration as evidence, timeout as schema success, Inventory as a
+source verdict, dormant Coverage reported as active
 
 ## Private Impression
 

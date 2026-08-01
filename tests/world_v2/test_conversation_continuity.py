@@ -97,6 +97,66 @@ def test_compile_separates_pending_interaction_from_replied_history_and_memory()
     assert result.rank_overrides == frozenset()
 
 
+def test_selected_dialogue_is_returned_in_causal_sequence_when_timestamps_tie() -> None:
+    """Fast/burst turns must not be regrouped by speaker.
+
+    QQ observations are second-granularity while delivery receipts can carry
+    sub-second timestamps.  Ledger order is therefore the authoritative
+    conversational chronology when several turns share one wall-clock second.
+    """
+
+    first = _dialogue(
+        "first",
+        "第一句用户消息",
+        speaker="counterpart",
+        at=NOW,
+        sequence=100,
+    )
+    first_reply = _dialogue(
+        "first-reply",
+        "第一句角色回复",
+        speaker="companion",
+        at=NOW,
+        sequence=201,
+        acknowledges=("event:dialogue:first",),
+    )
+    second = _dialogue(
+        "second",
+        "第二句用户消息",
+        speaker="counterpart",
+        at=NOW,
+        sequence=300,
+    )
+    second_reply = _dialogue(
+        "second-reply",
+        "第二句角色回复",
+        speaker="companion",
+        at=NOW,
+        sequence=401,
+        acknowledges=("event:dialogue:second",),
+    )
+    current = _dialogue(
+        "current",
+        "第三句用户消息",
+        speaker="counterpart",
+        at=NOW,
+        sequence=500,
+    )
+
+    result = ConversationContinuityCompiler().compile(
+        dialogue=(second_reply, first, current, first_reply, second),
+        trigger_ref="event:dialogue:current",
+    )
+
+    assert [item.dialogue_id for item in result.dialogue] == [
+        first.dialogue_id,
+        first_reply.dialogue_id,
+        second.dialogue_id,
+        second_reply.dialogue_id,
+        current.dialogue_id,
+    ]
+
+
 def test_current_cue_prefetches_only_the_source_bound_associative_memory() -> None:
     earlier = _dialogue(
         "earlier",

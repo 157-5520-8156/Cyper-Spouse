@@ -17,5 +17,8 @@ exec /Users/geoff/.local/bin/mlx_lm.server \
   --chat-template-args '{"enable_thinking":false}' \
   --max-tokens 256 \
   --temp 0.0 \
-  --prompt-cache-size 16 \
+  --decode-concurrency 1 \
+  --prompt-concurrency 1 \
+  --prompt-cache-size 4 \
+  --prompt-cache-bytes 512M \
   --log-level "${LOCAL_APPRAISAL_LOG_LEVEL:-WARNING}"

@@ -1,6 +1,6 @@
 # 沈知栀系统蓝图
 
-更新日期：2026-07-10
+更新日期：2026-07-29
 
 本文是当前运行系统的事实快照。设计目标、缺口和后续验收见
 [`dynamic-loop-design.md`](dynamic-loop-design.md)。每次改变运行时边界、
@@ -10,79 +10,92 @@
 
 沈知栀是一个本地优先、以 QQ 私聊为主要存在方式的陪伴型 daemon。她不是
 SillyTavern 角色卡的附属 UI，也不是单次 API 调用：daemon 是身份、关系、记忆、
-生活节律、消息时机、主动行为与投递确认的唯一权威。
+生活事实、调度机会与投递确认的权威；角色模型拥有消息时机、主动/沉默、态度、
+措辞、模态与消息数量的决定权。两者边界见
+[`ADR 0010`](adr/0010-controlled-high-variance-character-agency.md) 和
+[`ADR 0014`](adr/0014-model-owned-private-turn-state-before-expression.md)。
 
 ```text
 QQ 小号 / NapCat OneBot ─┐
-QQ 官方机器人（可选） ──┼─> 入站适配 -> 合并/时机 -> CompanionEngine
+QQ 官方机器人（可选） ──┼─> 入站适配 -> Observation / reliability lifecycle
 微信（未接入） ──────────┘                         |
                                                   v
-  SQLite: 身份、聊天、出站、情绪、印象、记忆、生活运行时、事件账本
+  World V2 账本/投影 -> Pinned Context + Current Self + Recall
                                                   |
                                                   v
-  上下文编排 -> OpenAI-compatible 聊天模型 -> 文本/表情/图片投递
+  角色模型 -> PrivateTurnState + ExpressionDraft -> 验收 / Action
                                                   |
                                                   v
-  成功/失败确认 -> 状态投影 -> 下一轮生活、时机与主动行为
+  平台投递与回执 -> 世界后果 / 下一轮 Context / 考虑机会
 ```
 
 ## 运行组件
 
 | 组件 | 当前职责 | 权威数据 |
 | --- | --- | --- |
-| `napcat_cli.py` | 接收 OneBot 事件、私聊白名单、群聊默认忽略、建立回复目标 | 入站事件与目标 QQ 号 |
-| `QQMessageCoalescer` | 连续消息合并、延迟、未读、打断、分段发送、短追问取消 | 当前会话任务 |
-| `CompanionEngine` | 状态变更、记忆、上下文、模型调用、投递确认 | 业务编排 |
-| `life_runtime.py` | 当天私有计划、正在进行的活动、手机注意力、短期事件余波、慢性状态投影 | `life_runtime` / `life_day_plan*` |
-| `proactive_scheduler.py` | 带抖动的后台唤醒、生活推进、主动/生活事件调度 | 调度时间 |
-| `QQDelivery` | 在官方 QQ 与 NapCat 小号间选择实际出站通道 | `QQ_ADAPTER` 配置 |
-| FastAPI 面板 | 知栀小屋、状态、上下文、生活运行时检查与受控调节 | 只读/调试入口 |
+| `qq_c2c_onebot_app.py` / `QQC2CHost` | OneBot 入站、平台身份、运输批次、QQ Action 投递 | 平台 Observation 与真实回执 |
+| `WorldRuntime` | 账本 UoW、CAS、恢复、Projection、Action 与 effect-once | World V2 不可变事件和 head |
+| `semantic_chat_composition.py` / `Deliberation` | 组装生产模型路径、校验 Proposal、记录 ModelResult | Pinned Turn 与已接受 Proposal |
+| `ledger_context_resolver.py` / `recall_runtime.py` | 构建来源绑定 Context、自动预取与角色选择性 Recall | Capsule、source refs 与 recall trace |
+| `LifeEcologyRuntime` | 消费真实时钟/情境事件，推进生活并打开可重放考虑机会 | ecology schedule 与 trigger lifecycle |
+| `SocialActionWorker` / media runtime | 执行已授权文字、Reaction、Sticker、媒体等 Action | Action 状态、外部结果与回执 |
+| FastAPI 面板 | World V2 状态、上下文与可靠性健康检查 | 只读投影和诊断指标 |
 
 ## 数据模型与所有权
 
 | 数据 | 用途 | 不能做什么 |
 | --- | --- | --- |
-| `messages` | 已发生的入站/已确认出站聊天 | 不能把未成功发送的内容当历史 |
-| `outbox_messages` | 回复和主动消息的 planned/delivered/failed 状态 | 不能绕过投递确认 |
-| `MoodState` | 情绪、亲密、信任、边界、印象、未读、关系阶段 | 不直接拼成公开内心独白 |
-| `memories` / self-core | 经过筛选的长期事实、共同事件、偏好与自我核心 | 不把临时调度痕迹当事实注入 |
-| `life_runtime` | 当前活动、基础/合成注意力、手机状态、用户事件余波、慢性影响 | 不凭空替代已确认的生活事件 |
-| `life_runtime_events` | 已进入的活动、私有生活事件、是否已分享以及用户对日常造成的影响 | 不是公开聊天记录，也不能包含未来计划 |
-| `life_day_plans` / `life_day_plan_items` | 当天尚未发生与已激活的私有日程候选 | 不是记忆，不能直接当成她已经做过的事 |
-| `proactive_delivery` | 她主动发出的普通消息与生活分享 | 用户下一条可被识别为反馈 |
-| `social_tasks` | 延迟回复等有时效的社交事务：原消息、原因、到期、认领与完成 | 不把取消/失败的任务当成已发生的对话 |
+| `world_events` / `world_snapshots` | 不可变事实、授权、结果、Projection 恢复与前缀证明 | 不改写历史事件或跳过 CAS/hash |
+| Observation / dialogue projection | 已发生入站与已确认送达的出站聊天 | 不把未成功发送的草稿当共同历史 |
+| Expression lifecycle / ModelResult audit | 每轮 claim、attempt、真实 provider identity、Proposal 与技术失败 | 不把失败伪装成角色沉默或本地回复 |
+| Action authorization / settlement | `now/later`、多 Beat、媒体和工具的授权、执行、失败、未知与取消 | 不绕过权限、effect-once 或真实回执 |
+| Character/Affect/relationship/life projections | 来源绑定的当前人格、情绪、关系、生活与经历 | 不直接编译成语气、追问、沉默或主动决定 |
+| Memory / Thread / Commitment / Expectation | 可召回事实与跨轮未完状态 | 不从无来源草稿生成事实或永久续期 |
+| Life Ecology / social initiative schedule | 时钟、情境刺激、ambient 机会、重试与退避 | 只安排考虑机会，不生成动机、台词或发送结论 |
 
 ## 当前主要行为链
 
 ### 用户发来消息
 
-1. 适配器去重并合并短时间内的连续输入。
-2. 生活运行时根据当前活动、手机状态、消息类型和通知数决定立即看、延后看或被第二条消息唤醒。
-3. 引擎记录互动事件，更新情绪、关系、印象、未回答问题、记忆和附件洞察。
-4. 用户事件可形成有时效的生活余波；统一生活投影把持久状态转换成当天的注意力轨迹。
-5. 上下文编排器选择当前意图、焦点、禁止误用的旧话、相关记忆、生活状态与回复策略。
-6. 模型生成后经过自然度、分段、图片/表情与安全门控。
-7. 只有投递成功才写入出站历史，并让表达后的情绪和生活状态回落。
+1. 适配器按平台事件身份去重，并用有上限的运输时间窗合并连续输入；不解析内容来决定
+   哪一句值得回复。
+2. 入站 Observation 与 expression reliability lifecycle 原子落账。平台未连接、手机真实
+   不可达或活动尚未提供考虑机会可以延后观察，但消息关键词不能替角色作语义决定。
+3. 上下文编排器提供当前 Observation、有来源的近期对话/记忆/生活状态、Current Self、
+   可用能力与硬边界，不提供回复菜单、提问预算或风格指令。
+4. 角色模型先形成 `PrivateTurnState`，必要时选择性 Recall，再选择
+   `now / later / silent`、单条/多条及文字/Reaction/Sticker 等表达；验收只守结构、
+   事实来源、隐私、安全、权限与外部效果边界。
+5. Appraisal/Affect 等耐久后处理独立接受并进入后续 Current Self；失败不能中断已合法
+   的当前表达，也不能由本地关键词补写。
+6. 只有投递成功才写入出站历史；失败、未知和取消都按 Action 回执结算。
 
-延迟回复先进入 `social_tasks.reply_later`，再由在线合并器按时处理。若适配器重启，
-主动调度器只接管超过两分钟仍未处理的任务；新用户消息会取消旧任务并进入新的合并轮次。
-用户的脆弱表达还会生成 `social_tasks.comfort_followup`：她先当下回应，再在合适的
-时间把关心作为主动候选；用户先回来则取消，只有成功投递才关闭。
+角色选择 `later` 时，系统把已接受的表达编译为有稳定身份、来源、到期与终态的 Action，
+重启后按 effect-once 恢复。新用户 Observation 原子终结尚未越过 Action 授权边界的旧
+cognition，再让角色依据新 Context 判断；系统不因“脆弱”“问句”或其他消息标签自动
+创建关心、追问或补回任务。
 
 官方 QQ 网关偶发以不同事件 ID 重投同一条用户消息时，适配器还会按“同一用户、
 同一文本、1.5 秒内”做窄窗口抑制；这只防止网关重投，不会吞掉数秒后用户有意重复
-发送的话。早期关系中的“宝宝/宝贝/老婆”等恋人式称呼会被记录为过早亲密，进入
-克制边界状态，也不会再在这轮回复之后追加发散消息。
+发送的话。称呼、语气、引用和上下文作为原始 InteractionEvidence 提供给模型 Appraisal；
+系统不靠称呼词表写入 guarded/hurt，也不据此禁止多 Beat 或后续主动考虑。
 
 ### 她主动分享或主动找人
 
-1. 调度器推进当天日计划与生活运行时，并读取时间、关系、情绪、冷却、历史触发器和未回应数量。
-2. 当前活动（睡眠、高专注）可阻止不合时宜的外发。
-3. 主动触发器和模型共同决定是否发送；预算、平台能力和投递失败均可阻止落地。
-4. 成功发送写入主动投递记录，随后进入“期待反馈”状态。
-5. 用户及时、温和、忙碌、拒斥或长期不回应，都会回流到安全感、回应印象、主动性、下一次冷却和生活轨迹。
+1. 调度器根据已提交的情境变化或 ambient 节奏打开一次可重放的考虑机会。
+2. 角色模型看到有来源的活动、可用性、关系、Affect、经历、Thread 与 Commitment，
+   自行选择 `now / later / silent`；深夜、忙碌和关系状态是情境，不是系统否决器。
+3. 确定性代码只验证事实来源、预算、平台能力、隐私/安全与 Action 权限；投递失败按
+   回执结算，不能被伪装成角色沉默。
+4. 成功发送写入主动投递记录；只有角色 Proposal 明确建立且来源合法的
+   ResponseExpectation 才进入等待投影。
+5. 用户后续回应作为新 Observation，由同轮 cognition/Appraisal 结合原 expectation 与
+   当前世界判断其意义；系统不按及时、温和、忙碌、拒斥等标签自动改写关系、主动性或
+   下一轮态度。
 
-活动结束时可偶尔产生小型私有事件；它先存在于内部账本，之后的生活分享只可从未分享事件中选择。没有候选事件时跳过分享，不能让模型从活动标签临场编一段经历；外发文本只能复用该事件，不得补写地点、人物、时间或结果。消息发送失败不会消耗该事件，也不会把它写成共同聊天历史。
+生活模型可从当前世界提出并结算私有事件；只有已提交经历能支撑关于人物、地点、时间与
+结果的生活 claim。角色即使没有可分享经历，仍可选择不含外部事实的自然表达；系统不能
+用活动标签临场补写经历。消息发送失败不会把草稿写成共同聊天历史。
 
 ## 已接入的平台
 
@@ -92,7 +105,10 @@ QQ 官方机器人（可选） ──┼─> 入站适配 -> 合并/时机 -> Co
 
 ## 模型与视觉边界
 
-- 聊天模型为 OpenAI-compatible 配置；模型可以替换，但 daemon 的状态、记忆、预算和工具确认不得交给模型自行决定。所有文本在投递前统一经过舞台词、重复问句与人物地点一致性清理；例如知栀不能把用户所在的成都说成自己的所在地。
+- 聊天模型为 OpenAI-compatible 配置；模型可以替换，但 daemon 的事实、记忆来源、预算、
+  外部 Action 权限和投递确认不得交给模型自行改写。系统不统一清理舞台词、重复问句，
+  也不以问号配额或助手腔禁句改写角色表达；人物、地点、时间和共同历史等事实 claim
+  必须通过同一 Pinned Context 的来源闭包，不合法时由同一角色模型受约束重选。
 - 图片理解/转写/生成是可选能力，受预算闸门和关系边界控制。
 - 视觉身份当前是参考集与 visual bible；LoRA/FaceID 尚未训练，训练前需要通过数据集与远端 GPU 环境审查。
 - 本地面板的像素小屋不是对话事实来源。`_scene_projection(...)` 将 daemon 已有的活动、手机注意力、情绪与未完成社交事务投影为 `location/action/expression/time_of_day`；前端只按这个契约做寻路与动作渲染，不能反向改写生活账本，也不能把计划项演成已发生事实。当前小屋是“等距背景 + 独立角色层”的观察面板，不是实体化游戏场景；实体化、碰撞、遮挡、动作库与多场景扩展已延期记录在 [`visual-home-roadmap.md`](visual-home-roadmap.md)。场景素材的来源与许可见 `THIRD_PARTY_NOTICES.md`。

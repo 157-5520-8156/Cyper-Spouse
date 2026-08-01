@@ -21,6 +21,9 @@ _MAX_EVENTS_PER_KIND = 20_000
 # One deque of unix timestamps per counter kind.  Kinds are a closed set so a
 # typo cannot silently create a new dashboard field.
 _KINDS = (
+    # A provider positively acknowledged one user-visible dispatch.  This is
+    # weaker than evidence that the user could actually see the reply.
+    "dispatch_acks",
     # One inbound turn produced an authorized visible reply (denominator).
     "visible_replies",
     # A local expression failsafe (canned acknowledgement or intent-bounded
@@ -30,6 +33,8 @@ _KINDS = (
     "claim_repair",
     # One corrective retry repaired a non-claim structural draft violation.
     "shape_repair",
+    # One semantic factual rejection caused a same-role full re-selection.
+    "source_closure_reselection",
     # One claim-free boundary line was chosen for an unverifiable world probe.
     "claim_free",
     # The configured backup provider produced the reply after a main failure.
@@ -59,6 +64,10 @@ def record_visible_reply() -> None:
     _record("visible_replies")
 
 
+def record_dispatch_ack() -> None:
+    _record("dispatch_acks")
+
+
 def record_failsafe() -> None:
     _record("failsafe")
 
@@ -69,6 +78,10 @@ def record_claim_repair() -> None:
 
 def record_shape_repair() -> None:
     _record("shape_repair")
+
+
+def record_source_closure_reselection() -> None:
+    _record("source_closure_reselection")
 
 
 def record_claim_free_reply() -> None:
@@ -93,11 +106,13 @@ def reliability_snapshot() -> dict[str, object]:
     return {
         "window_hours": 24,
         "since": _process_started_at.isoformat(),
+        "dispatch_acks_24h": counts["dispatch_acks"],
         "visible_replies_24h": visible,
         "failsafe_24h": failsafe,
         "failsafe_rate_24h": (round(failsafe / visible, 4) if visible else None),
         "claim_repair_24h": counts["claim_repair"],
         "shape_repair_24h": counts["shape_repair"],
+        "source_closure_reselection_24h": counts["source_closure_reselection"],
         "claim_free_24h": counts["claim_free"],
         "backup_recovery_24h": counts["backup_recovery"],
     }
@@ -115,8 +130,10 @@ __all__ = [
     "record_backup_recovery",
     "record_claim_free_reply",
     "record_claim_repair",
+    "record_dispatch_ack",
     "record_failsafe",
     "record_shape_repair",
+    "record_source_closure_reselection",
     "record_visible_reply",
     "reliability_snapshot",
     "reset_for_tests",

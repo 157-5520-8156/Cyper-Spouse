@@ -1,8 +1,17 @@
 # 注意力读延迟（Attention Read Delay）——设计评估与结论
 
 - 日期：2026-07-20
-- 状态：**仅设计文档，不实现**（本轮交付第 1/2 层：attention_view 纯投影推导 + later/silent 提示词激活；读延迟层经评估与自适应节奏保持、快应答存在复杂交互，按任务判据只交付设计）
-- 相关：`src/companion_daemon/world_v2/attention_view.py`（第 1 层）、`docs/design/…`（本文件）、`qq_c2c_host.py`（未改动）
+- 状态：**已否决，仅保留为历史反例，不得实现**
+- 否决依据：`docs/adr/0010-controlled-high-variance-character-agency.md` 与
+  `docs/adr/0014-model-owned-private-turn-state-before-expression.md`
+
+> 本文以下旧设计用时段、活动类别、情绪阈值和消息关键词推导“是否看见手机”及回复
+> 时机，属于宿主替角色作语义决定；其中“手机扣着”“看到通知先放着”等内容也没有
+> World 事实来源。生产路径已移除这套 `attention_view` 投影。当前模型只接收来源明确的
+> pinned time、活动/availability 与 Affect 原始环境，并在 `PrivateTurnState` 中自行决定
+> 注意、时机、表达或沉默。历史 V2 Attention schema/reducer 仅为重放兼容保留，仍无生产
+> producer。未来若建立“未读/已读”事实，必须由具有事实权限的角色/平台证据链产生，不能
+> 恢复本文的 activity/emotion → phone/reply 矩阵。
 
 ## 1. 目标
 

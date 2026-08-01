@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
@@ -10,7 +11,25 @@ from pydantic import Field, model_validator
 from .expression_payload_store import ImmutableExpressionPayloadStore
 from .ledger import LedgerPort
 from .schema_core import FrozenModel, PrivacyClass
-from .schemas import LedgerProjection, Observation
+from .schemas import (
+    CommittedWorldEventRef,
+    ExecutionReceipt,
+    LedgerProjection,
+    Observation,
+)
+
+
+_DIALOGUE_SEQUENCE_SCALE = 100
+
+
+def dialogue_causal_sequence(*, world_revision: int, position: int = 0) -> int:
+    """Map ledger authority plus an in-plan beat position onto one total order."""
+
+    if world_revision < 1:
+        raise ValueError("dialogue world revision must be positive")
+    if not 0 <= position < _DIALOGUE_SEQUENCE_SCALE:
+        raise ValueError("dialogue position exceeds sequence scale")
+    return world_revision * _DIALOGUE_SEQUENCE_SCALE + position
 
 
 class DialogueSourceClaim(FrozenModel):
@@ -22,12 +41,22 @@ class DialogueSourceClaim(FrozenModel):
 class RecentDialogueItem(FrozenModel):
     dialogue_id: str = Field(min_length=1)
     speaker: Literal["counterpart", "companion"]
+    # The role label is convenient for presentation, but it cannot preserve
+    # whose report an old turn contains.  Production records the exact actor
+    # so recall can distinguish "the counterpart told me X" from a companion
+    # Experience.  The optional default keeps historical in-memory fixtures
+    # and replayed compatibility packets readable.
+    speaker_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude_if=lambda value: value is None,
+    )
     text: str = Field(min_length=1, max_length=4_096)
     occurred_at: datetime
     delivery_state: Literal["observed", "provider_accepted", "delivered"]
     sequence: int = Field(ge=1)
     privacy_class: PrivacyClass = "private"
-    source_claims: tuple[DialogueSourceClaim, ...] = Field(min_length=1, max_length=5)
+    source_claims: tuple[DialogueSourceClaim, ...] = Field(min_length=1, max_length=6)
     acknowledges_observation_event_refs: tuple[str, ...] = Field(
         default=(), max_length=4
     )
@@ -59,6 +88,14 @@ class RecentDialogueItem(FrozenModel):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class RecentDialogueCompilation:
+    """Bounded visible text plus full effect-once acknowledgement authority."""
+
+    dialogue: tuple[RecentDialogueItem, ...]
+    acknowledged_observation_event_refs: frozenset[str]
+
+
 class RecentDialogueCompiler:
     """Compile recent inbound text and only provider-visible accepted expressions."""
 
@@ -85,6 +122,21 @@ class RecentDialogueCompiler:
         subject_refs: frozenset[str],
         max_user_items: int | None = None,
     ) -> tuple[RecentDialogueItem, ...]:
+        return self.compile_with_acknowledgements(
+            projection=projection,
+            actor_ref=actor_ref,
+            subject_refs=subject_refs,
+            max_user_items=max_user_items,
+        ).dialogue
+
+    def compile_with_acknowledgements(
+        self,
+        *,
+        projection: LedgerProjection,
+        actor_ref: str,
+        subject_refs: frozenset[str],
+        max_user_items: int | None = None,
+    ) -> RecentDialogueCompilation:
         user_limit = self._max_user if max_user_items is None else max_user_items
         if not self._max_user <= user_limit <= 64:
             raise ValueError("recent dialogue candidate window is invalid")
@@ -131,10 +183,17 @@ class RecentDialogueCompiler:
                 RecentDialogueItem(
                     dialogue_id=f"dialogue:observation:{observation.observation_id}",
                     speaker="counterpart",
+                    speaker_ref=observation.actor,
                     text=observation.text,
                     occurred_at=observation.received_at,
                     delivery_state="observed",
-                    sequence=event_ref.world_revision,
+                    # Observation timestamps are only second-granularity on
+                    # some platform paths.  Use the committed ledger revision
+                    # as the primary conversational order and reserve the
+                    # low digits for multi-beat replies.
+                    sequence=dialogue_causal_sequence(
+                        world_revision=event_ref.world_revision
+                    ),
                     source_claims=(self._claim(event_ref),),
                 )
             )
@@ -146,6 +205,16 @@ class RecentDialogueCompiler:
         stored = {item.payload_ref: item for item in projection.stored_message_payloads}
         descriptors = {item.payload_ref: item for item in projection.expression_payload_descriptors}
         receipts = {item.action_id: item for item in projection.execution_receipts}
+        historically_visible_action_ids = frozenset(
+            item.action_id
+            for item in projection.execution_receipts
+            if item.observed_state in {"provider_accepted", "delivered"}
+        )
+        historically_delivered_action_ids = frozenset(
+            item.action_id
+            for item in projection.execution_receipts
+            if item.observed_state == "delivered"
+        )
         proposal_audits = {
             item.proposal_id: item for item in projection.proposal_audits
         }
@@ -188,6 +257,33 @@ class RecentDialogueCompiler:
                     "action_id": manifest.action_id,
                 }],
             ))
+        candidate_observation_event_refs = frozenset(
+            claim.authority_event_ref
+            for item in inbound
+            for claim in item.source_claims
+        )
+        acknowledged_observation_event_refs = frozenset(
+            acknowledged_event_ref
+            for (
+                _acceptance_id,
+                plan_id,
+                acceptance_event_ref,
+                acknowledged_event_ref,
+                beats,
+            ) in accepted_expressions
+            if acknowledged_event_ref is not None
+            and acknowledged_event_ref in candidate_observation_event_refs
+            and acknowledged_event_ref in refs
+            and refs[acknowledged_event_ref].event_type == "ObservationRecorded"
+            and acceptance_event_ref in refs
+            and plan_id in plans
+            and any(
+                isinstance(beat.get("action_id"), str)
+                and (action := actions.get(str(beat["action_id"]))) is not None
+                and action.action_id in historically_visible_action_ids
+                for beat in beats
+            )
+        )
         # Select a small recent manifest window before proving delivery
         # receipts.  Manifests are already bound to an acceptance event in
         # the projection; sorting by that committed revision retains the
@@ -207,16 +303,41 @@ class RecentDialogueCompiler:
             for beat in beats
             if isinstance(beat.get("action_id"), str)
         }
-        receipt_events: dict[str, object] = {}
+        receipt_events: dict[
+            str, tuple[CommittedWorldEventRef, ExecutionReceipt]
+        ] = {}
+        first_visible_receipts: dict[
+            str, tuple[CommittedWorldEventRef, ExecutionReceipt]
+        ] = {}
         for ref in projection.committed_world_event_refs:
             if ref.event_type != "ExecutionReceiptRecorded":
                 continue
             located = self._ledger.lookup_event_commit(ref.event_id)
             raw = located[0].payload().get("receipt") if located is not None else None
-            receipt_id = raw.get("receipt_id") if isinstance(raw, dict) else None
-            action_id = raw.get("action_id") if isinstance(raw, dict) else None
-            if isinstance(receipt_id, str) and action_id in candidate_action_ids:
-                receipt_events[receipt_id] = ref
+            try:
+                # Ledger JSON necessarily represents tuples and datetimes as
+                # arrays and strings.  Parse that JSON representation before
+                # applying the frozen receipt contract.
+                recorded_receipt = ExecutionReceipt.model_validate(raw, strict=False)
+            except ValueError:
+                continue
+            if recorded_receipt.action_id not in candidate_action_ids:
+                continue
+            receipt_events[recorded_receipt.receipt_id] = (ref, recorded_receipt)
+            if recorded_receipt.observed_state not in {
+                "provider_accepted",
+                "delivered",
+            }:
+                continue
+            previous_visible = first_visible_receipts.get(recorded_receipt.action_id)
+            if (
+                previous_visible is None
+                or ref.world_revision < previous_visible[0].world_revision
+            ):
+                first_visible_receipts[recorded_receipt.action_id] = (
+                    ref,
+                    recorded_receipt,
+                )
         for (
             acceptance_id,
             plan_id,
@@ -239,17 +360,23 @@ class RecentDialogueCompiler:
                     continue
                 action = actions.get(action_id)
                 receipt = receipts.get(action_id)
+                if action is None:
+                    continue
+                first_visible_receipt = first_visible_receipts.get(action_id)
+                if first_visible_receipt is None:
+                    continue
+                visible_receipt_event_ref, visible_receipt = first_visible_receipt
+                receipt_event = (
+                    receipt_events.get(receipt.receipt_id)
+                    if receipt is not None
+                    else None
+                )
+                delivery_refs = [visible_receipt_event_ref]
                 if (
-                    action is None
-                    or receipt is None
-                    or action.state not in {"provider_accepted", "delivered"}
-                    or receipt.observed_state not in {"provider_accepted", "delivered"}
+                    receipt_event is not None
+                    and receipt_event[0].event_id != visible_receipt_event_ref.event_id
                 ):
-                    continue
-                receipt_event_ref = receipt_events.get(receipt.receipt_id)
-                if receipt_event_ref is None:
-                    continue
-                delivery_refs = [receipt_event_ref]
+                    delivery_refs.append(receipt_event[0])
                 if action.state == "delivered":
                     terminal = next(
                         (
@@ -300,10 +427,18 @@ class RecentDialogueCompiler:
                     RecentDialogueItem(
                         dialogue_id=f"dialogue:expression:{plan_id}:{beat_id}",
                         speaker="companion",
+                        speaker_ref=actor_ref,
                         text=text,
-                        occurred_at=receipt.received_at,
-                        delivery_state=receipt.observed_state,
-                        sequence=acceptance.world_revision * 100 + position,
+                        occurred_at=visible_receipt.received_at,
+                        delivery_state=(
+                            "delivered"
+                            if action_id in historically_delivered_action_ids
+                            else visible_receipt.observed_state
+                        ),
+                        sequence=dialogue_causal_sequence(
+                            world_revision=visible_receipt_event_ref.world_revision,
+                            position=position,
+                        ),
                         source_claims=tuple(
                             sorted(
                                 (
@@ -331,7 +466,16 @@ class RecentDialogueCompiler:
                     )
                 )
         companion = sorted(companion, key=lambda item: item.sequence)[-self._max_companion :]
-        return tuple(sorted((*inbound, *companion), key=lambda item: item.sequence, reverse=True))
+        return RecentDialogueCompilation(
+            dialogue=tuple(
+                sorted(
+                    (*inbound, *companion),
+                    key=lambda item: item.sequence,
+                    reverse=True,
+                )
+            ),
+            acknowledged_observation_event_refs=acknowledged_observation_event_refs,
+        )
 
     @staticmethod
     def _claim(ref) -> DialogueSourceClaim:  # type: ignore[no-untyped-def]
@@ -342,4 +486,10 @@ class RecentDialogueCompiler:
         )
 
 
-__all__ = ["DialogueSourceClaim", "RecentDialogueCompiler", "RecentDialogueItem"]
+__all__ = [
+    "DialogueSourceClaim",
+    "RecentDialogueCompilation",
+    "RecentDialogueCompiler",
+    "RecentDialogueItem",
+    "dialogue_causal_sequence",
+]

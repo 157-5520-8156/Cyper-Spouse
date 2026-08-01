@@ -29,6 +29,10 @@ from companion_daemon.world_v2.memory_retrieval import (
     MemoryRetrievalItem,
     MemorySourceExcerpt,
 )
+from companion_daemon.world_v2.life_content import (
+    LifeContentExcerpt,
+    RecentExperienceContextItem,
+)
 from companion_daemon.world_v2.recent_dialogue import (
     DialogueSourceClaim,
     RecentDialogueItem,
@@ -49,7 +53,6 @@ from companion_daemon.world_v2.schemas import (
     CharacterCoreValues,
     ExperienceOccurrenceSettlementBinding,
     ExperienceOrigin,
-    ExperienceProjection,
     ExperienceValues,
     FactProjection,
     MemoryCandidateProjection,
@@ -1178,7 +1181,7 @@ def _character_core_bound():
     )
 
 
-def _experience(index: int) -> ExperienceProjection:
+def _experience(index: int) -> RecentExperienceContextItem:
     values = ExperienceValues(
         summary_ref=f"content:experience:{index}",
         summary_payload_hash=hashlib.sha256(f"summary:{index}".encode()).hexdigest(),
@@ -1209,7 +1212,7 @@ def _experience(index: int) -> ExperienceProjection:
         policy_refs=("policy:experience-v1",),
         accepted_event_ref=f"event:experience:{index}",
     )
-    return ExperienceProjection(
+    return RecentExperienceContextItem(
         experience_id=f"experience:{index}",
         semantic_fingerprint=experience_semantic_fingerprint(
             values=values,
@@ -1217,31 +1220,49 @@ def _experience(index: int) -> ExperienceProjection:
         ),
         values=values,
         origin=origin,
+        content=LifeContentExcerpt(
+            content_id=f"life-content:experience:{index}",
+            content_kind="experience_summary",
+            content_ref=values.summary_ref,
+            content_payload_hash=values.summary_payload_hash,
+            text=f"第 {index} 段经过权威绑定的近期自身经历。",
+            truncated=False,
+            privacy_class=values.privacy_class,
+            source_entity_id=f"experience:{index}",
+            source_entity_revision=1,
+            authority_event_ref=origin.accepted_event_ref,
+            authority_world_revision=7,
+            authority_payload_hash=HASH_B,
+            descriptor_event_ref=f"event:life-content:experience:{index}",
+            descriptor_world_revision=7,
+            descriptor_payload_hash=hashlib.sha256(
+                f"descriptor:{index}".encode()
+            ).hexdigest(),
+        ),
     )
 
 
 def _experience_bound(
-    experiences: tuple[ExperienceProjection, ...],
+    experiences: tuple[RecentExperienceContextItem, ...],
     *,
     ranks: tuple[int, ...],
 ) -> ResolvedSlice:
     metadata = []
     for item, rank in zip(experiences, ranks, strict=True):
-        settlement = item.values.source_bindings[0]
         bindings = (
             ResolvedSourceBinding(
                 source_kind="committed_event",
                 authority_type="ExperienceCommitted",
-                ref=item.origin.accepted_event_ref,
-                source_world_revision=7,
-                immutable_hash=HASH_B,
+                ref=item.content.authority_event_ref,
+                source_world_revision=item.content.authority_world_revision,
+                immutable_hash=item.content.authority_payload_hash,
             ),
             ResolvedSourceBinding(
                 source_kind="committed_event",
-                authority_type="WorldOccurrenceSettled",
-                ref=settlement.authority_event_ref,
-                source_world_revision=settlement.authority_world_revision,
-                immutable_hash=settlement.authority_payload_hash,
+                authority_type="LifeContentRecorded",
+                ref=item.content.descriptor_event_ref,
+                source_world_revision=item.content.descriptor_world_revision,
+                immutable_hash=item.content.descriptor_payload_hash,
             ),
         )
         metadata.append(
@@ -1348,9 +1369,10 @@ def test_global_compaction_keeps_one_source_bound_recent_self_experience() -> No
     model_view = json.loads(capsule.model_content_json)
     retained = model_view["slices"]["recent_experiences"]["items"][0]
     assert retained["item_ref"] == "experience:0"
+    assert retained["value"]["content"]["text"] == "第 0 段经过权威绑定的近期自身经历。"
     assert set(model_view["slices"]["recent_experiences"]["source_refs"]) == {
         "event:experience:0",
-        "event:occurrence:settled:0",
+        "event:life-content:experience:0",
     }
 
 

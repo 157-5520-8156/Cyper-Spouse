@@ -17,7 +17,13 @@ from .minimal_reply_events import (
     ExpressionPlanCompletedPayload,
     ExpressionPlanTerminatedPayload,
 )
-from .schemas import Action, ExecutionReceipt, LedgerProjection, WorldEvent
+from .schemas import (
+    Action,
+    ExecutionReceipt,
+    ExpressionBeatProjection,
+    LedgerProjection,
+    WorldEvent,
+)
 
 
 ExpressionLifecycleEventType = Literal[
@@ -60,6 +66,7 @@ class ExpressionReceiptLifecycle:
             or receipt.action_id != action.action_id
         ):
             raise ValueError("terminal receipt does not bind an expression beat")
+        best_effort_typing = action.kind == "typing"
         terminal_state = receipt.observed_state
         if terminal_state == "provider_accepted":  # defensive; receipt schema already rejects it
             raise ValueError("expression lifecycle requires terminal receipt")
@@ -73,7 +80,7 @@ class ExpressionReceiptLifecycle:
                 raise ValueError("terminal receipt conflicts with settled expression beat")
         elif beat.state != "authorized":
             raise ValueError("terminal receipt does not settle an authorized expression beat")
-        if plan.state == "completed":
+        if plan.state == "completed" and not best_effort_typing:
             history = plan.history[-1] if plan.history else None
             if (
                 history is None
@@ -81,7 +88,9 @@ class ExpressionReceiptLifecycle:
                 or history.terminal_action_state != terminal_state
             ):
                 raise ValueError("terminal receipt conflicts with completed expression plan")
-        elif plan.state not in {"authorized", "terminated"}:
+        elif plan.state not in {"authorized", "terminated"} and not (
+            best_effort_typing and plan.state == "completed"
+        ):
             raise ValueError("terminal receipt does not settle an active expression plan")
         settled = ExpressionBeatSettledPayload(
             acceptance_id=beat.acceptance_id,
@@ -105,21 +114,42 @@ class ExpressionReceiptLifecycle:
         # when this receipt settles the final unresolved beat; dependencies are
         # dispatch eligibility, not a reason to skip lifecycle authority.
         plan_beats = tuple(item for item in projection.expression_beats if item.plan_id == plan_id)
-        prior_beats_delivered = all(
-            item.beat_id == beat_id
-            or (
+        actions_by_id = {
+            item.action_id: item
+            for item in (*projection.actions, action)
+        }
+
+        def beat_allows_plan_completion(item: ExpressionBeatProjection) -> bool:
+            if item.beat_id == beat_id:
+                return True
+            item_action = (
+                actions_by_id.get(item.action_id)
+                if item.action_id is not None
+                else None
+            )
+            if item_action is not None and item_action.kind == "typing":
+                return item_action.state in {
+                    "provider_accepted",
+                    "delivered",
+                    "failed",
+                    "unknown",
+                    "expired",
+                }
+            return (
                 item.state == "settled"
                 and bool(item.history)
                 and item.history[-1].terminal_action_state == "delivered"
             )
-            for item in plan_beats
+
+        prior_beats_satisfied = all(
+            beat_allows_plan_completion(item) for item in plan_beats
         )
-        if plan.state == "terminated":
+        if plan.state in {"terminated", "completed"}:
             # An in-flight sibling may settle after another required beat has
-            # already terminated the plan.  Preserve its independent receipt
+            # already closed the plan. Preserve its independent receipt
             # without reopening or completing the terminal plan.
             return tuple(events)
-        if terminal_state == "delivered" and prior_beats_delivered:
+        if terminal_state == "delivered" and prior_beats_satisfied:
             completed = ExpressionPlanCompletedPayload(
                 acceptance_id=plan.acceptance_id,
                 proposal_id=plan.proposal_id,
@@ -137,7 +167,7 @@ class ExpressionReceiptLifecycle:
                     payload=completed.model_dump(mode="json"),
                 )
             )
-        elif terminal_state != "delivered":
+        elif terminal_state != "delivered" and not best_effort_typing:
             terminated = ExpressionPlanTerminatedPayload(
                 acceptance_id=plan.acceptance_id,
                 proposal_id=plan.proposal_id,

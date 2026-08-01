@@ -206,7 +206,9 @@ def derive_minimal_reply_material(
         "contract": "minimal-reply-acceptance.1",
         "world_id": world_id,
         "proposal_id": proposal.proposal_id,
-        "proposal_hash": proposal.proposal_hash,
+        # Audit-only PrivateTurnState changes the immutable proposal record,
+        # but cannot authorize a distinct external effect.
+        "proposal_hash": proposal.effect_hash,
         "intent_id": intent.intent_id,
         "intent_hash": intent_hash,
         "policy_digest": policy.digest,

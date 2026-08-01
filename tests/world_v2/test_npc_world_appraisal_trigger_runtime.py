@@ -140,9 +140,9 @@ async def test_settled_npc_event_is_audited_as_world_authority_and_terminates_no
     assert request.trigger_ref == "occurrence-settled"
     assert request.trigger_message is None
     assert request.trigger_evidence[0].evidence_kind == "settled_world_event"
-    assert json.loads(request.model_content_json)["slices"]["world_life"]["items"][0]["value"][
-        "occurrence_id"
-    ] == "occurrence-tea"
+    # The settlement is exact trigger authority for appraisal, but an event
+    # lived only by an NPC is not autobiographical companion WorldLife.
+    assert json.loads(request.model_content_json)["slices"]["world_life"]["items"] == []
     process = ledger.project().trigger_processes[0]
     assert process.process_kind == "npc_world_appraisal"
     assert process.state == "terminal"

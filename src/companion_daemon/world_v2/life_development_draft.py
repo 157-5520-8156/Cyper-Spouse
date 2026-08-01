@@ -14,21 +14,25 @@ import re
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, ValidationError, computed_field, model_validator
+from pydantic import Field, ValidationError, computed_field, field_validator, model_validator
 
 from .schema_core import FrozenModel, PrivacyClass
 from .schemas import DueWindow, ProjectionCursor
 
 
 _NARRATIVE_TAG = re.compile(r"^narrative:[a-z0-9][a-z0-9._-]{0,63}$")
-_LOCAL_NPC_REF = re.compile(r"^local:npc:[a-z0-9][a-z0-9._-]{0,63}$")
+_LOCAL_NPC_REF_PATTERN = r"^local:npc:[a-z0-9][a-z0-9._-]{0,63}$"
+_LOCAL_NPC_REF = re.compile(_LOCAL_NPC_REF_PATTERN)
 _LOCAL_WINDOW = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$")
+LIFE_DEVELOPMENT_PRIVACY_ORDER = (
+    "public",
+    "shareable",
+    "personal",
+    "private",
+    "withhold",
+)
 _PRIVACY_RANK = {
-    "public": 0,
-    "shareable": 1,
-    "personal": 2,
-    "private": 3,
-    "withhold": 4,
+    value: rank for rank, value in enumerate(LIFE_DEVELOPMENT_PRIVACY_ORDER)
 }
 
 
@@ -41,6 +45,14 @@ def _digest(value: object) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _canonicalize_string_set(value: object) -> object:
+    """Canonicalize model-authored reference sets without changing authority."""
+
+    if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        return tuple(sorted(set(value)))
+    return value
 
 
 class LifeDevelopmentLocationCapability(FrozenModel):
@@ -92,9 +104,7 @@ class LifeDevelopmentLocationCapability(FrozenModel):
                 or self.available_to is None
                 or self.available_to <= self.available_from
             ):
-                raise ValueError(
-                    "current presence requires one ordered, finite authority interval"
-                )
+                raise ValueError("current presence requires one ordered, finite authority interval")
             if not self.now_allowed:
                 raise ValueError("current presence must authorize the present")
         else:
@@ -122,14 +132,10 @@ class LifeDevelopmentLocationCapability(FrozenModel):
             {
                 "availability_kind": self.availability_kind,
                 "available_from": (
-                    self.available_from.isoformat()
-                    if self.available_from is not None
-                    else None
+                    self.available_from.isoformat() if self.available_from is not None else None
                 ),
                 "available_to": (
-                    self.available_to.isoformat()
-                    if self.available_to is not None
-                    else None
+                    self.available_to.isoformat() if self.available_to is not None else None
                 ),
                 "authority_refs": self.authority_refs,
                 "local_windows": self.local_windows,
@@ -204,16 +210,12 @@ class LifeDevelopmentCapabilityManifest(FrozenModel):
                 ),
             )
         ):
-            raise ValueError(
-                "life development location capabilities must be sorted and unique"
-            )
+            raise ValueError("life development location capabilities must be sorted and unique")
         return self
 
     @property
     def location_refs(self) -> tuple[str, ...]:
-        return tuple(
-            sorted({item.location_ref for item in self.location_capabilities})
-        )
+        return tuple(sorted({item.location_ref for item in self.location_capabilities}))
 
     @property
     def manifest_hash(self) -> str:
@@ -249,6 +251,11 @@ class LifeDevelopmentClaimDeclaration(FrozenModel):
     ]
     source_refs: tuple[str, ...] = Field(default=(), max_length=16)
 
+    @field_validator("source_refs", mode="before")
+    @classmethod
+    def canonicalize_source_refs(cls, value: object) -> object:
+        return _canonicalize_string_set(value)
+
     @model_validator(mode="after")
     def source_shape_matches_scope(self) -> "LifeDevelopmentClaimDeclaration":
         if self.source_refs != tuple(sorted(set(self.source_refs))):
@@ -269,10 +276,19 @@ class LifeDevelopmentClaimDeclaration(FrozenModel):
 
 
 class ProvisionalNpcDraft(FrozenModel):
-    local_ref: str = Field(min_length=1, max_length=80)
+    local_ref: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=_LOCAL_NPC_REF_PATTERN,
+    )
     summary: str = Field(min_length=1, max_length=1_000)
     narrative_tags: tuple[str, ...] = Field(default=(), max_length=16)
     privacy_class: PrivacyClass
+
+    @field_validator("narrative_tags", mode="before")
+    @classmethod
+    def canonicalize_narrative_tags(cls, value: object) -> object:
+        return _canonicalize_string_set(value)
 
     @model_validator(mode="after")
     def is_local_and_open_ended(self) -> "ProvisionalNpcDraft":
@@ -290,6 +306,11 @@ class DynamicLifeDirectionDraft(FrozenModel):
     narrative_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
     duration_days: int = Field(ge=1, le=730)
     privacy_class: PrivacyClass
+
+    @field_validator("narrative_tags", mode="before")
+    @classmethod
+    def canonicalize_narrative_tags(cls, value: object) -> object:
+        return _canonicalize_string_set(value)
 
     @model_validator(mode="after")
     def tags_are_open_narrative_refs(self) -> "DynamicLifeDirectionDraft":
@@ -339,22 +360,21 @@ class LifeDevelopmentVisualEvidenceDraft(FrozenModel):
     """
 
     claim_refs: tuple[str, ...] = Field(min_length=1, max_length=16)
-    activity_description: str | None = Field(
-        default=None, min_length=1, max_length=1_000
-    )
+    activity_description: str | None = Field(default=None, min_length=1, max_length=1_000)
     location: LifeDevelopmentVisualLocationDraft | None = None
     environment: LifeDevelopmentVisualEnvironmentDraft | None = None
-    objects: tuple[LifeDevelopmentVisualObjectDraft, ...] = Field(
-        default=(), max_length=16
-    )
+    objects: tuple[LifeDevelopmentVisualObjectDraft, ...] = Field(default=(), max_length=16)
+
+    @field_validator("claim_refs", mode="before")
+    @classmethod
+    def canonicalize_claim_refs(cls, value: object) -> object:
+        return _canonicalize_string_set(value)
 
     @model_validator(mode="after")
     def is_claim_closed_and_concrete(self) -> "LifeDevelopmentVisualEvidenceDraft":
         if self.claim_refs != tuple(sorted(set(self.claim_refs))):
             raise ValueError("life-development visual claim refs must be sorted and unique")
-        if not any(
-            (self.activity_description, self.location, self.environment, self.objects)
-        ):
+        if not any((self.activity_description, self.location, self.environment, self.objects)):
             raise ValueError("life-development visual evidence cannot be empty")
         refs = tuple(item.local_ref for item in self.objects)
         if len(refs) != len(set(refs)):
@@ -372,6 +392,11 @@ class LifeDevelopmentOutcomeDraft(FrozenModel):
     dynamic_life_direction: DynamicLifeDirectionDraft | None = None
     visual_evidence: LifeDevelopmentVisualEvidenceDraft | None = None
 
+    @field_validator("claim_refs", mode="before")
+    @classmethod
+    def canonicalize_claim_refs(cls, value: object) -> object:
+        return _canonicalize_string_set(value)
+
     @model_validator(mode="after")
     def local_refs_are_unique(self) -> "LifeDevelopmentOutcomeDraft":
         if self.claim_refs != tuple(sorted(set(self.claim_refs))):
@@ -381,9 +406,7 @@ class LifeDevelopmentOutcomeDraft(FrozenModel):
             raise ValueError("outcome provisional NPC refs must be unique")
         if self.visual_evidence is not None:
             if not set(self.visual_evidence.claim_refs) <= set(self.claim_refs):
-                raise ValueError(
-                    "outcome visual evidence must close over outcome claim refs"
-                )
+                raise ValueError("outcome visual evidence must close over outcome claim refs")
             if self.privacy_class not in {"public", "shareable"}:
                 raise ValueError(
                     "recipient-unbound life-development visual evidence must be public or shareable"
@@ -433,11 +456,24 @@ class LifeDevelopmentTimingDraft(FrozenModel):
         assert self.opens_at is not None and self.closes_at is not None
         if self.opens_at < logical_time:
             raise LifeDevelopmentDraftError(
-                "window_in_past", "later opens_at precedes pinned Logical Time"
+                "window_in_past",
+                "later opens_at precedes pinned Logical Time",
+                violations=(
+                    {
+                        "path": "timing.opens_at",
+                        "message": (
+                            "later opens_at must be at or after pinned logical time"
+                        ),
+                        "type": "window_in_past",
+                    },
+                ),
+                failure_context={
+                    "pinned_logical_time": logical_time.isoformat(),
+                    "selected_opens_at": self.opens_at.isoformat(),
+                    "selected_closes_at": self.closes_at.isoformat(),
+                },
             )
-        if self.closes_at - self.opens_at > timedelta(
-            minutes=manifest.max_window_minutes
-        ):
+        if self.closes_at - self.opens_at > timedelta(minutes=manifest.max_window_minutes):
             raise LifeDevelopmentDraftError(
                 "window_too_long",
                 "later window exceeds capability max_window_minutes",
@@ -476,15 +512,22 @@ class LifeDevelopmentPossibilityDraft(FrozenModel):
     privacy_class: PrivacyClass
     outcomes: tuple[LifeDevelopmentOutcomeDraft, ...] = Field(min_length=2, max_length=4)
 
+    @field_validator(
+        "anchor_refs",
+        "entity_refs",
+        "premise_claim_refs",
+        mode="before",
+    )
+    @classmethod
+    def canonicalize_reference_sets(cls, value: object) -> object:
+        return _canonicalize_string_set(value)
+
     @model_validator(mode="after")
     def refs_are_canonical(self) -> "LifeDevelopmentPossibilityDraft":
         if any(
-            outcome.experienced_by_ref != self.authored_subject_ref
-            for outcome in self.outcomes
+            outcome.experienced_by_ref != self.authored_subject_ref for outcome in self.outcomes
         ):
-            raise ValueError(
-                "every life-development outcome must bind the authored subject"
-            )
+            raise ValueError("every life-development outcome must bind the authored subject")
         for refs in (
             self.anchor_refs,
             self.entity_refs,
@@ -500,13 +543,9 @@ class LifeDevelopmentPossibilityDraft(FrozenModel):
             *(ref for outcome in self.outcomes for ref in outcome.claim_refs),
         }
         if used != set(declaration_refs):
-            raise ValueError(
-                "premise and outcomes must exactly close over claim declarations"
-            )
+            raise ValueError("premise and outcomes must exactly close over claim declarations")
         if (self.location_ref is None) != (self.location_capability_ref is None):
-            raise ValueError(
-                "location_ref and location_capability_ref must be supplied together"
-            )
+            raise ValueError("location_ref and location_capability_ref must be supplied together")
         for outcome in self.outcomes:
             visual = outcome.visual_evidence
             if (
@@ -526,12 +565,9 @@ class LifeDevelopmentPossibilityDraft(FrozenModel):
             self.causal_authority == "world_contingency"
             and self.outcome_resolution_authority == "character_choice"
         ):
-            raise ValueError(
-                "external contingency outcomes cannot be selected by the character"
-            )
-        if (
-            self.outcome_resolution_authority != "character_choice"
-            and any(item.dynamic_life_direction is not None for item in self.outcomes)
+            raise ValueError("external contingency outcomes cannot be selected by the character")
+        if self.outcome_resolution_authority != "character_choice" and any(
+            item.dynamic_life_direction is not None for item in self.outcomes
         ):
             raise ValueError(
                 "dynamic life direction requires character-controlled outcome resolution"
@@ -577,10 +613,19 @@ CharacterChoiceDraft = CharacterChoiceNoOpDraft | CharacterChoiceAcceptDraft
 
 
 class LifeDevelopmentDraftError(ValueError):
-    def __init__(self, code: str, detail: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        *,
+        violations: tuple[dict[str, str], ...] = (),
+        failure_context: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(f"{code}: {detail}")
         self.code = code
         self.detail = detail
+        self.violations = violations
+        self.failure_context = dict(failure_context or {})
 
 
 def parse_world_author_draft(
@@ -612,10 +657,38 @@ def parse_world_author_draft(
         raise LifeDevelopmentDraftError(
             "invalid_shape", "World Author output must be one JSON object"
         )
+    if set(decoded) == {"replacement"}:
+        # Strict OpenAI-compatible schemas cannot place the no_op/propose
+        # union at the root.  The structured transport therefore moves that
+        # exact union below one `replacement` property.  Remove only this
+        # exact provider envelope and run the ordinary complete semantic and
+        # authority validation below; the caller still retains `raw` unchanged
+        # for the immutable external-result audit.
+        replacement = decoded.get("replacement")
+        if not isinstance(replacement, dict):
+            raise LifeDevelopmentDraftError(
+                "invalid_shape",
+                "World Author replacement transport must contain one JSON object",
+            )
+        decoded = replacement
+        json_text = json.dumps(
+            decoded,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     if (
-        decoded.get("decision") != "no_op"
-        and manifest.owner_actor_ref == "legacy:unknown-owner"
+        decoded.get("decision") == "no_op"
+        and set(decoded) == {"decision", "authored_subject_ref"}
+        and decoded.get("authored_subject_ref") == manifest.owner_actor_ref
     ):
+        # ``authored_subject_ref`` is required on the other branch of the
+        # World Author union and models sometimes echo it onto an explicit
+        # no-op.  The matching owner ref cannot authorize an effect or add a
+        # fact, so discard only this exact harmless echo before constructing
+        # the canonical no-op.  Every other extra field remains forbidden.
+        decoded = {"decision": "no_op"}
+        json_text = '{"decision":"no_op"}'
+    if decoded.get("decision") != "no_op" and manifest.owner_actor_ref == "legacy:unknown-owner":
         # Historical immutable audits predate explicit subject authority.
         # Decode them only under an equally explicit legacy manifest identity;
         # every newly compiled production manifest names the real owner and
@@ -652,18 +725,34 @@ def parse_world_author_draft(
             draft = LifeDevelopmentPossibilityDraft.model_validate_json(json_text)
     except ValueError as exc:
         detail = "World Author output violates the possibility schema"
+        structured_violations: tuple[dict[str, str], ...] = ()
         if isinstance(exc, ValidationError):
             violations = []
+            machine_violations = []
             for error in exc.errors(include_url=False, include_input=False):
                 location = ".".join(str(part) for part in error["loc"]) or "<root>"
-                violations.append(
-                    f"{location}: {error['msg']} [{error['type']}]"
+                violations.append(f"{location}: {error['msg']} [{error['type']}]")
+                machine_violations.append(
+                    {
+                        "path": location,
+                        "message": str(error["msg"]),
+                        "type": str(error["type"]),
+                    }
                 )
+            for violation in _visual_location_pairing_violations(decoded):
+                if violation not in machine_violations:
+                    machine_violations.append(violation)
+                    violations.append(
+                        f"{violation['path']}: {violation['message']} "
+                        f"[{violation['type']}]"
+                    )
             if violations:
                 detail = f"{detail}: {'; '.join(violations)}"
+                structured_violations = tuple(machine_violations)
         raise LifeDevelopmentDraftError(
             "invalid_shape",
             detail[:8_000],
+            violations=structured_violations,
         ) from exc
     if isinstance(draft, LifeDevelopmentNoOpDraft):
         return draft
@@ -682,20 +771,80 @@ def parse_world_author_draft(
         manifest=manifest,
     )
     if draft.location_ref is not None:
-        location_capabilities = tuple(
+        matching_location_capabilities = tuple(
             item
             for item in manifest.location_capabilities
             if item.location_ref == draft.location_ref
             and item.capability_ref == draft.location_capability_ref
-            and item.authorizes(
+        )
+        location_capabilities = tuple(
+            item
+            for item in matching_location_capabilities
+            if item.authorizes(
                 timing_mode=draft.timing.mode,
                 window=resolved_window,
             )
         )
         if not location_capabilities:
+            if matching_location_capabilities:
+                violations = (
+                    {
+                        "path": "timing",
+                        "message": (
+                            "the selected location capability does not authorize "
+                            "the resolved proposal window"
+                        ),
+                        "type": "capability_window_unavailable",
+                    },
+                )
+                detail = (
+                    "the selected location capability exists but does not authorize "
+                    "the proposed window"
+                )
+            else:
+                violations = (
+                    {
+                        "path": "location_ref",
+                        "message": (
+                            "the selected location_ref and location_capability_ref "
+                            "pair is absent from the pinned capability manifest"
+                        ),
+                        "type": "capability_not_available",
+                    },
+                    {
+                        "path": "location_capability_ref",
+                        "message": (
+                            "the selected location_ref and location_capability_ref "
+                            "pair is absent from the pinned capability manifest"
+                        ),
+                        "type": "capability_not_available",
+                    },
+                )
+                detail = (
+                    "the selected location_ref and location_capability_ref pair is "
+                    "absent from the pinned capability manifest"
+                )
             raise LifeDevelopmentDraftError(
                 "unsupported_location_window",
-                "location capability is absent or unavailable for the proposed window",
+                detail,
+                violations=violations,
+                failure_context={
+                    "available_location_capability_count": len(
+                        manifest.location_capabilities
+                    ),
+                    "matching_location_capability_count": len(
+                        matching_location_capabilities
+                    ),
+                    "resolved_window": {
+                        "opens_at": resolved_window.opens_at.isoformat(),
+                        "closes_at": resolved_window.closes_at.isoformat(),
+                    },
+                    "selected_location_capability_ref": (
+                        draft.location_capability_ref
+                    ),
+                    "selected_location_ref": draft.location_ref,
+                    "timing_mode": draft.timing.mode,
+                },
             )
         required_privacy = max(
             (_PRIVACY_RANK[item.privacy_class] for item in location_capabilities),
@@ -728,6 +877,56 @@ def parse_world_author_draft(
                 "existing-world claim cites a ref absent from pinned grounding refs",
             )
     return draft
+
+
+def _visual_location_pairing_violations(
+    decoded: dict[str, object],
+) -> tuple[dict[str, str], ...]:
+    """Make cross-field visual-location failures addressable by a model."""
+
+    proposal_location = decoded.get("location_ref")
+    outcomes = decoded.get("outcomes")
+    if not isinstance(outcomes, list):
+        return ()
+    violations: list[dict[str, str]] = []
+    proposal_coordinate_reported = False
+    for index, outcome in enumerate(outcomes):
+        if not isinstance(outcome, dict):
+            continue
+        visual = outcome.get("visual_evidence")
+        if not isinstance(visual, dict):
+            continue
+        location = visual.get("location")
+        if not isinstance(location, dict):
+            continue
+        visual_location = location.get("location_ref")
+        if not isinstance(visual_location, str) or visual_location == proposal_location:
+            continue
+        if not proposal_coordinate_reported:
+            violations.append(
+                {
+                    "path": "location_ref",
+                    "message": (
+                        "proposal location_ref must be present and equal every "
+                        "visual location_ref, or every visual location must be null"
+                    ),
+                    "type": "visual_location_pairing",
+                }
+            )
+            proposal_coordinate_reported = True
+        violations.append(
+            {
+                "path": (
+                    f"outcomes.{index}.visual_evidence.location.location_ref"
+                ),
+                "message": (
+                    "visual location_ref must equal the proposal location_ref; "
+                    "a background or origin place is not an execution coordinate"
+                ),
+                "type": "visual_location_pairing",
+            }
+        )
+    return tuple(violations)
 
 
 def _window_fits_local_schedule(
@@ -774,11 +973,7 @@ def _local_interval(
         time(hour=start_minute // 60, minute=start_minute % 60),
         tzinfo=zone,
     )
-    end_date = (
-        candidate_date + timedelta(days=1)
-        if end_minute <= start_minute
-        else candidate_date
-    )
+    end_date = candidate_date + timedelta(days=1) if end_minute <= start_minute else candidate_date
     end = datetime.combine(
         end_date,
         time(hour=end_minute // 60, minute=end_minute % 60),
@@ -799,16 +994,38 @@ def parse_character_choice(
         )
     try:
         decoded = json.loads(raw)
-        if isinstance(decoded, dict) and decoded.get("decision") == "no_op":
-            draft: CharacterChoiceDraft = CharacterChoiceNoOpDraft.model_validate_json(
-                raw
-            )
-        else:
-            draft = CharacterChoiceAcceptDraft.model_validate_json(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
+    except json.JSONDecodeError as exc:
         raise LifeDevelopmentDraftError(
             "invalid_character_output",
-            "Character Model output must be exactly accept or no_op",
+            "Character Model output is not valid JSON",
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise LifeDevelopmentDraftError(
+            "invalid_character_output",
+            "Character Model output must be one JSON object",
+        )
+    try:
+        if decoded.get("decision") == "no_op":
+            draft: CharacterChoiceDraft = CharacterChoiceNoOpDraft.model_validate_json(raw)
+        else:
+            draft = CharacterChoiceAcceptDraft.model_validate_json(raw)
+    except ValidationError as exc:
+        violations = tuple(
+            {
+                "path": ".".join(str(part) for part in error["loc"]) or "<root>",
+                "message": str(error["msg"]),
+                "type": str(error["type"]),
+            }
+            for error in exc.errors(include_url=False, include_input=False)
+        )
+        detail = "; ".join(
+            f"{item['path']}: {item['message']} [{item['type']}]"
+            for item in violations
+        )
+        raise LifeDevelopmentDraftError(
+            "invalid_character_output",
+            ("Character Model output violates the choice schema: " + detail)[:8_000],
+            violations=violations,
         ) from exc
     if isinstance(draft, CharacterChoiceNoOpDraft):
         return draft
@@ -846,6 +1063,7 @@ __all__ = [
     "LifeDevelopmentVisualLocationDraft",
     "LifeDevelopmentVisualObjectDraft",
     "LifeDevelopmentPossibilityDraft",
+    "LIFE_DEVELOPMENT_PRIVACY_ORDER",
     "LifeDevelopmentTimingDraft",
     "LifeDevelopmentWorldDraft",
     "ProvisionalNpcDraft",

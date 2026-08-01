@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from companion_daemon.world_v2.batch_invariants import private_impression_trigger_identity
+from companion_daemon.world_v2.appraisal_events import appraisal_mutation_hash
+from companion_daemon.world_v2.batch_invariants import (
+    interaction_appraisal_trigger_identity,
+    private_impression_trigger_identity,
+)
+from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.private_impression_producer import (
     PrivateImpressionDraftAdapter,
@@ -18,6 +24,12 @@ from companion_daemon.world_v2.private_impression_producer import (
 )
 from companion_daemon.world_v2.private_impression_events import (
     private_impression_mutation_hash,
+)
+from companion_daemon.world_v2.schemas import (
+    ClaimLease,
+    EvidenceRef,
+    ProjectionCursor,
+    TriggerProcess,
 )
 from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     CompanionIdentityFrame,
@@ -46,6 +58,154 @@ def _ledger_with_active_appraisal():
     record_appraisal_proposal(ledger, trigger, evidence, payload)
     commit(ledger, appraisal_authorized_batch(trigger, payload))
     return ledger
+
+
+def _append_second_appraisal(ledger: WorldLedger) -> None:
+    logical_time = ledger.project().logical_time
+    assert logical_time is not None
+    commit(
+        ledger,
+        [event("message-event:2", "ObservationRecorded", message_payload("message:2"))],
+    )
+    opened = TriggerProcess(
+        trigger_id=interaction_appraisal_trigger_identity(WORLD_ID, "message:2"),
+        trigger_ref="interaction:message:2",
+        process_kind="interaction_appraisal",
+        source_evidence_ref="message:2",
+        state="open",
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "interaction-trigger-opened:2",
+                "TriggerProcessOpened",
+                {"process": opened.model_dump(mode="json")},
+            )
+        ],
+    )
+    claimed = opened.model_copy(
+        update={
+            "state": "claimed",
+            "claim_lease": ClaimLease(
+                owner_id="worker:interaction-appraisal",
+                attempt_id="attempt:interaction:2",
+                acquired_at=logical_time,
+                expires_at=logical_time + timedelta(minutes=2),
+            ),
+            "attempt_ids": ("attempt:interaction:2",),
+        }
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "interaction-trigger-claimed:2",
+                "TriggerProcessClaimed",
+                {"process": claimed.model_dump(mode="json")},
+            )
+        ],
+    )
+    observation = next(
+        item for item in ledger.project().message_observations if item.observation_id == "message:2"
+    )
+    evidence = EvidenceRef(
+        ref_id="message:2",
+        evidence_type="observed_message",
+        claim_purpose="private_hypothesis",
+        source_world_revision=observation.world_revision,
+        immutable_hash=observation.event_payload_hash,
+    )
+    first = ledger.project().appraisals[0]
+    second = first.model_copy(
+        update={
+            "appraisal_id": "appraisal:interaction:2",
+            "source_cluster_ref": "conversation:2",
+            "origin": first.origin.model_copy(
+                update={
+                    "change_id": "change:interaction-appraisal:2",
+                    "transition_id": "transition:interaction-appraisal:2",
+                    "accepted_event_ref": "interaction-appraisal-accepted:2",
+                }
+            ),
+            "evidence_refs": (evidence,),
+        }
+    )
+    payload: dict[str, object] = {
+        "change_id": second.origin.change_id,
+        "transition_id": second.origin.transition_id,
+        "expected_entity_revision": 0,
+        "evidence_refs": [evidence.model_dump(mode="json")],
+        "policy_refs": ["policy:appraisal-v1"],
+        "acceptance_id": "acceptance:interaction-appraisal:2",
+        "proposal_id": "proposal:interaction-appraisal:2",
+        "evaluated_world_revision": ledger.project().world_revision,
+        "accepted_change_hash": "0" * 64,
+        "trigger_id": claimed.trigger_id,
+        "appraisal": second.model_dump(mode="json"),
+    }
+    payload["accepted_change_hash"] = appraisal_mutation_hash(payload)
+    commit(
+        ledger,
+        [
+            event(
+                "interaction-appraisal-proposed:2",
+                "ProposalRecorded",
+                {
+                    "proposal_id": payload["proposal_id"],
+                    "proposal_kind": "appraisal_transition",
+                    "transition_kind": "accept",
+                    "change_id": payload["change_id"],
+                    "trigger_id": claimed.trigger_id,
+                    "trigger_ref": claimed.trigger_ref,
+                    "source_evidence_ref": claimed.source_evidence_ref,
+                    "evaluated_world_revision": payload["evaluated_world_revision"],
+                    "expected_entity_revision": 0,
+                    "proposed_change_hash": payload["accepted_change_hash"],
+                    "evidence_refs": [evidence.model_dump(mode="json")],
+                    "policy_refs": payload["policy_refs"],
+                    "proposed_mutation": {
+                        "event_type": "AppraisalAccepted",
+                        "payload_json": json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    },
+                },
+            )
+        ],
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "interaction-appraisal-acceptance:2",
+                "AcceptanceRecorded",
+                {
+                    "status": "accepted",
+                    "acceptance_id": payload["acceptance_id"],
+                    "proposal_id": payload["proposal_id"],
+                    "evaluated_world_revision": payload["evaluated_world_revision"],
+                    "accepted_change_id": payload["change_id"],
+                    "accepted_change_hash": payload["accepted_change_hash"],
+                },
+            ),
+            event("interaction-appraisal-accepted:2", "AppraisalAccepted", payload),
+            event(
+                "interaction-appraisal-completed:2",
+                "TriggerProcessCompleted",
+                {
+                    "trigger_id": claimed.trigger_id,
+                    "owner_id": "worker:interaction-appraisal",
+                    "attempt_id": "attempt:interaction:2",
+                    "completed_at": logical_time.isoformat(),
+                    "runtime_outcome_ref": "appraisal:appraisal:interaction:2",
+                },
+            ),
+        ],
+    )
 
 
 def test_reflection_capsule_combines_role_relationship_affect_and_lived_layers() -> None:
@@ -173,7 +333,7 @@ def _retain(
 ) -> str:
     return json.dumps(
         {
-            "retain": True,
+            "decision": "retain",
             "source_refs": source_refs,
             "reflection_summary": reflection_summary,
             "confidence": 6_000,
@@ -181,6 +341,30 @@ def _retain(
         },
         ensure_ascii=False,
     )
+
+
+async def _ledger_with_predecessor_and_second_appraisal():
+    ledger = _ledger_with_active_appraisal()
+    await PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER).open_once()
+    first = await PrivateImpressionTriggerRuntime(
+        ledger=ledger,
+        adapter=PrivateImpressionDraftAdapter(
+            model=_Model(
+                [
+                    _retain(
+                        ["appraisal:appraisal:interaction:1:meaning:misunderstanding"],
+                        reflection_summary="我暂时觉得他像是在推着我照他的剧本说。",
+                    )
+                ]
+            )
+        ),
+        owner_id=OWNER,
+    ).drain_one()
+    assert first.work_status == "accepted"
+    predecessor = ledger.project().private_impressions[0]
+    _append_second_appraisal(ledger)
+    await PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER).open_once()
+    return ledger, predecessor
 
 
 @pytest.mark.asyncio
@@ -260,11 +444,101 @@ async def test_producer_accepts_one_appraisal_bound_impression() -> None:
     assert await PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER).open_once() is None
 
 
+@pytest.mark.parametrize(
+    ("decision", "summary", "preserves_first_seen"),
+    (
+        (
+            "consolidate",
+            "也许他不是想控制我，只是很在意自己的重点有没有被接住。",
+            True,
+        ),
+        (
+            "supersede",
+            "现在看来他只是希望自己的重点被接住，之前那种理解不合适了。",
+            False,
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_model_replacement_is_one_compact_replayable_ledger_transition(
+    decision: str,
+    summary: str,
+    preserves_first_seen: bool,
+) -> None:
+    ledger, predecessor = await _ledger_with_predecessor_and_second_appraisal()
+    predecessor_ref = f"private-impression:{predecessor.impression_id}"
+    replacement = json.dumps(
+        {
+            "decision": decision,
+            "predecessor_refs": [predecessor_ref],
+            "source_refs": [
+                "appraisal:appraisal:interaction:2:meaning:disappointment",
+                predecessor_ref,
+            ],
+            "reflection_summary": summary,
+            "confidence": 5_800,
+            "expiry_condition": "until_counter_evidence",
+        },
+        ensure_ascii=False,
+    )
+
+    result = await PrivateImpressionTriggerRuntime(
+        ledger=ledger,
+        adapter=PrivateImpressionDraftAdapter(model=_Model([replacement])),
+        owner_id=OWNER,
+    ).drain_one()
+
+    assert result.work_status == "accepted"
+    projection = ledger.project()
+    active = [item for item in projection.private_impressions if item.status == "active"]
+    superseded = [item for item in projection.private_impressions if item.status == "superseded"]
+    assert len(active) == len(superseded) == 1
+    assert superseded[0].impression_id == predecessor.impression_id
+    assert superseded[0].entity_revision == predecessor.entity_revision + 1
+    assert active[0].interpretation_refs == (
+        "appraisal:appraisal:interaction:2:meaning:disappointment",
+    )
+    assert predecessor.origin.accepted_event_ref in active[0].source_refs
+    if preserves_first_seen:
+        assert active[0].first_seen == predecessor.first_seen
+    else:
+        assert active[0].first_seen == active[0].last_supported
+    next_capsule = compile_private_impression_reflection_capsule(
+        projection=projection,
+        appraisal=projection.appraisals[-1],
+        identity_frame=CompanionIdentityFrame(
+            companion_name="沈知栀",
+            counterpart_name="Geoff",
+            relationship_frame="朋友",
+        ),
+        world_id=WORLD_ID,
+    )
+    assert [
+        item.source_ref
+        for item in next_capsule.sources
+        if item.source_kind == "existing_impression"
+    ] == [f"private-impression:{active[0].impression_id}"]
+    transition = next(
+        item.event
+        for item in ledger.export_replay_evidence().events
+        if item.event.event_type == "PrivateImpressionAccepted"
+        and item.event.payload()["transition_kind"] == decision
+    )
+    assert transition.payload()["predecessor_refs"] == [
+        {
+            "expected_entity_revision": 1,
+            "impression_id": predecessor.impression_id,
+        }
+    ]
+    replay = ledger.export_replay_evidence()
+    assert replay.projection == replay.replay
+
+
 @pytest.mark.asyncio
 async def test_model_decline_consumes_the_trigger_without_an_impression() -> None:
     ledger = _ledger_with_active_appraisal()
     await PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER).open_once()
-    model = _Model(['{"retain":false}'])
+    model = _Model(['{"decision":"no_change"}'])
     result = await PrivateImpressionTriggerRuntime(
         ledger=ledger,
         adapter=PrivateImpressionDraftAdapter(model=model),
@@ -344,6 +618,37 @@ async def test_adapter_gets_one_corrective_retry_then_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unhashable_model_refs_receive_the_same_bounded_correction() -> None:
+    ledger = _ledger_with_active_appraisal()
+    await PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER).open_once()
+    malformed = json.dumps(
+        {
+            "decision": "retain",
+            "source_refs": [{}],
+            "reflection_summary": "我先保留这个猜测。",
+            "confidence": 5_000,
+            "expiry_condition": "until_counter_evidence",
+        },
+        ensure_ascii=False,
+    )
+    model = _Model(
+        [
+            malformed,
+            _retain(["appraisal:appraisal:interaction:1:meaning:misunderstanding"]),
+        ]
+    )
+
+    result = await PrivateImpressionTriggerRuntime(
+        ledger=ledger,
+        adapter=PrivateImpressionDraftAdapter(model=model),
+        owner_id=OWNER,
+    ).drain_one()
+
+    assert result.work_status == "accepted"
+    assert len(model.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_provider_failure_is_audited_once_and_waits_for_a_fresh_attempt() -> None:
     class _TimeoutModel:
         model = "test-timeout-role"
@@ -374,7 +679,7 @@ async def test_provider_failure_is_audited_once_and_waits_for_a_fresh_attempt() 
     assert model.calls == 1
     assert audit["outcome"] == "timeout"
     assert audit["attempted_model_id"] == "test-timeout-role"
-    assert audit["attempted_model_version"] == "private-impression-draft.3"
+    assert audit["attempted_model_version"] == "private-impression-draft.4"
 
 
 @pytest.mark.asyncio
@@ -413,7 +718,7 @@ async def test_audit_storage_failure_is_exposed_and_blocks_same_attempt_reentry(
 @pytest.mark.parametrize(
     "response",
     (
-        '{"retain":false}',
+        '{"decision":"no_change"}',
         _retain(["appraisal:appraisal:interaction:1:meaning:disappointment"]),
     ),
 )
@@ -458,6 +763,139 @@ async def test_interleaved_world_commit_never_applies_or_consumes_stale_reflecti
         if item.process_kind == "private_impression_deliberation"
     )
     assert process.state == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_deliberation_cas_after_proposal_uses_a_fresh_decision_identity(
+    monkeypatch,
+) -> None:
+    """A stranded typed proposal cannot authorize a later role-model decision."""
+
+    ledger = _ledger_with_active_appraisal()
+    projection = ledger.project()
+    appraisal = projection.appraisals[0]
+    located = ledger.lookup_event_commit(appraisal.origin.accepted_event_ref)
+    assert located is not None
+    source_event = located[0]
+    model = _Model(
+        [
+            _retain(
+                ["appraisal:appraisal:interaction:1:meaning:misunderstanding"],
+                reflection_summary="第一遍我觉得也许只是彼此理解岔了。",
+            ),
+            _retain(
+                ["appraisal:appraisal:interaction:1:meaning:misunderstanding"],
+                reflection_summary="再想一遍，我仍只把它当成可能的误解。",
+            ),
+        ]
+    )
+    adapter = PrivateImpressionDraftAdapter(model=model)
+    runtime = PrivateImpressionTriggerRuntime(
+        ledger=ledger,
+        adapter=adapter,
+        owner_id=OWNER,
+    )
+
+    def cursor_of(value) -> ProjectionCursor:  # type: ignore[no-untyped-def]
+        return ProjectionCursor(
+            world_revision=value.world_revision,
+            deliberation_revision=value.deliberation_revision,
+            ledger_sequence=value.ledger_sequence,
+        )
+
+    capsule = compile_private_impression_reflection_capsule(
+        projection=projection,
+        appraisal=appraisal,
+        identity_frame=adapter.identity_frame,
+        world_id=WORLD_ID,
+    )
+    first = await adapter.classify(capsule=capsule, attempt_id="attempt:cas:first")
+    assert first.draft is not None
+    await runtime._persist_model_run(
+        run=first,
+        source_event=source_event,
+        cursor=cursor_of(projection),
+    )
+    after_first_model = ledger.project()
+    original_commit_at_cursor = ledger.commit_at_cursor
+    interleaved = False
+
+    def commit_with_deliberation_interleave(events, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal interleaved
+        if not interleaved and any(item.event_type == "AcceptanceRecorded" for item in events):
+            interleaved = True
+            current = ledger.project()
+            original_commit_at_cursor(
+                [
+                    event(
+                        "operator:private-impression-cas",
+                        "OperatorObservationRecorded",
+                        {
+                            "observation_id": "operator:private-impression-cas",
+                            "observation_hash": "f" * 64,
+                        },
+                    )
+                ],
+                expected_cursor=cursor_of(current),
+                commit_id="commit:operator:private-impression-cas",
+            )
+        return original_commit_at_cursor(events, **kwargs)
+
+    monkeypatch.setattr(ledger, "commit_at_cursor", commit_with_deliberation_interleave)
+    with pytest.raises(ConcurrencyConflict):
+        await runtime._accept(
+            appraisal=appraisal,
+            draft=first.draft,
+            capsule=capsule,
+            model_result_ref=first.audits[-1].model_result_ref,
+            source_event=source_event,
+            before=after_first_model,
+        )
+    monkeypatch.setattr(ledger, "commit_at_cursor", original_commit_at_cursor)
+
+    before_second_model = ledger.project()
+    second_capsule = compile_private_impression_reflection_capsule(
+        projection=before_second_model,
+        appraisal=appraisal,
+        identity_frame=adapter.identity_frame,
+        world_id=WORLD_ID,
+    )
+    second = await adapter.classify(
+        capsule=second_capsule,
+        attempt_id="attempt:cas:second",
+    )
+    assert second.draft is not None
+    await runtime._persist_model_run(
+        run=second,
+        source_event=source_event,
+        cursor=cursor_of(before_second_model),
+    )
+    after_second_model = ledger.project()
+    accepted_event_ref = await runtime._accept(
+        appraisal=appraisal,
+        draft=second.draft,
+        capsule=second_capsule,
+        model_result_ref=second.audits[-1].model_result_ref,
+        source_event=source_event,
+        before=after_second_model,
+    )
+
+    typed_proposals = [
+        item.event
+        for item in ledger.export_replay_evidence().events
+        if item.event.event_type == "ProposalRecorded"
+        and item.event.payload().get("proposal_kind") == "private_impression_transition"
+    ]
+    assert len(typed_proposals) == 2
+    assert typed_proposals[0].event_id != typed_proposals[1].event_id
+    accepted = ledger.lookup_event_commit(accepted_event_ref)
+    assert accepted is not None
+    assert (
+        accepted[0].payload()["impression"]["reflection_summary"]
+        == second.draft.reflection_summary
+    )
+    replay = ledger.export_replay_evidence()
+    assert replay.projection == replay.replay
 
 
 @pytest.mark.asyncio

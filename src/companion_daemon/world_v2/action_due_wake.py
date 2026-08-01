@@ -8,8 +8,11 @@ from datetime import UTC, datetime
 import logging
 from threading import Lock
 
+from .errors import IdempotencyConflict
+
 
 logger = logging.getLogger(__name__)
+_WAKE_RETRY_DELAYS_SECONDS = (1.0, 5.0, 30.0)
 
 
 class ActionDueWakeDiagnostics:
@@ -17,6 +20,7 @@ class ActionDueWakeDiagnostics:
         self._lock = Lock()
         self._wake_latency_ms: list[float] = []
         self._failure_count = 0
+        self._permanent_failure_count = 0
 
     def record(self, value: float) -> None:
         with self._lock:
@@ -28,6 +32,7 @@ class ActionDueWakeDiagnostics:
         with self._lock:
             values = sorted(self._wake_latency_ms)
             failure_count = self._failure_count
+            permanent_failure_count = self._permanent_failure_count
         def percentile(fraction: float) -> float | None:
             return (
                 values[min(len(values) - 1, int((len(values) - 1) * fraction))]
@@ -39,11 +44,17 @@ class ActionDueWakeDiagnostics:
             "wake_latency_ms_p50": percentile(0.5),
             "wake_latency_ms_p95": percentile(0.95),
             "failure_count": failure_count,
+            "permanent_failure_count": permanent_failure_count,
         }
 
     def record_failure(self) -> None:
         with self._lock:
             self._failure_count += 1
+
+    def record_permanent_failure(self) -> None:
+        with self._lock:
+            self._failure_count += 1
+            self._permanent_failure_count += 1
 
 
 class ActionDueWake:
@@ -161,36 +172,47 @@ class ActionDueWake:
         try:
             delay = max(0.0, (due - self._now()).total_seconds())
             await self._sleep(delay + self._coalesce_seconds)
+        except asyncio.CancelledError:
+            return
+        for attempt_ordinal in range(len(_WAKE_RETRY_DELAYS_SECONDS) + 1):
             if self._closed or generation != self._generation:
                 return
             observed = self._now()
             self._diagnostics.record((observed - due).total_seconds() * 1_000)
-            await self._wake()
-            if generation == self._generation:
-                await self.refresh()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            self._diagnostics.record_failure()
-            logger.exception("action due wake failed; rebuilding timer")
-            for delay in (1.0, 5.0, 30.0):
-                if self._closed or generation != self._generation:
+            try:
+                await self._wake()
+            except asyncio.CancelledError:
+                return
+            except IdempotencyConflict:
+                self._diagnostics.record_permanent_failure()
+                logger.exception(
+                    "action due wake stopped on permanent idempotency conflict"
+                )
+                if generation == self._generation:
+                    self._task = None
+                return
+            except Exception:
+                self._diagnostics.record_failure()
+                if attempt_ordinal == len(_WAKE_RETRY_DELAYS_SECONDS):
+                    logger.exception(
+                        "action due wake retries exhausted; waiting for an external refresh"
+                    )
+                    if generation == self._generation:
+                        self._task = None
                     return
+                retry_delay = _WAKE_RETRY_DELAYS_SECONDS[attempt_ordinal]
+                logger.exception(
+                    "action due wake failed; retrying in %.1fs",
+                    retry_delay,
+                )
                 try:
-                    await self._sleep(delay)
-                    if self._closed or generation != self._generation:
-                        return
-                    await self.refresh()
-                    return
+                    await self._sleep(retry_delay)
                 except asyncio.CancelledError:
                     return
-                except Exception:
-                    self._diagnostics.record_failure()
-                    logger.exception(
-                        "action due wake timer rebuild failed; retrying in %.1fs",
-                        delay,
-                    )
-            logger.error("action due wake timer rebuild exhausted bounded retries")
+                continue
+            if generation == self._generation:
+                await self.refresh()
+            return
 
     async def aclose(self) -> None:
         self._closed = True

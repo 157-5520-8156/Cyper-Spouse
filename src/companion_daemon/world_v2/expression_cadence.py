@@ -12,13 +12,6 @@ from .schema_core import FrozenModel
 
 
 CadenceProfile = Literal["rapid", "conversational", "hesitant", "escalating"]
-ExpressionBeatRole = Literal[
-    "opening",
-    "substantive",
-    "challenge",
-    "self_correction",
-    "afterthought",
-]
 CADENCE_POLICY_VERSION = "expression-cadence.1"
 _EXPIRY_SLACK_SECONDS = 120.0
 
@@ -136,7 +129,6 @@ __all__ = [
     "CADENCE_POLICY_VERSION",
     "CadenceDraw",
     "CadenceProfile",
-    "ExpressionBeatRole",
     "cadence_gap_bounds",
     "cadence_windows",
     "record_cadence_draws",

@@ -127,23 +127,31 @@ def test_fit_secondary_call_timeout_skips_when_no_useful_budget_remains() -> Non
 
 
 def test_reliability_snapshot_counts_and_rate() -> None:
+    metrics.record_dispatch_ack()
+    metrics.record_dispatch_ack()
     metrics.record_visible_reply()
     metrics.record_visible_reply()
     metrics.record_visible_reply()
     metrics.record_failsafe()
     metrics.record_claim_repair()
     metrics.record_shape_repair()
+    metrics.record_source_closure_reselection()
     metrics.record_claim_free_reply()
     metrics.record_backup_recovery()
 
     snapshot = metrics.reliability_snapshot()
 
     assert snapshot["window_hours"] == 24
+    assert snapshot["dispatch_acks_24h"] == 2
+    # Existing health fields remain available with their stronger delivered
+    # semantics; clients do not need to migrate keys merely to distinguish an
+    # acknowledgement from user-visible evidence.
     assert snapshot["visible_replies_24h"] == 3
     assert snapshot["failsafe_24h"] == 1
     assert snapshot["failsafe_rate_24h"] == round(1 / 3, 4)
     assert snapshot["claim_repair_24h"] == 1
     assert snapshot["shape_repair_24h"] == 1
+    assert snapshot["source_closure_reselection_24h"] == 1
     assert snapshot["claim_free_24h"] == 1
     assert snapshot["backup_recovery_24h"] == 1
     assert isinstance(snapshot["since"], str)
@@ -197,9 +205,15 @@ class _ShapeRepairedCombinedProvider:
 
     model = "combined-flash"
 
-    def __init__(self, *, corrected_on_call: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        corrected_on_call: int = 2,
+        direct_expression_on_call: int | None = None,
+    ) -> None:
         self.calls: list[list[dict[str, str]]] = []
         self._corrected_on_call = corrected_on_call
+        self._direct_expression_on_call = direct_expression_on_call
 
     async def complete(
         self, messages: list[dict[str, str]], *, temperature: float = 0.8
@@ -211,6 +225,8 @@ class _ShapeRepairedCombinedProvider:
             if len(self.calls) >= self._corrected_on_call
             else _BROKEN_SHAPE_EXPRESSION
         )
+        if self._direct_expression_on_call == len(self.calls):
+            return json.dumps(expression, ensure_ascii=False)
         return json.dumps(
             {"appraisal_draft": _VALID_APPRAISAL, "expression_draft": expression},
             ensure_ascii=False,
@@ -219,7 +235,10 @@ class _ShapeRepairedCombinedProvider:
 
 @pytest.mark.asyncio
 async def test_paired_shape_reject_is_repaired_with_violation_feedback() -> None:
-    provider = _ShapeRepairedCombinedProvider(corrected_on_call=2)
+    provider = _ShapeRepairedCombinedProvider(
+        corrected_on_call=2,
+        direct_expression_on_call=3,
+    )
     cognition = SingleCallInboundCognition(flash_model=provider)
     request = _request(revision=3, call="call:paired-shape-repair")
 
@@ -228,9 +247,11 @@ async def test_paired_shape_reject_is_repaired_with_violation_feedback() -> None
         request.model_copy(update={"call_id": "call:paired-shape-repair-expression"})
     )
 
-    # One combined pass plus exactly one corrective retry; the cached
-    # expression is then materialized without another provider call.
-    assert len(provider.calls) == 2
+    # The combined pass and its correction produce valid appraisal evidence.
+    # Acceptance changes the final pinned request identity, so the expression
+    # is chosen once more from that updated same-turn Context rather than
+    # relabelling cached pre-appraisal bytes as a later provider result.
+    assert len(provider.calls) == 3
     corrective = provider.calls[1][-1]["content"]
     assert "structural validation" in corrective
     assert "note" in corrective  # quotes the concrete violation
@@ -242,9 +263,11 @@ async def test_paired_shape_reject_is_repaired_with_violation_feedback() -> None
 @pytest.mark.asyncio
 async def test_deadline_deferred_repair_is_spent_before_the_failsafe() -> None:
     # The paired attempt has nearly no budget left, so its in-attempt repair
-    # is deferred (never started).  The post-acceptance expression pass then
-    # spends the one violation-quoting corrective retry instead of landing on
-    # a canned line.
+    # is deferred (never started).  A direct expression pass for that exact
+    # pinned request then spends the one violation-quoting corrective retry
+    # instead of landing on a canned line.  A different request identity must
+    # instead ask the role model afresh and is covered by the paired identity
+    # tests.
     from companion_daemon.world_v2 import deliberation as deliberation_module
 
     provider = _ShapeRepairedCombinedProvider(corrected_on_call=2)
@@ -258,9 +281,7 @@ async def test_deadline_deferred_repair_is_spent_before_the_failsafe() -> None:
         deliberation_module._ATTEMPT_DEADLINE.reset(token)
     assert len(provider.calls) == 1  # repair deferred, not spent
 
-    expression = await cognition.expression.propose(
-        request.model_copy(update={"call_id": "call:pre-failsafe-retry-expression"})
-    )
+    expression = await cognition.expression.propose(request)
 
     assert len(provider.calls) == 2
     assert "structural validation" in provider.calls[1][-1]["content"]
@@ -273,7 +294,8 @@ async def test_deadline_deferred_repair_is_spent_before_the_failsafe() -> None:
 @pytest.mark.asyncio
 async def test_spent_corrective_is_not_repeated_or_replaced_with_local_prose() -> None:
     # The in-attempt corrective already ran once and failed; the expression
-    # pass must not repeat the identical repair before its bounded failsafe.
+    # pass for the same pinned request must not repeat the identical repair
+    # before its bounded model-owned recovery.
     provider = _ShapeRepairedCombinedProvider(corrected_on_call=99)
     cognition = SingleCallInboundCognition(flash_model=provider)
     request = _request(revision=3, call="call:pre-failsafe-exhausted")
@@ -282,9 +304,7 @@ async def test_spent_corrective_is_not_repeated_or_replaced_with_local_prose() -
     assert len(provider.calls) == 2  # paired pass plus one failed corrective
 
     with pytest.raises(ValueError, match="requires_model_recovery"):
-        await cognition.expression.propose(
-            request.model_copy(update={"call_id": "call:pre-failsafe-exhausted-expression"})
-        )
+        await cognition.expression.propose(request)
 
     assert len(provider.calls) == 2  # no third identical repair
     assert metrics.reliability_snapshot()["failsafe_24h"] == 0

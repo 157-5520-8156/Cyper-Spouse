@@ -22,6 +22,21 @@ def test_selected_v2_platform_paths_do_not_reach_legacy_runtime_authority() -> N
     assert_v2_platform_architecture(REPOSITORY_ROOT)
 
 
+def test_removed_attention_view_has_no_source_or_operator_script_importers() -> None:
+    removed_module = "companion_daemon.world_v2.attention_view"
+    offenders: list[str] = []
+    for root in (REPOSITORY_ROOT / "src", REPOSITORY_ROOT / "scripts"):
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            if any(
+                isinstance(node, ast.ImportFrom) and node.module == removed_module
+                for node in ast.walk(tree)
+            ):
+                offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
+
+    assert offenders == []
+
+
 def test_default_route_guard_rejects_archive_writers_but_not_world_v2() -> None:
     violations = scan_default_http_route_paths(
         (
@@ -92,12 +107,13 @@ def test_internal_world_module_is_not_subject_to_platform_authority_import_rule(
     assert scan_v2_platform_source(path) == ()
 
 
-def test_platform_media_executor_may_import_only_the_narrow_delivery_approval_check(
+def test_platform_media_executor_may_import_only_the_narrow_delivery_approval_contract(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "platform_action_executor.py"
     path.write_text(
-        "from .media_delivery_runtime import require_current_media_delivery_approval\n",
+        "from .media_delivery_runtime import "
+        "MediaDeliveryError, require_current_media_delivery_approval\n",
         encoding="utf-8",
     )
 

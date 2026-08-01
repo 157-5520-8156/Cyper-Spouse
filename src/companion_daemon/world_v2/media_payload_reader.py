@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from .media_v2 import ImmutableMediaPayloadStore
-from .platform_action_executor import AuthorizedPayloadReader, ResolvedActionPayload
+from .platform_action_executor import (
+    AuthorizedPayloadReader,
+    AuthorizedPayloadResolutionError,
+    ResolvedActionPayload,
+)
 from .schemas import Action
 
 
@@ -14,7 +18,9 @@ class MediaSidecarPayloadReader:
     async def resolve(self, action: Action) -> ResolvedActionPayload:
         record = self._store.read_exact(payload_ref=action.payload_ref)
         if record is None or record.payload_hash != action.payload_hash:
-            raise ValueError("Media v2 Action payload sidecar is missing or does not bind Action")
+            raise AuthorizedPayloadResolutionError(
+                "Media v2 Action payload sidecar is missing or does not bind Action"
+            )
         return ResolvedActionPayload(
             payload_ref=record.payload_ref,
             payload_hash=record.payload_hash,

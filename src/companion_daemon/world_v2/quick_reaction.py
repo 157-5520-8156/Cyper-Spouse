@@ -110,9 +110,11 @@ class QuickReactionPolicy(FrozenModel):
     # A second quick reaction shortly after a previous one reads as spammy;
     # halve the act mass inside this window (projection-derived, no state).
     reaction_backoff_seconds: int = Field(default=600, ge=30, le=86_400)
-    # Hard budget for the local semantic gate.  On timeout the lane gives up;
-    # it never blocks or degrades the visible reply turn.
-    gate_timeout_seconds: float = Field(default=0.8, gt=0.0, le=5.0)
+    # Hard budget for the optional local semantic gate.  This worker runs
+    # before the role-model cursor is pinned, so a half-dead local endpoint
+    # would otherwise delay every selected visible turn.  Missing this budget
+    # simply means no reaction; it never changes or replaces the main reply.
+    gate_timeout_seconds: float = Field(default=0.25, gt=0.0, le=5.0)
 
 
 class QuickReactionDecisionProfile(FrozenModel):
@@ -227,7 +229,7 @@ def _gate_system_prompt(catalog: str) -> str:
         "你只判断这条消息适不适合贴表情、贴哪一个，不生成任何文字回复。\n"
         "只有内容轻松、正面、有趣或普通日常分享时才贴（比如完成了某件事、趣闻、美食、"
         "可爱的东西、无伤大雅的玩笑）。\n"
-        '以下情况一律不贴，输出 {"react":false}：\n'
+        "以下情况一律不贴，输出 none：\n"
         "- 对方在倾诉痛苦、难过、疲惫、焦虑、委屈等负面情绪\n"
         "- 对方在生气、抱怨、争执、指责，或语气冷淡疏远、阴阳怪气\n"
         "- 对方提出严肃问题、重要请求、需要认真讨论或安慰的事\n"
@@ -235,8 +237,8 @@ def _gate_system_prompt(catalog: str) -> str:
         "先贴笑脸再慢慢回复一条坏消息是灾难性的，所以宁可不贴。\n"
         "表情只能从下面目录的 option_id 里选：\n"
         f"{catalog}\n"
-        '只输出一个 JSON 对象：{"react":false} 或 {"react":true,"reaction_id":"<option_id>"}。'
-        "禁止 Markdown、解释和任何其他字段。"
+        "只输出 none 或目录中的一个 option_id。"
+        "禁止 JSON、Markdown、解释和任何其他文字。"
     )
 
 
@@ -245,8 +247,13 @@ def parse_quick_reaction_verdict(raw: object, *, option_ids: frozenset[str]) -> 
 
     if not isinstance(raw, str) or not raw.strip():
         return None
+    token = raw.strip()
+    if token == "none":
+        return None
+    if token in option_ids:
+        return token
     try:
-        value = json.loads(extract_json_object_text(raw))
+        value = json.loads(extract_json_object_text(token))
     except (TypeError, ValueError):
         return None
     if not isinstance(value, dict):
@@ -266,8 +273,8 @@ class QuickReactionSemanticGate:
     """Bounded local-model confirmation that owns the social-safety boundary.
 
     ``assess`` returns an in-catalog reaction token or ``None`` for *every*
-    other outcome — an explicit ``{"react": false}``, a timeout, a transport
-    failure, or garbage output.  The lane treats all of those identically:
+    other outcome — an explicit ``none``, a timeout, a transport failure, or
+    garbage output.  The lane treats all of those identically:
     give up quietly, never delay or fail the visible turn.
     """
 
@@ -702,6 +709,7 @@ class QuickReactionWorker:
             evaluated_world_revision=cursor.world_revision,
             expected_commit_world_revision=cursor.world_revision,
             expected_deliberation_revision=cursor.deliberation_revision,
+            expected_ledger_sequence=cursor.ledger_sequence,
         )
         try:
             if self._ledger.blocks_event_loop:

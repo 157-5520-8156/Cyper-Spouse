@@ -7,6 +7,7 @@ fabricated from a model completion or a delivery timestamp.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 import math
@@ -17,6 +18,7 @@ from typing import AsyncIterator, Callable, Iterator, Literal
 
 StartupClass = Literal["hot", "cold"]
 TraceEnvironment = Literal["offline_in_process", "real_transport"]
+ProviderKind = Literal["role", "auxiliary"]
 TraceSegment = Literal[
     "coalescing",
     "queue",
@@ -26,6 +28,9 @@ TraceSegment = Literal[
     "advisor",
     "model_ttft",
     "model_completion",
+    "foreground_provider_total",
+    "role_provider_total",
+    "api_external_overhead",
     "primary",
     "hedge_started",
     "candidate_validated",
@@ -36,9 +41,13 @@ TraceSegment = Literal[
     "hedge_cancelled",
     "hedge_lost",
     "budget_exhausted",
+    "technical_recovery_started",
+    "validation_recovery_started",
+    "validation_reselection_started",
     "acceptance",
     "dispatch",
     "receipt",
+    "ingress_to_first_role_provider",
     "ingress_to_visible",
 ]
 
@@ -52,6 +61,9 @@ TRACE_SEGMENTS: frozenset[str] = frozenset(
         "advisor",
         "model_ttft",
         "model_completion",
+        "foreground_provider_total",
+        "role_provider_total",
+        "api_external_overhead",
         "primary",
         "hedge_started",
         "candidate_validated",
@@ -62,12 +74,23 @@ TRACE_SEGMENTS: frozenset[str] = frozenset(
         "hedge_cancelled",
         "hedge_lost",
         "budget_exhausted",
+        "technical_recovery_started",
+        "validation_recovery_started",
+        "validation_reselection_started",
         "acceptance",
         "dispatch",
         "receipt",
+        "ingress_to_first_role_provider",
         "ingress_to_visible",
     }
 )
+
+# A trace remains joinable across the context, model, multi-beat dispatch and
+# receipt phases.  Keeping the most recently touched 1,024 traces comfortably
+# exceeds the process concurrency ceilings while making health work and memory
+# independent of daemon uptime.
+DEFAULT_MAX_RETAINED_TRACES = 1_024
+DEFAULT_MAX_ACTIVE_TRACES = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +134,13 @@ class TurnLatencyTrace:
         self._ingress_started_ns = ingress_started_ns
         self._clock_ns = clock_ns
         self._durations_ns: dict[str, int] = {}
+        self._first_role_provider_ns: int | None = None
+        self._first_role_provider_call_id: str | None = None
+        self._provider_entries_ns: dict[str, int] = {}
+        self._provider_completions_ns: dict[str, int] = {}
+        self._provider_kinds: dict[str, ProviderKind] = {}
+        self._first_role_provider_completion_call_id: str | None = None
+        self._cognition_finished = False
         self._visible_ns: int | None = None
         self._lock = Lock()
 
@@ -135,7 +165,15 @@ class TurnLatencyTrace:
         return self._environment == environment
 
     def record_span(self, segment: TraceSegment, *, started_ns: int, ended_ns: int) -> None:
-        if segment not in TRACE_SEGMENTS or segment == "ingress_to_visible":
+        if segment not in TRACE_SEGMENTS or segment in {
+            "ingress_to_first_role_provider",
+            "ingress_to_visible",
+            "model_completion",
+            "model_ttft",
+            "foreground_provider_total",
+            "role_provider_total",
+            "api_external_overhead",
+        }:
             raise ValueError("latency span segment is unsupported")
         if started_ns < self._ingress_started_ns or ended_ns < started_ns:
             raise ValueError("latency span is outside the turn timeline")
@@ -150,10 +188,19 @@ class TurnLatencyTrace:
         QQ coalescing timestamps survive a process restart as wall-clock evidence,
         while this process recorder uses a monotonic clock.  Accepting the exact
         duration keeps that evidence usable without pretending those clocks share
-        an epoch.  It may not be used to synthesize visibility or model TTFT.
+        an epoch.  It may not be used to synthesize visibility, first role-provider
+        entry, or model TTFT.
         """
 
-        if segment not in TRACE_SEGMENTS or segment in {"ingress_to_visible", "model_ttft"}:
+        if segment not in TRACE_SEGMENTS or segment in {
+            "ingress_to_first_role_provider",
+            "ingress_to_visible",
+            "model_completion",
+            "model_ttft",
+            "foreground_provider_total",
+            "role_provider_total",
+            "api_external_overhead",
+        }:
             raise ValueError("latency duration segment is unsupported")
         if not math.isfinite(duration_ms) or duration_ms < 0:
             raise ValueError("latency duration must be finite and non-negative")
@@ -188,11 +235,240 @@ class TurnLatencyTrace:
             if self._visible_ns is None:
                 self._visible_ns = observed
 
+    def mark_first_role_provider(self, *, observed_ns: int | None = None) -> None:
+        """Backward-compatible marker for an unattributed provider entry."""
+
+        self.mark_role_provider_entry(
+            "model-call:unattributed-first-role-provider",
+            observed_ns=observed_ns,
+        )
+
+    def mark_role_provider_entry(
+        self,
+        provider_call_id: str,
+        *,
+        observed_ns: int | None = None,
+    ) -> None:
+        """Record an actual role-provider request boundary.
+
+        The transport is currently a non-streaming completion API.  Entry is
+        therefore observable, but it is not time-to-first-token evidence.
+        """
+
+        self._mark_provider_entry(
+            provider_call_id,
+            provider_kind="role",
+            observed_ns=observed_ns,
+        )
+
+    def mark_auxiliary_provider_entry(
+        self,
+        provider_call_id: str,
+        *,
+        observed_ns: int | None = None,
+    ) -> None:
+        """Record a foreground embedding/advisory provider request boundary."""
+
+        self._mark_provider_entry(
+            provider_call_id,
+            provider_kind="auxiliary",
+            observed_ns=observed_ns,
+        )
+
+    def _mark_provider_entry(
+        self,
+        provider_call_id: str,
+        *,
+        provider_kind: ProviderKind,
+        observed_ns: int | None,
+    ) -> None:
+        if not provider_call_id:
+            raise ValueError("provider call id is required")
+
+        observed = self._clock_ns() if observed_ns is None else observed_ns
+        if observed < self._ingress_started_ns:
+            raise ValueError("provider timestamp precedes ingress")
+        with self._lock:
+            if self._cognition_finished:
+                return
+            existing_kind = self._provider_kinds.get(provider_call_id)
+            if existing_kind is not None and existing_kind != provider_kind:
+                raise ValueError("provider call id cannot change kind")
+            self._provider_entries_ns.setdefault(provider_call_id, observed)
+            self._provider_kinds.setdefault(provider_call_id, provider_kind)
+            if provider_kind == "role" and self._first_role_provider_ns is None:
+                self._first_role_provider_ns = observed
+                self._first_role_provider_call_id = provider_call_id
+
+    def mark_role_provider_completion(
+        self,
+        provider_call_id: str,
+        *,
+        observed_ns: int | None = None,
+    ) -> None:
+        """Record the first complete non-streaming role-provider response."""
+
+        self._mark_provider_completion(
+            provider_call_id,
+            provider_kind="role",
+            observed_ns=observed_ns,
+        )
+
+    def mark_auxiliary_provider_completion(
+        self,
+        provider_call_id: str,
+        *,
+        observed_ns: int | None = None,
+    ) -> None:
+        """Record completion of a foreground embedding/advisory request."""
+
+        self._mark_provider_completion(
+            provider_call_id,
+            provider_kind="auxiliary",
+            observed_ns=observed_ns,
+        )
+
+    def _mark_provider_completion(
+        self,
+        provider_call_id: str,
+        *,
+        provider_kind: ProviderKind,
+        observed_ns: int | None,
+    ) -> None:
+        if not provider_call_id:
+            raise ValueError("provider call id is required")
+        observed = self._clock_ns() if observed_ns is None else observed_ns
+        with self._lock:
+            if self._cognition_finished:
+                return
+            started = self._provider_entries_ns.get(provider_call_id)
+            if started is None:
+                raise ValueError("provider completion has no matching entry")
+            if self._provider_kinds.get(provider_call_id) != provider_kind:
+                raise ValueError("provider completion kind does not match entry")
+            if observed < started:
+                raise ValueError("provider completion precedes entry")
+            self._provider_completions_ns.setdefault(provider_call_id, observed)
+            if (
+                provider_kind == "role"
+                and self._first_role_provider_completion_call_id is None
+            ):
+                self._first_role_provider_completion_call_id = provider_call_id
+                self._durations_ns["model_completion"] = observed - started
+
+    def finish_cognition_timing(self) -> None:
+        """Freeze role-provider markers while leaving Action evidence joinable."""
+
+        with self._lock:
+            self._cognition_finished = True
+
+    def role_provider_timing_evidence(self) -> dict[str, object]:
+        """Return explicit entry/completion evidence and TTFT availability."""
+
+        with self._lock:
+            entry_ns = self._first_role_provider_ns
+            entry_call_id = self._first_role_provider_call_id
+            completion_call_id = self._first_role_provider_completion_call_id
+            completion_ns = self._durations_ns.get("model_completion")
+            entries = dict(self._provider_entries_ns)
+            completions = dict(self._provider_completions_ns)
+            provider_kinds = dict(self._provider_kinds)
+        return {
+            "entry": {
+                "status": "observed" if entry_ns is not None else "not_observed",
+                "segment": "ingress_to_first_role_provider",
+                "provider_call_id": entry_call_id,
+                "duration_ms": (
+                    None
+                    if entry_ns is None
+                    else (entry_ns - self._ingress_started_ns) / 1_000_000
+                ),
+            },
+            "ttft": {
+                "status": "unavailable",
+                "segment": "model_ttft",
+                "provider_call_id": None,
+                "duration_ms": None,
+                "reason": "non_streaming_completion_api",
+            },
+            "completion": {
+                "status": (
+                    "observed" if completion_ns is not None else "not_observed"
+                ),
+                "segment": "model_completion",
+                "provider_call_id": completion_call_id,
+                "duration_ms": (
+                    None if completion_ns is None else completion_ns / 1_000_000
+                ),
+            },
+            "calls": [
+                {
+                    "provider_call_id": call_id,
+                    "provider_kind": provider_kinds[call_id],
+                    "status": (
+                        "completed" if call_id in completions else "in_progress"
+                    ),
+                    "entry_ms": (started - self._ingress_started_ns) / 1_000_000,
+                    "duration_ms": (
+                        None
+                        if call_id not in completions
+                        else (completions[call_id] - started) / 1_000_000
+                    ),
+                }
+                for call_id, started in sorted(
+                    entries.items(), key=lambda item: (item[1], item[0])
+                )
+            ],
+        }
+
     def samples(self) -> tuple[ProductionLatencySample, ...]:
         with self._lock:
             durations = dict(self._durations_ns)
+            entries = dict(self._provider_entries_ns)
+            completions = dict(self._provider_completions_ns)
+            provider_kinds = dict(self._provider_kinds)
+            if self._first_role_provider_ns is not None:
+                durations["ingress_to_first_role_provider"] = (
+                    self._first_role_provider_ns - self._ingress_started_ns
+                )
             if self._visible_ns is not None:
                 durations["ingress_to_visible"] = self._visible_ns - self._ingress_started_ns
+            if entries and set(entries) <= set(completions):
+                intervals = tuple(
+                    (started, completions[call_id])
+                    for call_id, started in entries.items()
+                )
+                durations["foreground_provider_total"] = _merged_interval_duration_ns(
+                    intervals
+                )
+                role_intervals = tuple(
+                    (started, completions[call_id])
+                    for call_id, started in entries.items()
+                    if provider_kinds[call_id] == "role"
+                )
+                if role_intervals:
+                    durations["role_provider_total"] = _merged_interval_duration_ns(
+                        role_intervals
+                    )
+                if self._visible_ns is not None:
+                    visible_intervals = tuple(
+                        (
+                            max(self._ingress_started_ns, started),
+                            min(self._visible_ns, ended),
+                        )
+                        for started, ended in intervals
+                        if ended > self._ingress_started_ns
+                        and started < self._visible_ns
+                    )
+                    provider_visible_ns = _merged_interval_duration_ns(
+                        visible_intervals
+                    )
+                    durations["api_external_overhead"] = max(
+                        0,
+                        self._visible_ns
+                        - self._ingress_started_ns
+                        - provider_visible_ns,
+                    )
         return tuple(
             ProductionLatencySample(
                 trace_id=self._trace_id,
@@ -205,13 +481,75 @@ class TurnLatencyTrace:
         )
 
 
-class ProductionLatencyRecorder:
-    """Process-local trace registry; never a second world-state authority."""
+def _merged_interval_duration_ns(intervals: tuple[tuple[int, int], ...]) -> int:
+    """Return union duration so concurrent hedges are subtracted only once."""
 
-    def __init__(self, *, clock_ns: Callable[[], int] = time.perf_counter_ns) -> None:
+    ordered = sorted(
+        (started, ended)
+        for started, ended in intervals
+        if ended > started
+    )
+    if not ordered:
+        return 0
+    total = 0
+    current_start, current_end = ordered[0]
+    for started, ended in ordered[1:]:
+        if started <= current_end:
+            current_end = max(current_end, ended)
+            continue
+        total += current_end - current_start
+        current_start, current_end = started, ended
+    return total + current_end - current_start
+
+
+class ProductionLatencyRecorder:
+    """Bounded active and post-cognition trace windows.
+
+    Active cognition traces are protected from completed-turn churn.  Once
+    cognition ends, :meth:`finish_cognition` moves the trace into a bounded
+    recently-touched window so immediate or recovering Action dispatch can
+    still append receipt/visibility evidence.  Exceeding the separate active
+    ceiling drops monitoring evidence instead of delaying a user turn.
+    """
+
+    def __init__(
+        self,
+        *,
+        clock_ns: Callable[[], int] = time.perf_counter_ns,
+        max_retained_traces: int = DEFAULT_MAX_RETAINED_TRACES,
+        max_active_traces: int = DEFAULT_MAX_ACTIVE_TRACES,
+    ) -> None:
+        if type(max_retained_traces) is not int or max_retained_traces < 1:
+            raise ValueError("maximum retained latency traces must be a positive integer")
+        if type(max_active_traces) is not int or max_active_traces < 1:
+            raise ValueError("maximum active latency traces must be a positive integer")
         self._clock_ns = clock_ns
-        self._traces: dict[str, TurnLatencyTrace] = {}
+        self._max_retained_traces = max_retained_traces
+        self._max_active_traces = max_active_traces
+        self._active_traces: dict[str, TurnLatencyTrace] = {}
+        self._completed_traces: OrderedDict[str, TurnLatencyTrace] = OrderedDict()
+        self._dropped_active_trace_count = 0
+        self._has_started_trace = False
         self._lock = Lock()
+
+    def _existing_locked(self, trace_id: str) -> TurnLatencyTrace | None:
+        return self._active_traces.get(trace_id) or self._completed_traces.get(trace_id)
+
+    def _activate_locked(self, trace: TurnLatencyTrace) -> bool:
+        if trace.trace_id in self._active_traces:
+            return True
+        if len(self._active_traces) >= self._max_active_traces:
+            self._dropped_active_trace_count += 1
+            return False
+        self._completed_traces.pop(trace.trace_id, None)
+        self._active_traces[trace.trace_id] = trace
+        return True
+
+    def _retain_completed_locked(self, trace: TurnLatencyTrace) -> None:
+        self._completed_traces[trace.trace_id] = trace
+        self._completed_traces.move_to_end(trace.trace_id)
+        while len(self._completed_traces) > self._max_retained_traces:
+            self._completed_traces.popitem(last=False)
 
     def start(
         self,
@@ -230,7 +568,7 @@ class ProductionLatencyRecorder:
             clock_ns=self._clock_ns,
         )
         with self._lock:
-            existing = self._traces.get(trace_id)
+            existing = self._existing_locked(trace_id)
             if existing is not None:
                 if not existing.matches_registration(
                     startup=startup,
@@ -238,8 +576,10 @@ class ProductionLatencyRecorder:
                     ingress_started_ns=started,
                 ):
                     raise ValueError("latency trace id was rebound to different ingress evidence")
+                self._activate_locked(existing)
                 return existing
-            self._traces[trace_id] = trace
+            self._has_started_trace = True
+            self._activate_locked(trace)
         return trace
 
     def start_ingress(
@@ -265,10 +605,11 @@ class ProductionLatencyRecorder:
         if not math.isfinite(elapsed_before_registration_ms) or elapsed_before_registration_ms < 0:
             raise ValueError("elapsed ingress duration must be finite and non-negative")
         with self._lock:
-            existing = self._traces.get(trace_id)
+            existing = self._existing_locked(trace_id)
             if existing is not None:
                 if not existing.matches_environment(environment):
                     raise ValueError("latency trace id was rebound to a different environment")
+                self._activate_locked(existing)
                 return existing
             now = self._clock_ns()
             elapsed_ns = round(elapsed_before_registration_ms * 1_000_000)
@@ -276,17 +617,41 @@ class ProductionLatencyRecorder:
                 raise ValueError("elapsed ingress duration precedes the monotonic clock epoch")
             trace = TurnLatencyTrace(
                 trace_id=trace_id,
-                startup="cold" if not self._traces else "hot",
+                startup="cold" if not self._has_started_trace else "hot",
                 environment=environment,
                 ingress_started_ns=now - elapsed_ns,
                 clock_ns=self._clock_ns,
             )
-            self._traces[trace_id] = trace
+            self._has_started_trace = True
+            self._activate_locked(trace)
             return trace
+
+    def finish_cognition(self, trace_id: str) -> bool:
+        """Move one trace into the bounded Action/visibility join window.
+
+        This is not a claim that an external Action is terminal.  A later
+        :meth:`get` still finds and renews the trace until newer completed
+        turns displace it from the fixed-size window.
+        """
+
+        if not trace_id:
+            raise ValueError("latency trace id is required")
+        with self._lock:
+            trace = self._active_traces.pop(trace_id, None)
+            if trace is None:
+                trace = self._completed_traces.get(trace_id)
+            if trace is None:
+                return False
+            trace.finish_cognition_timing()
+            self._retain_completed_locked(trace)
+            return True
 
     def samples(self) -> tuple[ProductionLatencySample, ...]:
         with self._lock:
-            traces = tuple(self._traces[key] for key in sorted(self._traces))
+            traces = (
+                *self._active_traces.values(),
+                *self._completed_traces.values(),
+            )
         return tuple(sample for trace in traces for sample in trace.samples())
 
     def get(self, trace_id: str) -> TurnLatencyTrace | None:
@@ -295,10 +660,56 @@ class ProductionLatencyRecorder:
         if not trace_id:
             raise ValueError("latency trace id is required")
         with self._lock:
-            return self._traces.get(trace_id)
+            trace = self._active_traces.get(trace_id)
+            if trace is not None:
+                return trace
+            trace = self._completed_traces.get(trace_id)
+            if trace is not None:
+                # Later Action/receipt phases renew the bounded post-cognition
+                # join lease without changing any timing evidence.
+                self._completed_traces.move_to_end(trace_id)
+            return trace
+
+    def get_active(self, trace_id: str) -> TurnLatencyTrace | None:
+        """Return a trace only while foreground cognition still owns it."""
+
+        if not trace_id:
+            raise ValueError("latency trace id is required")
+        with self._lock:
+            return self._active_traces.get(trace_id)
+
+    @property
+    def retained_trace_count(self) -> int:
+        with self._lock:
+            return len(self._active_traces) + len(self._completed_traces)
+
+    @property
+    def active_trace_count(self) -> int:
+        with self._lock:
+            return len(self._active_traces)
+
+    @property
+    def completed_trace_count(self) -> int:
+        with self._lock:
+            return len(self._completed_traces)
+
+    @property
+    def dropped_active_trace_count(self) -> int:
+        with self._lock:
+            return self._dropped_active_trace_count
+
+    @property
+    def max_retained_traces(self) -> int:
+        return self._max_retained_traces
+
+    @property
+    def max_active_traces(self) -> int:
+        return self._max_active_traces
 
 
 __all__ = [
+    "DEFAULT_MAX_ACTIVE_TRACES",
+    "DEFAULT_MAX_RETAINED_TRACES",
     "ProductionLatencyRecorder",
     "ProductionLatencySample",
     "TRACE_SEGMENTS",

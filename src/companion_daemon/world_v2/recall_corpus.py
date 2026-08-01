@@ -17,6 +17,7 @@ from pydantic import Field
 
 from .context_capsule import FactRecallItem, HistoricalFactRecallItem
 from .fact_reducers import INSTALLED_FACT_PREDICATE_GUIDE
+from .life_content import RecentExperienceContextItem
 from .memory_retrieval import MemoryRetrievalItem
 from .recall_index import (
     RecallCursor,
@@ -29,7 +30,6 @@ from .schemas import (
     AffectEpisodeProjection,
     AppraisalHypothesis,
     AppraisalProjection,
-    ExperienceProjection,
     PrivateImpressionProjection,
     ThreadProjection,
 )
@@ -54,7 +54,7 @@ class RecallCorpusSources(FrozenModel):
     relevant_facts: tuple[FactRecallItem, ...] = ()
     historical_facts: tuple[HistoricalFactRecallItem, ...] = ()
     open_threads: tuple[ThreadProjection, ...] = ()
-    recent_experiences: tuple[ExperienceProjection, ...] = ()
+    recent_experiences: tuple[RecentExperienceContextItem, ...] = ()
     world_life: tuple[WorldLifeContextItem, ...] = ()
     active_memory_candidates: tuple[MemoryRetrievalItem, ...] = ()
     affect_openings: tuple[AffectOpeningRecallItem, ...] = ()
@@ -78,8 +78,8 @@ def required_recall_authority_refs(sources: RecallCorpusSources) -> frozenset[st
         refs.update(ref.ref_id for ref in item.values.source_evidence_refs)
         refs.update(ref.ref_id for ref in item.values.anchor_evidence_refs)
     for item in sources.recent_experiences:
-        refs.add(item.origin.accepted_event_ref)
-        refs.update(binding.authority_event_ref for binding in item.values.source_bindings)
+        refs.add(item.content.authority_event_ref)
+        refs.add(item.content.descriptor_event_ref)
     for item in sources.world_life:
         refs.add(item.source.authority_event_ref)
         if item.content is not None:
@@ -94,6 +94,13 @@ def required_recall_authority_refs(sources: RecallCorpusSources) -> frozenset[st
         refs.add(item.origin.accepted_event_ref)
         refs.update(ref.ref_id for ref in item.evidence_refs)
     for item in sources.private_impressions:
+        # A superseded private impression remains immutable World history, but
+        # it is no longer part of the character's current private
+        # understanding.  Historical recall is allowed to recover superseded
+        # facts; it must not resurrect a hypothesis the character explicitly
+        # replaced.
+        if item.status != "active":
+            continue
         refs.update(item.source_refs)
         if item.origin is not None:
             refs.add(item.origin.accepted_event_ref)
@@ -147,7 +154,7 @@ def _subjects(*values: str) -> tuple[str, ...]:
 class RecallCorpusCompiler:
     """Deep compiler for a source-closed hybrid recall corpus."""
 
-    VERSION = "world-v2-recall-corpus.1"
+    VERSION = "world-v2-recall-corpus.4"
 
     def compile(
         self,
@@ -163,6 +170,28 @@ class RecallCorpusCompiler:
         documents: list[RecallDocument] = []
 
         for item in sources.recent_dialogue:
+            if item.speaker == "companion":
+                speaker_ref = item.speaker_ref or actor_ref
+                dialogue_subject_refs = _subjects(speaker_ref)
+                epistemic_scope = "companion_expression_record"
+            else:
+                counterpart_refs = tuple(
+                    ref for ref in subject_refs if ref != actor_ref
+                )
+                speaker_ref = (
+                    item.speaker_ref
+                    or (counterpart_refs[0] if len(counterpart_refs) == 1 else None)
+                )
+                dialogue_subject_refs = _subjects(
+                    *((speaker_ref,) if speaker_ref is not None else counterpart_refs)
+                )
+                epistemic_scope = "counterpart_report_only"
+            if (
+                speaker_ref is None
+                or not dialogue_subject_refs
+                or speaker_ref not in subject_refs
+            ):
+                continue
             bindings = _canonical_bindings(
                 tuple(
                     self._prefer_binding(
@@ -190,13 +219,16 @@ class RecallCorpusCompiler:
                     bindings=bindings,
                     text=item.text,
                     actor_ref=actor_ref,
-                    subject_refs=subject_refs,
+                    subject_refs=dialogue_subject_refs,
                     link_refs=(
                         *item.acknowledges_observation_event_refs,
                         *(claim.authority_event_ref for claim in item.source_claims),
                     ),
                     occurred_from=item.occurred_at,
                     privacy_class=item.privacy_class,
+                    authority="dialogue_record",
+                    epistemic_scope=epistemic_scope,
+                    speaker_ref=speaker_ref,
                 )
             )
 
@@ -321,64 +353,79 @@ class RecallCorpusCompiler:
             )
 
         experiences_by_id = {item.experience_id: item for item in sources.recent_experiences}
+        experience_memory_links: dict[str, set[str]] = {}
         for candidate in sources.active_memory_candidates:
             for excerpt in candidate.source_excerpts:
-                fact = facts_by_id.get(excerpt.source_id)
                 experience = experiences_by_id.get(excerpt.source_id)
-                if excerpt.source_kind == "fact" and fact is not None:
-                    # Fact-backed retrieval state enriches the canonical Fact
-                    # document above. Emitting a second document for the same
-                    # semantic authority would let one fact occupy two of the
-                    # six bounded hits and crowd out unrelated memories.
+                if (
+                    excerpt.source_kind != "experience"
+                    or experience is None
+                    or excerpt.source_entity_revision != experience.entity_revision
+                    or excerpt.authority_event_ref
+                    != experience.content.authority_event_ref
+                    or excerpt.authority_world_revision
+                    != experience.content.authority_world_revision
+                    or excerpt.authority_payload_hash
+                    != experience.content.authority_payload_hash
+                    or excerpt.excerpt_ref != experience.content.content_ref
+                    or excerpt.excerpt_payload_hash
+                    != experience.content.content_payload_hash
+                ):
                     continue
-                elif excerpt.source_kind == "experience" and experience is not None:
-                    occurred_from = experience.values.occurred_from
-                    occurred_to = experience.values.occurred_to
-                    item_subjects = _subjects(*experience.values.participant_refs)
-                else:
-                    # Exact prose without an exact temporal/source projection
-                    # is not promoted into the searchable corpus.
-                    continue
-                binding = self._prefer_binding(
-                    authority=authority,
-                    fallback=RecallSourceBinding(
-                        source_kind="committed_event",
-                        authority_type=(
-                            "FactCommitted"
-                            if excerpt.source_kind == "fact"
-                            else "ExperienceCommitted"
+                experience_memory_links.setdefault(excerpt.source_id, set()).update(
+                    {
+                        candidate.candidate_id,
+                        candidate.cue_kind,
+                        f"retrieval_strength_bp:{candidate.retrieval_strength_bp}",
+                        *candidate.retention_rationales,
+                    }
+                )
+        for item in sources.recent_experiences:
+            if actor_ref not in item.values.participant_refs:
+                continue
+            bindings = _canonical_bindings(
+                (
+                    self._prefer_exact_binding(
+                        authority=authority,
+                        fallback=RecallSourceBinding(
+                            source_kind="committed_event",
+                            authority_type="ExperienceCommitted",
+                            ref=item.content.authority_event_ref,
+                            source_world_revision=item.content.authority_world_revision,
+                            immutable_hash=item.content.authority_payload_hash,
                         ),
-                        ref=excerpt.authority_event_ref,
-                        source_world_revision=excerpt.authority_world_revision,
-                        immutable_hash=excerpt.authority_payload_hash,
+                    ),
+                    self._prefer_exact_binding(
+                        authority=authority,
+                        fallback=RecallSourceBinding(
+                            source_kind="committed_event",
+                            authority_type="LifeContentRecorded",
+                            ref=item.content.descriptor_event_ref,
+                            source_world_revision=item.content.descriptor_world_revision,
+                            immutable_hash=item.content.descriptor_payload_hash,
+                        ),
                     ),
                 )
-                documents.append(
-                    self._document(
-                        memory_kind=("semantic" if excerpt.source_kind == "fact" else "episodic"),
-                        source_item_ref=excerpt.source_id,
-                        source_slice=(
-                            "relevant_facts"
-                            if excerpt.source_kind == "fact"
-                            else "recent_experiences"
-                        ),
-                        bindings=(binding,),
-                        text=excerpt.text,
-                        actor_ref=actor_ref,
-                        subject_refs=item_subjects,
-                        link_refs=(
-                            candidate.candidate_id,
-                            candidate.cue_kind,
-                            *candidate.retention_rationales,
-                        ),
-                        occurred_from=occurred_from,
-                        occurred_to=occurred_to,
-                        privacy_class=candidate.privacy_ceiling,
-                    )
+            )
+            documents.append(
+                self._document(
+                    memory_kind="episodic",
+                    source_item_ref=item.experience_id,
+                    source_slice="recent_experiences",
+                    bindings=bindings,
+                    text=item.content.text,
+                    actor_ref=actor_ref,
+                    subject_refs=_subjects(*item.values.participant_refs),
+                    link_refs=tuple(
+                        sorted(experience_memory_links.get(item.experience_id, ()))
+                    ),
+                    occurred_from=item.values.occurred_from,
+                    occurred_to=item.values.occurred_to,
+                    privacy_class=item.content.privacy_class,
                 )
-
+            )
         for item in sources.world_life:
-            if item.content is None:
+            if actor_ref not in item.participant_refs or item.content is None:
                 continue
             bindings = _canonical_bindings(
                 (
@@ -581,6 +628,8 @@ class RecallCorpusCompiler:
             )
 
         for item in sources.private_impressions:
+            if item.status != "active":
+                continue
             resolved = tuple(meanings[ref] for ref in item.interpretation_refs if ref in meanings)
             if len(resolved) != len(item.interpretation_refs):
                 continue
@@ -665,6 +714,21 @@ class RecallCorpusCompiler:
             raise ValueError("recall source disagrees with committed event authority")
         return exact
 
+    @classmethod
+    def _prefer_exact_binding(
+        cls,
+        *,
+        authority: dict[str, RecallSourceBinding],
+        fallback: RecallSourceBinding,
+    ) -> RecallSourceBinding:
+        binding = cls._prefer_binding(authority=authority, fallback=fallback)
+        if (
+            binding.source_kind != fallback.source_kind
+            or binding.authority_type != fallback.authority_type
+        ):
+            raise ValueError("recall source has the wrong authority type")
+        return binding
+
     @staticmethod
     def _document(
         *,
@@ -684,6 +748,8 @@ class RecallCorpusCompiler:
         status: str = "active",
         privacy_class: str,
         authority: str = "world_fact",
+        epistemic_scope: str | None = None,
+        speaker_ref: str | None = None,
     ) -> RecallDocument:
         canonical = _canonical_bindings(bindings)
         return RecallDocument(
@@ -713,6 +779,15 @@ class RecallCorpusCompiler:
             status=status,
             privacy_class=privacy_class,
             authority=authority,
+            epistemic_scope=(
+                epistemic_scope
+                or (
+                    "private_interpretation"
+                    if authority == "defeasible_interpretation"
+                    else "world_fact"
+                )
+            ),
+            speaker_ref=speaker_ref,
         )
 
 

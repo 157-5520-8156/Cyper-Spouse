@@ -126,10 +126,9 @@ class AppraisalProposalCompiler:
             source_proposal_event_ref=authority.audit.event_ref,
             logical_time=projection.logical_time,
         )
-        commit = self._ledger.commit(
+        commit = self._ledger.commit_at_cursor(
             [event],
-            expected_world_revision=cursor.world_revision,
-            expected_deliberation_revision=cursor.deliberation_revision,
+            expected_cursor=cursor,
             commit_id="commit:appraisal-proposal-compiler:"
             + _digest(
                 {

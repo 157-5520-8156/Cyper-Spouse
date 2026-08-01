@@ -131,9 +131,11 @@ mechanisms:
   # - resource: one-shot seeding of world_seed energy/attention would freeze
   #   a never-adjusted number into the capsule; the honest producer is
   #   activity-settlement resource pressure, again a full delivery.
-  # - attention: the live phone-presence need is served by the attention_view
-  #   advisory (pure projection, landed 2026-07-19); the authority head stays
-  #   dormant until an event-sourced producer is actually required.
+  # - attention: the authority head remains replay-only.  Production exposes
+  #   pinned time, current activity/availability and Affect as separate sourced
+  #   coordinates; it does not derive phone location, message visibility or a
+  #   reply tendency.  A future live producer must be a character decision,
+  #   not an activity/emotion-to-behavior matrix.
   # Activating any of these requires a new producer verdict recorded here
   # first; see Producer-First Authority in CONTEXT.md.
   - id: v16-situation-constituents
@@ -174,25 +176,6 @@ mechanisms:
       - tests/world_v2/test_advisory_compiler.py::test_compiles_source_bound_rejectable_advisory_without_mutation_ports
       - tests/world_v2/test_ledger_context_resolver.py::test_real_ledger_resolves_situation_core_and_authoritative_empty_domains
       - tests/world_v2/test_ledger_context_resolver.py::test_nonempty_context_is_byte_equivalent_across_memory_and_sqlite
-
-  - id: phone-attention-advisory
-    phase: 3
-    status: closed
-    runtime_activation: default
-    limitations: [advisory-only-never-writes-attention-authority-events, derivation-is-a-reviewed-heuristic-over-committed-material-only]
-    sources: [active-plan-heads, active-affect-episodes, pinned-logical-clock]
-    events: [ActivityPlanned, AffectEpisodeOpened, ClockAdvanced]
-    reducers: [src/companion_daemon/world_v2/reducers.py]
-    projections: [PhoneAttentionReading, InnerAdvisory]
-    decision_consumers: [PinnedTurn, expression-timing-choice]
-    actions: []
-    terminal_states: []
-    adapters: [internal]
-    tests:
-      - tests/world_v2/test_attention_view.py::test_sleep_plan_reads_as_away_and_cites_the_plan_authority
-      - tests/world_v2/test_attention_view.py::test_advisory_is_source_bound_bounded_and_labelled
-      - tests/world_v2/test_attention_view.py::test_advisory_without_any_committed_source_is_dropped
-      - tests/world_v2/test_attention_view.py::test_expression_prompt_exposes_attention_without_prescribing_timing
 
   - id: appraisal-affect-relationship-impression
     phase: 3
@@ -271,7 +254,7 @@ mechanisms:
     phase: 5
     status: closed
     runtime_activation: default
-    limitations: [napcat-nontext-only-http-and-other-qq-profiles-text-only, later-is-single-text-followup-only, provider-accepted-still-requires-terminal-receipt]
+    limitations: [napcat-nontext-only-http-and-other-qq-profiles-text-only, later-is-bounded-text-followup-sequence-up-to-eight, provider-accepted-still-requires-terminal-receipt]
     sources: [accepted-expression-plan, user-interjection, platform-receipt]
     events: [ExpressionPlanAccepted, ExpressionBeatAuthorized, ExpressionBeatSettled, ExpressionBeatTerminated, ExpressionPlanCompleted, ExpressionPlanTerminated]
     reducers: [src/companion_daemon/world_v2/reducers.py]
@@ -293,22 +276,20 @@ mechanisms:
 
   - id: quick-reaction-same-turn-lane
     phase: 5
-    status: closed
-    runtime_activation: default
-    limitations: [reaction-capability-is-deployment-gated-napcat-only, lane-silently-skips-without-an-injected-local-gate-model, opportunity-not-debt-every-failure-gives-up-without-retry]
-    sources: [committed-observation, recorded-act-hold-draw, bounded-local-model]
+    status: deferred
+    runtime_activation: not-wired
+    limitations: [historical-events-remain-replayable, production-reaction-is-a-model-owned-expression-beat, explicit-test-injection-only]
+    sources: [immutable-historical-world-events]
     events: [ObservationRecorded, RandomDrawRecorded, ProposalRecorded, AcceptanceRecorded, ExpressionPlanAccepted, ActionAuthorized]
     reducers: [src/companion_daemon/world_v2/reducers.py]
     projections: [expression-plans, actions]
-    decision_consumers: [QuickReactionWorker, ActionPump]
+    decision_consumers: [WorldReducerReplay]
     actions: [reaction]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [qq-c2c-v2]
+    adapters: []
     tests:
-      - tests/world_v2/test_quick_reaction_vertical.py::test_gate_declines_serious_content_and_no_reaction_is_authorized
+      - tests/world_v2/test_qq_c2c_host_migration.py::test_qq_c2c_host_turns_a_wrapped_flash_draft_into_a_delivered_action
       - tests/world_v2/test_quick_reaction_vertical.py::test_hold_draw_never_consults_the_local_model_and_replays_itself
-      - tests/world_v2/test_quick_reaction_vertical.py::test_quick_reaction_reaches_provider_before_the_reply_model_is_consulted
-      - tests/world_v2/test_quick_reaction_vertical.py::test_local_model_failure_gives_up_silently_and_reply_is_unaffected
 
   - id: afterthought-followup-lane
     phase: 5

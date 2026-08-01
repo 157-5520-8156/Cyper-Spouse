@@ -12,11 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
-from typing import Callable, Literal, Mapping, Protocol
+from typing import Awaitable, Callable, Literal, Mapping, Protocol
 
 from .dashboard_projection_adapter import DashboardPublicProjectionDTO, DashboardRoomProjectionDTO
 from .production_turn_application import WorldV2TurnApplication
 from .production_latency_trace import ProductionLatencySample
+from .replay_evidence import ReplayEvidence
 from .schemas import ProjectionRequest
 
 
@@ -107,6 +108,14 @@ class PlatformInboundTransport(Protocol):
     """One-way provider ingress used only by a host polling loop."""
 
     async def receive(self) -> PlatformInbound | None: ...
+
+
+class ProviderAcceptedReconciliationGate(Protocol):
+    """Platform-facing structural view of the ActionPump reconciliation gate."""
+
+    async def try_acquire_reconciliation(self) -> bool: ...
+
+    async def release_reconciliation(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +300,19 @@ class WorldV2PlatformHost:
 
         return await self._application.drain_actions_once()
 
+    async def drain_actions_once_gated(
+        self,
+        *,
+        provider_accepted_reconciliation_gate: ProviderAcceptedReconciliationGate,
+    ):
+        """Defer only an old acknowledged Action's terminal reconciliation."""
+
+        return await self._application.drain_actions_once(
+            provider_accepted_reconciliation_gate=(
+                provider_accepted_reconciliation_gate
+            )
+        )
+
     async def drain_action(self, action_id: str):
         """Advance a specific ingress-authorized Action only."""
 
@@ -300,6 +322,11 @@ class WorldV2PlatformHost:
         """Read the internal Action projection without exposing a writer."""
 
         return await self._application.action_due_projection()
+
+    def export_replay_evidence(self) -> ReplayEvidence:
+        """Expose one immutable, cursor-consistent snapshot to offline evaluators."""
+
+        return self._application.export_replay_evidence()
 
     async def drain_media_results_once(self, *, logical_time: datetime) -> str | None:
         """Materialize one receipt-bound media result after provider dispatch.
@@ -378,6 +405,7 @@ class WorldV2PlatformHost:
         media_preview_trace_id: str,
         media_preview_correlation_id: str,
         should_preempt: Callable[[], bool] | None = None,
+        action_pump_once: Callable[[], Awaitable[object]] | None = None,
     ) -> PlatformScheduledDrainResult:
         """Run one platform-neutral, strictly budgeted scheduler pass.
 
@@ -393,6 +421,11 @@ class WorldV2PlatformHost:
         is in flight.  Preemption never interrupts a unit mid-commit: every
         unit that started still completes its own transaction, and skipped
         work simply remains claimed-or-due for the next scheduler pass.
+
+        ``action_pump_once`` lets a provider adapter serialize only ActionPump
+        provider handoffs with its targeted ingress lane.  It must not wrap
+        this whole method: background/model work is unrelated to Action
+        dispatch and may take an unbounded provider round trip.
         """
 
         if not 0 <= max_action_units <= 64 or not 0 <= max_background_units <= 64:
@@ -404,6 +437,11 @@ class WorldV2PlatformHost:
 
         def preempted() -> bool:
             return should_preempt is not None and bool(should_preempt())
+
+        async def drain_one_action() -> object:
+            if action_pump_once is not None:
+                return await action_pump_once()
+            return await self.drain_actions_once()
 
         action_statuses: list[str] = []
         background_statuses: list[str] = []
@@ -420,7 +458,7 @@ class WorldV2PlatformHost:
         )
         initial_queue_saturated = False
         while action_units_used < initial_action_limit and not preempted():
-            result = await self.drain_actions_once()
+            result = await drain_one_action()
             if result is None or getattr(result, "status", None) == "idle":
                 break
             action_units_used += 1
@@ -546,7 +584,7 @@ class WorldV2PlatformHost:
         # budget in the same scheduler pass; otherwise every initiative pays
         # an artificial extra scheduler interval after the decision is done.
         while action_units_used < max_action_units and not preempted():
-            result = await self.drain_actions_once()
+            result = await drain_one_action()
             if result is None or getattr(result, "status", None) == "idle":
                 break
             action_units_used += 1
@@ -597,6 +635,28 @@ class WorldV2PlatformHost:
         """Close the composition-owned persistent application once the host stops."""
 
         self._application.close()
+
+    async def aclose(self) -> None:
+        """Wait for application-owned async work before closing its stores."""
+
+        close = getattr(self._application, "aclose", None)
+        if callable(close):
+            await close()
+            return
+        self._application.close()
+
+    @property
+    def shutdown_pending_task_count(self) -> int:
+        """Propagate an application lease without exposing its owned tasks."""
+
+        return int(getattr(self._application, "shutdown_pending_task_count", 0))
+
+    async def wait_for_shutdown_quiescence(self) -> None:
+        """Wait for a bounded-close application's detached work, when present."""
+
+        wait = getattr(self._application, "wait_for_shutdown_quiescence", None)
+        if callable(wait):
+            await wait()
 
 
 __all__ = [

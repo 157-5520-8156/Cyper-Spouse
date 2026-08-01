@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
+from hashlib import sha256
 
+import httpx
 import pytest
 
+from companion_daemon.llm import (
+    OpenAICompatibleChatModel,
+    ProviderCapacityGate,
+)
+from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+    ChatModelDeliberationAdapter,
+)
 from companion_daemon.world_v2.context_capsule import (
     ContextCapsuleCompiler,
     InnerAdvisoryProjection,
@@ -21,14 +31,26 @@ from companion_daemon.world_v2.deliberation import (
     ModelInput,
     ModelOutput,
     ModelRoute,
+    ModelUsageProvenance,
     RouteRequest,
     TriggerMessage,
+    ValidationTechnicalFailure,
+    begin_validation_reselection_recovery,
     claim_secondary_provider_slot,
+    claim_validation_corrective_provider_slot,
+    fit_pre_provider_wait_timeout,
+    mark_first_role_provider_completion,
+    mark_first_role_provider_entry,
+    run_validation_review,
+)
+from companion_daemon.world_v2.expression_draft import (
+    QQ_NAPCAT_EXPRESSION_CAPABILITIES,
 )
 from companion_daemon.world_v2.interactive_turn_budget import (
     InteractiveTurnBudgetPolicy,
 )
 from companion_daemon.world_v2.proposal_envelope import MinimalProposal, ProposalEvidenceRef
+from companion_daemon.world_v2.proposal_audit_schemas import RecordedModelResultAudit
 from companion_daemon.world_v2.recall_index import (
     FeatureHashRecallEmbedding,
     InMemoryRecallIndex,
@@ -38,7 +60,11 @@ from companion_daemon.world_v2.recall_index import (
 )
 from companion_daemon.world_v2.recall_runtime import (
     CharacterRecallRequest,
+    PresentedPrefetchTrace,
     RecallCoordinator,
+)
+from companion_daemon.world_v2.single_call_inbound_cognition import (
+    SingleCallInboundCognition,
 )
 from test_context_capsule import HASH_B, NOW, _bound, _request
 from test_proposal_envelope import (
@@ -199,6 +225,12 @@ class _EpisodeMain(_Main):
         self.provisional_delay = provisional_delay
         self.provisional_requests: list[ModelInput] = []
 
+    def shadow_observer_provider_available(self, _request: ModelInput) -> bool:
+        return True
+
+    async def propose_shadow_observer(self, request: ModelInput) -> ModelOutput:
+        return await self.propose_provisional(request)
+
     async def propose_provisional(self, request: ModelInput) -> ModelOutput:
         self.provisional_requests.append(request)
         if self.provisional_delay:
@@ -233,9 +265,7 @@ class _ManualClock:
         for target, waiter in tuple(self._waiters):
             if target <= self.now and not waiter.done():
                 waiter.set_result(None)
-        self._waiters = [
-            (target, waiter) for target, waiter in self._waiters if not waiter.done()
-        ]
+        self._waiters = [(target, waiter) for target, waiter in self._waiters if not waiter.done()]
         await asyncio.sleep(0)
 
 
@@ -291,6 +321,75 @@ class _HedgeThenLocalQuick(_Quick):
             model_version="local-expression-failsafe.1",
             raw_proposal=_minimal_raw(text="刚才我没接好，先回你一声。"),
         )
+
+
+@pytest.mark.asyncio
+async def test_first_provider_prefetch_wait_uses_one_ingress_relative_budget() -> None:
+    clock = _ManualClock()
+
+    class _CapturingMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prefetch_wait: float | None = None
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.prefetch_wait = fit_pre_provider_wait_timeout(0.45)
+            return await super().propose(request)
+
+    main = _CapturingMain()
+    budget = InteractiveTurnBudgetPolicy(
+        total_seconds=5.5,
+        hedge_after_seconds=1.5,
+        acceptance_dispatch_reserve_seconds=1.2,
+        first_provider_entry_seconds=0.5,
+        clock=clock,
+        sleep=clock.sleep,
+    ).start()
+    await clock.advance(0.28)
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:pre-provider-total-budget",
+        budget=budget,
+    )
+
+    assert result.proposal is not None
+    assert main.prefetch_wait == pytest.approx(0.17)
+
+
+@pytest.mark.asyncio
+async def test_role_adapter_can_mark_actual_first_provider_entry() -> None:
+    marks: list[str] = []
+
+    class _MarkingMain(_Main):
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            mark_first_role_provider_entry(request.call_id)
+            result = await super().propose(request)
+            mark_first_role_provider_completion(request.call_id)
+            return result
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_MarkingMain(),
+        quick_recovery=_Quick(),
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:first-role-provider-marker",
+        budget=InteractiveTurnBudgetPolicy().start(),
+        first_role_provider_marker=lambda call_id: marks.append(f"entered:{call_id}"),
+        first_role_provider_completion_marker=lambda call_id: marks.append(
+            f"completed:{call_id}"
+        ),
+    )
+
+    assert result.proposal is not None
+    assert len(marks) == 2
+    assert marks[0].startswith("entered:model-call:")
+    assert marks[1] == marks[0].replace("entered:", "completed:", 1)
 
 
 @pytest.mark.asyncio
@@ -366,13 +465,14 @@ async def test_first_completed_invalid_does_not_beat_later_valid_candidate() -> 
 @pytest.mark.asyncio
 async def test_primary_valid_before_hedge_never_calls_backup() -> None:
     clock = _ManualClock()
+    marks: list[str] = []
     budget = InteractiveTurnBudgetPolicy(
         total_seconds=5.5,
         hedge_after_seconds=1.5,
         acceptance_dispatch_reserve_seconds=1.2,
         clock=clock,
         sleep=clock.sleep,
-    ).start()
+    ).start(marker=marks.append)
     primary = _ControlledMain()
     backup = _ControlledQuick()
     running = asyncio.create_task(
@@ -392,6 +492,1194 @@ async def test_primary_valid_before_hedge_never_calls_backup() -> None:
     assert result.audit.slot == "primary"
     assert result.audit.outcome == "winner"
     assert backup.requests == []
+    assert budget.candidate_deadline == pytest.approx(4.3)
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_name", ("appraisal", "expression"))
+async def test_cancelled_latency_hedge_cannot_cool_down_next_turn_formal_recovery(
+    adapter_name: str,
+) -> None:
+    """A role recovery provider is reserve capacity, not a speculative hedge."""
+
+    response_allowed = asyncio.Event()
+    provider_requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal provider_requests
+        provider_requests += 1
+        await response_allowed.wait()
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "role recovery completed"}}],
+                "usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 3,
+                    "total_tokens": 7,
+                },
+            },
+        )
+
+    capacity = ProviderCapacityGate(
+        cooldown_seconds=30.0,
+        active_lease_seconds=30.0,
+    )
+    recovery_provider = OpenAICompatibleChatModel(
+        "test-key",
+        "https://recovery.invalid",
+        "role-recovery",
+        transport=httpx.MockTransport(handler),
+        capacity_gate=capacity,
+    )
+
+    class UnusedPrimaryProvider:
+        model = "unused-primary"
+
+        async def complete(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.8,
+        ) -> str:
+            del messages, temperature
+            raise AssertionError("capability probe must not call the primary provider")
+
+    cognition = SingleCallInboundCognition(
+        flash_model=UnusedPrimaryProvider(),
+        recovery_model=recovery_provider,
+    )
+
+    class FormalRecovery:
+        def __init__(self) -> None:
+            self.requests: list[ModelInput] = []
+
+        def has_hedge_provider(self, request: ModelInput) -> bool:
+            adapter = getattr(cognition, adapter_name)
+            return bool(adapter.has_hedge_provider(request))
+
+        async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+            del failure_code
+            self.requests.append(request)
+            await recovery_provider.complete(
+                [{"role": "user", "content": "recover this failed role turn"}]
+            )
+            return ModelOutput(
+                model_id="role-recovery",
+                model_version="v1",
+                raw_proposal=_minimal_raw(text="这是备用角色模型自己的回复。"),
+            )
+
+    formal_recovery = FormalRecovery()
+    first_primary = _ControlledMain()
+    first_running = asyncio.create_task(
+        Deliberation(
+            router=_Router(),
+            main_model=first_primary,
+            quick_recovery=formal_recovery,
+        ).deliberate(
+            _capsule(),
+            attempt_id="attempt:formal-recovery-turn-one",
+            budget=InteractiveTurnBudgetPolicy(
+                total_seconds=0.5,
+                hedge_after_seconds=0.01,
+                acceptance_dispatch_reserve_seconds=0.1,
+                technical_recovery_seconds=0.3,
+            ).start(),
+        )
+    )
+    await first_primary.started.wait()
+    # Give the latency hedge boundary a real scheduler turn. The formal
+    # recovery provider must remain untouched while the primary is healthy.
+    await asyncio.sleep(0.03)
+    assert first_primary.result is not None
+    first_primary.result.set_result(
+        ModelOutput(
+            model_id="primary",
+            model_version="v1",
+            raw_proposal=_decision_raw(),
+        )
+    )
+    first = await first_running
+    assert first.proposal is not None
+
+    # A different turn now suffers an actual main-provider failure. The same
+    # installed role model must still be immediately admissible.
+    response_allowed.set()
+    second = await Deliberation(
+        router=_Router(),
+        main_model=_Main(fail=True),
+        quick_recovery=formal_recovery,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:formal-recovery-turn-two",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=0.5,
+            hedge_after_seconds=0.01,
+            acceptance_dispatch_reserve_seconds=0.1,
+            technical_recovery_seconds=0.3,
+        ).start(),
+    )
+
+    assert second.proposal is not None
+    assert second.audit.status == "main_exception_recovered"
+    assert provider_requests == 1
+    assert capacity.snapshot().ambiguous_cancellations == 0
+    await recovery_provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_flash_route_preserves_provider_reported_auxiliary_reasoning() -> None:
+    material = {
+        "usage_contract": "model-usage.1",
+        "route_class": "expressive",
+        "input_tokens": 21,
+        "output_tokens": 5,
+        "thinking_tokens": 7,
+        "token_provenance": "provider_reported",
+        "transport": "provider_api",
+        "provider": "source-review-aggregate",
+        "provider_usage_ref": "usage:source-review-aggregate:1",
+    }
+    usage = ModelUsageProvenance(
+        **material,
+        provider_usage_hash=sha256(
+            json.dumps(
+                material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    )
+    output = ModelOutput(
+        model_id="flash-with-reviewed-candidate",
+        model_version="v1",
+        raw_proposal=_decision_raw(),
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        usage=usage,
+    )
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_Main(raw=output),
+        quick_recovery=_Quick(),
+    ).deliberate(_capsule(), attempt_id="attempt:provider-reasoning-evidence")
+
+    assert result.proposal is not None
+    assert result.audit.route.tier == "flash"
+    assert result.audit.usage is not None
+    assert result.audit.usage.thinking_tokens == 7
+    recorded = RecordedModelResultAudit.model_validate(result.audit.model_dump(mode="json"))
+    assert recorded.usage is not None
+    assert recorded.usage.thinking_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_primary_deadline_opens_independent_fallback_window_after_real_timeout() -> None:
+    class SourceClosureMain(_ControlledMain):
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+    class IdentifiedFallback(_ControlledQuick):
+        pass
+
+    clock = _ManualClock()
+    marks: list[str] = []
+    primary = SourceClosureMain()
+    fallback = IdentifiedFallback()
+    budget = InteractiveTurnBudgetPolicy(
+        total_seconds=5.5,
+        hedge_after_seconds=1.5,
+        acceptance_dispatch_reserve_seconds=1.2,
+        technical_recovery_seconds=2.0,
+        clock=clock,
+        sleep=clock.sleep,
+    ).start(marker=marks.append)
+    running = asyncio.create_task(
+        Deliberation(router=_Router(), main_model=primary, quick_recovery=fallback).deliberate(
+            _capsule(),
+            attempt_id="attempt:post-deadline-fallback",
+            budget=budget,
+        )
+    )
+
+    await primary.started.wait()
+    await clock.advance(4.3)
+    await asyncio.wait_for(fallback.started.wait(), timeout=0.1)
+    assert fallback.result is not None
+    fallback.result.set_result(
+        ModelOutput(
+            model_id="configured-fallback",
+            model_version="v1",
+            raw_proposal=_minimal_raw(text="这是备用角色模型自己的回复。"),
+            winning_model_call_id="model-call:actual-configured-fallback",
+            winning_request_hash="e" * 64,
+        )
+    )
+
+    result = await running
+
+    assert result.proposal is not None
+    assert result.audit.status == "main_timeout_recovered"
+    assert result.audit.failure_code == "primary_timeout"
+    assert result.audit.slot == "backup"
+    assert result.audit.model_call_id == "model-call:actual-configured-fallback"
+    assert result.audit.request_hash == "e" * 64
+    assert result.attempt_audits[0].failure_code == "primary_timeout"
+    assert len(primary.requests) == len(fallback.requests) == 1
+    assert fallback.failure_codes == ["main_timeout"]
+    assert "technical_recovery_started" in marks
+
+
+@pytest.mark.asyncio
+async def test_source_review_failure_retries_review_without_reauthoring_or_author_recovery() -> (
+    None
+):
+    class ReviewRecoveringMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.author_calls = 0
+            self.reviewer_calls = 0
+            self.second_review_started = asyncio.Event()
+            self.release_second_review = asyncio.Event()
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            self.author_calls += 1
+
+            async def review() -> None:
+                self.reviewer_calls += 1
+                if self.reviewer_calls == 1:
+                    raise TimeoutError("review provider timed out")
+                self.second_review_started.set()
+                await self.release_second_review.wait()
+
+            await run_validation_review(review, timeout_seconds=0.2)
+            return ModelOutput(
+                model_id="reviewed-main",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    marks: list[str] = []
+    main = ReviewRecoveringMain()
+    quick = _Quick()
+    running = asyncio.create_task(
+        Deliberation(
+            router=_Router(),
+            main_model=main,
+            quick_recovery=quick,
+        ).deliberate(
+            _capsule(),
+            attempt_id="attempt:review-only-recovery",
+            budget=InteractiveTurnBudgetPolicy(
+                total_seconds=1.0,
+                hedge_after_seconds=0.2,
+                acceptance_dispatch_reserve_seconds=0.2,
+                technical_recovery_seconds=0.4,
+                validation_recovery_seconds=0.2,
+            ).start(marker=marks.append),
+        )
+    )
+
+    await asyncio.wait_for(main.second_review_started.wait(), timeout=0.2)
+    assert not running.done()
+    assert main.author_calls == 1
+    assert main.reviewer_calls == 2
+    assert quick.requests == []
+    main.release_second_review.set()
+    result = await running
+
+    assert result.proposal is not None
+    assert result.audit.model_id == "reviewed-main"
+    assert main.author_calls == 1
+    assert main.reviewer_calls == 2
+    assert quick.requests == []
+    assert "validation_recovery_started" in marks
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+async def test_terminal_review_retry_preserves_the_last_reviewer_invocation_audit() -> None:
+    material = {
+        "usage_contract": "model-usage.1",
+        "route_class": "expressive",
+        "input_tokens": 8,
+        "output_tokens": 2,
+        "thinking_tokens": 0,
+        "token_provenance": "provider_reported",
+        "transport": "provider_api",
+        "provider": "independent-source-reviewer",
+        "provider_usage_ref": "usage:reviewer:second",
+    }
+    usage = ModelUsageProvenance(
+        **material,
+        provider_usage_hash=sha256(
+            json.dumps(
+                material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    )
+    calls = 0
+
+    async def review() -> None:
+        nonlocal calls
+        calls += 1
+        raise ValidationTechnicalFailure(
+            "source_review_exception",
+            model_call_id=f"model-call:reviewer:{calls}",
+            request_hash=str(calls) * 64,
+            attempted_model_id="independent-source-reviewer",
+            attempted_model_version="review-wire.5",
+            usage=usage if calls == 2 else None,
+        )
+
+    with pytest.raises(ValidationTechnicalFailure) as caught:
+        await run_validation_review(review, timeout_seconds=0.2)
+
+    assert calls == 2
+    assert caught.value.model_call_id == "model-call:reviewer:2"
+    assert caught.value.request_hash == "2" * 64
+    assert caught.value.attempted_model_id == "independent-source-reviewer"
+    assert caught.value.attempted_model_version == "review-wire.5"
+    assert caught.value.usage == usage
+
+
+@pytest.mark.asyncio
+async def test_validation_recovery_from_one_candidate_does_not_starve_the_next_candidate() -> None:
+    class ReviewRecoveringMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.author_calls = 0
+            self.reviewer_calls_by_author: list[int] = []
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            self.author_calls += 1
+            reviewer_calls = 0
+
+            async def review() -> None:
+                nonlocal reviewer_calls
+                reviewer_calls += 1
+                if reviewer_calls == 1:
+                    raise TimeoutError("first reviewer attempt failed")
+
+            await run_validation_review(review, timeout_seconds=0.05)
+            self.reviewer_calls_by_author.append(reviewer_calls)
+            return ModelOutput(
+                model_id="reviewed-main",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    marks: list[str] = []
+    main = ReviewRecoveringMain()
+    quick = _Quick()
+    budget = InteractiveTurnBudgetPolicy(
+        total_seconds=1.2,
+        hedge_after_seconds=0.2,
+        acceptance_dispatch_reserve_seconds=0.1,
+        technical_recovery_seconds=0.3,
+        validation_recovery_seconds=0.1,
+    ).start(marker=marks.append)
+
+    first = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:review-candidate-one",
+        budget=budget,
+    )
+    # The first candidate's reviewer-only window has expired, while the
+    # ordinary turn author window is still live.
+    await asyncio.sleep(0.12)
+    second = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:review-candidate-two",
+        budget=budget,
+    )
+
+    assert first.proposal is not None
+    assert second.proposal is not None
+    assert main.author_calls == 2
+    assert main.reviewer_calls_by_author == [2, 2]
+    assert quick.requests == []
+    assert marks.count("validation_recovery_started") == 2
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+async def test_exhausted_source_review_does_not_fall_through_to_quick_author() -> None:
+    class ReviewFailingMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.author_calls = 0
+            self.reviewer_calls = 0
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            self.author_calls += 1
+
+            async def review() -> None:
+                self.reviewer_calls += 1
+                raise TimeoutError("review provider timed out")
+
+            await run_validation_review(review, timeout_seconds=0.1)
+            raise AssertionError("an unreviewed draft must not materialize")
+
+    marks: list[str] = []
+    main = ReviewFailingMain()
+    quick = _Quick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:review-exhausted-no-author",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+            technical_recovery_seconds=0.4,
+            validation_recovery_seconds=0.2,
+        ).start(marker=marks.append),
+    )
+
+    assert result.proposal is None
+    assert result.audit.status == "main_timeout"
+    assert result.audit.failure_code == "source_review_timeout"
+    assert main.author_calls == 1
+    assert main.reviewer_calls == 2
+    assert quick.requests == []
+    assert "validation_recovery_started" in marks
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_budget", (False, True))
+@pytest.mark.parametrize(
+    (
+        "failure_code",
+        "claims_corrective",
+        "expected_status",
+        "expected_outcome",
+        "expected_slot",
+    ),
+    (
+        ("source_review_timeout", False, "main_timeout", "timeout", "primary"),
+        ("source_review_exception", False, "main_exception", "exception", "primary"),
+        ("inventory_invalid", False, "main_exception", "invalid", "primary"),
+        ("coverage_invalid", False, "main_exception", "invalid", "primary"),
+        (
+            "authored_expression_reselection_invalid",
+            True,
+            "main_exception",
+            "exception",
+            "corrective",
+        ),
+    ),
+)
+async def test_terminal_validation_failure_mapping_is_budget_independent(
+    with_budget: bool,
+    failure_code: str,
+    claims_corrective: bool,
+    expected_status: str,
+    expected_outcome: str,
+    expected_slot: str,
+) -> None:
+    class TerminalReselectionMain(_Main):
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            if claims_corrective:
+                assert claim_validation_corrective_provider_slot()
+            raise ValidationTechnicalFailure(failure_code)  # type: ignore[arg-type]
+
+    main = TerminalReselectionMain()
+    quick = _Quick()
+    unit = Deliberation(router=_Router(), main_model=main, quick_recovery=quick)
+    kwargs = (
+        {
+            "budget": InteractiveTurnBudgetPolicy(
+                total_seconds=1.0,
+                hedge_after_seconds=0.2,
+                acceptance_dispatch_reserve_seconds=0.2,
+            ).start()
+        }
+        if with_budget
+        else {}
+    )
+
+    result = await unit.deliberate(
+        _capsule(),
+        attempt_id=f"attempt:terminal-reselection:{failure_code}:{with_budget}",
+        **kwargs,
+    )
+
+    assert result.proposal is None
+    assert result.audit.status == expected_status
+    assert result.audit.failure_code == failure_code
+    assert result.audit.slot == expected_slot
+    assert result.audit.outcome == expected_outcome
+    assert result.attempt_audits == (result.audit,)
+    assert (
+        RecordedModelResultAudit.model_validate(result.audit.model_dump(mode="python")).failure_code
+        == failure_code
+    )
+    assert len(main.requests) == 1
+    assert quick.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_code", "expected_status", "expected_main_status"),
+    (
+        (
+            "authored_subcall_timeout",
+            "main_timeout_recovered",
+            "main_timeout",
+        ),
+        (
+            "authored_subcall_exception",
+            "main_exception_recovered",
+            "main_exception",
+        ),
+    ),
+)
+async def test_nested_role_transport_failure_can_use_the_configured_recovery_author(
+    failure_code: str,
+    expected_status: str,
+    expected_main_status: str,
+) -> None:
+    class FailedNestedAuthor(_Main):
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            raise ValidationTechnicalFailure(failure_code)  # type: ignore[arg-type]
+
+    main = FailedNestedAuthor()
+    quick = _Quick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id=f"attempt:recover-nested-author:{failure_code}",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+            technical_recovery_seconds=0.4,
+        ).start(),
+    )
+
+    assert result.proposal is not None
+    assert result.audit.status == expected_status
+    assert result.audit.failure_code == failure_code
+    assert result.attempt_audits[0].status == expected_main_status
+    assert result.attempt_audits[0].failure_code == failure_code
+    assert quick.failure_codes == [failure_code]
+
+
+@pytest.mark.asyncio
+async def test_invalid_recall_reselection_is_terminal_through_public_deliberation() -> None:
+    class InvalidRecallThenInvalidFinal:
+        model = "invalid-recall-final"
+
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, str]]] = []
+
+        async def complete_with_usage(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.8,
+        ) -> tuple[str, dict[str, object]]:
+            del temperature
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                raw = json.dumps(
+                    {
+                        "private_turn_state": {
+                            "inner_state_summary": "我想先回忆再决定。",
+                            "attended_source_refs": [],
+                        },
+                        "recall_request": {
+                            "query_text": "非法 Recall 选择",
+                            "limit": 7,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            elif len(self.calls) == 2:
+                raw = json.dumps(
+                    {
+                        "timing_choice": "now",
+                        "beats": [{"modality": "text", "text": "第二次仍缺少私人状态。"}],
+                        "stance": "invalid_without_private_state",
+                        "brief_rationale": "Invalid final fixture.",
+                        "world_claims": [],
+                    },
+                    ensure_ascii=False,
+                )
+            else:
+                raise AssertionError("a terminal Recall correction opened a third role call")
+            usage_material = {
+                "usage_contract": "model-usage.1",
+                "route_class": "expressive",
+                "input_tokens": 10 + len(self.calls),
+                "output_tokens": 3 + len(self.calls),
+                "thinking_tokens": len(self.calls),
+                "token_provenance": "provider_reported",
+                "transport": "provider_api",
+                "provider": self.model,
+                "provider_usage_ref": f"usage:invalid-recall-final:{len(self.calls)}",
+            }
+            return raw, {
+                **usage_material,
+                "provider_usage_hash": sha256(
+                    json.dumps(
+                        usage_material,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+            }
+
+    provider = InvalidRecallThenInvalidFinal()
+    quick = _Quick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=ChatModelDeliberationAdapter(
+            model=provider,
+            expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
+                update={"private_turn_state_mode": "required"}
+            ),
+        ),
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:terminal-invalid-recall-adapter",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=5.5,
+            hedge_after_seconds=1.5,
+            acceptance_dispatch_reserve_seconds=1.2,
+        ).start(),
+    )
+
+    assert result.proposal is None
+    assert result.audit.status == "main_exception"
+    assert result.audit.failure_code == "recall_choice_reselection_invalid"
+    assert result.audit.slot == "corrective"
+    assert result.audit.outcome == "exception"
+    assert result.audit.attempted_model_id == provider.model
+    assert result.audit.attempted_model_version == ChatModelDeliberationAdapter.VERSION
+    assert result.audit.usage is not None
+    assert result.audit.usage.input_tokens == 23
+    assert result.audit.usage.output_tokens == 9
+    recorded = RecordedModelResultAudit.model_validate(result.audit.model_dump(mode="python"))
+    assert recorded.attempted_model_id == provider.model
+    assert recorded.usage is not None
+    assert recorded.usage.input_tokens == 23
+    assert len(provider.calls) == 2
+    assert quick.requests == []
+
+
+@pytest.mark.asyncio
+async def test_validation_retry_may_finish_after_author_deadline_without_opening_author_recovery() -> (
+    None
+):
+    class LateReviewMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.author_calls = 0
+            self.reviewer_calls = 0
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            self.author_calls += 1
+            await asyncio.sleep(0.25)
+
+            async def review() -> None:
+                self.reviewer_calls += 1
+                if self.reviewer_calls == 1:
+                    await asyncio.sleep(0.05)
+                    raise TimeoutError("first reviewer attempt failed")
+                await asyncio.sleep(0.08)
+
+            await run_validation_review(review, timeout_seconds=0.12)
+            return ModelOutput(
+                model_id="late-reviewed-main",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    marks: list[str] = []
+    main = LateReviewMain()
+    quick = _Quick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:late-review-only-recovery",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=0.4,
+            hedge_after_seconds=0.1,
+            acceptance_dispatch_reserve_seconds=0.05,
+            technical_recovery_seconds=0.3,
+            validation_recovery_seconds=0.2,
+        ).start(marker=marks.append),
+    )
+
+    assert result.proposal is not None
+    assert main.author_calls == 1
+    assert main.reviewer_calls == 2
+    assert quick.requests == []
+    assert "validation_recovery_started" in marks
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+async def test_near_deadline_author_gets_one_complete_review_attempt_before_retry() -> None:
+    class NearDeadlineReviewedMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reviewer_calls = 0
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            # Leave less than one complete review request in the ordinary
+            # author window while still returning a valid authored candidate.
+            await asyncio.sleep(0.4)
+
+            async def review() -> None:
+                self.reviewer_calls += 1
+                await asyncio.sleep(0.08)
+
+            await run_validation_review(review, timeout_seconds=0.15)
+            return ModelOutput(
+                model_id="near-deadline-reviewed-main",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    marks: list[str] = []
+    main = NearDeadlineReviewedMain()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:complete-near-deadline-review",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=0.5,
+            hedge_after_seconds=0.1,
+            acceptance_dispatch_reserve_seconds=0.05,
+            technical_recovery_seconds=0.2,
+            validation_recovery_seconds=0.18,
+        ).start(marker=marks.append),
+    )
+
+    assert result.proposal is not None
+    assert main.reviewer_calls == 1
+    assert marks.count("validation_recovery_started") == 1
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+async def test_full_reviewer_timeout_and_retry_survive_the_author_deadline() -> None:
+    class FullRetryReviewedMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reviewer_calls = 0
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            # Return close to the ordinary author deadline, then scale the
+            # production 22s + 22s reviewer attempts down by 100.
+            await asyncio.sleep(0.4)
+
+            async def review() -> None:
+                self.reviewer_calls += 1
+                if self.reviewer_calls == 1:
+                    await asyncio.sleep(0.23)
+                    raise AssertionError("the first reviewer attempt must time out")
+                await asyncio.sleep(0.21)
+
+            await run_validation_review(review, timeout_seconds=0.22)
+            return ModelOutput(
+                model_id="full-retry-reviewed-main",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    marks: list[str] = []
+    main = FullRetryReviewedMain()
+    quick = _Quick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:full-review-retry-after-author-deadline",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=0.5,
+            hedge_after_seconds=0.1,
+            acceptance_dispatch_reserve_seconds=0.05,
+            technical_recovery_seconds=0.2,
+            validation_recovery_seconds=0.46,
+            validation_reselection_seconds=0.32,
+        ).start(marker=marks.append),
+    )
+
+    assert result.proposal is not None
+    assert result.audit.model_id == "full-retry-reviewed-main"
+    assert main.reviewer_calls == 2
+    assert quick.requests == []
+    assert marks.count("validation_recovery_started") == 1
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+async def test_source_reselection_window_fits_role_repair_and_complete_final_review() -> None:
+    class LateSourceCorrectionMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.author_calls = 0
+            self.reviewer_calls = 0
+            self.correction_calls = 0
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            self.author_calls += 1
+            await asyncio.sleep(0.25)
+
+            async def first_review() -> None:
+                self.reviewer_calls += 1
+                await asyncio.sleep(0.02)
+
+            await run_validation_review(first_review, timeout_seconds=0.05)
+            assert begin_validation_reselection_recovery()
+            self.correction_calls += 1
+            # Scale the production 8s repair + 22s final review + 2s margin
+            # down by 100 while preserving their deadline relationship.
+            await asyncio.sleep(0.08)
+
+            async def corrected_review() -> None:
+                self.reviewer_calls += 1
+                await asyncio.sleep(0.21)
+
+            await run_validation_review(corrected_review, timeout_seconds=0.22)
+            return ModelOutput(
+                model_id="late-source-corrected-main",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    marks: list[str] = []
+    main = LateSourceCorrectionMain()
+    quick = _Quick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:late-source-correction",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=0.4,
+            hedge_after_seconds=0.1,
+            acceptance_dispatch_reserve_seconds=0.05,
+            technical_recovery_seconds=0.3,
+            validation_recovery_seconds=0.2,
+            validation_reselection_seconds=0.32,
+        ).start(marker=marks.append),
+    )
+
+    assert result.proposal is not None
+    assert main.author_calls == 1
+    assert main.correction_calls == 1
+    assert main.reviewer_calls == 2
+    assert quick.requests == []
+    assert marks.count("validation_reselection_started") == 1
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+async def test_reviewer_retry_cannot_consume_correction_final_review_and_appeal_window() -> None:
+    class RetriedReviewThenCorrectedMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.review_attempts = 0
+            self.initial_appeal_attempts = 0
+            self.final_review_attempts = 0
+            self.correction_calls = 0
+            self.appeal_calls = 0
+            self.appeal_attempts = 0
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            await asyncio.sleep(0.12)
+
+            async def initial_review() -> None:
+                self.review_attempts += 1
+                await asyncio.sleep(0.06 if self.review_attempts == 1 else 0.02)
+
+            # The independent reviewer needed its one technical retry. That
+            # retry must not consume the separate doctrine-authorized window
+            # for one role correction plus final review and focused appeal.
+            await run_validation_review(initial_review, timeout_seconds=0.05)
+
+            async def initial_appeal() -> None:
+                self.initial_appeal_attempts += 1
+                if self.initial_appeal_attempts == 1:
+                    raise RuntimeError("initial appeal wire parse failed")
+                await asyncio.sleep(0.01)
+
+            await run_validation_review(initial_appeal, timeout_seconds=0.05)
+            assert begin_validation_reselection_recovery()
+            self.correction_calls += 1
+            await asyncio.sleep(0.08)
+
+            async def final_review() -> None:
+                self.review_attempts += 1
+                self.final_review_attempts += 1
+                if self.final_review_attempts == 1:
+                    raise RuntimeError("final reviewer transport reset")
+                await asyncio.sleep(0.02)
+
+            await run_validation_review(final_review, timeout_seconds=0.05)
+            self.appeal_calls += 1
+
+            async def focused_appeal() -> None:
+                self.appeal_attempts += 1
+                if self.appeal_attempts == 1:
+                    raise RuntimeError("appeal wire parse failed")
+                await asyncio.sleep(0.02)
+
+            await run_validation_review(focused_appeal, timeout_seconds=0.05)
+            return ModelOutput(
+                model_id="review-retry-then-corrected",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    marks: list[str] = []
+    main = RetriedReviewThenCorrectedMain()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:review-retry-before-reselection",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=0.3,
+            hedge_after_seconds=0.1,
+            acceptance_dispatch_reserve_seconds=0.05,
+            # This test exercises the later reselection window. Keep the
+            # initial fixed reviewer phase large enough for its full first
+            # attempt, retry, and the separate appeal fixture.
+            validation_recovery_seconds=0.12,
+            validation_reselection_seconds=0.3,
+        ).start(marker=marks.append),
+    )
+
+    assert result.proposal is not None
+    assert main.review_attempts == 4
+    assert main.initial_appeal_attempts == 2
+    assert main.final_review_attempts == 2
+    assert main.correction_calls == 1
+    assert main.appeal_calls == 1
+    assert main.appeal_attempts == 2
+    assert marks.count("validation_recovery_started") == 1
+    assert marks.count("validation_reselection_started") == 1
+    assert "technical_recovery_started" not in marks
+
+
+@pytest.mark.asyncio
+async def test_independent_fallback_window_has_a_hard_deadline() -> None:
+    class SourceClosureMain(_Main):
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+    clock = _ManualClock()
+    fallback = _ControlledQuick()
+    running = asyncio.create_task(
+        Deliberation(
+            router=_Router(),
+            main_model=SourceClosureMain({"bad": True}),
+            quick_recovery=fallback,
+        ).deliberate(
+            _capsule(),
+            attempt_id="attempt:bounded-technical-recovery",
+            budget=InteractiveTurnBudgetPolicy(
+                total_seconds=5.5,
+                hedge_after_seconds=1.5,
+                acceptance_dispatch_reserve_seconds=1.2,
+                technical_recovery_seconds=2.0,
+                clock=clock,
+                sleep=clock.sleep,
+            ).start(),
+        )
+    )
+
+    await fallback.started.wait()
+    await clock.advance(1.99)
+    assert not running.done()
+    await clock.advance(0.01)
+    result = await running
+
+    assert result.proposal is None
+    assert result.audit.status == "recovery_failed"
+    assert result.audit.failure_code == "backup_timeout"
+    assert result.audit.outcome == "budget_exhausted"
+    assert len(fallback.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_actual_failure_recovery_does_not_require_a_speculative_hedge_provider() -> None:
+    class NoSpeculativeHedgeQuick(_Quick):
+        def has_hedge_provider(self, _request: ModelInput) -> bool:
+            return False
+
+    fallback = NoSpeculativeHedgeQuick({"bad": True})
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_Main({"bad": True}),
+        quick_recovery=fallback,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:actual-failure-without-hedge",
+        budget=InteractiveTurnBudgetPolicy().start(),
+    )
+
+    assert result.proposal is None
+    assert result.audit.status == "recovery_failed"
+    assert result.audit.failure_code == "backup_invalid"
+    assert result.attempt_audits[0].status == "main_invalid"
+    assert len(fallback.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_code", ("inventory_invalid", "coverage_invalid"))
+async def test_recovery_source_validation_failure_records_durable_invalid_outcome(
+    failure_code: str,
+) -> None:
+    class SourceValidationFailingQuick(_Quick):
+        async def recover(self, request: ModelInput, main_failure_code: str) -> ModelOutput:
+            self.requests.append(request)
+            self.failure_codes.append(main_failure_code)
+            raise ValidationTechnicalFailure(failure_code)  # type: ignore[arg-type]
+
+    fallback = SourceValidationFailingQuick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_Main({"bad": True}),
+        quick_recovery=fallback,
+    ).deliberate(
+        _capsule(),
+        attempt_id=f"attempt:recovery-source-validation:{failure_code}",
+        budget=InteractiveTurnBudgetPolicy().start(),
+    )
+
+    assert result.proposal is None
+    assert result.audit.status == "recovery_failed"
+    assert result.audit.failure_code == f"backup_{failure_code}"
+    assert result.audit.outcome == "invalid"
+    assert result.attempt_audits[0].failure_code == "primary_invalid"
+    assert result.attempt_audits[0].outcome == "invalid"
+    assert (
+        RecordedModelResultAudit.model_validate(result.audit.model_dump(mode="python")).failure_code
+        == f"backup_{failure_code}"
+    )
+    assert len(fallback.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_actual_failure_reuses_an_open_turn_recovery_window_without_extending_it() -> None:
+    clock = _ManualClock()
+    budget = InteractiveTurnBudgetPolicy(
+        total_seconds=5.5,
+        hedge_after_seconds=1.5,
+        acceptance_dispatch_reserve_seconds=1.2,
+        technical_recovery_seconds=2.0,
+        clock=clock,
+        sleep=clock.sleep,
+    ).start()
+    existing_deadline = budget.begin_technical_recovery()
+    primary = _ControlledMain()
+    fallback = _ControlledQuick()
+
+    running = asyncio.create_task(
+        Deliberation(
+            router=_Router(),
+            main_model=primary,
+            quick_recovery=fallback,
+        ).deliberate(
+            _capsule(),
+            attempt_id="attempt:reuse-open-technical-recovery",
+            budget=budget,
+        )
+    )
+    await primary.started.wait()
+    assert primary.result is not None
+    primary.result.set_result(
+        ModelOutput(model_id="invalid", model_version="v1", raw_proposal={"bad": True})
+    )
+    await fallback.started.wait()
+    assert fallback.result is not None
+    fallback.result.set_result(
+        ModelOutput(model_id="invalid", model_version="v1", raw_proposal={"bad": True})
+    )
+    result = await running
+
+    assert result.proposal is None
+    assert result.audit.status == "recovery_failed"
+    assert result.audit.failure_code == "backup_invalid"
+    assert len(fallback.requests) == 1
+    assert budget.candidate_deadline == existing_deadline
 
 
 @pytest.mark.asyncio
@@ -429,6 +1717,231 @@ async def test_corrective_claims_second_slot_and_prevents_hedge_or_third_call() 
     assert result.audit.slot == "corrective"
     assert result.audit.outcome == "winner"
     assert backup.requests == []
+
+
+@pytest.mark.asyncio
+async def test_failed_primary_corrective_can_use_one_configured_fallback_role_model() -> None:
+    class InvalidCorrectiveMain(_Main):
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            assert claim_validation_corrective_provider_slot()
+            return ModelOutput(
+                model_id="primary-corrective",
+                model_version="v1",
+                raw_proposal={"bad": True},
+                winning_model_call_id="model-call:actual-failed-corrective",
+                winning_request_hash="f" * 64,
+            )
+
+    fallback = _Quick(_decision_raw())
+    result = await Deliberation(
+        router=_Router(),
+        main_model=InvalidCorrectiveMain(),
+        quick_recovery=fallback,
+        recovery_mode="proposal_grammar",
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:fallback-after-corrective",
+        budget=InteractiveTurnBudgetPolicy().start(),
+    )
+
+    assert result.proposal is not None
+    assert result.proposal.proposal_kind == "decision"
+    assert result.attempt_audits[0].model_call_id == "model-call:actual-failed-corrective"
+    assert result.attempt_audits[0].request_hash == "f" * 64
+    assert result.attempt_audits[0].slot == "corrective"
+    assert result.attempt_audits[0].failure_code == "corrective_invalid"
+    assert result.audit.model_id == "quick"
+    assert result.audit.slot == "backup"
+    assert result.audit.status == "main_invalid_recovered"
+    assert result.audit.failure_code == "corrective_invalid"
+    assert fallback.failure_codes == ["corrective_invalid"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_after_failed_corrective_gets_one_bounded_reselection() -> None:
+    class InvalidCorrectiveMain(_Main):
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            assert claim_validation_corrective_provider_slot()
+            return ModelOutput(
+                model_id="primary-corrective",
+                model_version="v1",
+                raw_proposal={"bad": True},
+            )
+
+    class InvalidFallback(_Quick):
+        async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+            self.requests.append(request)
+            self.failure_codes.append(failure_code)
+            assert claim_validation_corrective_provider_slot(allow_after_backup=True)
+            assert not claim_validation_corrective_provider_slot(allow_after_backup=True)
+            return ModelOutput(
+                model_id="invalid-fallback",
+                model_version="v1",
+                raw_proposal={"still_bad": True},
+            )
+
+    main = InvalidCorrectiveMain()
+    fallback = InvalidFallback()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=fallback,
+        recovery_mode="proposal_grammar",
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:one-fallback-correction",
+        budget=InteractiveTurnBudgetPolicy().start(),
+    )
+
+    assert result.proposal is None
+    assert result.attempt_audits[0].slot == "corrective"
+    assert result.attempt_audits[0].failure_code == "corrective_invalid"
+    assert result.audit.slot == "backup"
+    assert result.audit.status == "recovery_failed"
+    assert result.audit.failure_code == "backup_invalid"
+    assert len(main.requests) == len(fallback.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_primary_audit_uses_the_actual_winning_provider_invocation_identity() -> None:
+    actual_call_id = "model-call:actual-primary-corrective"
+    actual_request_hash = "c" * 64
+    output = ModelOutput(
+        model_id="corrected",
+        model_version="v1",
+        raw_proposal=_decision_raw(),
+        winning_model_call_id=actual_call_id,
+        winning_request_hash=actual_request_hash,
+    )
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_Main(output),
+        quick_recovery=_Quick(),
+    ).deliberate(_capsule(), attempt_id="attempt:actual-primary-invocation")
+
+    assert result.audit.model_call_id == actual_call_id
+    assert result.audit.request_hash == actual_request_hash
+    assert result.attempt_audits == (result.audit,)
+
+
+@pytest.mark.asyncio
+async def test_recovery_audit_uses_the_actual_winning_provider_invocation_identity() -> None:
+    actual_call_id = "model-call:actual-backup-corrective"
+    actual_request_hash = "d" * 64
+    output = ModelOutput(
+        model_id="backup-corrected",
+        model_version="v1",
+        raw_proposal=_minimal_raw(),
+        winning_model_call_id=actual_call_id,
+        winning_request_hash=actual_request_hash,
+    )
+
+    class ActualInvocationQuick(_Quick):
+        async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+            self.requests.append(request)
+            self.failure_codes.append(failure_code)
+            return output
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_Main({"bad": True}),
+        quick_recovery=ActualInvocationQuick(),
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:actual-backup-invocation",
+    )
+
+    assert result.audit.model_call_id == actual_call_id
+    assert result.audit.request_hash == actual_request_hash
+    assert result.attempt_audits[-1] == result.audit
+    assert result.attempt_audits[0].model_call_id != actual_call_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_kind", ["recall", "backup"])
+async def test_validation_correction_may_use_one_bounded_slot_after_recall_or_recovery(
+    second_kind: str,
+) -> None:
+    class RecallThenCorrectingMain(_Main):
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            assert claim_secondary_provider_slot(second_kind)  # type: ignore[arg-type]
+            assert claim_validation_corrective_provider_slot(
+                allow_after_backup=second_kind == "backup"
+            )
+            assert not claim_validation_corrective_provider_slot()
+            assert not claim_secondary_provider_slot("backup")
+            return ModelOutput(
+                model_id="recalled-and-corrected",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+    clock = _ManualClock()
+    backup = _ControlledQuick()
+    result = await Deliberation(
+        router=_Router(),
+        main_model=RecallThenCorrectingMain(),
+        quick_recovery=backup,
+    ).deliberate(
+        _capsule(),
+        attempt_id=f"attempt:post-{second_kind}-corrective",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=5.5,
+            hedge_after_seconds=1.5,
+            acceptance_dispatch_reserve_seconds=1.2,
+            clock=clock,
+            sleep=clock.sleep,
+        ).start(),
+    )
+
+    assert result.audit.model_id == "recalled-and-corrected"
+    assert result.audit.slot == "corrective"
+    assert result.audit.outcome == "winner"
+    assert backup.requests == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_winner_with_nested_validation_reselection_is_a_corrective_slot() -> None:
+    class CorrectingQuick(_Quick):
+        async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+            self.requests.append(request)
+            self.failure_codes.append(failure_code)
+            assert claim_validation_corrective_provider_slot(allow_after_backup=True)
+            return ModelOutput(
+                model_id="backup-corrected",
+                model_version="v1",
+                raw_proposal=_minimal_raw(),
+            )
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_Main({"bad": True}),
+        quick_recovery=CorrectingQuick(),
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:backup-nested-corrective",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=5.5,
+            hedge_after_seconds=1.5,
+            acceptance_dispatch_reserve_seconds=1.2,
+            clock=_ManualClock(),
+        ).start(),
+    )
+
+    assert result.proposal is not None
+    assert result.audit.model_id == "backup-corrected"
+    assert result.audit.slot == "corrective"
+    assert result.audit.outcome == "winner"
 
 
 @pytest.mark.asyncio
@@ -515,8 +2028,10 @@ async def test_dual_invalid_after_full_budget_stops_after_one_corrective_call() 
     assert result.audit.status == "recovery_failed"
     assert result.audit.failure_code == "backup_invalid"
     assert result.attempt_audits[0].failure_code == "primary_invalid"
-    assert result.attempt_audits[0].outcome == "budget_exhausted"
-    assert result.attempt_audits[1].outcome == "budget_exhausted"
+    # The primary's old deadline no longer erases the independent recovery
+    # window.  The fallback is still rejected on its actual invalid result.
+    assert result.attempt_audits[0].outcome == "invalid"
+    assert result.attempt_audits[1].outcome == "invalid"
     assert len(result.attempt_audits) == 2
 
 
@@ -769,6 +2284,7 @@ async def test_seen_prefetch_fact_extends_frozen_evidence_and_is_audited() -> No
         logical_time=NOW,
     )
     trace = coordinator.prefetch(
+        expected_cursor=cursor,
         query_text="tea preference",
         accessibility_seed="draw:test:prefetch",
         trigger_ref=capsule.trigger_ref,
@@ -796,7 +2312,104 @@ async def test_seen_prefetch_fact_extends_frozen_evidence_and_is_audited() -> No
 
 
 @pytest.mark.asyncio
-async def test_trigger_message_reaches_model_only_when_bound_to_current_observation_evidence() -> None:
+async def test_ordered_presented_prefetch_union_extends_frozen_evidence() -> None:
+    handle = _capsule()
+    capsule = handle.capsule
+    cursor = RecallCursor(
+        world_revision=capsule.world_revision,
+        deliberation_revision=capsule.deliberation_revision,
+        ledger_sequence=capsule.ledger_sequence,
+    )
+    index = InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    index.rebuild(
+        cursor=cursor,
+        documents=(
+            RecallDocument(
+                document_id="recall:prefetch:first",
+                memory_kind="semantic",
+                source_item_ref="fact:prefetch:first",
+                source_slice="relevant_facts",
+                source_refs=("event:source:first-prefetch",),
+                source_bindings=(
+                    RecallSourceBinding(
+                        source_kind="committed_event",
+                        authority_type="FactCommitted",
+                        ref="event:source:first-prefetch",
+                        source_world_revision=7,
+                        immutable_hash=HASH_B,
+                    ),
+                ),
+                source_world_revision=7,
+                text="The counterpart previously described a tea preference.",
+                actor_ref="actor:companion",
+                subject_refs=("actor:companion",),
+                occurred_from=NOW,
+                privacy_class="personal",
+            ),
+        ),
+    )
+    coordinator = RecallCoordinator.from_built_index(
+        index=index,
+        cursor=cursor,
+        actor_ref="actor:companion",
+        subject_refs=("actor:companion",),
+        logical_time=NOW,
+    )
+    first = coordinator.prefetch(
+        expected_cursor=cursor,
+        query_text="tea preference",
+        accessibility_seed="draw:test:first-prefetch",
+        trigger_ref=capsule.trigger_ref,
+    )
+    later = coordinator.prefetch(
+        expected_cursor=cursor,
+        query_text="unrelated material",
+        accessibility_seed="draw:test:later-prefetch",
+        trigger_ref=capsule.trigger_ref,
+    )
+    assert first.audit.hits
+    assert later.audit.hits == ()
+    raw = _decision_raw(evidence_ref="event:source:first-prefetch")
+    raw["evidence_refs"][0]["evidence_kind"] = "committed_fact"
+    main = _Main(
+        ModelOutput(
+            model_id="main",
+            model_version="v1",
+            raw_proposal=raw,
+            prefetch_trace=later,
+            presented_prefetch_traces=(
+                PresentedPrefetchTrace(
+                    phase="initial",
+                    model_call_id="model-call:prefetch-initial",
+                    trace=first,
+                ),
+                PresentedPrefetchTrace(
+                    phase="recall_followup",
+                    model_call_id="model-call:prefetch-followup",
+                    trace=later,
+                ),
+            ),
+        )
+    )
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+    ).deliberate(handle, attempt_id="attempt:ordered-prefetch")
+
+    assert result.proposal is not None
+    assert tuple(item.model_call_id for item in result.audit.presented_prefetch_traces) == (
+        "model-call:prefetch-initial",
+        "model-call:prefetch-followup",
+    )
+    assert result.audit.prefetch_trace is None
+
+
+@pytest.mark.asyncio
+async def test_trigger_message_reaches_model_only_when_bound_to_current_observation_evidence() -> (
+    None
+):
     main = _Main()
     unit = Deliberation(router=_Router(), main_model=main, quick_recovery=_Quick())
     observed = ProposalEvidenceRef(
@@ -1070,6 +2683,70 @@ async def test_handled_provider_exception_is_not_logged_as_detached(caplog) -> N
 
 
 @pytest.mark.asyncio
+async def test_private_turn_state_validation_logs_only_structured_safe_metadata(caplog) -> None:
+    secret = "PRIVATE-INNER-STATE-" + ("绝密" * 260)
+    invalid = {
+        "private_turn_state": {
+            "inner_state_summary": secret,
+            "attended_source_refs": [],
+        },
+        "timing_choice": "silent",
+        "beats": [],
+        "stance": "keep_private",
+        "brief_rationale": "The role model chose silence.",
+        "world_claims": [],
+    }
+
+    class InvalidPrivateStateProvider:
+        model = "test-private-state-provider"
+
+        async def complete_json(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.8,
+        ) -> str:
+            return json.dumps(invalid, ensure_ascii=False)
+
+    observed = ProposalEvidenceRef(
+        ref_id="observation:current:private-state",
+        evidence_kind="observed_message",
+        source_world_revision=7,
+        immutable_hash=f"sha256:{HASH_B}",
+    )
+    current = TriggerMessage(
+        event_ref="event:observation:1",
+        event_payload_hash=f"sha256:{HASH_B}",
+        observation_ref=observed.ref_id,
+        source_world_revision=observed.source_world_revision,
+        actor="user:primary",
+        channel="test",
+        reply_target="user:primary",
+        text="这句是当前消息。",
+    )
+    result = await Deliberation(
+        router=_Router(),
+        main_model=ChatModelDeliberationAdapter(
+            model=InvalidPrivateStateProvider(),
+            expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        ),
+        quick_recovery=_Quick(fail=True),
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:private-state-log-privacy",
+        trigger_evidence=(_authority_evidence(), observed),
+        trigger_message=current,
+    )
+
+    assert result.proposal is None
+    assert "private_turn_state.string_too_long" in caplog.text
+    assert "path=private_turn_state.inner_state_summary" in caplog.text
+    assert "PRIVATE-INNER-STATE" not in caplog.text
+    assert "绝密" not in caplog.text
+    assert "input_value" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_untrusted_test_capsule_is_rejected_before_any_model_call() -> None:
     main = _Main()
     untrusted = _compile_resolved_context(_request())
@@ -1127,6 +2804,89 @@ async def test_provider_suppressing_cancellation_cannot_extend_caller_deadline()
 
 
 @pytest.mark.asyncio
+async def test_close_detaches_provider_that_keeps_suppressing_cancellation() -> None:
+    """Shutdown is bounded while a detached provider retains safe ownership."""
+
+    release = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+
+    async def cancellation_suppressing_provider() -> None:
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+        raise RuntimeError("late provider failure")
+
+    unit = Deliberation(router=_Router(), main_model=_Main(), quick_recovery=_Quick())
+    with pytest.raises(TimeoutError):
+        await unit._with_deadline(
+            cancellation_suppressing_provider(),
+            timeout=0.001,
+            label="close-cancellation-suppressor",
+            lane="main",
+        )
+    await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+
+    closing = asyncio.create_task(unit.aclose())
+    try:
+        await asyncio.sleep(0.2)
+        closed_with_provider_still_running = closing.done()
+        assert unit.provider_health.main_inflight == 1
+    finally:
+        release.set()
+        await asyncio.wait_for(closing, timeout=1)
+
+    assert closed_with_provider_still_running is True
+    for _ in range(10):
+        if unit.provider_health.main_inflight == 0:
+            break
+        await asyncio.sleep(0)
+    assert unit.provider_health.main_inflight == 0
+
+
+@pytest.mark.asyncio
+async def test_deadline_bounded_drain_preserves_nested_validation_failure_audit() -> None:
+    technical = ValidationTechnicalFailure(
+        "source_review_timeout",
+        attempted_model_id="nested-source-reviewer",
+        attempted_model_version="source-review.1",
+    )
+
+    async def nested_reviewer_cleanup() -> ModelOutput:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError as cancelled:
+            # Production-shaped nested cancellation needs multiple scheduling
+            # turns before the reviewer audit reaches the outer task.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            setattr(
+                cancelled,
+                "world_v2_validation_technical_failure",
+                technical,
+            )
+            raise
+
+    unit = Deliberation(
+        router=_Router(),
+        main_model=_Main(),
+        quick_recovery=_Quick(),
+    )
+
+    with pytest.raises(ValidationTechnicalFailure) as caught:
+        await unit._with_deadline(
+            nested_reviewer_cleanup(),
+            timeout=0.001,
+            label="nested-source-review",
+            lane="main",
+        )
+
+    assert caught.value is technical
+    assert unit.provider_health.main_inflight == 0
+
+
+@pytest.mark.asyncio
 async def test_expression_episode_off_is_original_single_provider_path() -> None:
     main = _EpisodeMain()
     result = await Deliberation(
@@ -1167,6 +2927,9 @@ async def test_expression_episode_shadow_runs_candidate_without_changing_full_re
             acceptance_dispatch_reserve_seconds=0.2,
         ).start(),
     )
+    async with asyncio.timeout(0.1):
+        while unit.expression_episode_diagnostics()["turns"] == 0:
+            await asyncio.sleep(0)
 
     assert result.proposal is not None
     assert result.proposal.proposal_id == "proposal:decision:1"
@@ -1176,7 +2939,195 @@ async def test_expression_episode_shadow_runs_candidate_without_changing_full_re
     diagnostics = unit.expression_episode_diagnostics()
     assert diagnostics["mode"] == "shadow"
     assert diagnostics["turns"] == 1
-    assert diagnostics["provisional_first"] == 1
+    # Shadow is deliberately post-author observation: the authoritative full
+    # lane must settle before the diagnostic candidate is allowed to run.
+    assert diagnostics["full_first"] == 1
+    assert diagnostics["provisional_first"] == 0
+    assert diagnostics["slot_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_blocked_shadow_observer_cannot_saturate_quick_recovery() -> None:
+    class BlockingShadowMain(_EpisodeMain):
+        def __init__(self) -> None:
+            super().__init__()
+            self.shadow_started = asyncio.Event()
+            self.release_shadow = asyncio.Event()
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            if len(self.requests) == 2:
+                raise ValueError("the second primary candidate is intentionally invalid")
+            return ModelOutput(
+                model_id="main",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+        async def propose_provisional(self, request: ModelInput) -> ModelOutput:
+            self.provisional_requests.append(request)
+            self.shadow_started.set()
+            await self.release_shadow.wait()
+            raw = _decision_raw()
+            raw["proposal_id"] = "proposal:blocked-shadow-observer"
+            return ModelOutput(
+                model_id="shadow",
+                model_version="v1",
+                raw_proposal=raw,
+            )
+
+    main = BlockingShadowMain()
+    quick = _Quick()
+    unit = Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+        expression_episode_mode="shadow",
+    )
+    budget_policy = InteractiveTurnBudgetPolicy(
+        total_seconds=1.0,
+        hedge_after_seconds=0.2,
+        acceptance_dispatch_reserve_seconds=0.2,
+    )
+
+    first = await unit.deliberate(
+        _capsule(),
+        attempt_id="attempt:blocked-shadow:first",
+        budget=budget_policy.start(),
+    )
+    await asyncio.wait_for(main.shadow_started.wait(), timeout=0.1)
+    try:
+        second = await unit.deliberate(
+            _capsule(),
+            attempt_id="attempt:blocked-shadow:second",
+            budget=budget_policy.start(),
+        )
+
+        assert first.proposal is not None
+        assert second.proposal is not None
+        assert second.audit.status == "main_invalid_recovered"
+        assert len(quick.requests) == 1
+        assert unit.provider_health.quick_inflight == 0
+        assert unit.provider_health.quick_circuit_open is False
+    finally:
+        main.release_shadow.set()
+        async with asyncio.timeout(0.1):
+            while unit.expression_episode_diagnostics()["turns"] == 0:
+                await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_and_joins_a_running_shadow_observer(caplog) -> None:
+    """Shutdown must not leave a diagnostic candidate using closed providers."""
+
+    class BlockingShadowMain(_EpisodeMain):
+        def __init__(self) -> None:
+            super().__init__()
+            self.shadow_started = asyncio.Event()
+            self.shadow_cancelled = asyncio.Event()
+            self.release_shadow = asyncio.Event()
+
+        async def propose_provisional(self, request: ModelInput) -> ModelOutput:
+            self.provisional_requests.append(request)
+            self.shadow_started.set()
+            try:
+                await self.release_shadow.wait()
+            except asyncio.CancelledError:
+                self.shadow_cancelled.set()
+                raise
+            raise AssertionError("shutdown must cancel the shadow observer")
+
+    main = BlockingShadowMain()
+    unit = Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+        expression_episode_mode="shadow",
+    )
+
+    result = await unit.deliberate(
+        _capsule(),
+        attempt_id="attempt:shadow-shutdown",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+    assert result.proposal is not None
+    await asyncio.wait_for(main.shadow_started.wait(), timeout=0.1)
+
+    await unit.aclose()
+
+    assert main.shadow_cancelled.is_set()
+    assert unit.provider_health.main_inflight == 0
+    assert unit.provider_health.quick_inflight == 0
+    assert "deliberation candidate raised" not in caplog.text
+    assert "ClosedResourceError" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_source_reviewed_full_reply_keeps_shadow_episode_isolated() -> None:
+    class _SourceReviewedEpisodeMain(_EpisodeMain):
+        def __init__(self) -> None:
+            super().__init__()
+            self.source_review_finished = asyncio.Event()
+            self.provisional_called = asyncio.Event()
+
+        def source_closure_review_enabled(self) -> bool:
+            return True
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            await asyncio.sleep(0.02)
+            # Models the full author's independent truth-boundary review.  A
+            # diagnostic shadow must not reserve this authoritative slot.
+            assert claim_validation_corrective_provider_slot()
+            self.source_review_finished.set()
+            return ModelOutput(
+                model_id="source-reviewed-full",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+            )
+
+        async def propose_provisional(self, request: ModelInput) -> ModelOutput:
+            # Production uses the same fallback provider for source review and
+            # shadow authorship.  Observation must not contend with the
+            # authoritative review on the visible path.
+            assert self.source_review_finished.is_set()
+            self.provisional_called.set()
+            return await super().propose_provisional(request)
+
+    main = _SourceReviewedEpisodeMain()
+    unit = Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+        expression_episode_mode="shadow",
+    )
+
+    result = await unit.deliberate(
+        _capsule(),
+        attempt_id="attempt:source-reviewed-episode-shadow",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+    await asyncio.wait_for(main.provisional_called.wait(), timeout=0.1)
+    async with asyncio.timeout(0.1):
+        while unit.expression_episode_diagnostics()["turns"] == 0:
+            await asyncio.sleep(0)
+
+    assert result.proposal is not None
+    assert result.proposal.proposal_id == "proposal:decision:1"
+    assert len(main.requests) == 1
+    assert len(main.provisional_requests) == 1
+    assert len(result.attempt_audits) == 1
+    diagnostics = unit.expression_episode_diagnostics()
+    assert diagnostics["mode"] == "shadow"
+    assert diagnostics["turns"] == 1
     assert diagnostics["slot_calls"] == 2
 
 
@@ -1204,9 +3155,7 @@ async def test_expression_episode_on_authorizes_first_valid_provisional_only() -
     assert len(main.requests) == 1
     assert len(main.provisional_requests) == 1
     assert len(result.attempt_audits) == 1
-    tail = await deliberation.await_expression_episode_tail(
-        result.proposal.trigger_ref
-    )
+    tail = await deliberation.await_expression_episode_tail(result.proposal.trigger_ref)
     assert tail is not None
     assert tail.disposition == "complete_without_more"
 
@@ -1244,9 +3193,7 @@ async def test_expression_episode_on_retains_auditable_full_append_tail() -> Non
     )
 
     assert result.proposal is not None
-    tail = await deliberation.await_expression_episode_tail(
-        result.proposal.trigger_ref
-    )
+    tail = await deliberation.await_expression_episode_tail(result.proposal.trigger_ref)
     assert tail is not None
     assert tail.disposition == "append"
     assert tail.deliberation is not None

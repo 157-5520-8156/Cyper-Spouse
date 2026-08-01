@@ -9,17 +9,20 @@ delivery confirmation or reach a World ledger.
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 from typing import Protocol
 
 from pydantic import Field
 
 from companion_daemon.qq_delivery import QQDelivery
 
+from .action_pump import TerminalPreDispatchFailure
 from .platform_action_executor import PlatformDispatchReceipt, PlatformDispatchRequest
 from .schema_core import FrozenModel
 
@@ -37,6 +40,10 @@ class QQC2CDelivery(Protocol):
 
     async def send_typing(
         self, recipient_id: str, *, state: str
+    ) -> dict[str, object]: ...
+
+    async def send_image_message(
+        self, recipient_id: str, *, image_path: Path
     ) -> dict[str, object]: ...
 
 
@@ -57,6 +64,14 @@ class _StickerPayload(FrozenModel):
 class _TypingPayload(FrozenModel):
     state: str = Field(pattern=r"^composing$")
     version: str = Field(pattern=r"^expression-typing\.1$")
+
+
+class _QQProviderDispatchError(Exception):
+    """Marks uncertainty from the external QQ call, not local validation."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(type(cause).__name__)
+        self.cause = cause
 
 
 def _digest(value: object) -> str:
@@ -100,14 +115,56 @@ def _get_msg_confirms(response: object, message_id: str) -> bool:
     return False
 
 
+def _write_private_media_copy(path: Path, image: bytes) -> None:
+    """Materialize exact authorized bytes as a private, no-overwrite artifact."""
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow,
+                0o600,
+            )
+            created = True
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(image)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return
+        except FileExistsError:
+            descriptor = os.open(path, os.O_RDONLY | no_follow)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("media audit target is not a regular file")
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
+                existing = stream.read()
+            if existing != image:
+                raise ValueError("media audit target does not contain the authorized bytes")
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if created:
+            path.unlink(missing_ok=True)
+        raise
+
+
 class QQC2CPlatformTransport:
     """Dispatch text to one of the explicitly registered QQ C2C targets.
 
     QQ's current send API acknowledges accepting a request but does not expose
     a durable delivery lookup.  Therefore a fresh response is recorded as
     ``provider_accepted`` (never ``delivered``).  If the process dies before
-    settlement, an empty lookup lets Action recovery mark the effect unknown
-    rather than duplicating an uncertain human-facing send.
+    settlement, a missing lookup result is itself recorded as unknown rather
+    than duplicating an uncertain human-facing send.
     """
 
     provider = "qq:c2c"
@@ -129,16 +186,40 @@ class QQC2CPlatformTransport:
     async def send(self, request: PlatformDispatchRequest) -> PlatformDispatchReceipt:
         recipient_id = self._recipients_by_target.get(request.target)
         if recipient_id is None:
-            raise ValueError("QQ C2C Action target is not owned by this transport")
+            raise TerminalPreDispatchFailure(
+                provider=self.provider,
+                error_class="local_preflight_authorization_rejected",
+                message="QQ C2C Action target is not owned by this transport",
+            )
         existing = self._receipts.get(request.idempotency_key)
         if existing is not None:
             if existing.request_fingerprint != request.fingerprint:
                 raise ValueError("QQ C2C idempotency key conflicts with the original request")
             return existing
-        response = await self._dispatch(request=request, recipient_id=recipient_id)
-        receipt = self._receipt_for(request=request, response=response)
+        try:
+            response = await self._dispatch(request=request, recipient_id=recipient_id)
+        except _QQProviderDispatchError as exc:
+            receipt = self._unknown_receipt(
+                idempotency_key=request.idempotency_key,
+                request_fingerprint=request.fingerprint,
+                error_class=self._provider_error_class(exc.cause),
+            )
+        else:
+            receipt = self._receipt_for(request=request, response=response)
         self._receipts[request.idempotency_key] = receipt
         return receipt
+
+    async def _call_provider(
+        self, operation: Awaitable[dict[str, object]]
+    ) -> dict[str, object]:
+        try:
+            return await operation
+        except Exception as exc:
+            # Once a network/provider call starts, a raised exception cannot
+            # prove whether QQ accepted the effect.  Preserve that uncertainty
+            # so effect-once recovery never re-sends the same human-facing
+            # Action.
+            raise _QQProviderDispatchError(exc) from exc
 
     async def _dispatch(
         self, *, request: PlatformDispatchRequest, recipient_id: str
@@ -147,7 +228,9 @@ class QQC2CPlatformTransport:
             request.kind in {"reply", "followup", "proactive_message"}
             and request.content_type == "text/plain"
         ):
-            return await self._delivery.send_text(recipient_id, request.body)
+            return await self._call_provider(
+                self._delivery.send_text(recipient_id, request.body)
+            )
         if (
             request.kind == "reaction"
             and request.content_type == "application/vnd.world-v2.reaction+json"
@@ -155,11 +238,17 @@ class QQC2CPlatformTransport:
             try:
                 payload = _ReactionPayload.model_validate_json(request.body, strict=True)
             except ValueError as exc:
-                raise ValueError("QQ reaction payload is invalid") from exc
-            return await self._delivery.send_reaction(
-                recipient_id,
-                message_id=payload.provider_message_id,
-                reaction_id=payload.reaction_id,
+                raise TerminalPreDispatchFailure(
+                    provider=self.provider,
+                    error_class="local_preflight_payload_semantics_rejected",
+                    message="QQ reaction payload is invalid",
+                ) from exc
+            return await self._call_provider(
+                self._delivery.send_reaction(
+                    recipient_id,
+                    message_id=payload.provider_message_id,
+                    reaction_id=payload.reaction_id,
+                )
             )
         if (
             request.kind == "sticker"
@@ -168,8 +257,16 @@ class QQC2CPlatformTransport:
             try:
                 payload = _StickerPayload.model_validate_json(request.body, strict=True)
             except ValueError as exc:
-                raise ValueError("QQ sticker payload is invalid") from exc
-            return await self._delivery.send_sticker(recipient_id, sticker_id=payload.sticker_id)
+                raise TerminalPreDispatchFailure(
+                    provider=self.provider,
+                    error_class="local_preflight_payload_semantics_rejected",
+                    message="QQ sticker payload is invalid",
+                ) from exc
+            return await self._call_provider(
+                self._delivery.send_sticker(
+                    recipient_id, sticker_id=payload.sticker_id
+                )
+            )
         if (
             request.kind == "typing"
             and request.content_type == "application/vnd.world-v2.typing+json"
@@ -177,14 +274,24 @@ class QQC2CPlatformTransport:
             try:
                 payload = _TypingPayload.model_validate_json(request.body, strict=True)
             except ValueError as exc:
-                raise ValueError("QQ typing payload is invalid") from exc
-            return await self._delivery.send_typing(recipient_id, state=payload.state)
+                raise TerminalPreDispatchFailure(
+                    provider=self.provider,
+                    error_class="local_preflight_payload_semantics_rejected",
+                    message="QQ typing payload is invalid",
+                ) from exc
+            return await self._call_provider(
+                self._delivery.send_typing(recipient_id, state=payload.state)
+            )
         if (
             request.kind == "media_delivery"
             and request.content_type == "application/vnd.world-v2.media-artifact+json"
         ):
             return await self._dispatch_media(request=request, recipient_id=recipient_id)
-        raise ValueError("QQ C2C transport does not support this Action payload")
+        raise TerminalPreDispatchFailure(
+            provider=self.provider,
+            error_class="local_preflight_action_unsupported",
+            message="QQ C2C transport does not support this Action payload",
+        )
 
     async def _dispatch_media(
         self, *, request: PlatformDispatchRequest, recipient_id: str
@@ -199,24 +306,43 @@ class QQC2CPlatformTransport:
 
         send_image = getattr(self._delivery, "send_image_message", None)
         if not callable(send_image):
-            raise ValueError("QQ delivery adapter does not support image messages")
+            raise TerminalPreDispatchFailure(
+                provider=self.provider,
+                error_class="local_preflight_action_unsupported",
+                message="QQ delivery adapter does not support image messages",
+            )
         try:
             payload = json.loads(request.body)
             if not isinstance(payload, dict) or payload.get("encoding") != "base64":
                 raise ValueError("unsupported media artifact encoding")
             image = base64.b64decode(str(payload.get("bytes") or ""), validate=True)
         except (ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("QQ media artifact payload is invalid") from exc
+            raise TerminalPreDispatchFailure(
+                provider=self.provider,
+                error_class="local_preflight_payload_semantics_rejected",
+                message="QQ media artifact payload is invalid",
+            ) from exc
         if not image:
-            raise ValueError("QQ media artifact payload is empty")
+            raise TerminalPreDispatchFailure(
+                provider=self.provider,
+                error_class="local_preflight_payload_semantics_rejected",
+                message="QQ media artifact payload is empty",
+            )
         # A durable on-disk copy doubles as the audit trail of what was sent.
-        _MEDIA_DELIVERY_OUTBOX.mkdir(parents=True, exist_ok=True)
         image_path = _MEDIA_DELIVERY_OUTBOX / (
             hashlib.sha256(image).hexdigest()[:24] + ".png"
         )
-        if not image_path.exists():
-            image_path.write_bytes(image)
-        return await send_image(recipient_id, image_path=image_path)
+        try:
+            _write_private_media_copy(image_path, image)
+        except (OSError, ValueError) as exc:
+            raise TerminalPreDispatchFailure(
+                provider=self.provider,
+                error_class="local_preflight_payload_unavailable",
+                message="QQ media audit copy could not be materialized safely",
+            ) from exc
+        return await self._call_provider(
+            send_image(recipient_id, image_path=image_path)
+        )
 
     async def lookup(
         self, *, idempotency_key: str, request_fingerprint: str
@@ -224,10 +350,54 @@ class QQC2CPlatformTransport:
         receipt = self._receipts.get(idempotency_key)
         if receipt is not None and receipt.request_fingerprint != request_fingerprint:
             raise ValueError("QQ C2C lookup fingerprint conflicts with the original dispatch")
-        # A new process has no provider-side lookup capability.  Returning
-        # None is intentional: ActionPump will apply the existing recovery
-        # policy instead of re-sending an uncertain reply.
+        if receipt is None:
+            # QQ exposes no durable lookup by our idempotency key.  A persisted
+            # ActionDispatchStarted means the external effect may already have
+            # happened; absence from this process-local cache is therefore a
+            # terminal unknown, never permission to dispatch it again.
+            receipt = self._unknown_receipt(
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                error_class="provider_result_unavailable",
+            )
+            self._receipts[idempotency_key] = receipt
         return receipt
+
+    @staticmethod
+    def _provider_error_class(error: Exception) -> str:
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+        try:
+            code = int(status_code)
+        except (TypeError, ValueError):
+            code = 0
+        if 100 <= code <= 599:
+            return f"provider_http_{code}"
+        return "provider_exception_" + type(error).__name__.lower()
+
+    def _unknown_receipt(
+        self,
+        *,
+        idempotency_key: str,
+        request_fingerprint: str,
+        error_class: str,
+    ) -> PlatformDispatchReceipt:
+        evidence = {
+            "idempotency_key": idempotency_key,
+            "request_fingerprint": request_fingerprint,
+            "error_class": error_class,
+        }
+        identity = _digest(evidence)
+        return PlatformDispatchReceipt(
+            provider_receipt_id=f"receipt:qq-c2c:unknown:{identity}",
+            provider_ref=f"qq-c2c:unknown:{identity}",
+            status="unknown",
+            error_class=error_class,
+            received_at=self._now(),
+            raw_payload_hash="sha256:" + _digest(evidence),
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
 
     async def verify_delivery(
         self, *, idempotency_key: str, target: str, provider_ref: str

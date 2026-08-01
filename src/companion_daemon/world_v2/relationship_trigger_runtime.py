@@ -15,7 +15,10 @@ from typing import Literal, Protocol
 
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
-from .relationship_trigger import relationship_deliberation_trigger_id
+from .relationship_trigger import (
+    relationship_continuity_trigger_id,
+    relationship_deliberation_trigger_id,
+)
 from .schema_core import FrozenModel
 from .schemas import ClaimLease, ProjectionCursor, TriggerProcess, WorldEvent
 
@@ -45,7 +48,7 @@ class RelationshipDeliberationWorker(Protocol):
         *,
         world_id: str,
         cursor: ProjectionCursor,
-        appraisal_event: WorldEvent,
+        source_event: WorldEvent,
     ) -> RelationshipDeliberationWorkResult: ...
 
 
@@ -100,7 +103,7 @@ class RelationshipTriggerRuntime:
         work = await self._worker.process(
             world_id=self._ledger.world_id,
             cursor=self._cursor(),
-            appraisal_event=source_event,
+            source_event=source_event,
         )
         work_status = getattr(work, "status", None)
         if not isinstance(work_status, str) or not work_status:
@@ -118,15 +121,24 @@ class RelationshipTriggerRuntime:
     def _source_event(self, process: TriggerProcess) -> WorldEvent:
         event_id = process.source_evidence_ref
         located = self._ledger.lookup_event_commit(event_id) if event_id is not None else None
-        if located is None or located[0].event_type != "AppraisalAccepted":
-            raise ValueError("relationship trigger source appraisal is unavailable")
-        if relationship_deliberation_trigger_id(
-            world_id=located[0].world_id, appraisal_event_id=located[0].event_id
-        ) != process.trigger_id:
-            raise ValueError("relationship trigger identity does not bind source appraisal")
-        if process.trigger_ref != f"relationship:{located[0].event_id}":
-            raise ValueError("relationship trigger reference does not bind source appraisal")
-        return located[0]
+        if located is None:
+            raise ValueError("relationship trigger source event is unavailable")
+        event = located[0]
+        if event.event_type == "AppraisalAccepted":
+            expected_id = relationship_deliberation_trigger_id(
+                world_id=event.world_id, appraisal_event_id=event.event_id
+            )
+            expected_ref = f"relationship:{event.event_id}"
+        elif event.event_type == "ObservationRecorded":
+            expected_id = relationship_continuity_trigger_id(
+                world_id=event.world_id, observation_event_id=event.event_id
+            )
+            expected_ref = f"relationship-continuity:{event.event_id}"
+        else:
+            raise ValueError("relationship trigger source event kind is unsupported")
+        if expected_id != process.trigger_id or process.trigger_ref != expected_ref:
+            raise ValueError("relationship trigger identity does not bind its source")
+        return event
 
     def _claim_or_reclaim(
         self, *, process: TriggerProcess, source_event: WorldEvent, projection

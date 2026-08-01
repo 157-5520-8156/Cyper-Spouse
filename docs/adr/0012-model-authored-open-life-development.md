@@ -37,6 +37,17 @@ Character Model 看到每个客观结果的完整文本，也会单独看到 Wor
 接受。后者只有在显式选择后才会物化为 Dynamic Life Arc；客观产生的新人物仍按
 已结算结果物化。
 
+Character Model 在作出生活选择前还拥有一次可选的、由她自己发起的长期记忆检索。
+她可以直接 `accept/no_op`，也可以先返回一个自由文本 `recall_request`；系统只在
+当前 pinned ledger cursor 上执行既有的来源闭合 RecallCoordinator，并把最多六条
+可访问候选连同原始 source refs 交还同一角色模型。检索结果是参考材料，不是行为
+指令，也不扩大 World Author 的事实或事件权限。随后进入一次最终 `accept/no_op`
+语义阶段；该阶段结果非法时，仍允许同一角色模型针对精确失败原因作一次完整纠正，
+但不能连续检索。请求、命中、游标、各语义阶段及其全部 provider attempts 和最终
+选择进入同一审计链。崩溃恢复复用已完成阶段的记录，不重新执行已持久化的角色
+阶段或检索；若最终语义阶段尚未完成，只从该阶段继续。这样，旧经历和用户互动
+可以被角色在自主生活中真正“想起”，但是否想起、是否据此行动仍由她决定。
+
 World Author 与 Character Model 的开放提议各自属于一个精确 Pinned Turn。每次
 实际调用的 messages hash、非法首答、纠正答、raw sidecar、Context identity 和
 决定对象 hash 都进入不可变审计；最终 life-development Proposal 引用这些审计
@@ -59,6 +70,71 @@ Acceptance、Settlement 与 Appraisal Trigger 在同一个 pinned-prefix CAS 批
 身份独立于全局 Ecology，并按 10/30/120 分钟封顶重试。旧
 `life-aftermath-context.1` 记录继续按原字节重放；新生产记录使用带 durable model
 audit 的 `.2`。
+
+World Author 请求同时携带生成式 JSON Schema 与机器可读的跨字段 Authority
+Contract。后者只描述 Schema 无法表达的来源 scope、World/Character 权威配对、
+recipient-unbound visual privacy 和未结算 outcome 的事实地位，不推荐剧情或角色
+行为。失败重选会保留同一 Contract，并返回结构化字段路径。模型输出中的引用数组
+按集合语义确定性排序去重：原始字节仍进入审计，未知引用、来源越权和隐私越权仍会
+拒绝。显式 `no_op` 若只额外回显了与 pinned owner 完全相同的
+`authored_subject_ref`，解析边界会丢弃这个不能产生事实、权限或 Action 的字段并
+生成规范 no-op；不同 subject 或任何其他额外字段仍是非法输出。这样避免把纯表示
+差异伪装成技术故障，同时不允许本地代码替 World Author 编写事件。
+
+首轮开放提议仍由常规 World Author 自由生成。只有独立来源闭包审查或
+novel-origin 审查已经给出精确失败坐标后，系统才允许配置一个能力更强的供应商，
+以同一个 `world_author` 语义身份完整重写一次。这个纠错调用继续使用原
+Pinned Context、Capability Manifest、失败坐标和权威边界；它不会收到剧情模板、
+行为偏好或运营者编写的替代事件，也不能改变已经冻结的机会身份。审计分别记录
+首轮与纠错实际使用的模型身份，因此这是一条可观察的同角色可靠性路由，不是由
+reviewer 或确定性代码接管生活创作。未配置强模型时仍由原 World Author 完成同样
+的一次纠错。
+
+来源审查的负坐标可以是 claim ID、草稿中的逐字片段，也可以是系统预先列出的精确
+prose path。prose path 只定位 World Author 已写出的一个字段，不产生事实、理由或
+替代内容；reviewer 仍须自行作出“该字段包含未闭合事实”的语义判断，代码只验证路径
+确实属于本次冻结草稿。这样，reviewer 无需把判断改写成容易失真的“带解释引文”，
+也不能借模糊匹配或本地抽取把不存在的文字变成有效拒绝。逐字片段仍必须原样存在，
+typed-location 冲突仍必须同时绑定实际 location ref、精确 prose path 和逐字片段。
+
+负坐标按审查权威进一步分层。General source reviewer 只裁决 existing-world claim
+entailment、premise/visual/provisional-NPC 中未声明的当前事实以及 typed location；
+`outcomes.N.text` 不能成为它的 undeclared-fact 路径或逐字片段来源。Outcome 是尚未
+发生的分支，分支内动作、对话、邀请、回复、感受和主观反应本身无需既有事实来源。
+Focused novel-origin critic 单独裁决 outcome 是否偷带分支发生前的当前/既往先决
+条件、倒填关系或共同历史、已完成的角色经历，或把既有实体伪装成 novel；它必须返回
+精确 `outcomes.N.text` 与该字段中的逐字片段，parser 只校验坐标，不用关键词代替模型
+作语义判断。Premise coverage 不再由 focused critic 重复裁决，避免两个模型以不同
+口径重复否决同一个候选。
+
+World Author 的跨字段机器契约明确暴露 visual location 的成对关系：proposal 未绑定
+执行地点时，所有 outcome 的 visual location 必须为空；绑定时，每个出现的 visual
+location 必须等于同一个执行坐标，背景地、来源地或设想中的其他地点不能借图片字段
+冒充可执行权限。失败反馈同时给出 proposal location 和具体 outcome visual location
+路径，不再只返回无法定位的根级错误。
+
+来源纠错仍只允许一次完整重写，但该次调用附带紧凑的 wire profile，限制建议的
+outcome、claim、NPC 与可选视觉附件数量及文本长度，目的仅是让一个完整 JSON 在供应商
+输出预算内闭合。它不枚举事件、动机或剧情，也不禁止不利事件；World Author 仍可自由
+选择 `no_op` 或任何满足相同权威边界的开放提案。该 profile 不增加模型调用，二次非法、
+超时和供应商异常仍记录技术失败并沿用 10/30/120 分钟退避。
+
+这里的“自由选择 `no_op`”只属于来源纠错的第一次 World Author 决定。如果该次已经
+返回 `propose`，但仅因 JSON Schema、wire 或 Capability 校验失败，唯一的 parser
+repair 必须修复同一个 `propose` 决定，不能借修格式改选 `no_op`。Repair 请求携带完整
+proposal schema、冻结的 Capability Manifest、跨字段 authority contract、精确错误
+路径和允许值；provider strict schema 也只接受 `propose`。若模型仍返回 `no_op` 或
+二次不合法，系统记录技术失败并重试，而不是把一次本可修复的候选伪装成角色主动没有
+生活。若来源纠错第一次就直接选择合法 `no_op`，它仍是 World Author 的有效决定。
+
+World Author 的每次首答与来源纠错还会收到同一个 pinned timing coordinate contract。
+它同时给出 Logical Time 的 UTC 瞬间、每种 Capability 时区下的等价本地时刻、
+`now/later` 字段关系，以及每个地点 Capability 的一个可直接复制的近期合法区间和
+当前 `now` 最大时长。近期区间是由既有 schedule/absolute authority 与 pinned time
+机械求交得到的证明坐标，不是地点或时间推荐，也不是完整候选菜单；模型仍可选择其他
+满足原 schedule 的未来窗口或不绑定地点。系统不会把过去时刻自动平移到未来，也不会
+把“相同钟面数字、不同 UTC offset”猜成模型原意。`window_in_past` 会返回
+`timing.opens_at`、pinned instant 和模型所选区间，非法结果仍是技术失败。
 
 这一设计增加模型输出与后果校验的复杂度，但把复杂度集中在 Life Ecology 的
 内部 seam，并避免有限剧情库成为角色生活的上限。随机性仍只决定考虑机会、

@@ -162,6 +162,9 @@ Cost control and visual identity notes:
   `text-embedding-3-small` vectors; otherwise recall remains exact/local only.
   `WORLD_V2_RECALL_EMBEDDING_MODEL` and
   `WORLD_V2_RECALL_EMBEDDING_DIMENSIONS` select another compatible embedding.
+  Transient transport, 408, 429, and 5xx failures open a process-local cooldown
+  of 120 seconds by default; tune it with
+  `WORLD_V2_RECALL_EMBEDDING_FAILURE_COOLDOWN_SECONDS`.
   Provider calls are additionally bounded by
   `WORLD_V2_RECALL_EMBEDDING_DAILY_TOKEN_BUDGET`,
   `WORLD_V2_RECALL_EMBEDDING_MONTHLY_TOKEN_BUDGET`,

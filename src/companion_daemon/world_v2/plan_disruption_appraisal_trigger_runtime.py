@@ -199,6 +199,7 @@ class PlanDisruptionAppraisalTurn:
             evaluated_world_revision=cursor.world_revision,
             expected_commit_world_revision=cursor.world_revision,
             expected_deliberation_revision=cursor.deliberation_revision,
+            expected_ledger_sequence=cursor.ledger_sequence,
         )
         try:
             if self._ledger.blocks_event_loop:
@@ -499,7 +500,9 @@ class PlanDisruptionAppraisalTriggerRuntime:
         ):
             events.extend(
                 affect_deliberation_trigger_events(
-                    appraisal_event=appraisal_event, owner_id=self._affect_owner_id
+                    appraisal_event=appraisal_event,
+                    owner_id=self._affect_owner_id,
+                    claimed_at=projection.logical_time,
                 )
             )
         relationship_id = relationship_deliberation_trigger_id(
@@ -510,7 +513,9 @@ class PlanDisruptionAppraisalTriggerRuntime:
         ):
             events.extend(
                 relationship_deliberation_trigger_events(
-                    appraisal_event=appraisal_event, owner_id=self._relationship_owner_id
+                    appraisal_event=appraisal_event,
+                    owner_id=self._relationship_owner_id,
+                    claimed_at=projection.logical_time,
                 )
             )
         if not events:

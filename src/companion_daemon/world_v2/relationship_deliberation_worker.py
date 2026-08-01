@@ -57,24 +57,23 @@ class RelationshipDeliberationWorker:
         *,
         world_id: str,
         cursor: ProjectionCursor,
-        appraisal_event: WorldEvent,
+        source_event: WorldEvent,
     ) -> RelationshipDeliberationWorkResult:
         if world_id != self._ledger.world_id:
             raise ValueError("relationship deliberation world mismatch")
         projection = self._ledger.project_at(cursor)
-        reusable = self._reusable_audit(projection=projection, appraisal_event=appraisal_event)
+        reusable = self._reusable_audit(projection=projection, source_event=source_event)
         audited = None
         source_audit_event_ref = None
         if reusable is None:
-            audited = await self._pinned_turn.audit_appraisal_accepted(
-                appraisal_event=appraisal_event,
+            audited = await self._pinned_turn.audit_relationship_source(
+                source_event=source_event,
                 cursor=cursor,
-                attempt_namespace="relationship",
             )
             if audited.proposal_id is None:
                 return RelationshipDeliberationWorkResult(
                     status="no_proposal",
-                    trigger_event_ref=appraisal_event.event_id,
+                    trigger_event_ref=source_event.event_id,
                     deliberation_commit=audited.result,
                 )
             source_proposal_id = audited.proposal_id
@@ -96,7 +95,7 @@ class RelationshipDeliberationWorker:
             accepted = self._accept_pending(cursor=cursor, proposal_id=pending.proposal_id)
             return RelationshipDeliberationWorkResult(
                 status="accepted",
-                trigger_event_ref=appraisal_event.event_id,
+                trigger_event_ref=source_event.event_id,
                 source_proposal_id=source_proposal_id,
                 typed_proposal_id=pending.proposal_id,
                 deliberation_commit=audited.result if audited is not None else None,
@@ -111,7 +110,7 @@ class RelationshipDeliberationWorker:
         if compiled.status == "no_change":
             return RelationshipDeliberationWorkResult(
                 status="no_change",
-                trigger_event_ref=appraisal_event.event_id,
+                trigger_event_ref=source_event.event_id,
                 source_proposal_id=compiled.source_proposal_id,
                 deliberation_commit=audited.result if audited is not None else None,
             )
@@ -127,7 +126,7 @@ class RelationshipDeliberationWorker:
         )
         return RelationshipDeliberationWorkResult(
             status="accepted",
-            trigger_event_ref=appraisal_event.event_id,
+            trigger_event_ref=source_event.event_id,
             source_proposal_id=compiled.source_proposal_id,
             typed_proposal_id=compiled.typed_proposal_id,
             deliberation_commit=audited.result if audited is not None else None,
@@ -136,11 +135,11 @@ class RelationshipDeliberationWorker:
         )
 
     @staticmethod
-    def _reusable_audit(*, projection, appraisal_event: WorldEvent):
+    def _reusable_audit(*, projection, source_event: WorldEvent):
         for audit in projection.proposal_audits:
             if (
                 audit.proposal_kind != "decision"
-                or audit.trigger_ref != appraisal_event.event_id
+                or audit.trigger_ref != source_event.event_id
                 or audit.evaluated_world_revision != projection.world_revision
             ):
                 continue

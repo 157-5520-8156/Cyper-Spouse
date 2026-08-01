@@ -39,6 +39,13 @@ class PrivateImpressionReflectionBinding:
     authority_event_ref: str
 
 
+class PrivateImpressionPredecessorRef(FrozenModel):
+    """Exact active impression revision selected by the role model to replace."""
+
+    impression_id: str = Field(min_length=1, max_length=512)
+    expected_entity_revision: int = Field(ge=1)
+
+
 def offered_private_impression_reflection_bindings(
     projection: object,
     *,
@@ -149,7 +156,9 @@ def offered_private_impression_reflection_bindings(
 class PrivateImpressionAuthorizedPayload(FrozenModel):
     change_id: str = Field(min_length=1)
     transition_id: str = Field(min_length=1)
+    transition_kind: Literal["open", "consolidate", "supersede"] = "open"
     expected_entity_revision: int = Field(ge=0)
+    predecessor_refs: tuple[PrivateImpressionPredecessorRef, ...] = ()
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     appraisal_refs: tuple[AppraisalMeaningRef, ...] = Field(min_length=1)
     policy_refs: tuple[str, ...] = Field(min_length=1)
@@ -160,7 +169,11 @@ class PrivateImpressionAuthorizedPayload(FrozenModel):
     # Absent only on immutable legacy events. New commits are rejected by the
     # commit-batch boundary unless this complete role-reflection lineage is
     # present.
-    reflection_contract: Literal["private-impression-draft.3"] | None = None
+    reflection_contract: Literal[
+        "private-impression-draft.3",
+        "private-impression-draft.4",
+    ] | None = None
+    reflection_decision: Literal["retain", "consolidate", "supersede"] | None = None
     reflection_source_refs: tuple[str, ...] = ()
     source_model_result: str | None = Field(default=None, min_length=1, max_length=256)
     source_capsule_id: str | None = Field(
@@ -192,8 +205,45 @@ class PrivateImpressionAuthorizedPayload(FrozenModel):
         )
         if any(reflection_lineage) and not all(reflection_lineage):
             raise ValueError("private impression reflection lineage is incomplete")
+        if (
+            self.reflection_decision is not None
+            and self.reflection_contract != "private-impression-draft.4"
+        ):
+            raise ValueError("private impression decision lacks its v4 reflection contract")
         if self.reflection_source_refs != tuple(dict.fromkeys(self.reflection_source_refs)):
             raise ValueError("private impression reflection source refs must be unique")
+        predecessor_ids = tuple(item.impression_id for item in self.predecessor_refs)
+        if predecessor_ids != tuple(dict.fromkeys(predecessor_ids)):
+            raise ValueError("private impression predecessor refs must be unique")
+        if self.reflection_contract == "private-impression-draft.3":
+            if (
+                self.transition_kind != "open"
+                or self.predecessor_refs
+                or self.reflection_decision is not None
+            ):
+                raise ValueError("private impression v3 reflection can only open an impression")
+        elif self.reflection_contract == "private-impression-draft.4":
+            if self.reflection_decision != (
+                "retain" if self.transition_kind == "open" else self.transition_kind
+            ):
+                raise ValueError(
+                    "private impression transition does not match the role-model decision"
+                )
+            if self.transition_kind == "open" and self.predecessor_refs:
+                raise ValueError("new private impression cannot replace predecessors")
+            if self.transition_kind != "open" and not self.predecessor_refs:
+                raise ValueError("private impression replacement requires predecessors")
+            selected_predecessors = {
+                ref.removeprefix("private-impression:")
+                for ref in self.reflection_source_refs
+                if ref.startswith("private-impression:")
+            }
+            if any(item not in selected_predecessors for item in predecessor_ids):
+                raise ValueError(
+                    "private impression predecessors were not selected by the role model"
+                )
+        elif self.transition_kind != "open" or self.predecessor_refs:
+            raise ValueError("legacy private impression cannot replace predecessors")
         return self
 
 
@@ -201,7 +251,7 @@ class PrivateImpressionAcceptedPayload(PrivateImpressionAuthorizedPayload):
     impression: PrivateImpressionProjection
 
     @model_validator(mode="after")
-    def opens_a_sourced_private_hypothesis(self) -> PrivateImpressionAcceptedPayload:
+    def accepts_a_sourced_private_hypothesis(self) -> PrivateImpressionAcceptedPayload:
         if self.expected_entity_revision != 0:
             raise ValueError("private impression acceptance must create revision one")
         if self.impression.entity_revision != 1 or self.impression.status != "active":
@@ -221,7 +271,10 @@ class PrivateImpressionAcceptedPayload(PrivateImpressionAuthorizedPayload):
         )
         if self.impression.interpretation_refs != expected_interpretations:
             raise ValueError("private impression interpretations must be appraisal references")
-        if self.impression.first_seen != self.impression.last_supported:
+        if (
+            self.transition_kind != "consolidate"
+            and self.impression.first_seen != self.impression.last_supported
+        ):
             raise ValueError("new private impression must have one authoritative support time")
         if self.reflection_contract is not None and self.impression.reflection_summary is None:
             raise ValueError("role-reflected private impression requires authored prose")
@@ -256,6 +309,14 @@ def private_impression_reflection_digest(
         else PrivateImpressionAcceptedPayload.model_validate(payload)
     )
     return private_impression_reflection_value_digest(
+        decision=(
+            value.reflection_decision
+            if value.reflection_contract == "private-impression-draft.4"
+            else None
+        ),
+        predecessor_refs=tuple(
+            f"private-impression:{item.impression_id}" for item in value.predecessor_refs
+        ),
         source_refs=value.reflection_source_refs,
         reflection_summary=value.impression.reflection_summary,
         confidence_bp=value.impression.confidence_bp,
@@ -265,18 +326,31 @@ def private_impression_reflection_digest(
 
 def private_impression_reflection_value_digest(
     *,
+    decision: str | None = None,
+    predecessor_refs: tuple[str, ...] = (),
     source_refs: tuple[str, ...],
     reflection_summary: str | None,
     confidence_bp: int,
     expiry_condition: str,
 ) -> str:
-    material = {
-        "retain": True,
-        "source_refs": list(source_refs),
-        "reflection_summary": reflection_summary,
-        "confidence": confidence_bp,
-        "expiry_condition": expiry_condition,
-    }
+    material = (
+        {
+            "decision": decision,
+            "predecessor_refs": list(predecessor_refs),
+            "source_refs": list(source_refs),
+            "reflection_summary": reflection_summary,
+            "confidence": confidence_bp,
+            "expiry_condition": expiry_condition,
+        }
+        if decision is not None
+        else {
+            "retain": True,
+            "source_refs": list(source_refs),
+            "reflection_summary": reflection_summary,
+            "confidence": confidence_bp,
+            "expiry_condition": expiry_condition,
+        }
+    )
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
 
@@ -298,7 +372,10 @@ def private_impression_payload_material(
         ):
             impression.pop("reflection_summary", None)
     for field in (
+        "transition_kind",
+        "predecessor_refs",
         "reflection_contract",
+        "reflection_decision",
         "reflection_source_refs",
         "source_model_result",
         "source_capsule_id",

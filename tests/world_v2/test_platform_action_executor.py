@@ -229,13 +229,23 @@ async def test_platform_adapter_keeps_non_text_primitives_typed_and_receipt_boun
 
     current = action(text=body, kind=kind)
     transport = Transport()
+    clock = _Clock()
+    recorder = ProductionLatencyRecorder(clock_ns=clock)
+    trace = recorder.start_ingress(
+        trace_id=current.trace_id,
+        environment="real_transport",
+    )
     receipt = await PlatformActionExecutor(
-        payloads=TypedPayloads(body), transport=transport
+        payloads=TypedPayloads(body),
+        transport=transport,
+        latency_recorder=recorder,
     ).dispatch(current)
 
     assert receipt is not None and receipt.status == "delivered"
     assert transport.sent[0].kind == kind
     assert transport.sent[0].content_type == content_type
+    segments = {sample.segment for sample in trace.samples()}
+    assert ("ingress_to_visible" in segments) is (kind != "typing")
 
 
 @pytest.mark.asyncio

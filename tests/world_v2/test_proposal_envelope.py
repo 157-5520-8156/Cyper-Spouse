@@ -22,6 +22,7 @@ from companion_daemon.world_v2.proposal_envelope import (
     TypedChange,
     validate_proposal_envelope,
 )
+from companion_daemon.world_v2.private_turn_state import PrivateTurnState
 
 
 NOW = datetime(2026, 7, 15, 8, 0, tzinfo=UTC)
@@ -204,6 +205,36 @@ def test_decision_is_frozen_extra_forbid_and_has_stable_canonical_hash() -> None
         DecisionProposal.model_validate({**proposal.model_dump(), "secret_reasoning": "chain"})
     with pytest.raises(ValidationError):
         DecisionProposal.model_validate({**proposal.model_dump(), "brief_rationale": "x" * 241})
+
+
+def test_private_turn_state_preserves_legacy_bytes_and_changes_only_new_proposal_identity() -> None:
+    legacy = _decision()
+
+    assert "private_turn_state" not in legacy.model_dump(mode="json")
+    assert (
+        legacy.proposal_hash
+        == "sha256:405a691275572e8a8c7a803b2f0cf7d45423ea80e395d91a385f73bca3a3dc1a"
+    )
+
+    with_state = _decision(
+        private_turn_state=PrivateTurnState(
+            inner_state_summary="我先感到被接住了，所以此刻确实想自然地回应。",
+            attended_source_refs=("event:message:1",),
+        )
+    )
+    rebuilt = DecisionProposal.model_validate_json(with_state.model_dump_json())
+
+    assert with_state.proposal_hash != legacy.proposal_hash
+    assert with_state.effect_hash == legacy.effect_hash == legacy.proposal_hash
+    assert rebuilt.private_turn_state == with_state.private_turn_state
+    assert rebuilt.proposed_changes == legacy.proposed_changes
+    assert rebuilt.action_intents == legacy.action_intents
+    assert rebuilt.evidence_refs == legacy.evidence_refs
+
+
+def test_private_turn_state_rejects_a_whitespace_only_summary() -> None:
+    with pytest.raises(ValidationError, match="non-whitespace"):
+        PrivateTurnState(inner_state_summary=" \t\n ")
 
 
 def test_decision_makes_affect_no_change_or_one_candidate_explicit() -> None:

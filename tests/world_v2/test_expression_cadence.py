@@ -17,8 +17,13 @@ from companion_daemon.world_v2.expression_cadence import (
     record_cadence_draws,
 )
 from companion_daemon.world_v2.expression_draft import (
+    ExpressionBeatDraftChoice,
+    ExpressionDraft,
     ExpressionDraftCapabilities,
     materialize_expression_draft,
+)
+from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+    expression_draft_shape_contract,
 )
 
 
@@ -56,6 +61,71 @@ def _draw(position: int, fraction_ppm: int) -> CadenceDraw:
         fraction_ppm=fraction_ppm,
         policy_version=CADENCE_POLICY_VERSION,
     )
+
+
+def test_new_expression_wire_does_not_expose_host_owned_beat_roles() -> None:
+    schema = json.dumps(ExpressionBeatDraftChoice.model_json_schema(), sort_keys=True)
+    contract = expression_draft_shape_contract()
+
+    assert '"role"' not in schema
+    assert "role" not in contract
+
+
+def test_non_silent_expression_rejects_a_typing_only_plan() -> None:
+    with pytest.raises(ValueError, match="visible expression requires at least one beat"):
+        ExpressionDraft.model_validate(
+            {
+                "timing_choice": "now",
+                "beats": ({"modality": "typing"},),
+                "stance": "pause_before_reply",
+                "brief_rationale": "A typing pulse cannot replace authored content.",
+            }
+        )
+
+
+def test_legacy_beat_roles_normalize_to_the_same_new_shadow_plan() -> None:
+    draws = (_draw(2, 500_000),)
+    capabilities = ExpressionDraftCapabilities(
+        profile_id="expression:test-role-hidden.1",
+        modalities=("text",),
+        recorded_cadence_mode="shadow",
+    )
+    common = {
+        "timing_choice": "now",
+        "cadence": "conversational",
+        "stance": "warm",
+        "brief_rationale": "Two independently chosen text beats.",
+    }
+    without_roles = materialize_expression_draft(
+        value={
+            **common,
+            "beats": [
+                {"modality": "text", "text": "先说第一件。"},
+                {"modality": "text", "text": "又想补一句。"},
+            ],
+        },
+        request=_request(draw_refs=tuple(item.draw_ref for item in draws)),
+        capabilities=capabilities,
+        cadence_draws=draws,
+    )
+    legacy_roles = materialize_expression_draft(
+        value={
+            **common,
+            "beats": [
+                {"modality": "text", "role": "opening", "text": "先说第一件。"},
+                {"modality": "text", "role": "afterthought", "text": "又想补一句。"},
+            ],
+        },
+        request=_request(draw_refs=tuple(item.draw_ref for item in draws)),
+        capabilities=capabilities,
+        cadence_draws=draws,
+    )
+
+    assert legacy_roles.proposal_id == without_roles.proposal_id
+    assert legacy_roles.proposed_changes == without_roles.proposed_changes
+    beats = without_roles.proposed_changes[0].payload.value()["beat_drafts"]
+    assert all("semantic_role" not in beat for beat in beats)
+    assert beats[1]["shadow_delay_window"] is not None
 
 
 @pytest.mark.parametrize(

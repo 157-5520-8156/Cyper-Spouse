@@ -10,7 +10,7 @@
 
 ## 基线证据
 
-使用现有 `scripts/run_world_conversation_audit.py` 在全新 SQLite 世界完成 30 轮真实模型回放：
+历史上曾使用现已退役的 World V1 审计入口，在全新 SQLite 世界完成 30 轮真实模型回放：
 
 - 30 条入站、28 条外发、2 条由不可中断活动产生的合法延迟；
 - 世界投影重建一致，`ready=true`，无开放或 unknown Action；
@@ -64,7 +64,7 @@
 - 新增 10 条专项测试，覆盖中性状态的情绪/身体反应幻觉、unresolved 情绪否认、guarded/repair_open/caring 状态降级、受伤中的关怀和机制讨论。
 - 模型候选现在经过 `affect_reply_violation`：中性投影不能凭空声称“被刺痛/生气/笑出声”，未解决负面情绪不能被说成“完全没事”。
 - 失败降级读取同一世界情感投影：guarded/withdraw/repair_open/caring 分别给出不同的短句，不再统一返回“没有把握”；降级不把内部 `repair_open` 误写成用户刚刚道歉。
-- 新增 `scripts/run_world_emotion_injection_audit.py`，每个隔离世界注入不同情绪后使用不同用户言语行为，不复用固定 30 轮。
+- 当时新增了一支 World V1 情绪注入脚本，每个隔离世界注入不同情绪后使用不同用户言语行为，不复用固定 30 轮。该脚本已随 V1 对话入口一并删除；当前同轮情绪证据由 World V2 隔离进程验收覆盖。
 
 ### Iteration 3：真实模型复测
 

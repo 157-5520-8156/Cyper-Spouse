@@ -85,7 +85,8 @@ Reducer 重放时重新在 `proposal_audits` 中解析 generic proposal，确认
 transition: open | update | resolve | supersede
 target: existing episode 或 source-cluster target
 appraisal_change_refs[]
-component_deltas[]: dimension + signed fixed point
+component_targets[]: dimension + 绝对 target_intensity_bp（当前生产契约）
+component_deltas[]: dimension + signed fixed point（只为旧账本重放保留）
 decay selector / residue selector
 evidence refs
 ```
@@ -100,6 +101,38 @@ evidence refs
 - canonical typed proposal/event identity/idempotency key。
 
 模型不能控制上述字段，也不能凭空引用未接受、expired 或不同 source cluster 的 appraisal。`baseline_adjust` 与机械 decay 不属于该 Module：前者需要长期校准证据，后者只由 logical clock lane 触发。
+
+### 5.1 绝对 target 的 pinned 下界契约
+
+Reducer 对绝对 target 的合法下界不是固定的 `1`，而是每一维：
+
+```text
+max(
+  pinned AffectBaselineProjection.baseline_bp,
+  installed decay profile.floor_bp,
+  installed residue policy.residue_bp,
+)
+```
+
+因此生产的 interaction-appraisal 与专用 Affect turn 会在精确
+`world_revision + deliberation_revision + ledger_sequence` 上，从同一
+`LedgerProjection` 生成完整的 `affect-target-lower-bounds.1` manifest。每一维同时携带
+baseline 数值与 calibration revision、policy version、basis hash；`ModelInput` 拒绝来自
+不同 cursor 的 manifest。其他 expression、relationship 等 turn 默认不携带此字段，从而
+不改变无关 provider 请求、token 和审计 hash。
+
+这个 manifest 是 reducer 可接受性的硬数值边界，不是情绪建议。模型仍独立决定
+`no_change`、维度组合和合法强度。Adapter 只拒绝低于对应下界的 target，绝不把它
+clamp 到下界，也不根据消息或情绪词替模型选择新值。第一次越界时，同一角色模型会收到
+精确的 `dimension / selected / minimum`，并有且只有一次机会基于原 pinned Context
+完整重选；第二次结果仍不合法时记录
+`affect_target_reselection_invalid` 技术失败，不能伪装为 `no_change`。
+
+Compiler 在接受前还会对当前 projection 再验一次同样的下界。若 proposal 在 audit
+cursor 合法、但 calibration/baseline 在此后抬升而使 target 失效，则保留已经接受的
+Appraisal，不写 `AdvisoryAcceptanceRejected`，并打开一次 fresh Affect consideration；
+新 turn 必须从最新 cursor 重新 pin Context 与下界。若 proposal 在原 audit cursor
+本就非法，则照常 fail closed。历史 `component_deltas` 的编译和重放规则保持不变。
 
 ## 6. 后台 worker 与低延迟
 
@@ -119,8 +152,8 @@ evidence refs
 1. in-memory 与 SQLite：accepted Appraisal -> fresh Affect Capsule -> model proposes -> source-bound typed candidate -> accepted Affect -> next Capsule；
 2. `no_change`：只产生 generic audit 和 terminal trigger，没有 Affect proposal/episode；
 3. model 伪造 accepted event id、revision、origin、after-image、foreign appraisal、两个 affect changes、错误 source hash 均 fail closed；
-4. stale：世界在 audit 后变化，旧 attempt 只能 stale；fresh cursor 重新 deliberation；
+4. stale：世界在 audit 后变化，旧 attempt 只能 stale；若具体变化是 target 下界抬升，
+   Appraisal 保留并打开 fresh Affect consideration，其余情况从 fresh cursor 重新 deliberation；
 5. duplicate/parallel worker：同一 candidate 与 acceptance effect-once；
 6. replay/reopen：generic audit、typed candidate、acceptance manifest 与 Affect reducer 均重建同一 semantic hash；
 7. performance：即时 reply 路径不等待 affect worker；worker 的 model route/token/queue delay 写入 redacted metrics。
-

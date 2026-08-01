@@ -1,0 +1,35 @@
+{
+  "scenario_id": "private-self-expression-natural.v1",
+  "turns": [
+    {
+      "id": "N01",
+      "at_minutes": 0,
+      "text": "今天下班路上突然下大雨，我没带伞。"
+    },
+    {
+      "id": "N02",
+      "at_minutes": 1,
+      "text": "跑到便利店门口的时候裤脚已经全湿了。"
+    },
+    {
+      "id": "N03",
+      "at_minutes": 3,
+      "text": "不过店里刚好在烤面包，站在门口闻着还挺香。"
+    },
+    {
+      "id": "N04",
+      "at_minutes": 6,
+      "text": "我最后买了个红豆的，回家路上就吃完了。"
+    },
+    {
+      "id": "N05",
+      "at_minutes": 10,
+      "text": "现在雨声小了很多，窗户上还是一层水。"
+    },
+    {
+      "id": "N06",
+      "at_minutes": 14,
+      "text": "忽然有点想把灯关了，就听一会儿外面的声音。"
+    }
+  ]
+}

@@ -23,6 +23,12 @@ from companion_daemon.world_v2.ledger_context_resolver import (
     _bounded_domain_items,
     context_capsule_compiler_from_ledger,
 )
+from companion_daemon.world_v2.recall_index import (
+    FeatureHashRecallEmbedding,
+    InMemoryRecallIndex,
+    RecallCursor,
+)
+from companion_daemon.world_v2.recall_runtime import RecallCoordinator
 from companion_daemon.world_v2.schemas import (
     BudgetAccount,
     BudgetReservation,
@@ -180,11 +186,17 @@ def test_context_does_not_use_lexical_overlap_to_reactivate_old_dialogue() -> No
         )
     )
 
-    retained_texts = {
-        json.loads(item.payload_json)["text"] for item in capsule.recent_dialogue.items
-    }
+    retained_dialogue = [
+        json.loads(item.payload_json) for item in capsule.recent_dialogue.items
+    ]
+    retained_texts = {item["text"] for item in retained_dialogue}
     assert "深圳这件事下午有新进展。" in retained_texts
     assert "我今天从深圳回来，晚点再和你说旅行的事。" not in retained_texts
+    current = next(
+        item for item in retained_dialogue if item["text"] == "深圳这件事下午有新进展。"
+    )
+    assert current["speaker"] == "counterpart"
+    assert current["speaker_ref"] == "user:primary"
 
 
 class CountingLedger:
@@ -270,6 +282,64 @@ def test_recall_sidecar_failure_does_not_abort_context_compilation() -> None:
     assert recall.discarded
 
 
+def test_optional_prefetch_failure_keeps_refreshed_character_pull_context() -> None:
+    class _PrefetchFailingRecall:
+        def __init__(self) -> None:
+            self.cursor = None
+            self.discarded_prefetch = []
+
+        def refresh(self, *, cursor, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.cursor = cursor
+
+        def schedule_prefetch(self, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            raise ValueError("broken optional prefetch")
+
+        def discard(self, cursor, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            if self.cursor == cursor:
+                self.cursor = None
+
+        def discard_scheduled_prefetch(self, cursor, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.discarded_prefetch.append(cursor)
+
+        def is_available(self, cursor, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+            return self.cursor == cursor
+
+    world_id = "world:context-prefetch-degraded"
+    ledger = WorldLedger.in_memory(world_id=world_id)
+    message = _message_observation(
+        world_id,
+        1,
+        "这条消息仍然应当可以主动召回。",
+        received_at=NOW,
+    )
+    ledger.commit(
+        [_event(world_id), message],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    projection = ledger.project()
+    recall = _PrefetchFailingRecall()
+    capsule = context_capsule_compiler_from_ledger(
+        ledger=ledger,
+        recall_coordinator=recall,  # type: ignore[arg-type]
+    ).compile(
+        query_from_projection(
+            projection,
+            actor_ref="actor:companion",
+            trigger_ref=message.event_id,
+        )
+    )
+    cursor = RecallCursor(
+        world_revision=projection.world_revision,
+        deliberation_revision=projection.deliberation_revision,
+        ledger_sequence=projection.ledger_sequence,
+    )
+
+    assert capsule.ledger_sequence == projection.ledger_sequence
+    assert recall.is_available(cursor, trigger_ref=message.event_id)
+    assert recall.discarded_prefetch == [cursor]
+
+
 def test_context_compilation_schedules_a_bounded_state_aware_recall_request() -> None:
     class _CapturingRecall:
         def __init__(self) -> None:
@@ -327,6 +397,82 @@ def test_context_compilation_schedules_a_bounded_state_aware_recall_request() ->
     assert "下午又要学雅思了" in str(scheduled["query_text"])
     assert str(scheduled["lexical_text"]).startswith("上午那件事后来怎么样了？")
     assert len(str(scheduled["lexical_text"])) <= 1_024
+
+
+def test_later_turn_cursor_remains_recallable_with_full_utf8_attention_packet() -> None:
+    world_id = "world:context-recall-cursor-advance"
+    ledger = WorldLedger.in_memory(world_id=world_id)
+    first_message = _message_observation(
+        world_id,
+        1,
+        "先记住这一轮。",
+        received_at=NOW - timedelta(minutes=6),
+    )
+    ledger.commit(
+        [_event(world_id), first_message],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    recall = RecallCoordinator(
+        index=InMemoryRecallIndex(embedding=FeatureHashRecallEmbedding())
+    )
+    compiler = context_capsule_compiler_from_ledger(
+        ledger=ledger,
+        recall_coordinator=recall,
+    )
+    first_projection = ledger.project()
+    compiler.compile(
+        query_from_projection(
+            first_projection,
+            actor_ref="actor:companion",
+            trigger_ref=first_message.event_id,
+        )
+    )
+    first_cursor = RecallCursor(
+        world_revision=first_projection.world_revision,
+        deliberation_revision=first_projection.deliberation_revision,
+        ledger_sequence=first_projection.ledger_sequence,
+    )
+    assert recall.is_available(first_cursor, trigger_ref=first_message.event_id)
+
+    later_messages = tuple(
+        _message_observation(
+            world_id,
+            index,
+            f"前情消息 {index}：" + "细节" * 200,
+            received_at=NOW - timedelta(minutes=6 - index),
+        )
+        for index in range(2, 6)
+    )
+    current_message = _message_observation(
+        world_id,
+        6,
+        "上午那件事后来怎么样了？" + "补充背景" * 400,
+        received_at=NOW,
+    )
+    ledger.commit(
+        [*later_messages, current_message],
+        expected_world_revision=first_projection.world_revision,
+        expected_deliberation_revision=first_projection.deliberation_revision,
+    )
+    current_projection = ledger.project()
+    capsule = compiler.compile(
+        query_from_projection(
+            current_projection,
+            actor_ref="actor:companion",
+            trigger_ref=current_message.event_id,
+        )
+    )
+    current_cursor = RecallCursor(
+        world_revision=current_projection.world_revision,
+        deliberation_revision=current_projection.deliberation_revision,
+        ledger_sequence=current_projection.ledger_sequence,
+    )
+
+    assert capsule.ledger_sequence == current_projection.ledger_sequence
+    assert recall.cursor == current_cursor
+    assert recall.is_available(current_cursor, trigger_ref=current_message.event_id)
+    recall.close()
 
 
 def test_default_scope_includes_only_the_committed_incoming_actor() -> None:

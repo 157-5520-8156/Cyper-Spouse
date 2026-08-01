@@ -25,6 +25,7 @@ _MAX_RELATIONSHIPS = 2
 _MAX_ACTIVITIES = 3
 _MAX_THREADS = 3
 _MAX_RECENT_DIALOGUE_ITEMS = 4
+_MAX_RECENT_COUNTERPART_DIALOGUE_ITEMS = 2
 _MAX_RECENT_DIALOGUE_TEXT_CHARACTERS = 240
 
 
@@ -34,6 +35,50 @@ def _mapping(value: object) -> Mapping[str, object]:
 
 def _sequence(value: object) -> Sequence[object]:
     return value if isinstance(value, (list, tuple)) else ()
+
+
+def select_recent_dialogue_for_automatic_recall(
+    values: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    """Select a compact, speaker-balanced semantic cue for automatic recall.
+
+    Callers provide a chronological, already source-bound dialogue tail with
+    the current inbound turn removed.  This is only an attention allocation:
+    it neither classifies the words nor infers why either person said them.
+    Reserving two recent counterpart turns prevents a multi-bubble companion
+    reply from erasing the very conversational context that can make a later
+    recall query meaningful.  The remaining slots retain the current
+    companion tail.  Input order is replay-stable and is preserved in output.
+    """
+
+    if len(values) <= _MAX_RECENT_DIALOGUE_ITEMS:
+        return tuple(values)
+
+    counterpart_indexes = tuple(
+        index
+        for index, value in enumerate(values)
+        if value.get("speaker") == "counterpart"
+    )
+    selected_indexes = set(counterpart_indexes[-_MAX_RECENT_COUNTERPART_DIALOGUE_ITEMS:])
+    remaining = _MAX_RECENT_DIALOGUE_ITEMS - len(selected_indexes)
+    if remaining > 0:
+        companion_indexes = tuple(
+            index
+            for index, value in enumerate(values)
+            if value.get("speaker") == "companion" and index not in selected_indexes
+        )
+        selected_indexes.update(companion_indexes[-remaining:])
+    remaining = _MAX_RECENT_DIALOGUE_ITEMS - len(selected_indexes)
+    if remaining > 0:
+        # Preserve existing chronological tail semantics for legacy or
+        # malformed speaker labels rather than manufacturing an attribution.
+        for index in range(len(values) - 1, -1, -1):
+            if index in selected_indexes:
+                continue
+            selected_indexes.add(index)
+            if len(selected_indexes) >= _MAX_RECENT_DIALOGUE_ITEMS:
+                break
+    return tuple(value for index, value in enumerate(values) if index in selected_indexes)
 
 
 def _compact_json(value: object) -> str:
@@ -238,4 +283,5 @@ def build_automatic_recall_request(
 __all__ = [
     "MAX_RECALL_QUERY_CHARACTERS",
     "build_automatic_recall_request",
+    "select_recent_dialogue_for_automatic_recall",
 ]

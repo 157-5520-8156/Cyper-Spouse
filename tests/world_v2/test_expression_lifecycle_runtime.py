@@ -287,6 +287,244 @@ def test_multibeat_plan_completes_only_after_the_last_independent_receipt() -> N
     assert [item.event_type for item in last_events] == ["ExpressionBeatSettled", "ExpressionPlanCompleted"]
 
 
+def test_failed_typing_prelude_settles_without_terminating_visible_expression() -> None:
+    typing_action = _action().model_copy(
+        update={
+            "kind": "typing",
+            "state": "failed",
+            "payload_hash": "sha256:" + "1" * 64,
+        }
+    )
+    typing_beat = _beat().model_copy(
+        update={"payload_hash": typing_action.payload_hash}
+    )
+    visible_action = _action().model_copy(
+        update={
+            "action_id": "action:expression:visible",
+            "expression_beat_id": "beat:expression:visible",
+            "payload_ref": "payload:expression:visible",
+            "payload_hash": "sha256:" + "2" * 64,
+            "state": "authorized",
+            "claim_lease": None,
+            "dependencies": (typing_action.action_id,),
+        }
+    )
+    visible_beat = _beat().model_copy(
+        update={
+            "beat_id": visible_action.expression_beat_id,
+            "action_id": visible_action.action_id,
+            "payload_ref": visible_action.payload_ref,
+            "payload_hash": visible_action.payload_hash,
+            "dependency_beat_ids": (typing_beat.beat_id,),
+        }
+    )
+    failed_receipt = _receipt().model_copy(update={"observed_state": "failed"})
+    receipt_event = _event(
+        "ExecutionReceiptRecorded",
+        {"receipt": failed_receipt.model_dump(mode="json")},
+        "typing-failed-receipt",
+    )
+    settlement_trigger_id = "trigger:settlement:provider:test:typing-failed"
+    typing_inflight = typing_action.model_copy(update={"state": "dispatch_started"})
+    typing_reservation = BudgetReservation(
+        reservation_id=typing_action.budget_reservation_id,
+        account_id="account:chat",
+        action_id=typing_action.action_id,
+        category="chat",
+        amount_limit=10,
+    )
+    projection = _projection().model_copy(
+        update={
+            "actions": (typing_inflight, visible_action),
+            "pending_actions": (typing_inflight, visible_action),
+            "expression_beats": (typing_beat, visible_beat),
+            "budget_reservations": (typing_reservation,),
+            "trigger_processes": (
+                TriggerProcess(
+                    trigger_id=settlement_trigger_id,
+                    trigger_ref="result:expression:typing-failed",
+                    process_kind="settlement",
+                    state="claimed",
+                    claim_lease=ClaimLease(
+                        owner_id="test",
+                        attempt_id="attempt:settlement:typing-failed",
+                        acquired_at=NOW,
+                        expires_at=NOW + timedelta(minutes=2),
+                    ),
+                    attempt_ids=("attempt:settlement:typing-failed",),
+                ),
+            ),
+        }
+    )
+
+    events = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=projection,
+        action=typing_action,
+        receipt=failed_receipt,
+        receipt_event=receipt_event,
+    )
+    planned = SettlementPlanner(world_id=WORLD).plan(
+        ExternalObservation(
+            schema_version="world-v2.1",
+            result_id="result:expression:typing-failed",
+            world_id=WORLD,
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:expression-lifecycle",
+            causation_id="cause:expression:typing-failed",
+            correlation_id="correlation:expression-lifecycle",
+            kind="execution_receipt",
+            source="provider:test",
+            source_event_id="source:expression:typing-failed",
+            action_id=typing_action.action_id,
+            idempotency_key=typing_action.idempotency_key,
+            status="failed",
+            provider_ref="provider-ref:expression:typing-failed",
+            cost_actual=0,
+            error_class="provider_rejected",
+            observed_at=NOW,
+            raw_payload_hash="raw:expression:typing-failed",
+        ),
+        trigger_id=settlement_trigger_id,
+        projection=projection,
+    )
+
+    assert [item.event_type for item in events] == ["ExpressionBeatSettled"]
+    assert "ExpressionPlanTerminated" not in tuple(
+        item.event_type for item in planned.events
+    )
+    assert "ActionCancelled" not in tuple(item.event_type for item in planned.events)
+    assert ActionPump._dependencies_satisfied(
+        action=visible_action,
+        actions=(typing_action, visible_action),
+    )
+
+
+def test_visible_delivery_completes_plan_after_failed_typing_prelude() -> None:
+    typing_action = _action().model_copy(
+        update={
+            "kind": "typing",
+            "state": "failed",
+            "payload_hash": "sha256:" + "1" * 64,
+        }
+    )
+    typing_beat = _beat().model_copy(
+        update={
+            "payload_hash": typing_action.payload_hash,
+            "state": "settled",
+            "history": (
+                *_beat().history,
+                ExpressionBeatLifecycleEntry(
+                    state="settled",
+                    event_ref="event:expression-lifecycle:typing-settled",
+                    event_payload_hash="8" * 64,
+                    receipt_id="receipt:expression:typing",
+                    terminal_action_state="failed",
+                ),
+            ),
+        }
+    )
+    visible_action = _action().model_copy(
+        update={
+            "action_id": "action:expression:visible",
+            "expression_beat_id": "beat:expression:visible",
+            "payload_ref": "payload:expression:visible",
+            "payload_hash": "sha256:" + "2" * 64,
+        }
+    )
+    visible_beat = _beat().model_copy(
+        update={
+            "beat_id": visible_action.expression_beat_id,
+            "action_id": visible_action.action_id,
+            "payload_ref": visible_action.payload_ref,
+            "payload_hash": visible_action.payload_hash,
+            "dependency_beat_ids": (typing_beat.beat_id,),
+        }
+    )
+    visible_receipt = _receipt().model_copy(
+        update={
+            "receipt_id": "receipt:expression:visible",
+            "action_id": visible_action.action_id,
+        }
+    )
+    receipt_event = _event(
+        "ExecutionReceiptRecorded",
+        {"receipt": visible_receipt.model_dump(mode="json")},
+        "visible-after-typing-receipt",
+    )
+
+    events = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=_projection().model_copy(
+            update={
+                "actions": (typing_action, visible_action),
+                "expression_beats": (typing_beat, visible_beat),
+            }
+        ),
+        action=visible_action,
+        receipt=visible_receipt,
+        receipt_event=receipt_event,
+    )
+
+    assert [item.event_type for item in events] == [
+        "ExpressionBeatSettled",
+        "ExpressionPlanCompleted",
+    ]
+
+
+@pytest.mark.parametrize("terminal_state", ["delivered", "failed", "unknown"])
+def test_late_typing_terminal_receipt_settles_after_visible_plan_completed(
+    terminal_state: str,
+) -> None:
+    typing_action = _action().model_copy(
+        update={
+            "kind": "typing",
+            "state": terminal_state,
+            "payload_hash": "sha256:" + "1" * 64,
+        }
+    )
+    typing_beat = _beat().model_copy(
+        update={"payload_hash": typing_action.payload_hash}
+    )
+    completed_plan = _plan().model_copy(
+        update={
+            "state": "completed",
+            "history": (
+                *_plan().history,
+                ExpressionPlanLifecycleEntry(
+                    state="completed",
+                    event_ref="event:expression-lifecycle:visible-completed",
+                    event_payload_hash="7" * 64,
+                    receipt_id="receipt:expression:visible",
+                    terminal_action_state="delivered",
+                ),
+            ),
+        }
+    )
+    receipt = _receipt().model_copy(
+        update={"observed_state": terminal_state}
+    )
+    receipt_event = _event(
+        "ExecutionReceiptRecorded",
+        {"receipt": receipt.model_dump(mode="json")},
+        f"late-typing-{terminal_state}",
+    )
+
+    events = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=_projection().model_copy(
+            update={
+                "actions": (typing_action,),
+                "expression_plans": (completed_plan,),
+                "expression_beats": (typing_beat,),
+            }
+        ),
+        action=typing_action,
+        receipt=receipt,
+        receipt_event=receipt_event,
+    )
+
+    assert [item.event_type for item in events] == ["ExpressionBeatSettled"]
+
+
 @pytest.mark.parametrize("terminal_state", ["failed", "unknown", "cancelled", "expired"])
 def test_non_delivered_terminal_beat_terminates_but_never_completes_plan(
     terminal_state: str,

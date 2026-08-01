@@ -20,7 +20,15 @@ from .recall_index import (
 from .schema_core import FrozenModel
 
 
-MAX_RECALL_AUDIT_BYTES = 10_000
+# ``request`` and the executed ``query`` are deliberately both durable: the
+# former proves what the character asked for, while the latter freezes actor,
+# privacy, cursor and accessibility inputs.  A production automatic-attention
+# packet can carry 1,024 CJK semantic characters plus 768 exact lexical
+# characters; UTF-8 and the intentional request/query duplication already
+# exceed the old 10 KB ceiling before a single bounded hit is present.  Keep
+# the independently bounded 6 KB result set while giving that replay envelope
+# a finite ceiling of its own.
+MAX_RECALL_AUDIT_BYTES = 32_000
 
 
 def paired_recall_transition_hash(
@@ -186,9 +194,32 @@ class RecallAuditTrace(FrozenModel):
         return self
 
 
+class PrefetchPresentationAudit(FrozenModel):
+    """One prefetch trace actually exposed to one character-model call."""
+
+    presentation_contract: Literal["prefetch-presentation.1"] = (
+        "prefetch-presentation.1"
+    )
+    phase: Literal[
+        "initial",
+        "recall_followup",
+        "recovery_initial",
+        "delegated_initial",
+    ]
+    model_call_id: str = Field(min_length=1, max_length=256)
+    trace: RecallAuditTrace
+
+    @model_validator(mode="after")
+    def trace_is_automatic_attention(self) -> Self:
+        if self.trace.mode != "prefetch":
+            raise ValueError("prefetch presentation requires a prefetch trace")
+        return self
+
+
 __all__ = [
     "CharacterRecallRequest",
     "MAX_RECALL_AUDIT_BYTES",
+    "PrefetchPresentationAudit",
     "RecallAuditHit",
     "RecallAuditTrace",
     "paired_recall_transition_hash",

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 import sqlite3
+from threading import Event
+from typing import Callable
 
 import httpx
 import pytest
 
 from companion_daemon.config import Settings
+from companion_daemon.llm import model_request_emission_scope
 from companion_daemon.world_v2 import recall_embedding
 from companion_daemon.world_v2.recall_embedding import (
     OpenAICompatibleRecallEmbedding,
@@ -34,6 +38,24 @@ CURSOR = RecallCursor(
     deliberation_revision=1,
     ledger_sequence=3,
 )
+
+
+class _MonotonicClock:
+    def __init__(self, value: float = 0.0) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
+def _timeout_transport(
+    calls: list[httpx.Request],
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise httpx.ConnectTimeout("TLS handshake timed out", request=request)
+
+    return handler
 
 
 def test_openai_compatible_embedding_preserves_provider_indices() -> None:
@@ -65,6 +87,37 @@ def test_openai_compatible_embedding_preserves_provider_indices() -> None:
 
     assert result == ((1.0, 0.0), (0.0, 1.0))
     assert embedding.last_usage_tokens == 6
+
+
+def test_embedding_transport_opens_and_closes_one_exact_provider_span() -> None:
+    events: list[tuple[str, str]] = []
+    embedding = OpenAICompatibleRecallEmbedding(
+        api_key="secret",
+        base_url="https://embedding.test/v1",
+        model="semantic-fixture",
+        dimensions=2,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"data": [{"index": 0, "embedding": [1.0, 0.0]}]},
+            )
+        ),
+    )
+
+    try:
+        with model_request_emission_scope(
+            provider_call_id="model-call:recall-embedding",
+            entry_marker=lambda call_id: events.append(("entry", call_id)),
+            completion_marker=lambda call_id: events.append(("completion", call_id)),
+        ):
+            embedding.embed(("茶",))
+    finally:
+        embedding.close()
+
+    assert events == [
+        ("entry", "model-call:recall-embedding"),
+        ("completion", "model-call:recall-embedding"),
+    ]
 
 
 @pytest.mark.parametrize("usage", ({}, {"total_tokens": 0}, {"total_tokens": "0"}))
@@ -230,21 +283,217 @@ def test_embedding_schema_errors_do_not_masquerade_as_provider_outages() -> None
 
 
 def test_embedding_auth_rejection_is_a_hard_configuration_error() -> None:
+    calls = 0
+
+    def reject(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, json={"error": "unauthorized"})
+
     embedding = OpenAICompatibleRecallEmbedding(
         api_key="wrong",
         base_url="https://embedding.test/v1",
         model="semantic-fixture",
         dimensions=2,
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(401, json={"error": "unauthorized"})
-        ),
+        transport=httpx.MockTransport(reject),
     )
 
     try:
         with pytest.raises(ValueError, match="configuration"):
             embedding.embed(("茶",))
+        with pytest.raises(ValueError, match="configuration"):
+            embedding.embed(("雨",))
     finally:
         embedding.close()
+
+    assert calls == 2
+
+
+def test_transient_embedding_failure_opens_process_local_cooldown() -> None:
+    clock = _MonotonicClock(10.0)
+    calls: list[httpx.Request] = []
+    embedding = OpenAICompatibleRecallEmbedding(
+        api_key="secret",
+        base_url="https://embedding.test/v1",
+        model="semantic-fixture",
+        dimensions=2,
+        transport=httpx.MockTransport(_timeout_transport(calls)),
+        failure_cooldown_seconds=120.0,
+        monotonic_clock=clock,
+    )
+
+    try:
+        with pytest.raises(
+            recall_embedding.RecallEmbeddingUnavailable,
+            match="provider unavailable",
+        ):
+            embedding.embed(("第一次",))
+        clock.value = 11.0
+        with pytest.raises(
+            recall_embedding.RecallEmbeddingUnavailable,
+            match="provider unavailable",
+        ):
+            embedding.embed(("第二次",))
+    finally:
+        embedding.close()
+
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status_code", (408, 429, 500, 503))
+def test_transient_http_embedding_statuses_open_cooldown(status_code: int) -> None:
+    calls = 0
+
+    def unavailable(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status_code, json={"error": "temporarily unavailable"})
+
+    embedding = OpenAICompatibleRecallEmbedding(
+        api_key="secret",
+        base_url="https://embedding.test/v1",
+        model="semantic-fixture",
+        dimensions=2,
+        transport=httpx.MockTransport(unavailable),
+    )
+    try:
+        with pytest.raises(recall_embedding.RecallEmbeddingUnavailable):
+            embedding.embed(("第一次",))
+        with pytest.raises(recall_embedding.RecallEmbeddingUnavailable):
+            embedding.embed(("第二次",))
+    finally:
+        embedding.close()
+
+    assert calls == 1
+
+
+def test_embedding_cooldown_expiry_retries_and_success_restores_immediate_calls() -> None:
+    clock = _MonotonicClock(10.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectTimeout("TLS handshake timed out", request=request)
+        return httpx.Response(
+            200,
+            json={"data": [{"index": 0, "embedding": [1.0, 0.0]}]},
+        )
+
+    embedding = OpenAICompatibleRecallEmbedding(
+        api_key="secret",
+        base_url="https://embedding.test/v1",
+        model="semantic-fixture",
+        dimensions=2,
+        transport=httpx.MockTransport(handler),
+        failure_cooldown_seconds=120.0,
+        monotonic_clock=clock,
+    )
+    try:
+        with pytest.raises(recall_embedding.RecallEmbeddingUnavailable):
+            embedding.embed(("故障",))
+        clock.value = 129.999
+        with pytest.raises(recall_embedding.RecallEmbeddingUnavailable):
+            embedding.embed(("仍在冷却",))
+        clock.value = 130.0
+        assert embedding.embed(("到期重试",)) == ((1.0, 0.0),)
+        assert embedding.embed(("成功后立即可用",)) == ((1.0, 0.0),)
+    finally:
+        embedding.close()
+
+    assert calls == 3
+
+
+def test_cached_embedding_does_not_charge_provider_budget_during_cooldown(
+    tmp_path,
+) -> None:
+    clock = _MonotonicClock(10.0)
+    calls: list[httpx.Request] = []
+    delegate = OpenAICompatibleRecallEmbedding(
+        api_key="secret",
+        base_url="https://embedding.test/v1",
+        model="semantic-fixture",
+        dimensions=2,
+        transport=httpx.MockTransport(_timeout_transport(calls)),
+        failure_cooldown_seconds=120.0,
+        monotonic_clock=clock,
+    )
+    path = tmp_path / "cooldown-budget.sqlite"
+    embedding = SQLiteCachedRecallEmbedding(
+        path=path,
+        world_id="world:cooldown-budget",
+        delegate=delegate,
+    )
+
+    try:
+        with pytest.raises(recall_embedding.RecallEmbeddingUnavailable):
+            embedding.embed(("茶",))
+        clock.value = 11.0
+        with pytest.raises(recall_embedding.RecallEmbeddingUnavailable):
+            embedding.embed(("雨",))
+        health = embedding.health_snapshot()
+    finally:
+        embedding.close()
+
+    assert len(calls) == 1
+    assert health["daily_tokens"] == 3
+    assert health["last_failure_code"] == "semantic recall provider unavailable"
+    connection = sqlite3.connect(path)
+    try:
+        usage = connection.execute(
+            """
+            SELECT consumed_tokens, request_count, failed_count, rejected_count
+            FROM world_recall_embedding_usage_daily
+            WHERE world_id = ?
+            """,
+            ("world:cooldown-budget",),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert usage == (3, 1, 1, 1)
+
+
+def test_concurrent_embedding_callers_share_one_failing_transport_attempt() -> None:
+    started = Event()
+    release = Event()
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        started.set()
+        assert release.wait(timeout=1.0)
+        raise httpx.ConnectTimeout("TLS handshake timed out", request=request)
+
+    embedding = OpenAICompatibleRecallEmbedding(
+        api_key="secret",
+        base_url="https://embedding.test/v1",
+        model="semantic-fixture",
+        dimensions=2,
+        transport=httpx.MockTransport(handler),
+        failure_cooldown_seconds=120.0,
+    )
+
+    def attempt(index: int) -> str:
+        try:
+            embedding.embed((f"并发{index}",))
+        except recall_embedding.RecallEmbeddingUnavailable as exc:
+            return str(exc)
+        raise AssertionError("outage unexpectedly returned a vector")
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = tuple(executor.submit(attempt, index) for index in range(8))
+            assert started.wait(timeout=1.0)
+            release.set()
+            results = tuple(future.result(timeout=1.0) for future in futures)
+    finally:
+        release.set()
+        embedding.close()
+
+    assert calls == 1
+    assert results == ("semantic recall provider unavailable",) * 8
 
 
 def test_semantic_embedding_is_opt_in_even_with_credentials() -> None:
@@ -264,6 +513,7 @@ def test_semantic_embedding_is_opt_in_even_with_credentials() -> None:
         WORLD_V2_RECALL_SEMANTIC_ENABLED=True,
         WORLD_V2_RECALL_EMBEDDING_MODEL="semantic-fixture",
         WORLD_V2_RECALL_EMBEDDING_DIMENSIONS=2,
+        WORLD_V2_RECALL_EMBEDDING_FAILURE_COOLDOWN_SECONDS=17.0,
     )
 
     assert configured_recall_embedding(disabled) is None
@@ -274,6 +524,7 @@ def test_semantic_embedding_is_opt_in_even_with_credentials() -> None:
         assert embedding.version.startswith(
             "openai-compatible:semantic-fixture:dimensions=2:endpoint="
         )
+        assert embedding.failure_cooldown_seconds == 17.0
     finally:
         embedding.close()
 

@@ -116,6 +116,7 @@ def test_compiler_records_a_source_bound_open_affect_candidate() -> None:
             evaluated_world_revision=head.world_revision,
             expected_commit_world_revision=head.world_revision,
             expected_deliberation_revision=head.deliberation_revision,
+            expected_ledger_sequence=head.ledger_sequence,
         ),
     )
     compilation = AffectProposalCompiler(ledger=ledger).record(

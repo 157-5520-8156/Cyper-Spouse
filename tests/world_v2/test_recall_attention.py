@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from companion_daemon.world_v2.recall_attention import (
     MAX_RECALL_QUERY_CHARACTERS,
     build_automatic_recall_request,
+    select_recent_dialogue_for_automatic_recall,
 )
 
 
@@ -113,3 +114,37 @@ def test_short_return_message_uses_verified_recent_dialogue_as_semantic_attentio
     # and unrelated “回来了”.  Dense attention still sees the exact inbound
     # text above; only the brittle lexical-only lane is withheld.
     assert request.lexical_text is None
+
+
+def test_automatic_recall_dialogue_attention_reserves_recent_counterpart_turns() -> None:
+    """Several companion bubbles cannot evict the other person's recent turns."""
+
+    dialogue = (
+        {"speaker": "counterpart", "text": "摊贩那件事让我很烦"},
+        {"speaker": "counterpart", "text": "我不是来问怎么处理的"},
+        {"speaker": "counterpart", "text": "我只是想找你吐槽"},
+        {"speaker": "companion", "text": "嗯？"},
+        {"speaker": "companion", "text": "那你想说什么？"},
+        {"speaker": "companion", "text": "我在听。"},
+        {"speaker": "companion", "text": "慢慢讲。"},
+    )
+
+    selected = select_recent_dialogue_for_automatic_recall(dialogue)
+
+    assert selected == (
+        dialogue[1],
+        dialogue[2],
+        dialogue[5],
+        dialogue[6],
+    )
+    request = build_automatic_recall_request(
+        observation_text="你刚才要是只顾着问细节，我会觉得你根本没在听。",
+        recent_dialogue_values=selected,
+    )
+    assert "我不是来问怎么处理的" in request.query_text
+    assert "我只是想找你吐槽" in request.query_text
+    assert "嗯？" not in request.query_text
+    assert "慢慢讲。" in request.query_text
+    # The selection is a pure replayable attention policy, not a semantic
+    # interpretation of either person's text.
+    assert select_recent_dialogue_for_automatic_recall(dialogue) == selected

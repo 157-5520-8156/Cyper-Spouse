@@ -1,0 +1,48 @@
+{
+  "scenario_id": "private-self-expression-targeted-real-audit.v1",
+  "turns": [
+    {
+      "id": "T01",
+      "at_minutes": 0,
+      "text": "今天学校门口那个摊贩把价格说得乱七八糟，我跟他争了半天。"
+    },
+    {
+      "id": "T02",
+      "at_minutes": 0,
+      "text": "其实我不是想让你帮我分析怎么维权。"
+    },
+    {
+      "id": "T03",
+      "at_minutes": 0,
+      "text": "就是回来的路上越想越气，想找个人吐槽。"
+    },
+    {
+      "id": "T04",
+      "at_minutes": 2,
+      "text": "你刚才要是只顾着问细节，我会觉得你根本没在听。"
+    },
+    {
+      "id": "T05",
+      "at_minutes": 4,
+      "text": "算了，先不说这个了。我下午还跟你提过那个项目进度。"
+    },
+    {
+      "id": "T06",
+      "at_minutes": 6,
+      "text": "今天终于把最麻烦的延迟问题压下去一点，我其实挺高兴的。"
+    },
+    {
+      "id": "T07",
+      "at_minutes": 8,
+      "text": "你今天自己有没有什么突然想起、但当时没说的事？"
+    },
+    {
+      "id": "T09",
+      "at_minutes": 10,
+      "text": "刚刚那句听着有点像客服，我更想听你真实一点地说。"
+    }
+  ],
+  "after_silence": {
+    "advance_minutes": 0
+  }
+}

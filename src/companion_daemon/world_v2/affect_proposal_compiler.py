@@ -16,6 +16,17 @@ from pydantic_core import to_jsonable_python
 from .affect_acceptance_runtime import affect_mutation_event_id
 from .affect_events import AffectComponentUpdate, affect_mutation_hash
 from .affect_math import DecayAnchor, DecayProfile, decay_intensity_bp
+from .affect_target_bounds import (
+    STANDARD_DECAY_DELAY_SECONDS,
+    STANDARD_DECAY_FLOOR_BP,
+    STANDARD_DECAY_HALF_LIFE_SECONDS,
+    STANDARD_DECAY_OBJECT_REF,
+    STANDARD_DECAY_SCHEMA_VERSION,
+    STANDARD_RESIDUE_BP,
+    STANDARD_RESIDUE_OBJECT_REF,
+    STANDARD_RESIDUE_SCHEMA_VERSION,
+    lower_bounds_from_projection,
+)
 from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
@@ -41,10 +52,14 @@ _POLICY_REFS = ("policy:affect-v1",)
 _MATRIX_VERSION = "affect-matrix.1"
 _MERGE_WINDOW_SECONDS = 900
 _DECAY_SELECTORS = {
-    ("policy:decay:standard", "affect-decay.1"): (3_600, 300, 120),
+    (STANDARD_DECAY_OBJECT_REF, STANDARD_DECAY_SCHEMA_VERSION): (
+        STANDARD_DECAY_HALF_LIFE_SECONDS,
+        STANDARD_DECAY_FLOOR_BP,
+        STANDARD_DECAY_DELAY_SECONDS,
+    ),
 }
 _RESIDUE_SELECTORS = {
-    ("policy:residue:standard", "affect-residue.1"): 500,
+    (STANDARD_RESIDUE_OBJECT_REF, STANDARD_RESIDUE_SCHEMA_VERSION): STANDARD_RESIDUE_BP,
 }
 _DIMENSIONS = {
     "hurt",
@@ -79,6 +94,7 @@ class AffectProposalCompilation(FrozenModel):
     skip_reason: str | None = None
     typed_proposal_id: str | None = None
     commit: CommitResult | None = None
+    acceptance_cursor: ProjectionCursor | None = None
 
 
 class AffectProposalCompiler:
@@ -127,10 +143,9 @@ class AffectProposalCompiler:
         event = self._proposal_event(
             typed=typed, source_event=source_event, logical_time=projection.logical_time
         )
-        commit = self._ledger.commit(
+        commit = self._ledger.commit_at_cursor(
             [event],
-            expected_world_revision=cursor.world_revision,
-            expected_deliberation_revision=cursor.deliberation_revision,
+            expected_cursor=cursor,
             commit_id="commit:affect-proposal-compiler:"
             + _digest(
                 {
@@ -146,6 +161,7 @@ class AffectProposalCompiler:
             source_proposal_event_ref=authority.audit.event_ref,
             typed_proposal_id=typed.proposal_id,
             commit=commit,
+            acceptance_cursor=self._cursor_from_commit(commit),
         )
 
     def record_rebased(
@@ -206,45 +222,23 @@ class AffectProposalCompiler:
             or any(ref not in appraisal_change_ids for ref in appraisal_refs)
         ):
             raise AffectProposalCompilerError("appraisal_refs_not_from_source_proposal")
-        typed_identity = _digest(
-            {
-                "source_proposal_event": authority.audit.event_ref,
-                "source_change": change.change_id,
-                "typed_contract": _CONTRACT,
-            }
+        projection = self._ledger.project_at(current_cursor)
+        pinned_projection = self._ledger.project_at(audit_cursor)
+        accepted_candidate = self._accepted_rebased_candidate(
+            projection=projection,
+            authority=authority,
+            change=change,
         )
-        expected_typed_id = f"proposal:affect-compiled:{typed_identity}"
-        expected_event_id = "event:affect-proposal-compiled:" + _digest(
-            {"world": self._ledger.world_id, "proposal": expected_typed_id}
-        )
-        located_existing = self._ledger.lookup_event_commit(expected_event_id)
-        if located_existing is not None:
-            try:
-                persisted = AffectProposalProjection.model_validate_json(
-                    located_existing[0].payload_json
-                )
-            except ValueError as exc:
-                raise AffectProposalCompilerError("rebased_candidate_event_invalid") from exc
-            binding = persisted.source_audit
-            if (
-                persisted.proposal_id != expected_typed_id
-                or binding is None
-                or binding.proposal_event_ref != authority.audit.event_ref
-                or binding.proposal_event_payload_hash != authority.audit.event_payload_hash
-                or binding.model_result_ref != authority.audit.model_result_ref
-                or binding.capsule_id != authority.audit.capsule_id
-                or binding.change_id != change.change_id
-                or binding.change_payload_hash != change.payload.payload_hash
-            ):
-                raise AffectProposalCompilerError("rebased_candidate_event_mismatch")
+        if accepted_candidate is not None:
+            candidate, commit = accepted_candidate
             return AffectProposalCompilation(
                 status="candidate_recorded",
                 source_proposal_id=proposal.proposal_id,
                 source_proposal_event_ref=authority.audit.event_ref,
-                typed_proposal_id=persisted.proposal_id,
-                commit=located_existing[1],
+                typed_proposal_id=candidate.proposal_id,
+                commit=commit,
+                acceptance_cursor=self._cursor_from_commit(commit),
             )
-        projection = self._ledger.project_at(current_cursor)
         existing = tuple(
             item
             for item in projection.affect_proposals
@@ -256,24 +250,84 @@ class AffectProposalCompiler:
             and item.source_audit.capsule_id == authority.audit.capsule_id
             and item.source_audit.change_id == change.change_id
         )
-        if len(existing) > 1:
-            raise AffectProposalCompilerError("rebased_candidate_ambiguous")
-        if existing:
-            located = self._ledger.lookup_event_commit(existing[0].recorded_event_ref)
-            if located is None or located[0].payload_hash != existing[0].recorded_event_payload_hash:
+        located_existing: list[
+            tuple[AffectProposalProjection, WorldEvent, CommitResult]
+        ] = []
+        for candidate in existing:
+            located = self._ledger.lookup_event_commit(candidate.recorded_event_ref)
+            if (
+                located is None
+                or located[0].payload_hash != candidate.recorded_event_payload_hash
+            ):
                 raise AffectProposalCompilerError("rebased_candidate_event_missing")
+            located_existing.append((candidate, located[0], located[1]))
+        accepted_existing = tuple(
+            item
+            for item in located_existing
+            if self._ledger.lookup_event_commit(
+                affect_mutation_event_id(
+                    world_id=self._ledger.world_id,
+                    proposal_id=item[0].proposal_id,
+                    transition_id=item[0].transition_id,
+                    event_type=item[0].proposed_mutation.event_type,
+                )
+            )
+            is not None
+        )
+        if len(accepted_existing) > 1:
+            raise AffectProposalCompilerError("rebased_candidate_accepted_ambiguous")
+        if accepted_existing:
+            candidate, _event, commit = accepted_existing[0]
             return AffectProposalCompilation(
                 status="candidate_recorded",
                 source_proposal_id=proposal.proposal_id,
                 source_proposal_event_ref=authority.audit.event_ref,
-                typed_proposal_id=existing[0].proposal_id,
-                commit=located[1],
+                typed_proposal_id=candidate.proposal_id,
+                commit=commit,
+                # Rejoining an already accepted immutable effect uses the
+                # original Proposal cursor; commit idempotency returns the
+                # existing accepted batch without attempting a new mutation.
+                acceptance_cursor=self._cursor_from_commit(commit),
+            )
+        current_existing = tuple(
+            item
+            for item in located_existing
+            if item[0].evaluated_world_revision == projection.world_revision
+        )
+        if len(current_existing) > 1:
+            raise AffectProposalCompilerError("rebased_candidate_ambiguous")
+        if current_existing:
+            candidate, _event, commit = current_existing[0]
+            return AffectProposalCompilation(
+                status="candidate_recorded",
+                source_proposal_id=proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+                typed_proposal_id=candidate.proposal_id,
+                commit=commit,
+                # Deliberation-only events may have advanced the full cursor
+                # after this candidate was recorded. Its World revision is
+                # still current, so pin acceptance to the caller's fresh head.
+                acceptance_cursor=current_cursor,
+            )
+        if self._target_lower_bound_changed_after_pin(
+            raw=raw,
+            pinned_projection=pinned_projection,
+            current_projection=projection,
+        ):
+            return AffectProposalCompilation(
+                status="no_change",
+                source_proposal_id=proposal.proposal_id,
+                source_proposal_event_ref=authority.audit.event_ref,
+                skip_reason=(
+                    "affect_proposal_compiler.target_lower_bound_changed_after_pin"
+                ),
             )
         try:
             typed = self._compile_transition(
                 authority=authority,
                 change=change,
                 projection=projection,
+                identity_world_revision=projection.world_revision,
             )
         except AffectProposalCompilerError as exc:
             if exc.code != "affect_proposal_compiler.merge_target_ambiguous":
@@ -290,10 +344,9 @@ class AffectProposalCompiler:
             source_event=source_event,
             logical_time=projection.logical_time,
         )
-        commit = self._ledger.commit(
+        commit = self._ledger.commit_at_cursor(
             [event],
-            expected_world_revision=current_cursor.world_revision,
-            expected_deliberation_revision=current_cursor.deliberation_revision,
+            expected_cursor=current_cursor,
             commit_id="commit:affect-proposal-compiler:rebased:"
             + _digest(
                 {
@@ -309,9 +362,98 @@ class AffectProposalCompiler:
             source_proposal_event_ref=authority.audit.event_ref,
             typed_proposal_id=typed.proposal_id,
             commit=commit,
+            acceptance_cursor=self._cursor_from_commit(commit),
         )
 
-    def _compile_transition(self, *, authority, change, projection) -> AffectProposalProjection:
+    def _accepted_rebased_candidate(
+        self,
+        *,
+        projection,
+        authority,
+        change,
+    ) -> tuple[AffectProposalProjection, CommitResult] | None:
+        """Locate an already settled candidate descended from this source choice."""
+
+        matches: list[tuple[AffectProposalProjection, CommitResult]] = []
+        for decision in projection.acceptance_decisions:
+            if (
+                decision.manifest_version != "affect-acceptance.1"
+                or decision.acceptance_event_ref is None
+            ):
+                continue
+            acceptance = self._ledger.lookup_event_commit(
+                decision.acceptance_event_ref
+            )
+            if acceptance is None:
+                continue
+            proposal_event_ref = acceptance[0].payload().get("proposal_event_ref")
+            located = (
+                self._ledger.lookup_event_commit(proposal_event_ref)
+                if isinstance(proposal_event_ref, str)
+                else None
+            )
+            if located is None or located[0].event_type != "ProposalRecorded":
+                continue
+            try:
+                candidate = AffectProposalProjection.model_validate_json(
+                    located[0].payload_json
+                )
+            except ValueError:
+                continue
+            binding = candidate.source_audit
+            if (
+                binding is None
+                or binding.proposal_event_ref != authority.audit.event_ref
+                or binding.proposal_event_payload_hash
+                != authority.audit.event_payload_hash
+                or binding.model_result_ref != authority.audit.model_result_ref
+                or binding.capsule_id != authority.audit.capsule_id
+                or binding.change_id != change.change_id
+                or binding.change_payload_hash != change.payload.payload_hash
+            ):
+                continue
+            matches.append((candidate, located[1]))
+        if len(matches) > 1:
+            raise AffectProposalCompilerError("rebased_candidate_accepted_ambiguous")
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _cursor_from_commit(commit: CommitResult) -> ProjectionCursor:
+        return ProjectionCursor(
+            world_revision=commit.world_revision,
+            deliberation_revision=commit.deliberation_revision,
+            ledger_sequence=commit.ledger_sequence,
+        )
+
+    @staticmethod
+    def _typed_identity(
+        *,
+        source_event_ref: str,
+        change_id: str,
+        identity_world_revision: int | None,
+    ) -> str:
+        material: dict[str, object] = {
+            "source_proposal_event": source_event_ref,
+            "source_change": change_id,
+            "typed_contract": _CONTRACT,
+        }
+        if identity_world_revision is not None:
+            # A combined Appraisal/Affect choice may survive a technical CAS
+            # loss after its first typed candidate was recorded. Recompiling
+            # the same audited choice against a newer World revision needs a
+            # distinct immutable candidate identity; no model-authored
+            # emotion or semantic field is changed by this discriminator.
+            material["rebase_world_revision"] = identity_world_revision
+        return _digest(material)
+
+    def _compile_transition(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        identity_world_revision: int | None = None,
+    ) -> AffectProposalProjection:
         source = authority.audit
         raw = change.payload.value()
         appraisals = self._appraisals(
@@ -336,11 +478,12 @@ class AffectProposalCompiler:
             for appraisal in appraisals
             for hypothesis in appraisal.hypotheses
         )
-        components = self._components(
+        components, component_semantics = self._components(
             raw=raw,
             cluster=cluster,
             meanings=meanings,
             at=projection.logical_time,
+            baselines=projection.affect_baselines,
             proposal_id=source.proposal_id,
             change_id=change.change_id,
         )
@@ -354,13 +497,13 @@ class AffectProposalCompiler:
                 evidence=evidence,
                 meanings=meanings,
                 proposed_components=components,
+                component_semantics=component_semantics,
+                identity_world_revision=identity_world_revision,
             )
-        identity = _digest(
-            {
-                "source_proposal_event": source.event_ref,
-                "source_change": change.change_id,
-                "typed_contract": _CONTRACT,
-            }
+        identity = self._typed_identity(
+            source_event_ref=source.event_ref,
+            change_id=change.change_id,
+            identity_world_revision=identity_world_revision,
         )
         typed_proposal_id = f"proposal:affect-compiled:{identity}"
         typed_change_id = f"change:affect-compiled:{identity}"
@@ -497,25 +640,25 @@ class AffectProposalCompiler:
         evidence,
         meanings,
         proposed_components,
+        component_semantics,
+        identity_world_revision,
     ) -> AffectProposalProjection:
         """Translate a merge-eligible audited open hint into one typed update.
 
-        The model still chooses the emotional dimensions and deltas.  This
-        compiler only applies the installed episode merge invariant and
-        materializes untouched sibling components, so Acceptance receives a
-        complete deterministic update rather than an invalid second open.
+        The model still chooses the emotional dimensions and either an explicit
+        target intensity (current contract) or a signed delta (legacy
+        contract). This compiler only applies that recorded numeric choice
+        after materializing decay; it does not infer emotional meaning.
         """
 
         at = projection.logical_time
         if at is None:
             raise AffectProposalCompilerError("logical_time_missing")
         source = authority.audit
-        identity = _digest(
-            {
-                "source_proposal_event": source.event_ref,
-                "source_change": change.change_id,
-                "typed_contract": _CONTRACT,
-            }
+        identity = self._typed_identity(
+            source_event_ref=source.event_ref,
+            change_id=change.change_id,
+            identity_world_revision=identity_world_revision,
         )
         typed_proposal_id = f"proposal:affect-compiled:{identity}"
         typed_change_id = f"change:affect-compiled:{identity}"
@@ -549,9 +692,14 @@ class AffectProposalCompiler:
                     )
                 )
                 continue
-            proposed_delta = proposed.intensity_bp
-            accepted_delta = min(proposed_delta, 10_000 - before)
-            after = before + accepted_delta
+            if component_semantics == "target":
+                after = proposed.intensity_bp
+                proposed_delta = after - before
+                accepted_delta = proposed_delta
+            else:
+                proposed_delta = proposed.intensity_bp
+                accepted_delta = min(proposed_delta, 10_000 - before)
+                after = before + accepted_delta
             updated = current.model_copy(
                 update={
                     "appraisal_refs": (*current.appraisal_refs, *meanings),
@@ -705,7 +853,17 @@ class AffectProposalCompiler:
             )
         return tuple(result)
 
-    def _components(self, *, raw, cluster, meanings, at, proposal_id, change_id):
+    def _components(
+        self,
+        *,
+        raw,
+        cluster,
+        meanings,
+        at,
+        baselines,
+        proposal_id,
+        change_id,
+    ):
         if at is None:
             raise AffectProposalCompilerError("logical_time_missing")
         decay = raw.get("decay_config")
@@ -729,18 +887,40 @@ class AffectProposalCompiler:
                 config_version=str(decay["schema_version"]),
             ),
         )
-        deltas = raw.get("component_deltas")
-        if not isinstance(deltas, list) or not deltas:
+        legacy_deltas = raw.get("component_deltas")
+        targets = raw.get("component_targets")
+        if (legacy_deltas is None) == (targets is None):
+            raise AffectProposalCompilerError("component_deltas_invalid")
+        component_semantics = "target" if targets is not None else "delta"
+        values = targets if targets is not None else legacy_deltas
+        if not isinstance(values, list) or not values:
             raise AffectProposalCompilerError("component_deltas_invalid")
         dimensions: set[str] = set()
+        baseline_by_dimension = {item.dimension: item.baseline_bp for item in baselines}
         result: list[AffectComponentProjection] = []
-        for item in deltas:
+        for item in values:
             if not isinstance(item, dict):
                 raise AffectProposalCompilerError("component_deltas_invalid")
-            dimension, intensity = item.get("name"), item.get("value")
+            if component_semantics == "target":
+                dimension = item.get("dimension")
+                intensity = item.get("target_intensity_bp")
+            else:
+                dimension = item.get("name")
+                intensity = item.get("value")
             if dimension not in _DIMENSIONS or not isinstance(intensity, int) or not 1 <= intensity <= 10_000:
                 raise AffectProposalCompilerError("component_delta_invalid")
-            if dimension in dimensions or intensity < max(profile.floor_bp, residue_bp):
+            minimum = max(
+                profile.floor_bp,
+                residue_bp,
+                baseline_by_dimension.get(dimension, 0),
+            )
+            if dimension in dimensions or (
+                component_semantics == "target" and intensity < minimum
+            ):
+                raise AffectProposalCompilerError("component_target_below_lower_bound")
+            if component_semantics == "delta" and intensity < max(
+                profile.floor_bp, residue_bp
+            ):
                 raise AffectProposalCompilerError("component_delta_invalid")
             dimensions.add(dimension)
             result.append(
@@ -760,7 +940,39 @@ class AffectProposalCompiler:
                     residue_bp=residue_bp,
                 )
             )
-        return tuple(result)
+        return tuple(result), component_semantics
+
+    @staticmethod
+    def _target_lower_bound_changed_after_pin(
+        *,
+        raw,
+        pinned_projection,
+        current_projection,
+    ) -> bool:
+        targets = raw.get("component_targets")
+        if not isinstance(targets, list) or not targets:
+            return False
+        pinned = lower_bounds_from_projection(pinned_projection)
+        current = lower_bounds_from_projection(current_projection)
+        became_invalid = False
+        for item in targets:
+            if not isinstance(item, dict):
+                return False
+            dimension = item.get("dimension")
+            selected = item.get("target_intensity_bp")
+            if (
+                not isinstance(dimension, str)
+                or isinstance(selected, bool)
+                or not isinstance(selected, int)
+            ):
+                return False
+            pinned_minimum = pinned.minimum_for(dimension)
+            current_minimum = current.minimum_for(dimension)
+            if selected < pinned_minimum:
+                return False
+            if selected < current_minimum:
+                became_invalid = True
+        return became_invalid
 
     def _proposal_event(
         self, *, typed: AffectProposalProjection, source_event: WorldEvent, logical_time

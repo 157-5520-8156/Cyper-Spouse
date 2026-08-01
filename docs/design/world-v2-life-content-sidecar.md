@@ -124,7 +124,15 @@ source_entity_revision
 ## 模型视图、预算与隐私
 
 `LifeContentResult` 包含 `settled_items`、`experience_items` 与结构化 suppressions。
-每个可见 item 至少带：
+`experience_items` 不是脱离投影的裸 excerpt，而是
+`RecentExperienceContextItem(ExperienceProjection + LifeContentExcerpt)`；因此
+`recent_experiences` 的每个模型可见正文同时闭合 `ExperienceCommitted` 与
+`LifeContentRecorded` 两个事件 authority。sidecar 缺行、正文 hash 不符，或 source
+event 不是对应的 `ExperienceCommitted` 时，该 Experience 在正文 lane 明确
+unavailable，读取层不得用 `summary_ref`、旧回复或本地模板补写。若当前相关
+Experience 全部因此不可读，`recent_experiences` 必须呈现为 unavailable，而不是
+“available 但为空”；没有 descriptor 的 Experience 也记录带 source entity id 的
+`descriptor_missing` suppression。每个可见 excerpt 至少带：
 
 ```text
 content_kind, content_ref, content_payload_hash, text, truncated
@@ -145,9 +153,12 @@ content_missing | hash_mismatch | budget_exhausted
 
 `WorldLifeContextCompiler` 将变成这个深模块的兼容 facade；`MemoryRetrievalCompiler`
 仅从 `LifeContentCompiler` 请求 Experience summary excerpt。两者都不得直接打开
-sidecar。Context Capsule 将 excerpt 的 authority/descriptor ref 写入 trace，然而
-Deliberation、Fact、Outcome 和 Action 的 evidence validator 仍只接受账本 authority，
-不接受 excerpt text 或 sidecar ref。
+sidecar。Context Capsule 将 Experience authority 与 descriptor authority 一起写入
+trace，并把有限正文放入 `recent_experiences` 和紧凑 `CurrentSelfState`。
+`RecallCorpusCompiler` 也直接把这份近期正文编译为 episodic 文档；这不要求该
+Experience 已经产生 `MemoryCandidate`。后者只增强巩固状态、联想线索和可访问性，
+不能决定一段已提交的近期经历是否存在。Deliberation、Fact、Outcome 和 Action 的
+evidence validator 仍只接受账本 authority，不接受 excerpt text 或 sidecar ref。
 
 ## 与 Outcome 闭环的衔接
 
@@ -181,11 +192,14 @@ sequenceDiagram
    authority/tamper fixtures。
 2. 实现 in-memory 与 SQLite sidecar adapter，覆盖 close/reopen。
 3. 实现 compiler，覆盖 source、cursor、hash、privacy、排序与 Unicode/总预算。
-4. 将 world life 与 Experience-backed memory 接线到 Capsule。
+4. 将 world life、source-bound recent Experience 与 Experience-backed memory
+   接线到 Capsule；近期 Experience 在尚未巩固为 MemoryCandidate 时也可由普通
+   Recall 索引。
 5. 由 Outcome authority reader 复用该 compiler 的候选内容读取能力，再实现
    `outcome_deliberation` worker。
 
 必须通过的测试包括：篡改 source/ref/hash、descriptor 早于 source、重复或冲突
 descriptor、sidecar 缺行/篡改、隐私越权、descriptor 前后 cursor、SQLite 重启、固定
-截断与排序、下一轮 Capsule 可读、Experience-backed MemoryCandidate 可读，以及文本
-无法被反向当成 Fact/Action/Outcome evidence。
+截断与排序、下一轮 Capsule 与 CurrentSelfState 可读、尚无 MemoryCandidate 的近期
+Experience 可召回、Experience-backed MemoryCandidate 可增强联想且不复制文档，以及
+文本无法被反向当成 Fact/Action/Outcome evidence。

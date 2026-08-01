@@ -5,26 +5,41 @@ import hashlib
 import json
 import logging
 import time
+from uuid import uuid4
 from datetime import UTC, datetime
 
 from .affect_math import DecayAnchor, DecayProfile, decay_intensity_bp
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .ledger import LedgerPort, WorldLedger
 from .event_identity import domain_idempotency_key
+from .acceptance_manifest import (
+    AcceptanceManifestV2,
+    canonical_acceptance_manifest_hash,
+    derive_acceptance_manifest_proposal_v2,
+)
 from .clock_authority import append_clock_transition, resolve_latest_clock
 from .goal_expiry_runtime import build_due_goal_expiry_events
 from .occurrence_clock_continuation import build_occurrence_clock_events
 from .outcome_observation_runtime import build_outcome_observation_event
 from .pinned_turn import PinnedTurnCompiler
 from .expression_episode_lifecycle import (
+    EXPRESSION_FRESH_CONTEXT_REPIN_LIMIT,
+    due_expression_retry_processes,
     expression_episode_claim_event,
     expression_episode_cancel_events,
     expression_episode_complete_event,
+    expression_episode_has_authorized_action,
     expression_episode_open_event,
+    expression_episode_repin_reservation_event,
+    expression_episode_technical_failure_count,
     expression_episode_trigger_id,
+    expression_episode_work_due,
 )
-from .expression_cadence import record_cadence_draws
-from .interactive_turn_budget import InteractiveTurnBudget
+from .expression_cadence import CadenceDraw, record_cadence_draws
+from .interactive_turn_budget import (
+    InteractiveTurnBudget,
+    InteractiveTurnBudgetPolicy,
+)
 from .production_latency_trace import ProductionLatencyRecorder
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
@@ -63,10 +78,6 @@ from .appraisal_acceptance_runtime import (
 )
 from .appraisal_proposal_worker import AppraisalProposalWorker
 from .immediate_emotion_proposal_worker import ImmediateEmotionProposalWorker
-from .immediate_emotion_gate import (
-    SemanticImmediateEmotionGate,
-    resolve_immediate_emotion_gate,
-)
 from .affect_trigger import affect_deliberation_trigger_events
 from .affect_acceptance_runtime import AffectAcceptanceError, AffectAcceptanceRuntime
 from .affect_deliberation_worker import AffectDeliberationWorker
@@ -98,7 +109,12 @@ from .interaction_bid_trigger_runtime import (
     InteractionBidTriggerRuntime,
 )
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
-from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
+from .action_pump import (
+    ActionExecutor,
+    ActionPump,
+    ActionPumpResult,
+    ProviderAcceptedReconciliationGate,
+)
 from .bounded_decision_vertical import AnchoredRunResult, InlineOnceRunResult
 from .expression_reconsideration import expression_reconsideration_events_for_observation
 from .expression_reconsideration_runtime import (
@@ -136,6 +152,7 @@ from .memory_withdrawal_review import (
     MemoryWithdrawalReviewRunResult,
     MemoryWithdrawalReviewRuntime,
 )
+from .proposal_audit import ProposalAuditCommit
 from .proposal_envelope import DecisionProposal, MinimalProposal, validate_proposal_envelope
 from .response_expectation_view import pending_response_expectation_manifest
 from .schemas import (
@@ -155,6 +172,7 @@ from .schemas import (
 
 
 _LOG = logging.getLogger(__name__)
+_INGRESS_CAS_MAX_ATTEMPTS = 8
 
 
 def _user_perceived_ms(observation: Observation) -> str | None:
@@ -209,6 +227,8 @@ class WorldRuntime:
         ledger: LedgerPort | None = None,
         projection_authority: ProjectionAuthority | None = None,
         pinned_turn: PinnedTurnCompiler | None = None,
+        expression_episode_owner: str | None = None,
+        expression_retry_budget_policy: InteractiveTurnBudgetPolicy | None = None,
         reply_policy: ReplyBudgetPolicy | None = None,
         reply_recorder: MinimalReplyAtomicRecorder | None = None,
         expression_policy: ExpressionPlanBudgetPolicy | None = None,
@@ -220,8 +240,6 @@ class WorldRuntime:
         appraisal_worker: AppraisalProposalWorker | None = None,
         interaction_appraisal_turn: PinnedTurnCompiler | None = None,
         immediate_emotion_worker: ImmediateEmotionProposalWorker | None = None,
-        immediate_emotion_signal_gate: bool = False,
-        immediate_emotion_semantic_gate: SemanticImmediateEmotionGate | None = None,
         npc_world_appraisal_turn: SettledWorldAppraisalTurn | None = None,
         silence_appraisal_turn: SilenceAppraisalTurn | None = None,
         silence_appraisal_idle_seconds: int | None = None,
@@ -276,6 +294,18 @@ class WorldRuntime:
         self._settlement = SettlementPlanner(world_id=world_id)
         self._projection = ProjectionCompiler(authority=projection_authority)
         self._pinned_turn = pinned_turn
+        if expression_episode_owner is not None and not expression_episode_owner:
+            raise ValueError("expression episode owner must not be empty")
+        # This lease owner identifies one live Runtime instance, not merely a
+        # deployment role.  A process-stable constant makes another daemon
+        # indistinguishable from the worker that is still inside its provider
+        # call, so a second runtime can generate the same reply concurrently.
+        self._expression_episode_owner = expression_episode_owner or (
+            f"worker:world-v2:expression-episode:{uuid4().hex}"
+        )
+        self._expression_retry_budget_policy = (
+            expression_retry_budget_policy or InteractiveTurnBudgetPolicy()
+        )
         if (reply_policy is None) != (reply_recorder is None):
             raise ValueError("minimal reply policy and recorder must be configured together")
         self._reply_policy = reply_policy
@@ -310,11 +340,6 @@ class WorldRuntime:
             if immediate_emotion_worker.ledger is not self._ledger:
                 raise ValueError("immediate emotion worker must own this exact ledger")
         self._immediate_emotion_worker = immediate_emotion_worker
-        self._immediate_emotion_signal_gate = bool(immediate_emotion_signal_gate)
-        # Optional semantic upgrade of the keyword scheduling gate.  It only
-        # participates when the signal gate itself is enabled; keyword hits
-        # still short-circuit before any model call.
-        self._immediate_emotion_semantic_gate = immediate_emotion_semantic_gate
         if npc_world_appraisal_turn is not None and appraisal_worker is None:
             raise ValueError("NPC world appraisal turn requires an appraisal worker")
         if npc_world_appraisal_turn is not None and interaction_appraisal_owner is None:
@@ -490,6 +515,15 @@ class WorldRuntime:
         self._perception_result_deliberator = perception_result_deliberator
         self._latency = latency_recorder
         self._lock = asyncio.Lock()
+        # A durable expression claim may be observed concurrently by ingress
+        # and the retry scheduler.  This process-local table is the atomic join
+        # seam for the provider phase of one exact attempt.  The tiny lock only
+        # protects task publication; it is never held while Context compilation
+        # or a provider call is running.
+        self._expression_attempt_task_lock = asyncio.Lock()
+        self._expression_attempt_tasks: dict[
+            str, asyncio.Task[ProposalAuditCommit]
+        ] = {}
         # Background cognition is serialized with itself, but must not hold
         # the world mutation lock while an external model is thinking.  The
         # visible inbound lane can then commit/answer while affect, memory,
@@ -506,6 +540,87 @@ class WorldRuntime:
         """Return the durable Clock authority used to pin an ingress envelope."""
 
         return (await self._project_for_write()).logical_time
+
+    async def _audit_expression_attempt_once(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        cursor: ProjectionCursor,
+        expression_attempt_id: str,
+        skip_advisories: bool = False,
+        turn_budget: InteractiveTurnBudget | None = None,
+        recorded_cadence_draws: tuple[CadenceDraw, ...] = (),
+    ) -> ProposalAuditCommit:
+        """Join one process-local provider invocation for an exact attempt.
+
+        Ledger CAS remains the durable authority across processes.  This join
+        closes the narrower in-process race where ingress acquires the world
+        lock after the scheduler has already observed it as free.
+        """
+
+        if self._pinned_turn is None:
+            raise ValueError("expression attempt audit requires a pinned turn")
+        if not expression_attempt_id:
+            raise ValueError("expression attempt audit requires an attempt id")
+        async with self._expression_attempt_task_lock:
+            task = self._expression_attempt_tasks.get(expression_attempt_id)
+            owns_invocation = task is None
+            if task is None:
+                task = asyncio.create_task(
+                    self._pinned_turn.audit_observation(
+                        observation=observation,
+                        observation_event=observation_event,
+                        cursor=cursor,
+                        skip_advisories=skip_advisories,
+                        turn_budget=turn_budget,
+                        recorded_cadence_draws=recorded_cadence_draws,
+                        expression_attempt_id=expression_attempt_id,
+                    ),
+                    name=f"expression-attempt:{expression_attempt_id}",
+                )
+                self._expression_attempt_tasks[expression_attempt_id] = task
+        try:
+            # A joining caller must not cancel the shared provider invocation.
+            # The creator still owns cancellation so an interrupted ingest can
+            # leave the same durable no-audit claim recoverable immediately.
+            result = await task if owns_invocation else await asyncio.shield(task)
+        except BaseException:
+            async with self._expression_attempt_task_lock:
+                if (
+                    self._expression_attempt_tasks.get(expression_attempt_id)
+                    is task
+                    and task.done()
+                ):
+                    self._expression_attempt_tasks.pop(expression_attempt_id, None)
+            raise
+
+        async with self._expression_attempt_task_lock:
+            # Retain recent successful tasks so a stale concurrent caller that
+            # arrives just after completion still joins the exact result.
+            # Bound this operational cache; durable audits remain authoritative.
+            if len(self._expression_attempt_tasks) > 256:
+                for key, candidate in tuple(self._expression_attempt_tasks.items()):
+                    if len(self._expression_attempt_tasks) <= 256:
+                        break
+                    if key != expression_attempt_id and candidate.done():
+                        self._expression_attempt_tasks.pop(key, None)
+        return result
+
+    async def _forget_expression_attempt_task(self, attempt_id: str) -> None:
+        """Drop a completed local join after its Proposal becomes stale."""
+
+        async with self._expression_attempt_task_lock:
+            task = self._expression_attempt_tasks.get(attempt_id)
+            if task is not None and task.done():
+                self._expression_attempt_tasks.pop(attempt_id, None)
+
+    async def _expression_attempt_task_is_live(self, attempt_id: str) -> bool:
+        """Return whether this Runtime is already inside the exact provider attempt."""
+
+        async with self._expression_attempt_task_lock:
+            task = self._expression_attempt_tasks.get(attempt_id)
+            return task is not None and not task.done()
 
     async def drain_background_once(self):
         """Run one background job and turn an expected cursor race into a retry."""
@@ -539,6 +654,7 @@ class WorldRuntime:
         | MemoryWithdrawalReviewRunResult
         | ProactiveActionRunResult
         | AnchoredRunResult
+        | RuntimeOutcome
         | None
     ):
         """Run one low-priority mental-state job without delaying an interactive turn.
@@ -553,6 +669,13 @@ class WorldRuntime:
         # holding ``_lock`` across its provider call would make a slow
         # low-priority thought block the next user message.
         async with self._background_lock:
+            # A user-visible turn that failed for technical reasons outranks
+            # advisory cognition once its recorded retry lease expires.  The
+            # process is event-sourced and source-bound; this does not turn a
+            # model-authored `silent` choice into a retry.
+            expression_retry = await self._drain_expression_retry_once()
+            if expression_retry is not None:
+                return expression_retry
             if self._perception_result_owner is not None:
                 assert self._perception_result_deliberator is not None
                 perception_result = await PerceptionResultTriggerRuntime(
@@ -788,7 +911,13 @@ class WorldRuntime:
                     return social_action
             return affect_result or appraisal_result
 
-    async def drain_actions_once(self) -> ActionPumpResult | None:
+    async def drain_actions_once(
+        self,
+        *,
+        provider_accepted_reconciliation_gate: (
+            ProviderAcceptedReconciliationGate | None
+        ) = None,
+    ) -> ActionPumpResult | None:
         """Dispatch one authorized external Action through the durable pump.
 
         This deliberately does not hold ``_lock`` while calling an executor:
@@ -806,7 +935,11 @@ class WorldRuntime:
             settle=self.settle,
             owner_id=self._action_pump_owner,
             excluded_action_kinds=self._action_pump_excluded_kinds,
-        ).drain_once()
+        ).drain_once(
+            provider_accepted_reconciliation_gate=(
+                provider_accepted_reconciliation_gate
+            )
+        )
 
     async def drain_action(self, action_id: str) -> ActionPumpResult | None:
         """Advance one ingress-bound Action without selecting a sibling."""
@@ -856,6 +989,26 @@ class WorldRuntime:
             events,
             expected_world_revision=world_revision,
             expected_deliberation_revision=deliberation_revision,
+            commit_id=commit_id,
+        )
+
+    async def _commit_at_cursor(
+        self,
+        events: list[WorldEvent],
+        *,
+        cursor: ProjectionCursor,
+        commit_id: str | None = None,
+    ):
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(
+                self._ledger.commit_at_cursor,
+                events,
+                expected_cursor=cursor,
+                commit_id=commit_id,
+            )
+        return self._ledger.commit_at_cursor(
+            events,
+            expected_cursor=cursor,
             commit_id=commit_id,
         )
 
@@ -1039,6 +1192,119 @@ class WorldRuntime:
             )
             return await self._commit_accepted(batch, cursor=material.cursor)
 
+    async def _record_reply_acceptance_failure(
+        self,
+        *,
+        audit,
+        observation: Observation,
+        failure_code: str,
+    ) -> str:
+        """Close one unusable reply Proposal without pretending the model was silent.
+
+        A stale Proposal must be reconsidered immediately at the new World
+        cursor.  A current Proposal that cannot cross a hard Acceptance
+        boundary (most commonly budget/account availability) is rejected and
+        retried on the expression lifecycle's 10/30/120 technical schedule.
+        The immutable Proposal remains in the ledger for audit and replay.
+        """
+
+        projection = await self._project_for_write()
+        existing = next(
+            (
+                decision
+                for decision in projection.acceptance_decisions
+                if decision.proposal_id == audit.proposal_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing.status
+        if audit.evaluated_world_revision > projection.world_revision:
+            raise ConcurrencyConflict(
+                "reply Proposal evaluates a future World revision"
+            )
+        status = (
+            "stale"
+            if audit.evaluated_world_revision < projection.world_revision
+            else "rejected"
+        )
+        binding = derive_acceptance_manifest_proposal_v2(
+            proposal_json=audit.proposal_json,
+            proposal_event_ref=audit.event_ref,
+            proposal_event_payload_hash=audit.event_payload_hash,
+        )
+        identity_material = {
+            "contract": "expression-acceptance-failure.1",
+            "world_id": self._world_id,
+            "proposal_id": audit.proposal_id,
+            "status": status,
+            "failure_code": failure_code,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                identity_material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        acceptance_id = f"acceptance:expression-retry:{digest}"
+        raw: dict[str, object] = {
+            "manifest_version": "acceptance-manifest.2",
+            "acceptance_id": acceptance_id,
+            "status": status,
+            "evaluated_world_revision": audit.evaluated_world_revision,
+            "proposals": (binding.model_dump(mode="json"),),
+            "authorized_effects": (),
+        }
+        raw["manifest_hash"] = canonical_acceptance_manifest_hash(raw)
+        manifest = AcceptanceManifestV2.model_validate(raw)
+        payload = manifest.model_dump(mode="json")
+        idempotency_key = domain_idempotency_key(
+            event_type="AcceptanceRecorded",
+            world_id=self._world_id,
+            payload=payload,
+        )
+        if idempotency_key is None:
+            raise RuntimeError(
+                "reply Acceptance failure has no installed event identity"
+            )
+        at = projection.logical_time or observation.logical_time
+        event = WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id=f"event:expression-acceptance-failure:{digest}",
+            world_id=self._world_id,
+            event_type="AcceptanceRecorded",
+            logical_time=at,
+            created_at=observation.created_at,
+            actor="system:expression-reliability",
+            source="world-runtime:expression-reliability",
+            trace_id=observation.trace_id,
+            causation_id=audit.event_ref,
+            correlation_id=observation.correlation_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+        )
+        await self._commit(
+            [event],
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            commit_id=f"commit:expression-acceptance-failure:{digest}",
+        )
+        _LOG.warning(
+            "reply acceptance deferred proposal=%s status=%s code=%s",
+            audit.proposal_id,
+            status,
+            failure_code,
+        )
+        if status == "stale":
+            # This exact Proposal is now terminal and the current World cursor
+            # requires fresh deliberation.  Releasing the completed local join
+            # does not weaken the concurrent-call mutex: the stale Acceptance
+            # is durable before another invocation can begin.
+            await self._forget_expression_attempt_task(audit.attempt_id)
+        return status
+
     async def evaluate_replay(
         self, *, evaluator: ReplayEvaluator | None = None
     ) -> ReplayEvaluation:
@@ -1071,10 +1337,7 @@ class WorldRuntime:
     async def _claim_expression_episode(
         self, observation: Observation
     ) -> tuple[TriggerProcess | None, ProjectionCursor | None]:
-        if (
-            self._pinned_turn is None
-            or self._pinned_turn.expression_episode_mode == "off"
-        ):
+        if self._pinned_turn is None:
             return None, None
         projection = await self._project_for_write()
         trigger_id = expression_episode_trigger_id(
@@ -1086,30 +1349,291 @@ class WorldRuntime:
         )
         if process is None or process.state == "terminal":
             return process, None
+        at = projection.logical_time or observation.logical_time
+        work_due = expression_episode_work_due(
+            projection,
+            process,
+            owner_id=self._expression_episode_owner,
+        )
+        if work_due is not None and at < work_due:
+            # The short provider lease may already have expired while a
+            # recorded technical failure is still inside its independent
+            # 10/30/120-minute backoff. Neither duplicate ingress nor another
+            # continuation path may reclaim early.
+            return process, None
         if process.state == "claimed":
-            return process, ProjectionCursor(
-                world_revision=projection.world_revision,
-                deliberation_revision=projection.deliberation_revision,
-                ledger_sequence=projection.ledger_sequence,
-            )
+            if (
+                process.claim_lease is None
+                or at < process.claim_lease.expires_at
+            ):
+                # A duplicate ingress joins the durable failure state but may
+                # not bypass its retry schedule.  The background worker
+                # reclaims the process after the lease expires.
+                return process, None
         event, claimed = expression_episode_claim_event(
             world_id=self._world_id,
             process=process,
-            owner_id="worker:world-v2:expression-episode",
-            at=projection.logical_time or observation.logical_time,
+            owner_id=self._expression_episode_owner,
+            at=at,
             trace_id=observation.trace_id,
             correlation_id=observation.correlation_id,
+            technical_failure_count=expression_episode_technical_failure_count(
+                projection, process
+            ),
         )
         committed = await self._commit(
             [event],
             world_revision=projection.world_revision,
             deliberation_revision=projection.deliberation_revision,
-            commit_id=f"commit:{trigger_id}:claim",
+            commit_id=f"commit:{trigger_id}:claim:{claimed.claim_lease.attempt_id}",
         )
         return claimed, ProjectionCursor(
             world_revision=committed.world_revision,
             deliberation_revision=committed.deliberation_revision,
             ledger_sequence=committed.ledger_sequence,
+        )
+
+    async def _ensure_expression_retry_process(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+    ) -> TriggerProcess | None:
+        """Open the durable retry lifecycle only after a technical failure.
+
+        Expression Episode shadow/on modes already open the lifecycle beside
+        ingress.  Production currently keeps that feature mode off, so a
+        failed model result must create the same event-sourced recovery seam
+        without adding two lifecycle events to every successful turn.
+        """
+
+        if self._pinned_turn is None:
+            return None
+        projection = await self._project_for_write()
+        trigger_id = expression_episode_trigger_id(
+            self._world_id, observation.observation_id
+        )
+        existing = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id == trigger_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        opened_event = expression_episode_open_event(
+            observation=observation,
+            observation_event=observation_event,
+        )
+        opened = TriggerProcess.model_validate_json(
+            json.dumps(opened_event.payload()["process"])
+        )
+        claimed_event, claimed = expression_episode_claim_event(
+            world_id=self._world_id,
+            process=opened,
+            owner_id=self._expression_episode_owner,
+            at=projection.logical_time or observation.logical_time,
+            trace_id=observation.trace_id,
+            correlation_id=observation.correlation_id,
+            technical_failure_count=0,
+        )
+        await self._commit(
+            [opened_event, claimed_event],
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            commit_id=f"commit:{trigger_id}:technical-retry-open",
+        )
+        return claimed
+
+    async def _expression_retry_source(
+        self,
+        *,
+        projection,
+        process: TriggerProcess,
+    ) -> tuple[Observation, WorldEvent, CommitResult, int] | None:
+        """Resolve the exact committed Observation authority for one retry."""
+
+        source = next(
+            (
+                item
+                for item in projection.message_observations
+                if item.observation_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        if (
+            source is None
+            or source.world_revision < 1
+            or source.world_revision > len(projection.committed_world_event_refs)
+        ):
+            return None
+        event_ref = projection.committed_world_event_refs[source.world_revision - 1]
+        if (
+            event_ref.event_type != "ObservationRecorded"
+            or event_ref.payload_hash != source.event_payload_hash
+        ):
+            return None
+        persisted = await self._lookup_event_commit(event_ref.event_id)
+        if (
+            persisted is None
+            or persisted[0].event_type != "ObservationRecorded"
+            or persisted[1].world_revision != source.world_revision
+        ):
+            return None
+        try:
+            observation = Observation.model_validate_json(persisted[0].payload_json)
+        except ValueError:
+            return None
+        if observation.observation_id != source.observation_id:
+            return None
+        return observation, persisted[0], persisted[1], source.world_revision
+
+    async def _drain_expression_retry_once(self) -> RuntimeOutcome | None:
+        """Reconsider one technically failed reply after its durable backoff."""
+
+        if self._pinned_turn is None:
+            return None
+        if self._lock.locked():
+            # Fast path only.  Correctness does not depend on this observation:
+            # ingress may acquire the lock immediately after it, in which case
+            # both callers atomically join ``_audit_expression_attempt_once``.
+            return None
+        projection = await self._project_for_write()
+        at = projection.logical_time
+        if at is None:
+            return None
+        due = due_expression_retry_processes(
+            projection,
+            at=at,
+            owner_id=self._expression_episode_owner,
+        )
+        if not due:
+            return None
+        process = due[0]
+        if (
+            process.claim_lease is not None
+            and await self._expression_attempt_task_is_live(
+                process.claim_lease.attempt_id
+            )
+        ):
+            # The short ingress mutation lock is intentionally released before
+            # provider work.  A local claimed/no-audit shape therefore is not a
+            # crash when its exact process-local task is still running.
+            return None
+        source = await self._expression_retry_source(
+            projection=projection,
+            process=process,
+        )
+        if source is None:
+            return None
+        observation, observation_event, original_commit, source_world_revision = source
+        if self._interaction_appraisal_turn is not None and any(
+            item.process_kind == "interaction_appraisal"
+            and item.source_evidence_ref == observation.observation_id
+            and item.state == "claimed"
+            and item.claim_lease is not None
+            and item.claim_lease.owner_id != self._interaction_appraisal_owner
+            for item in projection.trigger_processes
+        ):
+            # If the same-turn emotion lane was selected but temporarily owned
+            # elsewhere, its accepted/no-change result must land before reply
+            # cognition is pinned.  Leaving the expression lifecycle active
+            # lets the ordinary appraisal lane finish it later in this
+            # background pass without losing the user's message.
+            return None
+        work_due = expression_episode_work_due(
+            projection,
+            process,
+            owner_id=self._expression_episode_owner,
+        )
+        local_no_result = (
+            process.state == "claimed"
+            and process.claim_lease is not None
+            and process.claim_lease.owner_id == self._expression_episode_owner
+            and at < process.claim_lease.expires_at
+            and not any(
+                item.attempt_id == process.claim_lease.attempt_id
+                for item in projection.model_result_audits
+            )
+        )
+        if (
+            local_no_result
+            or (
+                process.state == "claimed"
+                and process.claim_lease is not None
+                and work_due is not None
+                and work_due <= at < process.claim_lease.expires_at
+            )
+        ):
+            assert process.claim_lease is not None
+            current_attempt_has_result = any(
+                item.attempt_id == process.claim_lease.attempt_id
+                for item in projection.model_result_audits
+            )
+            if (
+                process.claim_lease.owner_id != self._expression_episode_owner
+                and not current_attempt_has_result
+            ):
+                # Another Runtime may still be inside the provider call.  Its
+                # no-audit shape is not evidence of a crash until its durable
+                # lease expires.
+                return None
+            # The active claim has either not reached a bound model result yet
+            # (process death after claim), or already owns a durable Proposal
+            # whose exact continuation remains. Only the original owner may
+            # resume generation before expiry; an immutable Proposal may be
+            # continued by any Runtime under CAS/effect-once. Reclaiming here
+            # would falsely count a crash as another failure.
+            claimed = process
+            cursor = ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            )
+        else:
+            claimed, cursor = await self._claim_expression_episode(observation)
+        if claimed is None or cursor is None:
+            return None
+
+        # A newer inbound message owns the current conversational moment.
+        # Replaying an old answer after it would be less human and can
+        # duplicate a later turn's meaning, so terminate the stale technical
+        # retry without asking deterministic code to invent a replacement.
+        current = await self._project_for_write()
+        if any(
+            item.world_revision > source_world_revision
+            for item in current.message_observations
+        ):
+            await self._complete_expression_episode(
+                observation=observation,
+                process=claimed,
+                outcome_ref="expression-episode:superseded-by-newer-inbound",
+            )
+            settled = await self._project_for_write()
+            return RuntimeOutcome(
+                outcome_id=f"outcome:expression-retry:{process.trigger_id}",
+                trigger_id=process.trigger_id,
+                observation_ref=observation.observation_id,
+                committed_world_revision=settled.world_revision,
+                ledger_sequence=settled.ledger_sequence,
+                status="observed_only",
+                deferred_refs=("expression_episode.superseded",),
+                projection_hint=f"world-revision:{settled.world_revision}",
+            )
+
+        return await self._existing_observation_outcome(
+            observation=observation,
+            observation_event=observation_event,
+            original_commit=original_commit,
+            trigger_id=(
+                f"trigger:observation:{observation.source}:"
+                f"{observation.source_event_id}"
+            ),
+            retry_process=claimed,
+            retry_cursor=cursor,
+            retry_turn_budget=self._expression_retry_budget_policy.start(),
         )
 
     async def _complete_expression_episode(
@@ -1132,6 +1656,14 @@ class WorldRuntime:
         )
         if current is None or current.state == "terminal":
             return
+        if (
+            process.claim_lease is None
+            or current.claim_lease is None
+            or current.claim_lease.attempt_id != process.claim_lease.attempt_id
+        ):
+            raise ConcurrencyConflict(
+                "expression episode completion lost its claim ownership"
+            )
         event = expression_episode_complete_event(
             world_id=self._world_id,
             process=current,
@@ -1146,6 +1678,266 @@ class WorldRuntime:
             deliberation_revision=projection.deliberation_revision,
             commit_id=f"commit:{process.trigger_id}:complete",
         )
+
+    async def _expression_episode_was_superseded(
+        self,
+        process: TriggerProcess | None,
+    ) -> bool:
+        """Recognize the stale provider race authorized by a newer inbound."""
+
+        if process is None:
+            return False
+        projection = await self._project_for_write()
+        current = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id == process.trigger_id
+            ),
+            None,
+        )
+        return (
+            current is not None
+            and current.state == "terminal"
+            and current.runtime_outcome_ref
+            == "expression-episode:superseded-by-newer-inbound"
+        )
+
+    async def _expression_attempt_repin_cursor(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        expression_attempt_id: str,
+    ) -> ProjectionCursor | None:
+        """Return a fresh cursor only while the exact unanswered attempt still owns work."""
+
+        projection = await self._project_for_write()
+        process = next(
+            (
+                item
+                for item in projection.trigger_processes
+                if item.trigger_id
+                == expression_episode_trigger_id(
+                    self._world_id,
+                    observation.observation_id,
+                )
+            ),
+            None,
+        )
+        if (
+            process is None
+            or process.state != "claimed"
+            or process.source_evidence_ref != observation.observation_id
+            or process.claim_lease is None
+            or process.claim_lease.attempt_id != expression_attempt_id
+            or not process.attempt_ids
+            or process.attempt_ids[-1] != expression_attempt_id
+        ):
+            return None
+        source = next(
+            (
+                item
+                for item in projection.message_observations
+                if item.observation_id == observation.observation_id
+            ),
+            None,
+        )
+        if source is None or any(
+            item.world_revision > source.world_revision
+            for item in projection.message_observations
+        ):
+            return None
+        if any(
+            item.trigger_ref == observation_event.event_id
+            and item.attempt_id == expression_attempt_id
+            for item in (
+                *projection.model_result_audits,
+                *projection.proposal_audits,
+            )
+        ):
+            return None
+        return ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        )
+
+    async def _reserve_expression_attempt_repin_cursor(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        expression_attempt_id: str,
+    ) -> tuple[ProjectionCursor, int] | None:
+        """CAS-reserve one durable fresh-context provider call.
+
+        The reservation is committed before model I/O. A process crash may
+        conservatively consume a slot, but can never forget it and mint an
+        unbounded fourth call on same-owner recovery.
+        """
+
+        for _ in range(4):
+            projection = await self._project_for_write()
+            process = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.trigger_id
+                    == expression_episode_trigger_id(
+                        self._world_id,
+                        observation.observation_id,
+                    )
+                ),
+                None,
+            )
+            if (
+                process is None
+                or process.state != "claimed"
+                or process.source_evidence_ref != observation.observation_id
+                or process.claim_lease is None
+                or process.claim_lease.attempt_id != expression_attempt_id
+                or process.attempt_ids[-1] != expression_attempt_id
+                or len(process.expression_repin_reservation_ids)
+                >= EXPRESSION_FRESH_CONTEXT_REPIN_LIMIT
+            ):
+                return None
+            source = next(
+                (
+                    item
+                    for item in projection.message_observations
+                    if item.observation_id == observation.observation_id
+                ),
+                None,
+            )
+            if source is None or any(
+                item.world_revision > source.world_revision
+                for item in projection.message_observations
+            ):
+                return None
+            if any(
+                item.trigger_ref == observation_event.event_id
+                and item.attempt_id == expression_attempt_id
+                for item in (
+                    *projection.model_result_audits,
+                    *projection.proposal_audits,
+                )
+            ):
+                return None
+            cursor = ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            )
+            event, replacement = expression_episode_repin_reservation_event(
+                world_id=self._world_id,
+                process=process,
+                cursor=cursor,
+                at=projection.logical_time or observation.logical_time,
+                trace_id=observation.trace_id,
+                correlation_id=observation.correlation_id,
+            )
+            try:
+                committed = await self._commit_at_cursor(
+                    [event],
+                    cursor=cursor,
+                    commit_id=f"commit:{event.event_id}",
+                )
+            except ConcurrencyConflict:
+                continue
+            return (
+                ProjectionCursor(
+                    world_revision=committed.world_revision,
+                    deliberation_revision=committed.deliberation_revision,
+                    ledger_sequence=committed.ledger_sequence,
+                ),
+                len(replacement.expression_repin_reservation_ids),
+            )
+        raise ConcurrencyConflict(
+            "expression repin reservation CAS did not converge"
+        )
+
+    async def _audit_expression_retry_with_durable_repins(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        process: TriggerProcess,
+        cursor: ProjectionCursor,
+        turn_budget: InteractiveTurnBudget | None,
+    ) -> ProposalAuditCommit | None:
+        """Resume one attempt without renewing its durable re-pin allowance."""
+
+        if self._pinned_turn is None or process.claim_lease is None:
+            return None
+        expression_attempt_id = process.claim_lease.attempt_id
+        audited: ProposalAuditCommit | None = None
+
+        # With no prior reservation this is recovery of the base call that may
+        # have died immediately after claiming. Once any re-pin is durable,
+        # every further provider call must first consume the next shared slot.
+        if not process.expression_repin_reservation_ids:
+            try:
+                audited = await self._audit_expression_attempt_once(
+                    observation=observation,
+                    observation_event=observation_event,
+                    cursor=cursor,
+                    turn_budget=turn_budget,
+                    expression_attempt_id=expression_attempt_id,
+                )
+            except ConcurrencyConflict:
+                if await self._expression_episode_was_superseded(process):
+                    return None
+
+        while audited is None:
+            reservation = await self._reserve_expression_attempt_repin_cursor(
+                observation=observation,
+                observation_event=observation_event,
+                expression_attempt_id=expression_attempt_id,
+            )
+            if reservation is None:
+                exhausted_cursor = await self._expression_attempt_repin_cursor(
+                    observation=observation,
+                    observation_event=observation_event,
+                    expression_attempt_id=expression_attempt_id,
+                )
+                if exhausted_cursor is None:
+                    return None
+                try:
+                    return (
+                        await self._pinned_turn.record_expression_repin_exhausted(
+                            observation=observation,
+                            observation_event=observation_event,
+                            cursor=exhausted_cursor,
+                            expression_attempt_id=expression_attempt_id,
+                        )
+                    )
+                except ConcurrencyConflict:
+                    if await self._expression_episode_was_superseded(process):
+                        return None
+                    raise
+            retry_cursor, stale_ordinal = reservation
+            _LOG.warning(
+                "world v2 expression recovery repin trace=%s ordinal=%s "
+                "to=%s/%s/%s",
+                observation.trace_id,
+                stale_ordinal,
+                retry_cursor.world_revision,
+                retry_cursor.deliberation_revision,
+                retry_cursor.ledger_sequence,
+            )
+            try:
+                audited = await self._audit_expression_attempt_once(
+                    observation=observation,
+                    observation_event=observation_event,
+                    cursor=retry_cursor,
+                    turn_budget=turn_budget,
+                    expression_attempt_id=expression_attempt_id,
+                )
+            except ConcurrencyConflict:
+                if await self._expression_episode_was_superseded(process):
+                    return None
+        return audited
 
     async def _settle_expression_episode_for_action(
         self, result: ExternalObservation
@@ -1198,6 +1990,20 @@ class WorldRuntime:
             ),
             None,
         )
+        if process is not None and (
+            process.state == "open"
+            or process.claim_lease is None
+            or (projection.logical_time or observation.logical_time)
+            >= process.claim_lease.expires_at
+        ):
+            # Provider receipts may arrive long after the model-attempt lease.
+            # Reclaim the exact lifecycle before completing it; otherwise the
+            # Action can settle durably while TriggerProcessCompleted is
+            # rejected as using an expired owner.
+            reclaimed, _ = await self._claim_expression_episode(observation)
+            if reclaimed is not None:
+                process = reclaimed
+                projection = await self._project_for_write()
         disposition = "complete_without_more"
         tail_audit = next(
             (
@@ -1311,8 +2117,42 @@ class WorldRuntime:
             observation_event.event_id
         )
         if tail is None:
-            return None
-        disposition = tail.disposition
+            # A restart loses the in-memory full-tail task, but the winning
+            # model Proposal already carries its model-authored disposition.
+            # Recover that exact choice so cancel/supersede cannot be bypassed
+            # merely because Action Acceptance committed just before a crash.
+            projection = await self._project_for_write()
+            decided = {
+                item.proposal_id for item in projection.acceptance_decisions
+            }
+            durable_disposition = None
+            for audit in reversed(projection.proposal_audits):
+                if (
+                    audit.trigger_ref != observation_event.event_id
+                    or audit.proposal_id in decided
+                    or not audit.proposal_id.startswith(
+                        ("proposal:expression:", "proposal:chat-reply:")
+                    )
+                    or (
+                        process.claim_lease is not None
+                        and audit.attempt_id not in process.attempt_ids
+                    )
+                ):
+                    continue
+                try:
+                    proposal = validate_proposal_envelope(
+                        json.loads(audit.proposal_json)
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(proposal, DecisionProposal):
+                    durable_disposition = proposal.episode_disposition
+                    break
+            if durable_disposition is None:
+                return None
+            disposition = durable_disposition
+        else:
+            disposition = tail.disposition
         if disposition == "append":
             return disposition
         if disposition in {"cancel_pending", "supersede_pending"}:
@@ -1695,6 +2535,191 @@ class WorldRuntime:
             projection_hint=f"world-revision:{committed.world_revision}",
         )
 
+    async def _commit_ingress_observation(
+        self,
+        *,
+        observation: Observation,
+        event: WorldEvent,
+        _retry_ordinal: int = 0,
+    ) -> tuple[Observation, WorldEvent, CommitResult, TriggerProcess | None, bool]:
+        """Commit one Observation and its source-owned triggers under a short lock.
+
+        The returned boolean distinguishes an idempotent existing Observation.
+        No model, context compilation, acceptance, or external effect is allowed
+        inside this phase: a newer inbound must be able to commit while an older
+        provider invocation is still thinking.
+        """
+
+        async with self._lock:
+            existing = await self._lookup_event_commit(event.event_id)
+            if existing is not None:
+                persisted, original_commit = existing
+                try:
+                    persisted_observation = Observation.model_validate_json(
+                        persisted.payload_json
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise IdempotencyConflict(
+                        "committed observation cannot be decoded"
+                    ) from exc
+                if persisted != event:
+                    # A locked-head clock rebase is the one permitted
+                    # difference between a retry's client envelope and the
+                    # committed observation. All other content remains a
+                    # genuine idempotency conflict.
+                    normalized_observation = observation.model_copy(
+                        update={"logical_time": persisted_observation.logical_time}
+                    )
+                    if (
+                        normalized_observation != persisted_observation
+                    ):
+                        raise IdempotencyConflict(
+                            "observation trigger was already committed with different content"
+                        )
+                return (
+                    persisted_observation,
+                    persisted,
+                    original_commit,
+                    None,
+                    True,
+                )
+
+            before = await self._project_for_write()
+            # WorldTurnRuntime resolves the clock just before entering this
+            # lock. A concurrent scheduler tick can win that gap. Bind a new
+            # Observation to the locked head; an idempotent retry above keeps
+            # its original immutable envelope.
+            locked_logical_time = before.logical_time
+            if (
+                locked_logical_time is not None
+                and observation.logical_time != locked_logical_time
+            ):
+                observation = observation.model_copy(
+                    update={"logical_time": locked_logical_time}
+                )
+                event = WorldEvent.from_payload(
+                    schema_version=observation.schema_version,
+                    event_id=event.event_id,
+                    world_id=self._world_id,
+                    event_type="ObservationRecorded",
+                    logical_time=observation.logical_time,
+                    created_at=observation.created_at,
+                    actor=observation.actor,
+                    source=observation.source,
+                    trace_id=observation.trace_id,
+                    causation_id=observation.causation_id,
+                    correlation_id=observation.correlation_id,
+                    idempotency_key=domain_idempotency_key(
+                        event_type="ObservationRecorded",
+                        world_id=self._world_id,
+                        payload=observation.model_dump(mode="json"),
+                    )
+                    or f"observation:{observation.source}:{observation.source_event_id}",
+                    payload=observation.model_dump(mode="json"),
+                )
+
+            # Observation, reconsideration, and source-owned trigger openings
+            # are one ingress fact. Commit them as one CAS batch so a newer
+            # Observation can atomically supersede a still-unanswered episode.
+            superseded_expression_events = tuple(
+                expression_episode_complete_event(
+                    world_id=self._world_id,
+                    process=process,
+                    at=before.logical_time or observation.logical_time,
+                    trace_id=observation.trace_id,
+                    correlation_id=observation.correlation_id,
+                    outcome_ref="expression-episode:superseded-by-newer-inbound",
+                    superseding_observation_event_ref=event.event_id,
+                )
+                for process in before.trigger_processes
+                if process.process_kind == "expression_episode"
+                and process.state == "claimed"
+                and process.claim_lease is not None
+                and not expression_episode_has_authorized_action(before, process)
+            )
+            ingress_events = [
+                event,
+                *superseded_expression_events,
+                *expression_reconsideration_events_for_observation(
+                    projection=before,
+                    observation=observation,
+                    source_event=event,
+                ),
+            ]
+            episode_process: TriggerProcess | None = None
+            if self._pinned_turn is not None:
+                # Reliability lifecycle is distinct from the optional
+                # speculative Episode feature. Open and claim it with the
+                # Observation so a crash after this short phase is recoverable.
+                opened_event = expression_episode_open_event(
+                    observation=observation,
+                    observation_event=event,
+                )
+                opened_process = TriggerProcess.model_validate_json(
+                    json.dumps(opened_event.payload()["process"])
+                )
+                claimed_event, episode_process = expression_episode_claim_event(
+                    world_id=self._world_id,
+                    process=opened_process,
+                    owner_id=self._expression_episode_owner,
+                    at=before.logical_time or observation.logical_time,
+                    trace_id=observation.trace_id,
+                    correlation_id=observation.correlation_id,
+                    technical_failure_count=0,
+                )
+                ingress_events.extend((opened_event, claimed_event))
+            if self._interaction_appraisal_owner is not None:
+                ingress_events.extend(
+                    interaction_appraisal_trigger_events(
+                        observation=observation,
+                        observation_event=event,
+                        owner_id=self._interaction_appraisal_owner,
+                    )
+                )
+            if self._interaction_fact_owner is not None:
+                ingress_events.append(
+                    interaction_fact_trigger_event(
+                        observation=observation,
+                        observation_event=event,
+                    )
+                )
+            if self._read_only_tool_owner is not None:
+                ingress_events.append(
+                    read_only_tool_trigger_event(
+                        observation=observation,
+                        observation_event=event,
+                    )
+                )
+            if self._perception_owner is not None and observation.attachment_refs:
+                ingress_events.append(
+                    perception_trigger_event(
+                        observation=observation,
+                        observation_event=event,
+                    )
+                )
+            try:
+                committed = await self._commit(
+                    ingress_events,
+                    world_revision=before.world_revision,
+                    deliberation_revision=before.deliberation_revision,
+                )
+            except ConcurrencyConflict:
+                if _retry_ordinal + 1 >= _INGRESS_CAS_MAX_ATTEMPTS:
+                    raise
+            else:
+                return observation, event, committed, episode_process, False
+
+        # ``self._lock`` coordinates only this Runtime instance. Background
+        # workers and another Runtime over the same SQLite World may still win
+        # the shared ledger head. Re-enter the whole short phase so logical
+        # time, superseded episodes, and every source-owned trigger are rebuilt
+        # from one fresh projection; no partially stale batch is reused.
+        return await self._commit_ingress_observation(
+            observation=observation,
+            event=event,
+            _retry_ordinal=_retry_ordinal + 1,
+        )
+
     async def ingest(
         self,
         observation: Observation,
@@ -1733,120 +2758,29 @@ class WorldRuntime:
         reply_deferred_refs: tuple[str, ...] = ()
         reply_terminal_errors: tuple[str, ...] = ()
         audited = None
+        acceptance_technical_failure = False
+        expression_superseded_by_inbound = False
         assessment_proposal: DecisionProposal | MinimalProposal | None = None
         episode_process: TriggerProcess | None = None
-        async with self._lock:
-            existing = await self._lookup_event_commit(event.event_id)
-            if existing is not None:
-                persisted, original_commit = existing
-                if persisted != event:
-                    # A locked-head clock rebase is the one permitted
-                    # difference between a retry's client envelope and the
-                    # committed observation. All other content remains a
-                    # genuine idempotency conflict.
-                    try:
-                        persisted_observation = Observation.model_validate_json(
-                            persisted.payload_json
-                        )
-                        normalized_observation = observation.model_copy(
-                            update={"logical_time": persisted_observation.logical_time}
-                        )
-                    except (TypeError, ValueError):
-                        persisted_observation = None
-                        normalized_observation = None
-                    if (
-                        persisted_observation is None
-                        or normalized_observation != persisted_observation
-                    ):
-                        raise IdempotencyConflict(
-                            "observation trigger was already committed with different content"
-                        )
-                return await self._existing_observation_outcome(
-                    observation=observation,
-                    observation_event=persisted,
-                    original_commit=original_commit,
-                    trigger_id=trigger_id,
-                )
-            before = await self._project_for_write()
-            # WorldTurnRuntime resolves the clock just before entering this
-            # lock.  A concurrent scheduler tick can win that gap.  For a new
-            # observation, bind the event to the locked head rather than
-            # allowing a stale logical_time to violate the Observation reducer
-            # invariant.  Existing idempotent observations returned above keep
-            # their original immutable envelope.
-            locked_logical_time = before.logical_time
-            if locked_logical_time is not None and observation.logical_time != locked_logical_time:
-                observation = observation.model_copy(update={"logical_time": locked_logical_time})
-                event = WorldEvent.from_payload(
-                    schema_version=observation.schema_version,
-                    event_id=f"event:{trigger_id}",
-                    world_id=self._world_id,
-                    event_type="ObservationRecorded",
-                    logical_time=observation.logical_time,
-                    created_at=observation.created_at,
-                    actor=observation.actor,
-                    source=observation.source,
-                    trace_id=observation.trace_id,
-                    causation_id=observation.causation_id,
-                    correlation_id=observation.correlation_id,
-                    idempotency_key=domain_idempotency_key(
-                        event_type="ObservationRecorded",
-                        world_id=self._world_id,
-                        payload=observation.model_dump(mode="json"),
-                    )
-                    or f"observation:{observation.source}:{observation.source_event_id}",
-                    payload=observation.model_dump(mode="json"),
-                )
-            # Observation, reconsideration, and source-owned trigger openings
-            # are one ingress fact.  Commit them as one batch so the durable
-            # prefix proof and SQLite transaction are paid once; splitting
-            # these identical-cursor writes made warm-chat latency grow with
-            # every background lane while providing no additional authority.
-            ingress_events = [
-                event,
-                *expression_reconsideration_events_for_observation(
-                    projection=before,
-                    observation=observation,
-                    source_event=event,
-                ),
-            ]
-            if (
-                self._pinned_turn is not None
-                and self._pinned_turn.expression_episode_mode != "off"
-            ):
-                ingress_events.append(
-                    expression_episode_open_event(
-                        observation=observation, observation_event=event
-                    )
-                )
-            if self._interaction_appraisal_owner is not None:
-                trigger_events = interaction_appraisal_trigger_events(
-                    observation=observation,
-                    observation_event=event,
-                    owner_id=self._interaction_appraisal_owner,
-                )
-                ingress_events.extend(trigger_events)
-            if self._interaction_fact_owner is not None:
-                fact_event = interaction_fact_trigger_event(
-                    observation=observation,
-                    observation_event=event,
-                )
-                ingress_events.append(fact_event)
-            if self._read_only_tool_owner is not None:
-                tool_event = read_only_tool_trigger_event(
-                    observation=observation, observation_event=event
-                )
-                ingress_events.append(tool_event)
-            if self._perception_owner is not None and observation.attachment_refs:
-                perception_event = perception_trigger_event(
-                    observation=observation, observation_event=event
-                )
-                ingress_events.append(perception_event)
-            committed = await self._commit(
-                ingress_events,
-                world_revision=before.world_revision,
-                deliberation_revision=before.deliberation_revision,
+        (
+            observation,
+            event,
+            committed,
+            episode_process,
+            existing_observation,
+        ) = await self._commit_ingress_observation(
+            observation=observation,
+            event=event,
+        )
+        if existing_observation:
+            return await self._existing_observation_outcome(
+                observation=observation,
+                observation_event=event,
+                original_commit=committed,
+                trigger_id=trigger_id,
+                retry_turn_budget=turn_budget,
             )
+        else:
             _LOG.warning(
                 "world v2 ingest phase trace=%s phase=ingress_commit_ms value=%.1f",
                 observation.trace_id,
@@ -1854,12 +2788,10 @@ class WorldRuntime:
             )
             # Fast tail of the human response distribution: while the main
             # deliberation below is still being prepared, a bounded worker may
-            # place one QQ reaction on the message that just committed.  It
-            # runs concurrently with the immediate-emotion scheduling gate
-            # (neither writes during that overlap), and is awaited *before*
-            # any reply cursor is pinned: its world-revision writes must land
-            # before the reply deliberation evaluates the world, otherwise
-            # the reply Acceptance would become legitimately stale.
+            # place one QQ reaction on the message that just committed. It is
+            # awaited *before* any reply cursor is pinned: its world-revision
+            # writes must land before reply deliberation evaluates the world,
+            # otherwise the reply Acceptance would become legitimately stale.
             quick_reaction_task: (
                 asyncio.Task[QuickReactionRunResult]
                 | asyncio.Task[InlineOnceRunResult]
@@ -1873,34 +2805,9 @@ class WorldRuntime:
                         source_world_revision=committed.world_revision,
                     )
                 )
-            # A significant emotional shift is part of the current human-like
-            # reaction, not a post-reply bookkeeping job.  The dedicated
-            # appraisal model decides whether the shift warrants persistence;
-            # when it does, the same audited result supplies both Appraisal and
-            # Affect.  Only after that durable pass do we compile the visible
-            # expression against the new cursor.
-            # The bounded local model alone decides whether Appraisal needs to
-            # complete before this reply. The durable interaction-appraisal
-            # trigger was already opened unconditionally in the ingress batch,
-            # so a timeout or invalid verdict only defers work to background;
-            # deterministic keyword tables never interpret the message. Her own
-            # recent texts would sharpen the contrast for cold-withdrawal
-            # detection, but reading expression payloads back from the sidecar
-            # store here would add I/O to the reply-critical path, so the gate
-            # judges the inbound message alone.
-            immediate_emotion_selected = self._immediate_emotion_worker is not None and (
-                not self._immediate_emotion_signal_gate
-                or await resolve_immediate_emotion_gate(
-                    text=observation.text,
-                    gate=self._immediate_emotion_semantic_gate,
-                )
-            )
             quick_reaction: QuickReactionRunResult | InlineOnceRunResult | None = None
             if quick_reaction_task is not None:
-                # The worker owns hard internal budgets and never raises; this
-                # await is bounded by the local gate timeout plus one provider
-                # round trip, most of which already overlapped the scheduling
-                # gate above.
+                # The worker owns hard internal budgets and never raises.
                 quick_reaction = await quick_reaction_task
                 _LOG.warning(
                     "world v2 ingest phase trace=%s phase=quick_reaction_ms value=%.1f "
@@ -1911,46 +2818,9 @@ class WorldRuntime:
                     quick_reaction.reaction_id,
                     _user_perceived_ms(observation),
                 )
-            emotion_ready = True
-            if immediate_emotion_selected:
-                assert self._interaction_appraisal_turn is not None
-                assert self._appraisal_worker is not None
-                assert self._interaction_appraisal_owner is not None
-                immediate_result = await InteractionAppraisalTriggerRuntime(
-                    ledger=self._ledger,
-                    pinned_turn=self._interaction_appraisal_turn,
-                    worker=self._appraisal_worker,
-                    owner_id=self._interaction_appraisal_owner,
-                    affect_owner_id=self._affect_deliberation_owner,
-                    relationship_owner_id=self._relationship_deliberation_owner,
-                    immediate_emotion_worker=self._immediate_emotion_worker,
-                ).run_observation(
-                    observation.observation_id,
-                    turn_budget=turn_budget,
-                )
-                emotion_ready = immediate_result.status in {"processed", "completed_existing"}
-                if not emotion_ready:
-                    reply_deferred_refs = (
-                        *reply_deferred_refs,
-                        f"immediate_emotion.{immediate_result.status}",
-                    )
-                head = await self._project_for_write()
-                reply_cursor = ProjectionCursor(
-                    world_revision=head.world_revision,
-                    deliberation_revision=head.deliberation_revision,
-                    ledger_sequence=head.ledger_sequence,
-                )
-                _LOG.warning(
-                    "world v2 ingest phase trace=%s phase=immediate_emotion_ms value=%.1f status=%s",
-                    observation.trace_id,
-                    (time.perf_counter() - started) * 1000,
-                    immediate_result.status,
-                )
-            elif self._immediate_emotion_worker is not None:
-                _LOG.warning(
-                    "world v2 ingest phase trace=%s phase=immediate_emotion_skipped reason=low_signal",
-                    observation.trace_id,
-                )
+            if quick_reaction is not None and quick_reaction.ledger_advanced:
+                # The quick lane committed after the ingress batch; the reply
+                # must be pinned at the true head, not the stale ingress cursor.
                 head = await self._project_for_write()
                 reply_cursor = ProjectionCursor(
                     world_revision=head.world_revision,
@@ -1958,24 +2828,12 @@ class WorldRuntime:
                     ledger_sequence=head.ledger_sequence,
                 )
             else:
-                emotion_ready = True
-                if quick_reaction is not None and quick_reaction.ledger_advanced:
-                    # The quick lane committed after the ingress batch; the
-                    # reply must be pinned at the true head, not the stale
-                    # ingress commit cursor.
-                    head = await self._project_for_write()
-                    reply_cursor = ProjectionCursor(
-                        world_revision=head.world_revision,
-                        deliberation_revision=head.deliberation_revision,
-                        ledger_sequence=head.ledger_sequence,
-                    )
-                else:
-                    reply_cursor = ProjectionCursor(
-                        world_revision=committed.world_revision,
-                        deliberation_revision=committed.deliberation_revision,
-                        ledger_sequence=committed.ledger_sequence,
-                    )
-            if self._pinned_turn is not None and emotion_ready:
+                reply_cursor = ProjectionCursor(
+                    world_revision=committed.world_revision,
+                    deliberation_revision=committed.deliberation_revision,
+                    ledger_sequence=committed.ledger_sequence,
+                )
+            if self._pinned_turn is not None:
                 episode_process, episode_cursor = await self._claim_expression_episode(
                     observation
                 )
@@ -2004,17 +2862,146 @@ class WorldRuntime:
                         deliberation_revision=draw_head.deliberation_revision,
                         ledger_sequence=draw_head.ledger_sequence,
                     )
-                audited = await self._pinned_turn.audit_observation(
-                    observation=observation,
-                    observation_event=event,
-                    cursor=reply_cursor,
-                    skip_advisories=(
-                        self._immediate_emotion_worker is not None
-                        and not immediate_emotion_selected
-                    ),
-                    turn_budget=turn_budget,
-                    recorded_cadence_draws=cadence_draws,
+                expression_attempt_id = (
+                    episode_process.claim_lease.attempt_id
+                    if episode_process is not None
+                    and episode_process.claim_lease is not None
+                    else None
                 )
+                try:
+                    if expression_attempt_id is None:
+                        audited = await self._pinned_turn.audit_observation(
+                            observation=observation,
+                            observation_event=event,
+                            cursor=reply_cursor,
+                            turn_budget=turn_budget,
+                            recorded_cadence_draws=cadence_draws,
+                        )
+                    else:
+                        audited = await self._audit_expression_attempt_once(
+                            observation=observation,
+                            observation_event=event,
+                            cursor=reply_cursor,
+                            turn_budget=turn_budget,
+                            recorded_cadence_draws=cadence_draws,
+                            expression_attempt_id=expression_attempt_id,
+                        )
+                except ConcurrencyConflict as initial_stale:
+                    # A newer Observation may deliberately terminate this
+                    # still-unanswered episode while its provider is in flight.
+                    # The old candidate then has no audit/Action authority.
+                    if await self._expression_episode_was_superseded(
+                        episode_process
+                    ):
+                        expression_superseded_by_inbound = True
+                    elif expression_attempt_id is None:
+                        raise
+                    else:
+                        # Action receipts and other independent workers may
+                        # advance the head while the model is composing. A
+                        # content-bearing draft can never be rebased. Discard
+                        # it and give the same character a bounded chance to
+                        # author again against the current complete Context.
+                        # If the head remains busy, leave the durable episode
+                        # retryable rather than surfacing a transport error or
+                        # inventing a fallback reply.
+                        # Repinning is still the same user-visible turn.  Its
+                        # author may use only the original absolute deadline;
+                        # a cursor race is not authority to mint another model
+                        # budget. A later durable retry gets its own budget only
+                        # after the event-sourced retry lifecycle says it is due.
+                        stale_repin_budget = turn_budget
+                        for _ in range(EXPRESSION_FRESH_CONTEXT_REPIN_LIMIT):
+                            reservation = (
+                                await self._reserve_expression_attempt_repin_cursor(
+                                    observation=observation,
+                                    observation_event=event,
+                                    expression_attempt_id=expression_attempt_id,
+                                )
+                            )
+                            if reservation is None:
+                                if await self._expression_episode_was_superseded(
+                                    episode_process
+                                ):
+                                    expression_superseded_by_inbound = True
+                                break
+                            retry_cursor, stale_ordinal = reservation
+                            _LOG.warning(
+                                "world v2 expression repin trace=%s ordinal=%s "
+                                "from=%s/%s/%s to=%s/%s/%s",
+                                observation.trace_id,
+                                stale_ordinal,
+                                reply_cursor.world_revision,
+                                reply_cursor.deliberation_revision,
+                                reply_cursor.ledger_sequence,
+                                retry_cursor.world_revision,
+                                retry_cursor.deliberation_revision,
+                                retry_cursor.ledger_sequence,
+                            )
+                            try:
+                                repin_budget_exhausted = (
+                                    stale_repin_budget is not None
+                                    and stale_repin_budget.author_remaining() <= 0
+                                )
+                                audited = await self._audit_expression_attempt_once(
+                                    observation=observation,
+                                    observation_event=event,
+                                    cursor=retry_cursor,
+                                    turn_budget=stale_repin_budget,
+                                    recorded_cadence_draws=cadence_draws,
+                                    expression_attempt_id=expression_attempt_id,
+                                )
+                                if (
+                                    repin_budget_exhausted
+                                    and audited.proposal_id is None
+                                ):
+                                    reply_deferred_refs = (
+                                        *reply_deferred_refs,
+                                        "expression_episode.repin_budget_exhausted",
+                                    )
+                                break
+                            except ConcurrencyConflict:
+                                if await self._expression_episode_was_superseded(
+                                    episode_process
+                                ):
+                                    expression_superseded_by_inbound = True
+                                    break
+                                continue
+                        if (
+                            audited is None
+                            and not expression_superseded_by_inbound
+                        ):
+                            exhausted_cursor = (
+                                await self._expression_attempt_repin_cursor(
+                                    observation=observation,
+                                    observation_event=event,
+                                    expression_attempt_id=expression_attempt_id,
+                                )
+                            )
+                            if exhausted_cursor is not None:
+                                audited = (
+                                    await self._pinned_turn.record_expression_repin_exhausted(
+                                        observation=observation,
+                                        observation_event=event,
+                                        cursor=exhausted_cursor,
+                                        expression_attempt_id=expression_attempt_id,
+                                    )
+                                )
+                                reply_deferred_refs = (
+                                    *reply_deferred_refs,
+                                    "expression_episode.repin_budget_exhausted",
+                                )
+                            else:
+                                reply_deferred_refs = (
+                                    *reply_deferred_refs,
+                                    "expression_episode.stale_repin_pending",
+                                )
+                                _LOG.warning(
+                                    "world v2 expression repin deferred trace=%s "
+                                    "error=%s",
+                                    observation.trace_id,
+                                    type(initial_stale).__name__,
+                                )
                 _LOG.warning(
                     "world v2 ingest phase trace=%s phase=reply_audit_ms value=%.1f",
                     observation.trace_id,
@@ -2080,6 +3067,7 @@ class WorldRuntime:
                                     affect_deliberation_trigger_events(
                                         appraisal_event=appraisal_event,
                                         owner_id=self._affect_deliberation_owner,
+                                        claimed_at=trigger_head.logical_time,
                                     )
                                 ),
                                 world_revision=trigger_head.world_revision,
@@ -2161,8 +3149,16 @@ class WorldRuntime:
                         elif timing_choice == "silent":
                             pass
                         elif account is None:
-                            reply_deferred_refs = (
-                                f"reply-budget-account:{self._reply_policy.account_id}",
+                            failure_code = (
+                                "minimal_reply_acceptance."
+                                "budget_account_unavailable"
+                            )
+                            reply_deferred_refs = (failure_code,)
+                            acceptance_technical_failure = True
+                            await self._record_reply_acceptance_failure(
+                                audit=audit,
+                                observation=observation,
+                                failure_code=failure_code,
                             )
                         else:
                             try:
@@ -2183,13 +3179,13 @@ class WorldRuntime:
                                     correlation_id=observation.correlation_id,
                                 )
                             except MinimalReplyAcceptanceError as exc:
-                                if exc.code in {
-                                    "minimal_reply_acceptance.budget_unavailable",
-                                    "minimal_reply_acceptance.budget_account_unavailable",
-                                }:
-                                    reply_deferred_refs = (exc.code,)
-                                else:
-                                    reply_terminal_errors = (exc.code,)
+                                reply_deferred_refs = (exc.code,)
+                                acceptance_technical_failure = True
+                                await self._record_reply_acceptance_failure(
+                                    audit=audit,
+                                    observation=observation,
+                                    failure_code=exc.code,
+                                )
                             else:
                                 assert self._reply_recorder is not None
                                 committed = await self._commit_visible_acceptance(
@@ -2242,8 +3238,16 @@ class WorldRuntime:
                                 None,
                             )
                             if account is None:
-                                reply_deferred_refs = (
-                                    f"expression-budget-account:{self._expression_policy.account_id}",
+                                failure_code = (
+                                    "expression_plan_acceptance."
+                                    "budget_account_unavailable"
+                                )
+                                reply_deferred_refs = (failure_code,)
+                                acceptance_technical_failure = True
+                                await self._record_reply_acceptance_failure(
+                                    audit=audit,
+                                    observation=observation,
+                                    failure_code=failure_code,
                                 )
                             else:
                                 try:
@@ -2266,13 +3270,13 @@ class WorldRuntime:
                                         source_observation=observation,
                                     )
                                 except ExpressionPlanAcceptanceError as exc:
-                                    if exc.code in {
-                                        "expression_plan_acceptance.budget_unavailable",
-                                        "expression_plan_acceptance.budget_account_unavailable",
-                                    }:
-                                        reply_deferred_refs = (exc.code,)
-                                    else:
-                                        reply_terminal_errors = (exc.code,)
+                                    reply_deferred_refs = (exc.code,)
+                                    acceptance_technical_failure = True
+                                    await self._record_reply_acceptance_failure(
+                                        audit=audit,
+                                        observation=observation,
+                                        failure_code=exc.code,
+                                    )
                                 else:
                                     assert self._expression_recorder is not None
                                     committed = await self._commit_visible_acceptance(
@@ -2310,6 +3314,19 @@ class WorldRuntime:
             status = "deferred"
         else:
             status = "observed_only"
+        technical_expression_failure = self._pinned_turn is not None and (
+            not expression_superseded_by_inbound
+            and (
+                audited is None
+                or audited.proposal_id is None
+                or acceptance_technical_failure
+            )
+        )
+        if technical_expression_failure:
+            episode_process = await self._ensure_expression_retry_process(
+                observation=observation,
+                observation_event=event,
+            )
         # This advisory ledger record must never sit in front of visible reply
         # authorization. Its helper is effect-once and absorbs a bounded CAS
         # race, so background World progress cannot turn a valid reply into
@@ -2325,7 +3342,11 @@ class WorldRuntime:
             and self._pinned_turn.expression_episode_mode == "on"
             and reply_authorized
         )
-        if not episode_tail_pending:
+        if (
+            not episode_tail_pending
+            and not technical_expression_failure
+            and not expression_superseded_by_inbound
+        ):
             await self._complete_expression_episode(
                 observation=observation,
                 process=episode_process,
@@ -2358,6 +3379,9 @@ class WorldRuntime:
         observation_event: WorldEvent,
         original_commit: CommitResult,
         trigger_id: str,
+        retry_process: TriggerProcess | None = None,
+        retry_cursor: ProjectionCursor | None = None,
+        retry_turn_budget: InteractiveTurnBudget | None = None,
     ) -> RuntimeOutcome:
         """Join a completed reply acceptance without repeating model work.
 
@@ -2368,29 +3392,6 @@ class WorldRuntime:
         """
 
         projection = await self._project_for_write()
-
-        def reply_audit_from(current_projection):
-            for candidate in reversed(current_projection.proposal_audits):
-                if (
-                    candidate.trigger_ref != observation_event.event_id
-                    or candidate.proposal_id.startswith(QUICK_REACTION_PROPOSAL_PREFIX)
-                    or candidate.proposal_kind != "decision"
-                ):
-                    continue
-                try:
-                    proposal = validate_proposal_envelope(
-                        json.loads(candidate.proposal_json)
-                    )
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(proposal, DecisionProposal) and any(
-                    change.kind == "expression_plan_transition"
-                    for change in proposal.proposed_changes
-                ):
-                    return candidate, proposal
-            return None
-
-        reply_audit = reply_audit_from(projection)
         episode = next(
             (
                 item
@@ -2402,29 +3403,148 @@ class WorldRuntime:
             ),
             None,
         )
+
+        def reply_audit_from(current_projection):
+            decided_proposal_ids = {
+                decision.proposal_id
+                for decision in current_projection.acceptance_decisions
+                if decision.status in {"rejected", "stale"}
+            }
+            for candidate in reversed(current_projection.proposal_audits):
+                if (
+                    candidate.trigger_ref != observation_event.event_id
+                    or candidate.proposal_id.startswith(QUICK_REACTION_PROPOSAL_PREFIX)
+                    or candidate.proposal_id in decided_proposal_ids
+                ):
+                    continue
+                try:
+                    proposal = validate_proposal_envelope(
+                        json.loads(candidate.proposal_json)
+                    )
+                except (TypeError, ValueError):
+                    continue
+                bound_attempt = (
+                    episode is not None
+                    and candidate.attempt_id in episode.attempt_ids
+                )
+                expression_family = candidate.proposal_id.startswith(
+                    ("proposal:expression:", "proposal:chat-reply:")
+                )
+                if (
+                    isinstance(proposal, (DecisionProposal, MinimalProposal))
+                    and (bound_attempt or expression_family)
+                ):
+                    return candidate, proposal
+            return None
+
+        async def acceptance_retry_outcome(audit, failure_code: str) -> RuntimeOutcome:
+            decision_status = await self._record_reply_acceptance_failure(
+                audit=audit,
+                observation=observation,
+                failure_code=failure_code,
+            )
+            current = await self._project_for_write()
+            return RuntimeOutcome(
+                outcome_id=f"outcome:{trigger_id}",
+                trigger_id=trigger_id,
+                observation_ref=observation.observation_id,
+                committed_world_revision=current.world_revision,
+                ledger_sequence=current.ledger_sequence,
+                status="deferred",
+                deferred_refs=(
+                    failure_code,
+                    f"expression_acceptance.{decision_status}",
+                ),
+                projection_hint=f"world-revision:{current.world_revision}",
+            )
+
+        reply_audit = reply_audit_from(projection)
         if (
             reply_audit is None
             and episode is not None
             and episode.state != "terminal"
             and self._pinned_turn is not None
         ):
-            claimed, cursor = await self._claim_expression_episode(observation)
-            if cursor is None:
-                current = await self._project_for_write()
-                cursor = ProjectionCursor(
-                    world_revision=current.world_revision,
-                    deliberation_revision=current.deliberation_revision,
-                    ledger_sequence=current.ledger_sequence,
+            if retry_process is not None and retry_cursor is not None:
+                claimed, cursor = retry_process, retry_cursor
+            elif (
+                episode.state == "claimed"
+                and episode.claim_lease is not None
+                and episode.claim_lease.owner_id
+                == self._expression_episode_owner
+                and (projection.logical_time or observation.logical_time)
+                < episode.claim_lease.expires_at
+                and (
+                    (
+                        (
+                            due_at := expression_episode_work_due(
+                                projection,
+                                episode,
+                                owner_id=self._expression_episode_owner,
+                            )
+                        )
+                        is not None
+                        and due_at
+                        <= (projection.logical_time or observation.logical_time)
+                    )
+                    or not any(
+                        item.trigger_ref == observation_event.event_id
+                        and item.attempt_id == episode.claim_lease.attempt_id
+                        for item in projection.model_result_audits
+                    )
                 )
-            await self._pinned_turn.audit_observation(
-                observation=observation,
-                observation_event=observation_event,
-                cursor=cursor,
-                turn_budget=None,
+            ):
+                # The process may have committed its claim and then crashed
+                # before its reply-lane provider result was recorded. Other
+                # lane audits on the same Observation do not change that
+                # fact. There is no failed attempt to back off from, so the
+                # duplicate on the same live Runtime resumes under the same
+                # durable claim. A foreign Runtime must wait for expiry.
+                claimed = episode
+                cursor = ProjectionCursor(
+                    world_revision=projection.world_revision,
+                    deliberation_revision=projection.deliberation_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                )
+            else:
+                claimed, cursor = await self._claim_expression_episode(observation)
+            # A duplicate ingress before the retry lease expires is a pure
+            # join.  Only the scheduler-owned reclaim receives a fresh cursor
+            # and may invoke the model again.
+            if cursor is not None:
+                if claimed.claim_lease is None:
+                    raise ConcurrencyConflict(
+                        "expression episode retry lost its claim lease"
+                    )
+                await self._audit_expression_retry_with_durable_repins(
+                    observation=observation,
+                    observation_event=observation_event,
+                    process=claimed,
+                    cursor=cursor,
+                    turn_budget=retry_turn_budget,
+                )
+                projection = await self._project_for_write()
+                reply_audit = reply_audit_from(projection)
+            episode = claimed or episode
+        if (
+            episode is not None
+            and episode.state != "terminal"
+            and (
+                episode.state == "open"
+                or episode.claim_lease is None
+                or (projection.logical_time or observation.logical_time)
+                >= episode.claim_lease.expires_at
             )
-            projection = await self._project_for_write()
-            reply_audit = reply_audit_from(projection)
-            episode = claimed
+        ):
+            # Proposal/manifest continuation also owns a lease.  If the
+            # process died after recording its exact model result and that
+            # lease later expired, reclaim before completing rather than
+            # borrowing the stale attempt or regenerating prose.
+            claimed, _ = await self._claim_expression_episode(observation)
+            if claimed is not None:
+                episode = claimed
+                projection = await self._project_for_write()
+                reply_audit = reply_audit_from(projection)
         # A quick-reaction manifest shares the observation trigger but is not
         # the visible answer; retry joining must resolve the reply lane only.
         manifest = next(
@@ -2487,16 +3607,52 @@ class WorldRuntime:
                     raise RuntimeError("expression plan manifest has no durable action event")
                 committed = persisted[1]
             deferred = all(item.action.kind == "followup" for item in generic_manifest.beats)
+            recovered_disposition = None
+            if not deferred:
+                recovered_disposition = (
+                    await self._resolve_expression_episode_before_dispatch(
+                        observation=observation,
+                        observation_event=observation_event,
+                        process=episode,
+                    )
+                )
+            if (
+                deferred
+                or self._pinned_turn is None
+                or self._pinned_turn.expression_episode_mode != "on"
+            ):
+                await self._complete_expression_episode(
+                    observation=observation,
+                    process=episode,
+                    outcome_ref=(
+                        "expression-episode:deferred"
+                        if deferred
+                        else "expression-episode:action_authorized"
+                    ),
+                )
+                projection = await self._project_for_write()
+            cancelled = recovered_disposition in {
+                "cancel_pending",
+                "supersede_pending",
+            }
+            if cancelled:
+                projection = await self._project_for_write()
             return RuntimeOutcome(
                 outcome_id=f"outcome:{trigger_id}",
                 trigger_id=trigger_id,
                 observation_ref=observation.observation_id,
-                committed_world_revision=committed.world_revision,
-                ledger_sequence=committed.ledger_sequence,
-                status="deferred" if deferred else "action_authorized",
+                committed_world_revision=projection.world_revision,
+                ledger_sequence=projection.ledger_sequence,
+                status=(
+                    "deferred"
+                    if deferred
+                    else "observed_only"
+                    if cancelled
+                    else "action_authorized"
+                ),
                 authorized_action_ids=(
                     ()
-                    if deferred
+                    if deferred or cancelled
                     else tuple(item.action.action_id for item in generic_manifest.beats)
                 ),
                 deferred_refs=(
@@ -2509,18 +3665,55 @@ class WorldRuntime:
                 ),
                 projection_hint=f"world-revision:{committed.world_revision}",
             )
-        if (
-            manifest is None
-            and reply_audit is not None
-            and self._expression_policy is not None
-            and self._expression_recorder is not None
-        ):
+        if manifest is None and reply_audit is not None:
             audit, proposal = reply_audit
-            if proposal.timing_choice == "silent":
+            source_ref = next(
+                (
+                    item
+                    for item in projection.message_observations
+                    if item.observation_id == observation.observation_id
+                ),
+                None,
+            )
+            if source_ref is not None and any(
+                item.world_revision > source_ref.world_revision
+                for item in projection.message_observations
+            ):
+                # The provider result is durable, but it was overtaken before
+                # gaining Action authority.  Preserve the audit and terminate
+                # the old lifecycle; never send old prose after a newer turn.
                 await self._complete_expression_episode(
                     observation=observation,
                     process=episode,
-                    outcome_ref="expression-episode:observed_only",
+                    outcome_ref="expression-episode:superseded-by-newer-inbound",
+                )
+                projection = await self._project_for_write()
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:{trigger_id}",
+                    trigger_id=trigger_id,
+                    observation_ref=observation.observation_id,
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="observed_only",
+                    deferred_refs=("expression_episode.superseded",),
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+
+            timing_choice = (
+                proposal.timing_choice
+                if isinstance(proposal, DecisionProposal)
+                else "silent"
+                if not proposal.proposed_changes and not proposal.action_intents
+                else "later"
+                if len(proposal.action_intents) == 1
+                and proposal.action_intents[0].kind == "followup"
+                else "now"
+            )
+            if timing_choice == "silent":
+                await self._complete_expression_episode(
+                    observation=observation,
+                    process=episode,
+                    outcome_ref="expression-episode:model-silent",
                 )
                 projection = await self._project_for_write()
                 return RuntimeOutcome(
@@ -2532,7 +3725,145 @@ class WorldRuntime:
                     status="observed_only",
                     projection_hint=f"world-revision:{projection.world_revision}",
                 )
-            if proposal.timing_choice == "now":
+            if timing_choice == "later":
+                if self._social_action_worker is None:
+                    return RuntimeOutcome(
+                        outcome_id=f"outcome:{trigger_id}",
+                        trigger_id=trigger_id,
+                        observation_ref=observation.observation_id,
+                        committed_world_revision=projection.world_revision,
+                        ledger_sequence=projection.ledger_sequence,
+                        status="deferred",
+                        deferred_refs=("social_action.deferred_pending",),
+                        projection_hint=f"world-revision:{projection.world_revision}",
+                    )
+                social = await self._social_action_worker.run_observation(
+                    observation.observation_id
+                )
+                if social.status in {"deferred", "duplicate"}:
+                    await self._complete_expression_episode(
+                        observation=observation,
+                        process=episode,
+                        outcome_ref="expression-episode:deferred",
+                    )
+                    projection = await self._project_for_write()
+                    action_ids = social.action_ids or (
+                        (social.action_id,) if social.action_id is not None else ()
+                    )
+                    return RuntimeOutcome(
+                        outcome_id=f"outcome:{trigger_id}",
+                        trigger_id=trigger_id,
+                        observation_ref=observation.observation_id,
+                        committed_world_revision=projection.world_revision,
+                        ledger_sequence=projection.ledger_sequence,
+                        status="deferred",
+                        deferred_refs=tuple(
+                            f"social_action.deferred:{action_id}"
+                            for action_id in action_ids
+                        ),
+                        projection_hint=f"world-revision:{projection.world_revision}",
+                    )
+                if social.status == "stale":
+                    await self._complete_expression_episode(
+                        observation=observation,
+                        process=episode,
+                        outcome_ref="expression-episode:superseded-by-newer-inbound",
+                    )
+                    projection = await self._project_for_write()
+                    return RuntimeOutcome(
+                        outcome_id=f"outcome:{trigger_id}",
+                        trigger_id=trigger_id,
+                        observation_ref=observation.observation_id,
+                        committed_world_revision=projection.world_revision,
+                        ledger_sequence=projection.ledger_sequence,
+                        status="observed_only",
+                        deferred_refs=(
+                            social.reason_code or "social_action.cursor_stale",
+                        ),
+                        projection_hint=f"world-revision:{projection.world_revision}",
+                    )
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:{trigger_id}",
+                    trigger_id=trigger_id,
+                    observation_ref=observation.observation_id,
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status=(
+                        "failed_safe"
+                        if social.status == "budget_exhausted"
+                        else "deferred"
+                    ),
+                    deferred_refs=(
+                        ()
+                        if social.status == "budget_exhausted"
+                        else (
+                            social.reason_code
+                            or f"social_action.{social.status}",
+                        )
+                    ),
+                    terminal_errors=(
+                        (
+                            social.reason_code
+                            or "social_action.budget_exhausted"
+                        ),
+                    )
+                    if social.status == "budget_exhausted"
+                    else (),
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+
+            if isinstance(proposal, MinimalProposal):
+                if self._reply_policy is None or self._reply_recorder is None:
+                    return await acceptance_retry_outcome(
+                        audit,
+                        "minimal_reply_acceptance.unconfigured",
+                    )
+                account = next(
+                    (
+                        item
+                        for item in projection.budget_accounts
+                        if item.account_id == self._reply_policy.account_id
+                    ),
+                    None,
+                )
+                if account is None:
+                    return await acceptance_retry_outcome(
+                        audit,
+                        "minimal_reply_acceptance.budget_account_unavailable",
+                    )
+                try:
+                    material = derive_minimal_reply_material(
+                        audit=audit,
+                        cursor=ProjectionCursor(
+                            world_revision=projection.world_revision,
+                            deliberation_revision=projection.deliberation_revision,
+                            ledger_sequence=projection.ledger_sequence,
+                        ),
+                        world_id=self._world_id,
+                        policy=self._reply_policy,
+                        account=account,
+                        logical_time=projection.logical_time or observation.logical_time,
+                        created_at=observation.created_at,
+                        trace_id=observation.trace_id,
+                        correlation_id=observation.correlation_id,
+                    )
+                except MinimalReplyAcceptanceError as exc:
+                    return await acceptance_retry_outcome(audit, exc.code)
+                committed = await self._commit_visible_acceptance(
+                    recorder=self._reply_recorder,
+                    acceptance_id=f"acceptance:minimal-reply:{audit.proposal_id}",
+                    material=material,
+                    actor=self._reply_policy.actor,
+                    source="world-runtime:minimal-reply-recovery",
+                    trace_id=observation.trace_id,
+                )
+                action_ids = (material.action.action_id,)
+            else:
+                if self._expression_policy is None or self._expression_recorder is None:
+                    return await acceptance_retry_outcome(
+                        audit,
+                        "expression_plan_acceptance.unconfigured",
+                    )
                 account = next(
                     (
                         item
@@ -2541,7 +3872,12 @@ class WorldRuntime:
                     ),
                     None,
                 )
-                if account is not None:
+                if account is None:
+                    return await acceptance_retry_outcome(
+                        audit,
+                        "expression_plan_acceptance.budget_account_unavailable",
+                    )
+                try:
                     material = derive_expression_plan_material(
                         audit=audit,
                         cursor=ProjectionCursor(
@@ -2559,32 +3895,52 @@ class WorldRuntime:
                         payload_store=self._expression_payload_store,
                         source_observation=observation,
                     )
-                    committed = await self._commit_visible_acceptance(
-                        recorder=self._expression_recorder,
-                        acceptance_id=f"acceptance:expression-plan:{audit.proposal_id}",
-                        material=material,
-                        actor=self._expression_policy.actor,
-                        source="world-runtime:expression-recovery",
-                        trace_id=observation.trace_id,
-                    )
-                    await self._complete_expression_episode(
-                        observation=observation,
-                        process=episode,
-                        outcome_ref="expression-episode:action_authorized",
-                    )
-                    projection = await self._project_for_write()
-                    return RuntimeOutcome(
-                        outcome_id=f"outcome:{trigger_id}",
-                        trigger_id=trigger_id,
-                        observation_ref=observation.observation_id,
-                        committed_world_revision=projection.world_revision,
-                        ledger_sequence=projection.ledger_sequence,
-                        status="action_authorized",
-                        authorized_action_ids=tuple(
-                            item.action.action_id for item in material.beats
-                        ),
-                        projection_hint=f"world-revision:{committed.world_revision}",
-                    )
+                except ExpressionPlanAcceptanceError as exc:
+                    return await acceptance_retry_outcome(audit, exc.code)
+                committed = await self._commit_visible_acceptance(
+                    recorder=self._expression_recorder,
+                    acceptance_id=f"acceptance:expression-plan:{audit.proposal_id}",
+                    material=material,
+                    actor=self._expression_policy.actor,
+                    source="world-runtime:expression-recovery",
+                    trace_id=observation.trace_id,
+                )
+                action_ids = tuple(item.action.action_id for item in material.beats)
+
+            recovered_disposition = (
+                await self._resolve_expression_episode_before_dispatch(
+                    observation=observation,
+                    observation_event=observation_event,
+                    process=episode,
+                )
+            )
+            cancelled = recovered_disposition in {
+                "cancel_pending",
+                "supersede_pending",
+            }
+            if (
+                not cancelled
+                and (
+                    self._pinned_turn is None
+                    or self._pinned_turn.expression_episode_mode != "on"
+                )
+            ):
+                await self._complete_expression_episode(
+                    observation=observation,
+                    process=episode,
+                    outcome_ref="expression-episode:action_authorized",
+                )
+            projection = await self._project_for_write()
+            return RuntimeOutcome(
+                outcome_id=f"outcome:{trigger_id}",
+                trigger_id=trigger_id,
+                observation_ref=observation.observation_id,
+                committed_world_revision=projection.world_revision,
+                ledger_sequence=projection.ledger_sequence,
+                status="observed_only" if cancelled else "action_authorized",
+                authorized_action_ids=() if cancelled else action_ids,
+                projection_hint=f"world-revision:{committed.world_revision}",
+            )
         if manifest is None:
             # A reply lane may terminate with only durable deliberation audit
             # evidence (for example, main and quick-recovery both fail
@@ -2607,11 +3963,10 @@ class WorldRuntime:
                 for item in projection.trigger_processes
             )
             if has_bound_deliberation or has_appraisal_trigger:
-                await self._complete_expression_episode(
-                    observation=observation,
-                    process=episode,
-                    outcome_ref="expression-episode:observed_only",
-                )
+                # No Proposal means a technical model/validation failure, not
+                # a character choice to stay silent.  Keep the claimed
+                # lifecycle recoverable; a successful, source-bound `silent`
+                # proposal is handled and terminalized above.
                 projection = await self._project_for_write()
                 return RuntimeOutcome(
                     outcome_id=f"outcome:{trigger_id}",
@@ -2642,12 +3997,22 @@ class WorldRuntime:
         action_event, committed = persisted
         if action_event.event_type != "ActionAuthorized":
             raise RuntimeError("minimal reply action identity resolves to another event type")
+        if (
+            self._pinned_turn is None
+            or self._pinned_turn.expression_episode_mode != "on"
+        ):
+            await self._complete_expression_episode(
+                observation=observation,
+                process=episode,
+                outcome_ref="expression-episode:action_authorized",
+            )
+            projection = await self._project_for_write()
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
             trigger_id=trigger_id,
             observation_ref=observation.observation_id,
-            committed_world_revision=committed.world_revision,
-            ledger_sequence=committed.ledger_sequence,
+            committed_world_revision=projection.world_revision,
+            ledger_sequence=projection.ledger_sequence,
             status="action_authorized",
             authorized_action_ids=(manifest.action_id,),
             projection_hint=f"world-revision:{committed.world_revision}",
@@ -3078,6 +4443,61 @@ class WorldRuntime:
                 commit_id=f"commit:{trigger_id}:inbox",
             )
             after_inbox = await self._project_for_write()
+            completed_process = next(
+                (
+                    candidate
+                    for candidate in after_inbox.trigger_processes
+                    if candidate.trigger_id == trigger_id and candidate.state == "terminal"
+                ),
+                None,
+            )
+            if completed_process is not None:
+                prior_reconciliation = next(
+                    (
+                        candidate
+                        for candidate in after_inbox.reconciliations
+                        if candidate.result_id == result.result_id
+                    ),
+                    None,
+                )
+                prior_receipt = next(
+                    (
+                        candidate
+                        for candidate in after_inbox.execution_receipts
+                        if candidate.result_id == result.result_id
+                    ),
+                    None,
+                )
+                if prior_reconciliation is not None:
+                    runtime_status = "deferred"
+                    deferred_ref = prior_reconciliation.reconciliation_id
+                    projection_hint = deferred_ref
+                elif (
+                    prior_receipt is not None
+                    and prior_receipt.action_id == result.action_id
+                    and prior_receipt.provider == result.source
+                    and prior_receipt.provider_ref == result.provider_ref
+                    and prior_receipt.source_event_id == result.source_event_id
+                    and prior_receipt.raw_payload_hash == result.raw_payload_hash
+                    and prior_receipt.observed_state == result.status
+                ):
+                    runtime_status = "action_executed"
+                    deferred_ref = None
+                    projection_hint = f"action:{result.action_id}:{result.status}"
+                else:
+                    raise IdempotencyConflict(
+                        f"completed settlement {trigger_id!r} has no equivalent terminal result"
+                    )
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:{trigger_id}",
+                    trigger_id=trigger_id,
+                    observation_ref=result.result_id,
+                    committed_world_revision=after_inbox.world_revision,
+                    ledger_sequence=after_inbox.ledger_sequence,
+                    status=runtime_status,
+                    deferred_refs=(deferred_ref,) if deferred_ref else (),
+                    projection_hint=projection_hint,
+                )
             plan = self._settlement.plan(
                 result,
                 trigger_id=trigger_id,

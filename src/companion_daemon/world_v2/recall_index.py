@@ -23,7 +23,7 @@ from .schema_core import FrozenModel, PrivacyClass
 from .sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
 
 
-RECALL_INDEX_POLICY_VERSION = "world-v2-recall-index.hybrid.2"
+RECALL_INDEX_POLICY_VERSION = "world-v2-recall-index.hybrid.3"
 RECALL_RESULT_MAX_BYTES = 6_000
 MAX_RECALL_QUERY_CHARACTERS = 1_024
 _PRIVACY_RANK: dict[PrivacyClass, int] = {
@@ -116,7 +116,26 @@ class RecallDocument(FrozenModel):
         "expired",
     ] = "active"
     privacy_class: PrivacyClass
-    authority: Literal["world_fact", "defeasible_interpretation"] = "world_fact"
+    authority: Literal[
+        "world_fact",
+        "dialogue_record",
+        "defeasible_interpretation",
+    ] = "world_fact"
+    epistemic_scope: Literal[
+        "world_fact",
+        "counterpart_report_only",
+        "companion_expression_record",
+        "private_interpretation",
+    ] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    speaker_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def source_and_time_are_closed(self) -> Self:
@@ -168,7 +187,52 @@ class RecallDocument(FrozenModel):
             raise ValueError("recall validity interval is reversed")
         if (self.memory_kind == "reflective") != (self.authority == "defeasible_interpretation"):
             raise ValueError("reflective recall must remain non-factual authority")
+        if self.authority == "dialogue_record":
+            if self.epistemic_scope not in {
+                "counterpart_report_only",
+                "companion_expression_record",
+            }:
+                raise ValueError("dialogue recall must retain its epistemic scope")
+            if self.speaker_ref is None:
+                raise ValueError("dialogue recall must retain its speaker")
+            if self.speaker_ref not in self.subject_refs:
+                raise ValueError("dialogue recall speaker must remain in subject scope")
+            if (
+                self.epistemic_scope == "counterpart_report_only"
+                and self.speaker_ref == self.actor_ref
+            ) or (
+                self.epistemic_scope == "companion_expression_record"
+                and self.speaker_ref != self.actor_ref
+            ):
+                raise ValueError("dialogue recall speaker contradicts its epistemic scope")
+        elif self.speaker_ref is not None:
+            raise ValueError("non-dialogue recall cannot declare a dialogue speaker")
+        elif (
+            self.authority == "world_fact"
+            and self.epistemic_scope not in {None, "world_fact"}
+        ) or (
+            self.authority == "defeasible_interpretation"
+            and self.epistemic_scope not in {None, "private_interpretation"}
+        ):
+            raise ValueError("recall authority and epistemic scope disagree")
         return self
+
+    @property
+    def effective_epistemic_scope(
+        self,
+    ) -> Literal[
+        "world_fact",
+        "counterpart_report_only",
+        "companion_expression_record",
+        "private_interpretation",
+    ]:
+        if self.epistemic_scope is not None:
+            return self.epistemic_scope
+        return (
+            "private_interpretation"
+            if self.authority == "defeasible_interpretation"
+            else "world_fact"
+        )
 
 
 class RecallQuery(FrozenModel):

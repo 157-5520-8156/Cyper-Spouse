@@ -83,7 +83,7 @@ class _AppraisalChat:
                 "meanings": [{"meaning": "boundary_violation", "confidence": 8_200}],
                 "attribution": "user",
                 "severity": 7_800,
-                "components": [{"dimension": "hurt", "intensity_bp": 6_200}],
+                "components": [{"dimension": "hurt", "target_intensity_bp": 6_200}],
             },
             ensure_ascii=False,
         )

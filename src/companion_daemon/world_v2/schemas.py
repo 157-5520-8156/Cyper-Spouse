@@ -574,10 +574,24 @@ class TriggerProcess(FrozenModel):
     state: Literal["open", "claimed", "terminal"]
     claim_lease: ClaimLease | None = None
     attempt_ids: tuple[str, ...] = ()
+    expression_repin_reservation_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=2,
+        exclude_if=lambda value: not value,
+    )
     runtime_outcome_ref: str | None = None
 
     @model_validator(mode="after")
     def active_attempt_matches_lease(self) -> TriggerProcess:
+        if self.expression_repin_reservation_ids:
+            if self.process_kind != "expression_episode" or self.state == "open":
+                raise ValueError(
+                    "only an active or terminal expression episode may retain repin reservations"
+                )
+            if len(set(self.expression_repin_reservation_ids)) != len(
+                self.expression_repin_reservation_ids
+            ):
+                raise ValueError("expression repin reservation ids must be unique")
         if (
             self.process_kind
             not in {
@@ -2942,7 +2956,7 @@ class PendingContextualLifeSourceProjection(FrozenModel):
 class ContextualLifeRetryProjection(FrozenModel):
     """One lane/source-specific technical retry; unrelated work cannot reset it."""
 
-    lane: Literal["formation", "planning"]
+    lane: Literal["formation", "planning", "experience_memory"]
     source_event_ref: str = Field(min_length=1)
     source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     retry_ordinal: int = Field(ge=1)
@@ -2963,7 +2977,7 @@ class ContextualLifeRetryProjection(FrozenModel):
 
 class ContextualLifeTechnicalFailureRecordedPayload(FrozenModel):
     failure_id: str = Field(min_length=1)
-    lane: Literal["formation", "planning"]
+    lane: Literal["formation", "planning", "experience_memory"]
     source_event_ref: str = Field(min_length=1)
     source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     evaluated_world_revision: int = Field(ge=0)
@@ -3903,7 +3917,7 @@ class PrivateImpressionProposalProjection(FrozenModel):
     proposal_kind: Literal["private_impression_transition"] = "private_impression_transition"
     proposal_encoding: Literal["typed-authority-v1"]
     authority_contract_ref: Literal["proposal-contract:private-impression.1"]
-    transition_kind: Literal["open"]
+    transition_kind: Literal["open", "consolidate", "supersede"]
     change_id: str = Field(min_length=1)
     transition_id: str = Field(min_length=1)
     evaluated_world_revision: int = Field(ge=0)
@@ -3912,7 +3926,10 @@ class PrivateImpressionProposalProjection(FrozenModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     appraisal_refs: tuple[AppraisalMeaningRef, ...] = Field(min_length=1)
     policy_refs: tuple[str, ...] = Field(min_length=1)
-    reflection_contract: Literal["private-impression-draft.3"] | None = None
+    reflection_contract: Literal[
+        "private-impression-draft.3",
+        "private-impression-draft.4",
+    ] | None = None
     reflection_source_refs: tuple[str, ...] = ()
     source_model_result: str | None = Field(default=None, min_length=1, max_length=256)
     source_capsule_id: str | None = Field(
@@ -3922,7 +3939,7 @@ class PrivateImpressionProposalProjection(FrozenModel):
     proposed_mutation: PrivateImpressionProposedMutation
 
     @model_validator(mode="after")
-    def transition_matches_only_installed_open(self) -> PrivateImpressionProposalProjection:
+    def transition_matches_installed_mutation(self) -> PrivateImpressionProposalProjection:
         if self.proposed_mutation.event_type != "PrivateImpressionAccepted":
             raise ValueError("private impression proposal transition does not match event")
         lineage = (
@@ -5362,7 +5379,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.44"
+    reducer_bundle_version: str = "world-v2-reducers.46"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)

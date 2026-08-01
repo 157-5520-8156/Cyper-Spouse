@@ -13,7 +13,6 @@ from collections.abc import Awaitable, Callable
 import hashlib
 import json
 import logging
-import re
 from threading import Lock
 from typing import Literal, Protocol
 
@@ -50,11 +49,6 @@ _NON_CANCELLABLE_STATES = frozenset(
     {"dispatch_started", "provider_accepted", "delivered"}
 )
 _LOG = logging.getLogger(__name__)
-_PLACEHOLDER = re.compile(
-    r"(稍等|等一下|让我(?:想想|看看)|我(?:还)?在想|容我想想|"
-    r"give me a (?:moment|second)|let me (?:think|check)|hold on)",
-    re.IGNORECASE,
-)
 
 
 def validate_provisional_proposal(proposal: ProposalInput | dict[str, object]) -> str:
@@ -84,9 +78,8 @@ def validate_provisional_proposal(proposal: ProposalInput | dict[str, object]) -
         not isinstance(text, str)
         or not text.strip()
         or beat.get("content_type") != "text/plain"
-        or _PLACEHOLDER.search(text.strip())
     ):
-        raise ValueError("provisional text is empty, placeholder, or non-text")
+        raise ValueError("provisional text is empty or non-text")
     return text.strip()
 
 
@@ -833,8 +826,6 @@ class ExpressionEpisode:
         if phase == "provisional":
             if candidate.beat_count != 1 or candidate.modality != "text":
                 return "provisional.single_text_beat_required"
-            if _PLACEHOLDER.search(candidate.text.strip()):
-                return "provisional.placeholder"
         return None
 
     async def _cancel_actions(

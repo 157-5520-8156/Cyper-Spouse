@@ -11,7 +11,10 @@ from typing import Protocol
 from .runtime import WorldRuntime
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
 from .production_latency_trace import ProductionLatencyRecorder
-from .action_pump import ActionPumpResult
+from .action_pump import (
+    ActionPumpResult,
+    ProviderAcceptedReconciliationGate,
+)
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .bounded_decision_vertical import AnchoredRunResult
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
@@ -90,6 +93,9 @@ class WorldTurnRuntime:
         budget = (
             self._interactive_turn_budget_policy.start(
                 processing_started_at=processing_started_at,
+                ingress_started_at=_ingress_started_at(
+                    turn.coalescing_metadata
+                ),
                 marker=(
                     lambda event: trace.record_duration(event, duration_ms=0.0)  # type: ignore[arg-type]
                     if trace is not None
@@ -99,40 +105,48 @@ class WorldTurnRuntime:
             if self._interactive_turn_budget_policy is not None
             else None
         )
-        return await self._runtime.ingest(
-            Observation(
-                schema_version="world-v2.1",
-                observation_id=f"observation:{source_event_id}",
-                world_id=self._runtime.world_id,
-                # Provider arrival time is evidence, not World Clock authority.
-                # A production world is initialized by WorldStarted and moves
-                # only through ClockAdvanced; unbootstrapped in-memory fixtures
-                # retain the historical first-observation fallback.
-                logical_time=logical_time or turn.observed_at,
-                created_at=turn.observed_at,
-                trace_id=turn.trace_id,
-                causation_id=source_event_id,
-                correlation_id=source_event_id,
-                source=f"platform:{turn.platform}",
-                source_event_id=source_event_id,
-                actor=actor,
-                channel=turn.platform,
-                payload_ref=f"ingress:{source_event_id}",
-                payload_hash=payload_hash,
-                text=turn.text,
-                received_at=turn.observed_at,
-                # Provider identity is committed with the Observation so a
-                # later reaction can bind the exact inbound message without
-                # trusting a model-supplied target.
-                reply_context={
-                    "target": target,
-                    "platform_message_id": platform_message_id,
-                },
-                attachment_refs=turn.attachment_refs,
-                coalescing_metadata=turn.coalescing_metadata,
-            ),
-            turn_budget=budget,
-        )
+        try:
+            return await self._runtime.ingest(
+                Observation(
+                    schema_version="world-v2.1",
+                    observation_id=f"observation:{source_event_id}",
+                    world_id=self._runtime.world_id,
+                    # Provider arrival time is evidence, not World Clock authority.
+                    # A production world is initialized by WorldStarted and moves
+                    # only through ClockAdvanced; unbootstrapped in-memory fixtures
+                    # retain the historical first-observation fallback.
+                    logical_time=logical_time or turn.observed_at,
+                    created_at=turn.observed_at,
+                    trace_id=turn.trace_id,
+                    causation_id=source_event_id,
+                    correlation_id=source_event_id,
+                    source=f"platform:{turn.platform}",
+                    source_event_id=source_event_id,
+                    actor=actor,
+                    channel=turn.platform,
+                    payload_ref=f"ingress:{source_event_id}",
+                    payload_hash=payload_hash,
+                    text=turn.text,
+                    received_at=turn.observed_at,
+                    # Provider identity is committed with the Observation so a
+                    # later reaction can bind the exact inbound message without
+                    # trusting a model-supplied target.
+                    reply_context={
+                        "target": target,
+                        "platform_message_id": platform_message_id,
+                    },
+                    attachment_refs=turn.attachment_refs,
+                    coalescing_metadata=turn.coalescing_metadata,
+                ),
+                turn_budget=budget,
+            )
+        finally:
+            if self._latency_recorder is not None:
+                # Cognition owns the protected active lease.  Action dispatch
+                # and provider visibility remain joinable through the bounded
+                # post-cognition window, so an exception or caller cancellation
+                # cannot leak an active trace for the rest of the process.
+                self._latency_recorder.finish_cognition(turn.trace_id)
 
     async def settle(self, result: ExternalObservation) -> RuntimeOutcome:
         """Settle an asynchronous provider receipt through the same v2 seam."""
@@ -165,7 +179,13 @@ class WorldTurnRuntime:
 
         return self._runtime.project(viewer)
 
-    async def drain_actions_once(self) -> ActionPumpResult | None:
+    async def drain_actions_once(
+        self,
+        *,
+        provider_accepted_reconciliation_gate: (
+            ProviderAcceptedReconciliationGate | None
+        ) = None,
+    ) -> ActionPumpResult | None:
         """Advance one already-authorized delivery without exposing the ledger.
 
         A platform host normally invokes this from its durable delivery worker
@@ -177,7 +197,11 @@ class WorldTurnRuntime:
         responsibilities.
         """
 
-        return await self._runtime.drain_actions_once()
+        return await self._runtime.drain_actions_once(
+            provider_accepted_reconciliation_gate=(
+                provider_accepted_reconciliation_gate
+            )
+        )
 
     async def drain_action(self, action_id: str) -> ActionPumpResult | None:
         """Advance only the Action that an ingress response is allowed to expose."""
@@ -222,6 +246,17 @@ def _inbound_payload_hash(turn: InboundTurn) -> str:
 
 def _processing_started_at(metadata: dict[str, object]) -> datetime | None:
     raw = metadata.get("processing_started_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return value if value.tzinfo is not None and value.utcoffset() is not None else None
+
+
+def _ingress_started_at(metadata: dict[str, object]) -> datetime | None:
+    raw = metadata.get("window_opened_at")
     if not isinstance(raw, str):
         return None
     try:

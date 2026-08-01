@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hashlib
 import json
 
@@ -23,14 +23,27 @@ def affect_deliberation_trigger_id(*, world_id: str, appraisal_event_id: str) ->
 
 
 def affect_deliberation_trigger_events(
-    *, appraisal_event: WorldEvent, owner_id: str, lease_seconds: int = 120
+    *,
+    appraisal_event: WorldEvent,
+    owner_id: str,
+    lease_seconds: int = 120,
+    claimed_at: datetime | None = None,
 ) -> tuple[WorldEvent, WorldEvent]:
-    """Open and claim the one effect-once affect turn for an AppraisalAccepted event."""
+    """Open and claim the one effect-once affect turn for an AppraisalAccepted event.
+
+    ``claimed_at`` is the caller's current projection Logical Time.  Omitting
+    it preserves the historical same-turn derivation used by existing callers.
+    """
 
     if appraisal_event.event_type != "AppraisalAccepted":
         raise ValueError("affect trigger requires AppraisalAccepted")
     if not owner_id or lease_seconds <= 0:
         raise ValueError("affect trigger owner and positive lease are required")
+    claim_time = appraisal_event.logical_time if claimed_at is None else claimed_at
+    if claim_time.tzinfo is None or claim_time.utcoffset() is None:
+        raise ValueError("affect trigger claim time must be timezone-aware")
+    if claim_time < appraisal_event.logical_time:
+        raise ValueError("affect trigger claim cannot precede its appraisal")
     trigger_id = affect_deliberation_trigger_id(
         world_id=appraisal_event.world_id, appraisal_event_id=appraisal_event.event_id
     )
@@ -50,8 +63,8 @@ def affect_deliberation_trigger_events(
             "claim_lease": ClaimLease(
                 owner_id=owner_id,
                 attempt_id=attempt_id,
-                acquired_at=appraisal_event.logical_time,
-                expires_at=appraisal_event.logical_time + timedelta(seconds=lease_seconds),
+                acquired_at=claim_time,
+                expires_at=claim_time + timedelta(seconds=lease_seconds),
             ),
             "attempt_ids": (attempt_id,),
         }
@@ -73,7 +86,7 @@ def affect_deliberation_trigger_events(
                 event_id=f"event:affect-deliberation:{role}:{_digest([trigger_id, attempt_id, role])}",
                 world_id=appraisal_event.world_id,
                 event_type=event_type,
-                logical_time=appraisal_event.logical_time,
+                logical_time=appraisal_event.logical_time if role == "opened" else claim_time,
                 created_at=appraisal_event.created_at,
                 actor=owner_id,
                 source="world-v2:affect-trigger",

@@ -19,12 +19,16 @@ import logging
 import os
 from pathlib import Path
 import time
-from typing import Literal, Mapping
+from typing import Awaitable, Literal, Mapping, Protocol
 
 from companion_daemon import event_media
 
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
-from .action_pump import ActionExecutor, ActionPumpResult
+from .action_pump import (
+    ActionExecutor,
+    ActionPumpResult,
+    ProviderAcceptedReconciliationGate,
+)
 from .activity_plan_runtime import (
     ActivityPlanCommand,
     ActivityPlanRuntime,
@@ -93,11 +97,16 @@ from .deliberation import (
 )
 from .production_proposal_grammar import compose_production_deliberation
 from .expression_episode import ExpressionEpisodeDiagnostics
+from .expression_episode_lifecycle import (
+    expression_episode_technical_failure_count,
+    expression_episode_work_due,
+)
 from .ledger_context_resolver import (
     ContextRelevanceScope,
     context_capsule_compiler_from_ledger,
     fact_recall_items,
 )
+from .context_resolver import query_from_projection
 from .change_phase_view import change_phase_reading_prose, change_phase_readings
 from .mood_view import MOOD_LABELS
 from .npc_relationship_view import npc_relationship_readings
@@ -216,6 +225,7 @@ from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
 from .expression_reconsideration_model_adapter import (
     AuditedReplacementReconsiderationReviewer,
     ExpressionReconsiderationChatModelAdapter,
+    reconsideration_role_context_from_capsule,
 )
 from .expression_reconsideration_runtime import (
     ExpressionReconsiderationReviewer,
@@ -232,7 +242,11 @@ from .production_performance_evidence import (
     ProductionPerformanceEvidence,
     ProductionPerformanceEvidenceReader,
 )
-from .expression_draft import QQ_NAPCAT_EXPRESSION_CAPABILITIES
+from .expression_draft import (
+    ExpressionDraftCapabilities,
+    QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    TEXT_ONLY_EXPRESSION_CAPABILITIES,
+)
 from .social_action_acceptance import SocialDeferredPolicy
 from .social_action_worker import SocialActionRunResult, SocialActionWorker
 from .quick_reaction import QuickReactionWorker
@@ -294,6 +308,7 @@ from .schemas import (
     CommitResult,
     EvidenceRef,
     ExternalObservation,
+    LedgerProjection,
     OutcomeObservation,
     ProjectionCursor,
     ProjectionRequest,
@@ -308,6 +323,80 @@ from .world_turn_runtime import InboundIdentityResolver, InboundTurn, WorldTurnR
 
 
 _LOG = logging.getLogger(__name__)
+
+_EXPRESSION_RETRY_WARNING_GRACE = timedelta(minutes=2)
+
+
+class _AsyncCloseable(Protocol):
+    """The lifecycle surface retained from factory-owned deliberations."""
+
+    async def aclose(self) -> None: ...
+
+
+def _expression_retry_health(
+    projection: LedgerProjection,
+) -> dict[str, object]:
+    """Project durable technical-retry liveness without process-local state.
+
+    The scheduler-owned lifecycle helpers remain the single definition of
+    which open/claimed episode needs continuation and when.  Health only
+    summarizes that immutable projection, so process restart cannot reset it.
+    """
+
+    pending_with_due = []
+    for process in projection.trigger_processes:
+        due_at = expression_episode_work_due(projection, process)
+        if due_at is not None:
+            pending_with_due.append((process, due_at))
+    pending_with_due.sort(
+        key=lambda item: (
+            item[1],
+            item[0].trigger_id,
+        )
+    )
+
+    logical_time = projection.logical_time
+    due = [
+        item for item in pending_with_due if logical_time is not None and item[1] <= logical_time
+    ]
+    overdue = [
+        item
+        for item in due
+        if logical_time is not None and logical_time - item[1] > _EXPRESSION_RETRY_WARNING_GRACE
+    ]
+    warning_reasons = ["expression_retry_overdue"] if overdue else []
+    earliest_due = pending_with_due[0][1] if pending_with_due else None
+    max_attempt_ordinal = max(
+        (len(process.attempt_ids) for process, _ in pending_with_due),
+        default=0,
+    )
+    consecutive_technical_failures = max(
+        (
+            expression_episode_technical_failure_count(projection, process)
+            for process, _ in pending_with_due
+        ),
+        default=0,
+    )
+    locator_limit = 8
+    return {
+        "state": "due" if due else ("waiting" if pending_with_due else "idle"),
+        "pending_count": len(pending_with_due),
+        "waiting_count": len(pending_with_due) - len(due),
+        "due_count": len(due),
+        "overdue_count": len(overdue),
+        "earliest_due_at": earliest_due.isoformat() if earliest_due is not None else None,
+        "max_attempt_ordinal": max_attempt_ordinal,
+        "consecutive_technical_failures": consecutive_technical_failures,
+        "pending_source_observation_refs": [
+            process.source_evidence_ref for process, _ in pending_with_due[:locator_limit]
+        ],
+        "pending_trigger_ids": [
+            process.trigger_id for process, _ in pending_with_due[:locator_limit]
+        ],
+        "locators_truncated": len(pending_with_due) > locator_limit,
+        "warning": bool(warning_reasons),
+        "warning_reasons": warning_reasons,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +549,10 @@ class WorldV2TurnApplicationConfig:
     expression_episode_mode: Literal["off", "shadow", "on"] = "off"
     recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
     expression_action_kinds: frozenset[str] = frozenset({"reply", "followup", "proactive_message"})
+    # Capability is a transport fact shared with proactive authoring.  It is
+    # not a behavior policy and replaces proactive's historical text-only
+    # side interface.
+    expression_capabilities: ExpressionDraftCapabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES
     appraisal_worker_owner: str = "worker:world-v2:appraisal"
     affect_worker_owner: str = "worker:world-v2:affect"
     relationship_worker_owner: str = "worker:world-v2:relationship"
@@ -496,23 +589,11 @@ class WorldV2TurnApplicationConfig:
     proactive_amount_per_action: int = 10
     proactive_worker_owner: str = "worker:world-v2:proactive"
     social_initiative_policy: SocialInitiativePolicy = SocialInitiativePolicy()
-    # Production platform hosts may gate the expensive same-turn emotion lane
-    # to high-signal relational turns; fixtures keep the historical eager
-    # behavior unless they opt in.
-    immediate_emotion_signal_gate: bool = False
-    # When the signal gate is on, keyword misses may additionally consult the
-    # local small appraisal model (bounded, ~2.5s worst case) so unlabeled
-    # relational signals (cold withdrawal, sarcasm, sudden distance) still get
-    # same-turn emotion work.  ``False`` restores the pure keyword gate.  The
-    # durable interaction-appraisal trigger is unaffected either way.
-    semantic_immediate_emotion_gate: bool = True
-    # Same-turn quick reaction lane: before the visible reply compiles, a
-    # recorded act/hold draw plus one bounded local-model confirmation may
-    # place a single QQ reaction on the triggering message.  It only composes
-    # where the ``reaction`` expression capability is closed end-to-end and
-    # the local appraisal checkpoint is installed; this switch is the
-    # operational kill toggle.
-    quick_reaction_enabled: bool = True
+    # Historical isolated experiment only.  Its recorded act/hold draw lets a
+    # side vertical choose visible behavior before PrivateTurnState exists, so
+    # every production composition defaults it off.  Tests that preserve the
+    # old event/reducer replay surface must opt in explicitly.
+    quick_reaction_enabled: bool = False
     # How long the user must stay quiet after her delivered reply before she
     # gets one chance to appraise the silence.  ``0``/``None`` disables the
     # lane; the QQ composition keeps the default enabled.
@@ -668,6 +749,7 @@ class WorldV2TurnApplication:
         social_initiative_policy: SocialInitiativePolicy,
         recall_index: SQLiteRecallIndex | None = None,
         recall_coordinator: RecallCoordinator | None = None,
+        owned_deliberations: tuple[_AsyncCloseable, ...] = (),
     ) -> None:
         self._turns = turns
         self._ledger = ledger
@@ -724,6 +806,10 @@ class WorldV2TurnApplication:
         self._social_initiative_policy = social_initiative_policy
         self._recall_index = recall_index
         self._recall_coordinator = recall_coordinator
+        self._owned_deliberations = owned_deliberations
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+        self._deferred_store_close_task: asyncio.Task[None] | None = None
         self._last_character_outcome: str | None = None
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
@@ -1237,8 +1323,18 @@ class WorldV2TurnApplication:
             return await asyncio.to_thread(self._activity_plans.replace, **kwargs)
         return self._activity_plans.replace(**kwargs)
 
-    async def drain_actions_once(self) -> ActionPumpResult | None:
-        result = await self._turns.drain_actions_once()
+    async def drain_actions_once(
+        self,
+        *,
+        provider_accepted_reconciliation_gate: (
+            ProviderAcceptedReconciliationGate | None
+        ) = None,
+    ) -> ActionPumpResult | None:
+        result = await self._turns.drain_actions_once(
+            provider_accepted_reconciliation_gate=(
+                provider_accepted_reconciliation_gate
+            )
+        )
         await self._join_deferred_terminal_action(result)
         return result
 
@@ -1776,6 +1872,7 @@ class WorldV2TurnApplication:
         | ExpressionReconsiderationRunResult
         | AnchoredRunResult
         | SocialActionRunResult
+        | RuntimeOutcome
         | None
     ):
         """Run one separately scheduled mental-state or memory work unit."""
@@ -2226,6 +2323,7 @@ class WorldV2TurnApplication:
         )
         occurrence_count = len(projection.world_occurrences)
         experience_count = len(projection.experiences)
+        expression_retry = _expression_retry_health(projection)
         plans_by_status = Counter(item.status for item in projection.plans)
         active_plans = tuple(item for item in projection.plans if item.status == "active")
         trigger_counts = Counter(item.process_kind for item in projection.trigger_processes)
@@ -2326,6 +2424,15 @@ class WorldV2TurnApplication:
             )
         )
         latest_completed = _latest_transitioned("completed")
+        experience_memory_retries = sorted(
+            (
+                item
+                for item in projection.contextual_life_retries
+                if item.lane == "experience_memory"
+            ),
+            key=lambda item: item.failed_at,
+            reverse=True,
+        )[:8]
         mechanisms = {
             # This is deliberately a read-only projection of what reached the
             # ledger.  It distinguishes "the mechanism has no state yet" from
@@ -2397,6 +2504,22 @@ class WorldV2TurnApplication:
                 "experience_decision_counts": dict(
                     sorted(experience_memory_decision_counts.items())
                 ),
+                "experience_memory_retry_count": len(
+                    experience_memory_retries
+                ),
+                "experience_memory_retries": [
+                    {
+                        "source_event_ref": item.source_event_ref,
+                        "retry_ordinal": item.retry_ordinal,
+                        "consecutive_technical_failures": (
+                            item.consecutive_technical_failures
+                        ),
+                        "failure_code": item.failure_code,
+                        "failed_at": item.failed_at.isoformat(),
+                        "next_retry_at": item.next_retry_at.isoformat(),
+                    }
+                    for item in experience_memory_retries
+                ],
                 "last_candidate_transition_at": (
                     max(item.updated_at for item in projection.memory_candidates).isoformat()
                     if projection.memory_candidates
@@ -2418,6 +2541,7 @@ class WorldV2TurnApplication:
                 "by_kind": dict(sorted(trigger_counts.items())),
                 "pending_by_kind": dict(sorted(pending_trigger_counts.items())),
             },
+            "expression_retry": expression_retry,
         }
         # Per-item viewer detail (bounded lists, clipped text).  The fact
         # recall and content-store reads are synchronous SQLite work, so they
@@ -2484,6 +2608,7 @@ class WorldV2TurnApplication:
             "experience_count": experience_count,
             "starved": not (life_event_count or occurrence_count or experience_count),
             "expression_episode": self._turns.expression_episode_diagnostics(),
+            "expression_retry": expression_retry,
             "recall_semantic": recall_semantic,
             "mechanisms": mechanisms,
         }
@@ -2808,7 +2933,10 @@ class WorldV2TurnApplication:
 
         return self._ledger.export_replay_evidence()
 
-    def close(self) -> None:
+    def _close_stores(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if self._recall_coordinator is not None:
             self._recall_coordinator.close()
         if self._recall_index is not None:
@@ -2817,6 +2945,79 @@ class WorldV2TurnApplication:
         self._expression_payload_store.close()
         self._media_payload_store.close()
         self._ledger.close()
+
+    def close(self) -> None:
+        """Close persistent stores for synchronous/offline composition users."""
+
+        self._close_stores()
+
+    async def aclose(self) -> None:
+        """Join detached deliberation work before closing its shared resources."""
+
+        close_task = self._close_task
+        if close_task is None:
+            close_task = asyncio.create_task(
+                self._aclose_owned(),
+                name="world-v2-turn-application-close",
+            )
+            self._close_task = close_task
+        await asyncio.shield(close_task)
+
+    async def _aclose_owned(self) -> None:
+        close_failures: tuple[BaseException, ...] = ()
+        if self._owned_deliberations:
+            results = await asyncio.gather(
+                *(item.aclose() for item in self._owned_deliberations),
+                return_exceptions=True,
+            )
+            close_failures = tuple(
+                result for result in results if isinstance(result, BaseException)
+            )
+        quiescence_waiters = tuple(
+            waiter()
+            for item in self._owned_deliberations
+            if getattr(item, "shutdown_pending_task_count", 0) > 0
+            if callable(waiter := getattr(item, "wait_for_shutdown_quiescence", None))
+        )
+        if quiescence_waiters:
+            deferred = asyncio.create_task(
+                self._close_stores_after_quiescence(quiescence_waiters),
+                name="world-v2-turn-application-deferred-store-close",
+            )
+            self._deferred_store_close_task = deferred
+            deferred.add_done_callback(self._observe_deferred_store_close)
+        else:
+            self._close_stores()
+        if close_failures:
+            raise close_failures[0]
+
+    async def _close_stores_after_quiescence(
+        self,
+        waiters: tuple[Awaitable[None], ...],
+    ) -> None:
+        try:
+            await asyncio.gather(*waiters, return_exceptions=True)
+        finally:
+            self._close_stores()
+
+    @staticmethod
+    def _observe_deferred_store_close(task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    @property
+    def shutdown_pending_task_count(self) -> int:
+        """Whether shared stores remain leased to detached deliberation work."""
+
+        task = self._deferred_store_close_task
+        return int(task is not None and not task.done())
+
+    async def wait_for_shutdown_quiescence(self) -> None:
+        """Wait until any deferred deliberation lease has released the stores."""
+
+        task = self._deferred_store_close_task
+        if task is not None:
+            await asyncio.shield(task)
 
 
 def build_sqlite_world_v2_turn_application(
@@ -2846,7 +3047,9 @@ def build_sqlite_world_v2_turn_application(
     activity_lifecycle_model: ActivityLifecycleDraftModel | None = None,
     open_world_event_model: OpenWorldEventModel | None = None,
     life_world_author_model: LifeDevelopmentModel | None = None,
+    life_world_author_source_rewriter: LifeDevelopmentModel | None = None,
     life_character_model: LifeDevelopmentModel | None = None,
+    life_source_closure_reviewer: LifeDevelopmentModel | None = None,
     media_selection_model: MediaSelectionDraftModel | None = None,
     read_only_tool_model: DeliberationModelAdapter | None = None,
     read_only_tool_transport: ReadOnlyToolTransport | None = None,
@@ -2855,6 +3058,8 @@ def build_sqlite_world_v2_turn_application(
     perception_transport: PerceptionTransport | None = None,
     proactive_model: ChatCompletionModel | None = None,
     proactive_identity_frame: CompanionIdentityFrame | None = None,
+    proactive_source_closure_model: ChatCompletionModel | None = None,
+    proactive_candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
     quick_reaction_model: ChatCompletionModel | None = None,
     semantic_recall_embedding: RecallEmbedding | None = None,
@@ -2890,6 +3095,14 @@ def build_sqlite_world_v2_turn_application(
     )
     if open_life_requested and config.life_ecology is None:
         raise ValueError("open life development requires Life Ecology")
+    if life_source_closure_reviewer is not None and not open_life_requested:
+        raise ValueError(
+            "life-development source closure requires World Author and Character Model"
+        )
+    if life_world_author_source_rewriter is not None and not open_life_requested:
+        raise ValueError(
+            "life-development World Author source rewrite requires open life development"
+        )
     # Refuse to start when the vertical registry and the scattered process-kind
     # enumerations disagree: a missing reviewer/owner must fail here by name,
     # not surface later as an Opened-only trigger backlog in the ledger.
@@ -3090,20 +3303,21 @@ def build_sqlite_world_v2_turn_application(
         expression_episode_diagnostics = ExpressionEpisodeDiagnostics(
             mode=config.expression_episode_mode
         )
+        chat_deliberation = compose_production_deliberation(
+            lane_id="chat_reply",
+            router=router,
+            main_model=main_model,
+            quick_recovery=quick_recovery,
+            main_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
+            quick_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
+            expression_action_kinds=config.expression_action_kinds,
+            expression_episode_mode=config.expression_episode_mode,
+            expression_episode_diagnostics=expression_episode_diagnostics,
+        )
         pinned = PinnedTurnCompiler(
             ledger=ledger,
             capsule_compiler=chat_capsules,
-            deliberation=compose_production_deliberation(
-                lane_id="chat_reply",
-                router=router,
-                main_model=main_model,
-                quick_recovery=quick_recovery,
-                main_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
-                quick_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
-                expression_action_kinds=config.expression_action_kinds,
-                expression_episode_mode=config.expression_episode_mode,
-                expression_episode_diagnostics=expression_episode_diagnostics,
-            ),
+            deliberation=chat_deliberation,
             companion_actor_ref=config.companion_actor_ref,
             advisory_compiler=advisory_compiler,
             latency_recorder=latency,
@@ -3118,11 +3332,6 @@ def build_sqlite_world_v2_turn_application(
             npc_relationship_advisory=True,
             # A pending shared_private invitation she may still need to voice.
             shared_private_invitation_advisory=True,
-            # Where her attention actually is relative to the phone (asleep,
-            # focused, browsing, wanting space) so timing_choice can be a real
-            # presence decision.  Advisory texture only, never a veto.
-            attention_advisory=True,
-            attention_chronology=LocalChronology(config.local_timezone),
             recorded_cadence_mode=config.recorded_cadence_mode,
         )
         social_action_worker = SocialActionWorker(
@@ -3147,6 +3356,12 @@ def build_sqlite_world_v2_turn_application(
                 model=proactive_model,
                 target=config.reply_target,
                 identity_frame=proactive_identity_frame,
+                expression_capabilities=config.expression_capabilities,
+                source_closure_reviewer=proactive_source_closure_model,
+                report_relative_reviewer=proactive_source_closure_model,
+                candidate_external_proposition_inventory_model=(
+                    proactive_candidate_external_proposition_inventory_model
+                ),
             )
             proactive_adapter.install_recall_coordinator(recall_coordinator)
             proactive_runtime = ProactiveActionRuntime(
@@ -3193,11 +3408,32 @@ def build_sqlite_world_v2_turn_application(
                     else ledger.project_at(cursor)
                 )
 
+            async def reconsideration_role_context(
+                cursor,
+                observation_event,
+                projection,
+            ):
+                query = query_from_projection(
+                    projection,
+                    actor_ref=config.companion_actor_ref,
+                    trigger_ref=observation_event.event_id,
+                )
+                capsule = (
+                    await asyncio.to_thread(chat_capsules.compile, query)
+                    if ledger.blocks_event_loop
+                    else chat_capsules.compile(query)
+                )
+                return reconsideration_role_context_from_capsule(
+                    capsule.model_content_json
+                )
+
             expression_reconsideration_reviewer = AuditedReplacementReconsiderationReviewer(
                 reviewer=ExpressionReconsiderationChatModelAdapter(
                     model=proactive_model,
                 ),
                 project_at=reconsideration_projection,
+                identity_frame=proactive_identity_frame,
+                role_context_at=reconsideration_role_context,
             )
         appraisal_acceptance = (
             AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
@@ -3227,9 +3463,11 @@ def build_sqlite_world_v2_turn_application(
                     quick_recovery=appraisal_model,
                     main_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
                     quick_timeout_seconds=config.interactive_turn_budget_policy.total_seconds,
-                    expression_episode_mode=(
-                        "shadow" if config.expression_episode_mode == "shadow" else "off"
-                    ),
+                    # Appraisal may precompute an expression draft, but it is
+                    # not the expression authority seam.  Shadow observation
+                    # belongs to the later chat_reply Deliberation after that
+                    # authoritative candidate has settled.
+                    expression_episode_mode="off",
                     expression_action_kinds=config.expression_action_kinds,
                     expression_episode_diagnostics=expression_episode_diagnostics,
                 ),
@@ -3253,11 +3491,7 @@ def build_sqlite_world_v2_turn_application(
                 change_phase_advisory=True,
                 npc_relationship_advisory=True,
                 shared_private_invitation_advisory=True,
-                # The paired pass drafts the visible expression too, so its
-                # timing_choice needs the same phone-attention reading as the
-                # ordinary reply lane.
-                attention_advisory=True,
-                attention_chronology=LocalChronology(config.local_timezone),
+                affect_target_bounds_enabled=True,
             )
             if appraisal_model is not None
             else None
@@ -3405,6 +3639,7 @@ def build_sqlite_world_v2_turn_application(
                     quick_recovery=affect_model,
                 ),
                 companion_actor_ref=config.companion_actor_ref,
+                affect_target_bounds_enabled=True,
             )
             if affect_model is not None
             else None
@@ -3594,9 +3829,9 @@ def build_sqlite_world_v2_turn_application(
         # Same-turn quick reaction lane.  It composes only when every seam is
         # proven: the deployment's expression closure includes ``reaction``
         # (today that is the NapCat dialect exactly) and a bounded local
-        # checkpoint is installed.  Production reuses the appraisal adapter's
-        # local model exactly like ``immediate_emotion_gate`` (no second
-        # client); tests may inject a fixture model directly.
+        # checkpoint is installed. Production reuses the appraisal adapter's
+        # local model instead of constructing another client; tests may inject
+        # a fixture model directly.
         if quick_reaction_model is None:
             quick_reaction_model = getattr(appraisal_model, "local_appraisal_model", None)
         # BoundedDecisionVertical pilot switch for the quick-reaction lane.
@@ -3627,6 +3862,7 @@ def build_sqlite_world_v2_turn_application(
             projection_authority=projection_authority,
             latency_recorder=latency,
             pinned_turn=pinned,
+            expression_retry_budget_policy=config.interactive_turn_budget_policy,
             reply_policy=ReplyBudgetPolicy(
                 account_id=config.chat_account_id,
                 amount_limit=config.reply_budget_amount,
@@ -3648,15 +3884,6 @@ def build_sqlite_world_v2_turn_application(
             appraisal_worker=appraisal_worker,
             interaction_appraisal_turn=appraisal_turn,
             immediate_emotion_worker=immediate_emotion_worker,
-            immediate_emotion_signal_gate=config.immediate_emotion_signal_gate,
-            # The semantic gate reuses the local appraisal model instance that
-            # SingleCallInboundCognition already owns; its adapter exposes the
-            # gate so composition never builds a second local-model client.
-            immediate_emotion_semantic_gate=(
-                getattr(appraisal_model, "immediate_emotion_gate", None)
-                if config.semantic_immediate_emotion_gate
-                else None
-            ),
             npc_world_appraisal_turn=npc_world_appraisal_turn,
             silence_appraisal_turn=silence_appraisal_turn,
             silence_appraisal_idle_seconds=config.silence_appraisal_idle_seconds,
@@ -4057,8 +4284,11 @@ def build_sqlite_world_v2_turn_application(
                 ledger=ledger,
                 content_store=life_content_store,
                 world_author=life_world_author_model,
+                world_author_source_rewriter=life_world_author_source_rewriter,
                 character_model=life_character_model,
+                source_closure_reviewer=life_source_closure_reviewer,
                 capsule_compiler=capsules,
+                recall_coordinator=recall_coordinator,
                 capability_manifest_compiler=ProjectionLifeCapabilityManifestCompiler(
                     owner_actor_ref=config.companion_actor_ref,
                     catalog=life_seed_catalog,
@@ -4176,6 +4406,7 @@ def build_sqlite_world_v2_turn_application(
             social_initiative_policy=config.social_initiative_policy,
             recall_index=recall_index,
             recall_coordinator=recall_coordinator,
+            owned_deliberations=(chat_deliberation,),
         )
     except Exception:
         recall_index.close()

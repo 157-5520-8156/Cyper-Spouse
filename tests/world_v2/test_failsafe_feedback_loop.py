@@ -93,10 +93,10 @@ class _ContextualGroundingReviewer:
         self.calls.append(messages)
         return json.dumps(
             {
-                "decision": "supported",
-                "unsupported_claim_indexes": [],
-                "undeclared_fact_fragments": [],
-                "brief_reason": (
+                "ci": [],
+                "v": [],
+                "p": [],
+                "r": (
                     "The visible activity explanation and its declaration "
                     "are directly present in Context."
                 ),
@@ -153,10 +153,10 @@ class _UnrelatedGroundingReviewer(_ContextualGroundingReviewer):
         self.calls.append(messages)
         return json.dumps(
             {
-                "decision": "unsupported",
-                "unsupported_claim_indexes": [0],
-                "undeclared_fact_fragments": [],
-                "brief_reason": "Desk tidying does not support a shower occurrence.",
+                "ci": [0],
+                "v": [],
+                "p": [],
+                "r": "Desk tidying does not support a shower occurrence.",
             }
         )
 
@@ -185,10 +185,10 @@ class _UndeclaredExcuseReviewer(_ContextualGroundingReviewer):
         assert "刚洗完澡" in request["visible_text"]
         return json.dumps(
             {
-                "decision": "unsupported",
-                "unsupported_claim_indexes": [],
-                "undeclared_fact_fragments": ["刚洗完澡"],
-                "brief_reason": "The visible shower occurrence has no declaration or source.",
+                "ci": [],
+                "v": ["undeclared_external_assertion"],
+                "p": [],
+                "r": "The visible shower occurrence has no declaration or source.",
             },
             ensure_ascii=False,
         )

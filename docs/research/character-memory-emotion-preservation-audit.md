@@ -99,10 +99,9 @@ SillyTavern 的角色设计把 Description、Personality、Scenario、First Mess
 - 世界知识按相关性选择注入，避免大而杂的上下文让角色跑偏。
 - Author's Note 类信息适合作为短期指导，不应自动成为事实。
 
-当前 `CharacterProfile.system_prompt()` 已明确将示例标为风格锚点，并限制数量；角色事实账本也提示
-背景和日常不能据此补写经历。这部分精髓基本保留。主要缺口是世界回复上下文没有把当前活动、
-地点、关系和来源 ID 以清楚的分层结构提供给模型，导致角色卡中的“常在图书馆”等气质参考覆盖了
-当前世界事实。
+当前 World V2 组合器把 `CharacterProfile` 的稳定身份材料与带来源的动态世界上下文分层呈现；
+角色卡不再自行拼成一个兼具事实与行为指令的旧式 system prompt。示例只可作为风格锚点，背景
+和日常不能据此补写经历；当前活动、地点、关系和来源 ID 则由 pinned capsule 单独提供。
 
 ## 4. EchoText：短期情绪、长期倾向与线上节奏
 

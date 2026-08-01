@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.random_authority import (
     RandomAuthority,
     RandomDrawRecordedPayload,
@@ -91,6 +92,36 @@ def test_draw_rejoins_after_clock_moves_when_seed_instant_is_the_original_wake()
 
     assert recovered == first
     assert len(commits) == 1
+
+
+def test_draw_reports_a_concurrent_clock_advance_as_a_cursor_race() -> None:
+    """A worker may yield after pinning context while a clock owner advances.
+
+    The caller's draw is still invalid at the new head, but this is a normal
+    retryable CAS race rather than malformed random authority input.
+    """
+
+    current_projection = SimpleNamespace(
+        world_revision=1,
+        deliberation_revision=0,
+        ledger_sequence=1,
+        logical_time=NOW + timedelta(minutes=1),
+    )
+    ledger = SimpleNamespace(
+        world_id="world:random-clock-race",
+        project=lambda: current_projection,
+    )
+
+    with pytest.raises(ConcurrencyConflict, match="current logical time"):
+        RandomAuthority(ledger=ledger).draw(
+            attempt_id="social:stale-clock",
+            candidate_refs=("delay:120", "delay:900"),
+            catalog_version="social-initiative.1",
+            logical_time=NOW,
+            actor="worker:social",
+            trace_id="trace:social",
+            correlation_id="correlation:social",
+        )
 
 
 def test_weighted_draw_records_canonical_normalized_authority_and_replays() -> None:

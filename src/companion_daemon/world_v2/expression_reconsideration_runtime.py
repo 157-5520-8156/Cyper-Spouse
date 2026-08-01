@@ -16,6 +16,7 @@ import json
 import logging
 from typing import Literal, Protocol
 
+from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
 from .minimal_reply_events import (
     ExpressionBeatTerminatedPayload,
@@ -25,6 +26,11 @@ from .schema_core import FrozenModel
 from .schemas import ClaimLease, ProjectionCursor, TriggerProcess, WorldEvent
 
 _LOG = logging.getLogger(__name__)
+
+
+class _ReviewCursorAdvanced(RuntimeError):
+    """The World changed after the role model saw its pinned Context."""
+
 
 def _digest(value: object) -> str:
     return hashlib.sha256(
@@ -153,9 +159,12 @@ class ExpressionReconsiderationRuntime:
             return ExpressionReconsiderationRunResult(
                 trigger_id=active.trigger_id, status="awaiting_review"
             )
+        review_cursor = self._cursor(current)
         try:
             reviewed = await self._reviewer.review(
-                process=active, observation_event=source[0], cursor=self._cursor(current)
+                process=active,
+                observation_event=source[0],
+                cursor=review_cursor,
             )
         except Exception:  # noqa: BLE001 - provider/contract failures remain retryable
             _LOG.warning(
@@ -171,7 +180,16 @@ class ExpressionReconsiderationRuntime:
                 trigger_id=active.trigger_id, status="awaiting_review"
             )
         if decision.disposition == "continue":
-            await self._complete(process=active, source_event=source[0], decision=decision)
+            try:
+                await self._complete(
+                    process=active,
+                    source_event=source[0],
+                    decision=decision,
+                    projection=current,
+                    decision_cursor=review_cursor,
+                )
+            except _ReviewCursorAdvanced:
+                return self._cursor_advanced_result(active)
             return ExpressionReconsiderationRunResult(
                 trigger_id=active.trigger_id, status="continued", disposition=decision.disposition
             )
@@ -179,16 +197,50 @@ class ExpressionReconsiderationRuntime:
             # Completion makes the decision durable, while the gate helper
             # keeps this particular frozen beat non-dispatchable until a later
             # source-bound observation opens a fresh reconsideration trigger.
-            await self._complete(process=active, source_event=source[0], decision=decision)
+            try:
+                await self._complete(
+                    process=active,
+                    source_event=source[0],
+                    decision=decision,
+                    projection=current,
+                    decision_cursor=review_cursor,
+                )
+            except _ReviewCursorAdvanced:
+                return self._cursor_advanced_result(active)
             return ExpressionReconsiderationRunResult(
                 trigger_id=active.trigger_id, status="deferred", disposition=decision.disposition
             )
-        await self._replace_or_cancel(process=active, source_event=source[0], decision=decision)
+        try:
+            await self._replace_or_cancel(
+                process=active,
+                source_event=source[0],
+                decision=decision,
+                projection=current,
+                decision_cursor=review_cursor,
+            )
+        except _ReviewCursorAdvanced:
+            return self._cursor_advanced_result(active)
         return ExpressionReconsiderationRunResult(
             trigger_id=active.trigger_id,
             status="replacement_required" if decision.requires_replacement() else "cancelled",
             disposition=decision.disposition,
             replacement_plan_ref=decision.replacement_plan_ref,
+        )
+
+    @staticmethod
+    def _cursor_advanced_result(
+        process: TriggerProcess,
+    ) -> ExpressionReconsiderationRunResult:
+        # Keep the claimed trigger non-terminal. The next drain reuses/reclaims
+        # it and asks the role model again with a fresh pinned capsule.
+        _LOG.info(
+            "expression reconsideration Context advanced during review; "
+            "keeping trigger retryable trigger_id=%s",
+            process.trigger_id,
+        )
+        return ExpressionReconsiderationRunResult(
+            trigger_id=process.trigger_id,
+            status="awaiting_review",
         )
 
     @classmethod
@@ -299,10 +351,13 @@ class ExpressionReconsiderationRuntime:
     async def _complete(
         self, *, process: TriggerProcess, source_event: WorldEvent,
         decision: ExpressionReconsiderationDecision,
+        projection=None,
+        decision_cursor: ProjectionCursor | None = None,
     ) -> None:
         if process.claim_lease is None:
             raise ValueError("expression reconsideration completion requires a claim")
-        projection = await self._project()
+        if projection is None:
+            projection = await self._project()
         at = max(projection.logical_time or source_event.logical_time, process.claim_lease.acquired_at)
         if at > process.claim_lease.expires_at:
             raise ValueError("expression reconsideration claim expired before completion")
@@ -332,17 +387,24 @@ class ExpressionReconsiderationRuntime:
             idempotency_key=identity,
             payload=payload,
         )
-        cursor = self._cursor(projection)
-        await self._commit_at_cursor(
-            (event,),
-            cursor=cursor,
-            commit_id="commit:expression-reconsideration:completed:"
-            + _digest([process.trigger_id, process.claim_lease.attempt_id]),
-        )
+        cursor = decision_cursor or self._cursor(projection)
+        try:
+            await self._commit_at_cursor(
+                (event,),
+                cursor=cursor,
+                commit_id="commit:expression-reconsideration:completed:"
+                + _digest([process.trigger_id, process.claim_lease.attempt_id]),
+            )
+        except ConcurrencyConflict as exc:
+            if decision_cursor is None:
+                raise
+            raise _ReviewCursorAdvanced from exc
 
     async def _replace_or_cancel(
         self, *, process: TriggerProcess, source_event: WorldEvent,
         decision: ExpressionReconsiderationDecision,
+        projection=None,
+        decision_cursor: ProjectionCursor | None = None,
     ) -> None:
         """Atomically retire the old, not-yet-dispatched Action and its budget.
 
@@ -353,7 +415,8 @@ class ExpressionReconsiderationRuntime:
         """
         if process.claim_lease is None:
             raise ValueError("expression reconsideration cancellation requires a claim")
-        projection = await self._project()
+        if projection is None:
+            projection = await self._project()
         at = max(projection.logical_time or source_event.logical_time, process.claim_lease.acquired_at)
         if at > process.claim_lease.expires_at:
             raise ValueError("expression reconsideration claim expired before cancellation")
@@ -604,18 +667,30 @@ class ExpressionReconsiderationRuntime:
             event_type="TriggerProcessCompleted", idempotency_key="world-v2:expression-reconsideration:completed:" + _digest([self._ledger.world_id, process.trigger_id, process.claim_lease.attempt_id]),
             payload=completion_payload,
         )
-        await self._commit_at_cursor(
-            (
-                cancellation,
-                beat_termination,
-                release,
-                *sibling_terminal_events,
-                plan_termination,
-                completion,
-            ),
-            cursor=self._cursor(projection),
-            commit_id="commit:expression-reconsideration:replace:" + _digest([process.trigger_id, process.claim_lease.attempt_id, decision_hash]),
-        )
+        try:
+            await self._commit_at_cursor(
+                (
+                    cancellation,
+                    beat_termination,
+                    release,
+                    *sibling_terminal_events,
+                    plan_termination,
+                    completion,
+                ),
+                cursor=decision_cursor or self._cursor(projection),
+                commit_id="commit:expression-reconsideration:replace:"
+                + _digest(
+                    [
+                        process.trigger_id,
+                        process.claim_lease.attempt_id,
+                        decision_hash,
+                    ]
+                ),
+            )
+        except ConcurrencyConflict as exc:
+            if decision_cursor is None:
+                raise
+            raise _ReviewCursorAdvanced from exc
         _LOG.info(
             "expression plan pending beats cancelled plan_id=%s cancelled_pending_count=%d disposition=%s",
             plan.plan_id,

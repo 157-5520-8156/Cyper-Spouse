@@ -1321,8 +1321,9 @@ beat 独立形成 Action 并由 QQ transport 调用对应 NapCat endpoint。HTTP
 通用 OneBot profile 仍是 text-only；prompt capability、production proposal grammar 和 transport
 三层都 fail closed，不能因全局 vocabulary 存在而放行非文本 Action。
 
-当前 deferred-social 合同只安装一个未来 text followup，故 `later` 的非文本 beat 明确拒绝，
-不静默改写成文本或立即执行。NapCat 同步返回只记为 `provider_accepted`，不能冒充
+当前 deferred-social 合同允许角色安排最多八个有序的未来 text followup；`later` 的非文本
+beat 仍明确拒绝，不静默改写成文本或立即执行。NapCat 同步返回只记为
+`provider_accepted`，不能冒充
 `delivered`；ExpressionPlan 必须等待各 beat 的独立 terminal receipt 才能完成，依赖 beat 也不会
 提前调度。现阶段 QQ 尚无跨进程 provider-side durable lookup，因此进程重启后的不确定发送按
 `unknown/reconciliation` 收口而不自动重发。这是 delivery evidence 的保守边界，不是平台动作

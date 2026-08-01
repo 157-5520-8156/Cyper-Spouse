@@ -652,8 +652,8 @@ def _manual_clock(start: datetime):
 
 
 @pytest.mark.asyncio
-async def test_burst_continuing_through_her_turn_is_not_sliced_by_stale_cadence() -> None:
-    """A rapid pair landing during her turn joins the next bounded batch."""
+async def test_burst_during_provider_joins_then_enters_as_one_interjection() -> None:
+    """A rapid pair stays one batch without waiting for the old provider."""
 
     start = NOW
     clock, idle_sleep, drive = _manual_clock(start)
@@ -696,11 +696,6 @@ async def test_burst_continuing_through_her_turn_is_not_sliced_by_stale_cadence(
     )
     await asyncio.sleep(0)
 
-    await drive(lambda: clock["now"] >= start + timedelta(seconds=1.8))
-    world.release_first_turn.set()
-    await drive(lambda: first.done() and second.done())
-    assert len(world.inbounds) == 1
-
     await drive(lambda: clock["now"] >= start + timedelta(seconds=2.0))
     fourth = asyncio.create_task(
         host.inbound_fragment(
@@ -711,7 +706,11 @@ async def test_burst_continuing_through_her_turn_is_not_sliced_by_stale_cadence(
             )
         )
     )
-    await drive(lambda: third.done() and fourth.done())
+    await drive(lambda: len(world.inbounds) == 2)
+    assert not world.release_first_turn.is_set()
+    assert world.inbounds[1].text == "对了教练夸我进步啦\n晚上一起打游戏呀"
+
+    world.release_first_turn.set()
     results = await asyncio.gather(first, second, third, fourth)
 
     assert all(item.status == "observed_only" for item in results)
@@ -901,17 +900,18 @@ async def test_scheduler_ingress_pass_yields_while_a_rhythm_hold_absorbs_a_volle
     await host.aclose()
 
 
-def test_adaptive_quiet_gap_follows_cadence_and_message_shape() -> None:
+def test_adaptive_quiet_gap_follows_observed_cadence_without_reading_semantics() -> None:
     host = QQC2CHost(
         host=_WorldHost(),  # type: ignore[arg-type]
         recipient_id="10001",
         canonical_user_id="geoff",
         ingress_store=MemoryQQIngressStore(),
     )
-    # No cadence yet: the whole semantic pacing hint remains subsecond.
+    # No cadence yet: different wording receives the same provider-local
+    # opportunity. The host does not decide whether either thought is complete.
     assert host._quiet_gap_seconds("今天要打比赛了") == pytest.approx(0.15)
-    assert host._quiet_gap_seconds("你吃饭了吗？") == pytest.approx(0.10)
-    assert host._quiet_gap_seconds("我跟你说，") == pytest.approx(0.255)
+    assert host._quiet_gap_seconds("你吃饭了吗？") == pytest.approx(0.15)
+    assert host._quiet_gap_seconds("我跟你说，") == pytest.approx(0.15)
     # A fast typist shrinks the base; a slow one grows it, both bounded below
     # the one-second local budget.
     host._recent_gap_seconds.extend([0.1, 0.12, 0.11])
@@ -921,12 +921,12 @@ def test_adaptive_quiet_gap_follows_cadence_and_message_shape() -> None:
     assert host._quiet_gap_seconds("嗯") == pytest.approx(0.42)
     assert host._quiet_gap_seconds("而且") == pytest.approx(0.42)
     # Burst continuation: the just-shown cadence floors the wait, so a fast
-    # historical median and a closed tail cannot slice an ongoing volley.
+    # historical median cannot slice an ongoing volley.
     host._recent_gap_seconds.clear()
     host._recent_gap_seconds.extend([0.2, 0.7])
-    assert host._quiet_gap_seconds("中午就比完啦") == pytest.approx(0.7 * 0.6)
+    assert host._quiet_gap_seconds("中午就比完啦") == pytest.approx(0.42)
     assert host._quiet_gap_seconds("中午就比完啦", burst=True) == pytest.approx(0.8)
-    # The floor is a floor, not a discount: a trailing-off tail still waits.
+    # Wording cannot change the observed-cadence floor.
     assert host._quiet_gap_seconds("而且", burst=True) == pytest.approx(0.8)
     # The floor never exceeds the bounded maximum.
     host._recent_gap_seconds.append(0.75)
@@ -938,7 +938,7 @@ def test_adaptive_quiet_gap_follows_cadence_and_message_shape() -> None:
     # Without cadence samples the burst flag alone changes nothing.
     host._recent_gap_seconds.clear()
     assert host._quiet_gap_seconds("你吃饭了吗？", burst=True) == pytest.approx(
-        0.10
+        0.15
     )
 
 
@@ -1102,52 +1102,204 @@ async def test_messages_arriving_during_slow_turn_join_one_followup_turn() -> No
 
 
 @pytest.mark.asyncio
-async def test_text_turn_fires_one_best_effort_typing_pulse() -> None:
+async def test_close_waits_for_process_owned_ingress_after_caller_cancels() -> None:
+    """Caller cancellation must not let shutdown close the ledger under its batch."""
+
     clock = {"now": NOW + timedelta(seconds=1)}
-    pulses: list[str] = []
 
-    async def typing_signal() -> None:
-        pulses.append("composing")
+    async def instant_sleep(delay: float) -> None:
+        clock["now"] += timedelta(seconds=delay)
+        await asyncio.sleep(0)
 
+    world = _SlowFirstTurnWorldHost()
     store = MemoryQQIngressStore()
-    store.submit(_text("message:typing", "在忙吗"), received_at=NOW)
-    world = _WorldHost()
     host = QQC2CHost(
         host=world,  # type: ignore[arg-type]
-        recipient_id="10001", canonical_user_id="geoff", ingress_store=store,
-        ingress_now=lambda: clock["now"], typing_signal=typing_signal,
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=store,
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=instant_sleep,
+        owned_action_close_grace_seconds=0.5,
     )
+    caller = asyncio.create_task(
+        host.inbound_fragment(_text("message:owned-close", "这条已经进入世界认知。"))
+    )
+    closing: asyncio.Task[None] | None = None
     try:
-        result = await host.drain_ingress_once()
-        assert result is not None
-        await asyncio.sleep(0)
+        await asyncio.wait_for(world.first_turn_started.wait(), timeout=1)
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
+
+        closing = asyncio.create_task(host.aclose())
+        await asyncio.sleep(0.05)
+
+        assert not closing.done()
+        assert world.closed is False
     finally:
-        await host.aclose()
-    assert pulses == ["composing"]
+        world.release_first_turn.set()
+        if closing is None:
+            closing = asyncio.create_task(host.aclose())
+        await asyncio.wait_for(closing, timeout=1)
+
+    submission = store.submission("message:owned-close")
+    assert submission is not None and submission.state == "committed"
 
 
 @pytest.mark.asyncio
-async def test_typing_pulse_failure_never_fails_the_turn() -> None:
+async def test_cancelled_ingress_waiter_is_removed_after_owned_batch_finishes() -> None:
+    """A shielded batch remains owned, then leaves the process join registry."""
+
     clock = {"now": NOW + timedelta(seconds=1)}
 
-    async def broken_signal() -> None:
-        raise RuntimeError("provider offline")
+    async def instant_sleep(delay: float) -> None:
+        clock["now"] += timedelta(seconds=delay)
+        await asyncio.sleep(0)
 
+    world = _SlowFirstTurnWorldHost()
     store = MemoryQQIngressStore()
-    store.submit(_text("message:typing-broken", "在吗"), received_at=NOW)
-    world = _WorldHost()
     host = QQC2CHost(
         host=world,  # type: ignore[arg-type]
-        recipient_id="10001", canonical_user_id="geoff", ingress_store=store,
-        ingress_now=lambda: clock["now"], typing_signal=broken_signal,
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=store,
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=instant_sleep,
     )
-    try:
-        result = await host.drain_ingress_once()
-        assert result is not None and result.status == "observed_only"
+    caller = asyncio.create_task(
+        host.inbound_fragment(_text("message:cancelled-waiter", "这条继续由进程完成。"))
+    )
+    await asyncio.wait_for(world.first_turn_started.wait(), timeout=1)
+
+    caller.cancel()
+    await asyncio.gather(caller, return_exceptions=True)
+    assert len(host._ingress_batch_tasks) == 1  # noqa: SLF001 - lifecycle seam
+
+    world.release_first_turn.set()
+    for _ in range(10):
+        if not host._ingress_batch_tasks:  # noqa: SLF001 - lifecycle seam
+            break
         await asyncio.sleep(0)
-    finally:
-        await host.aclose()
+
+    assert host._ingress_batch_tasks == {}  # noqa: SLF001 - lifecycle seam
+    submission = store.submission("message:cancelled-waiter")
+    assert submission is not None and submission.state == "committed"
     assert len(world.inbounds) == 1
+    await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_prefers_world_async_lifecycle_before_sync_store_close() -> None:
+    class _AsyncClosingWorld(_WorldHost):
+        def __init__(self) -> None:
+            super().__init__()
+            self.async_closed = False
+            self.sync_closed = False
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            self.async_closed = True
+
+        def close(self) -> None:
+            self.sync_closed = True
+
+    world = _AsyncClosingWorld()
+    store = MemoryQQIngressStore()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=store,
+    )
+
+    await host.aclose()
+
+    assert world.async_closed is True
+    assert world.sync_closed is False
+
+
+@pytest.mark.asyncio
+async def test_close_defers_semantic_dependencies_while_world_shutdown_lease_is_open() -> None:
+    release = asyncio.Event()
+
+    class _LeasedWorld(_WorldHost):
+        async def aclose(self) -> None:
+            return None
+
+        @property
+        def shutdown_pending_task_count(self) -> int:
+            return 0 if release.is_set() else 1
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            await release.wait()
+
+    class _SemanticDependencies:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    world = _LeasedWorld()
+    semantic = _SemanticDependencies()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        semantic_chat=semantic,  # type: ignore[arg-type]
+        ingress_store=MemoryQQIngressStore(),
+    )
+
+    await host.aclose()
+
+    assert semantic.closed is False
+    assert host.shutdown_pending_task_count == 1
+
+    release.set()
+    await asyncio.wait_for(host.wait_for_shutdown_quiescence(), timeout=1)
+
+    assert semantic.closed is True
+    assert host.shutdown_pending_task_count == 0
+
+
+@pytest.mark.asyncio
+async def test_close_reports_semantic_shutdown_lease_after_bounded_semantic_close() -> None:
+    release = asyncio.Event()
+
+    class _SemanticDependencies:
+        def __init__(self) -> None:
+            self.close_called = False
+
+        async def aclose(self) -> None:
+            self.close_called = True
+
+        @property
+        def shutdown_pending_task_count(self) -> int:
+            return 0 if release.is_set() else int(self.close_called)
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            await release.wait()
+
+    semantic = _SemanticDependencies()
+    host = QQC2CHost(
+        host=_WorldHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        semantic_chat=semantic,  # type: ignore[arg-type]
+        ingress_store=MemoryQQIngressStore(),
+    )
+
+    await host.aclose()
+
+    assert semantic.close_called is True
+    assert host.shutdown_pending_task_count == 1
+    quiescence = asyncio.create_task(host.wait_for_shutdown_quiescence())
+    await asyncio.sleep(0)
+    assert quiescence.done() is False
+
+    release.set()
+    await asyncio.wait_for(quiescence, timeout=1)
+    assert host.shutdown_pending_task_count == 0
 
 
 @pytest.mark.asyncio

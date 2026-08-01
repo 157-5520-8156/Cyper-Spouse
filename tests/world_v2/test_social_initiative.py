@@ -481,6 +481,81 @@ async def test_failed_situation_consideration_retains_its_stimulus_on_retry() ->
 
 
 @pytest.mark.asyncio
+async def test_successful_retry_terminally_settles_the_failed_consideration() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    occurred_at = NOW + timedelta(minutes=30)
+    stimulus = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:experience:settled-retry",
+        world_id="world:social-context-test",
+        event_type="ExperienceCommitted",
+        logical_time=occurred_at,
+        created_at=occurred_at,
+        actor="actor:companion",
+        source="test",
+        trace_id="trace:settled-retry",
+        causation_id="cause:settled-retry",
+        correlation_id="conversation:settled-retry",
+        idempotency_key="experience:settled-retry",
+        payload={},
+    )
+    stimulus_ref = SimpleNamespace(
+        event_id=stimulus.event_id,
+        event_type=stimulus.event_type,
+        logical_time=stimulus.logical_time,
+        world_revision=2,
+    )
+    failure_ref = SimpleNamespace(
+        event_id="event:model-result:settled-retry",
+        event_type="ModelResultRecorded",
+        logical_time=occurred_at + timedelta(minutes=4),
+        world_revision=4,
+    )
+    consideration_ref = "proactive-consideration:consideration:settled-retry"
+    projection.logical_time = occurred_at + timedelta(minutes=20)
+    projection.committed_world_event_refs = (stimulus_ref, failure_ref)
+    projection.model_result_audits = (
+        SimpleNamespace(
+            model_result_ref="model-result:settled-retry",
+            proposal_hash=None,
+            event_ref=failure_ref.event_id,
+            evaluated_world_revision=2,
+        ),
+    )
+    projection.trigger_processes = (
+        SimpleNamespace(
+            process_kind="proactive_action_deliberation",
+            state="terminal",
+            trigger_ref=consideration_ref,
+            runtime_outcome_ref=(
+                "proactive:deliberation-failed:model-result:settled-retry"
+            ),
+            source_evidence_ref=stimulus.event_id,
+            claim_lease=SimpleNamespace(acquired_at=failure_ref.logical_time),
+        ),
+        SimpleNamespace(
+            process_kind="proactive_action_deliberation",
+            state="terminal",
+            trigger_ref=consideration_ref,
+            runtime_outcome_ref="proactive:silent",
+            source_evidence_ref=stimulus.event_id,
+            claim_lease=SimpleNamespace(
+                acquired_at=failure_ref.logical_time + timedelta(minutes=10)
+            ),
+        ),
+    )
+    compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
+        (stimulus, SimpleNamespace(world_revision=2))
+        if event_id == stimulus.event_id
+        else None
+    )
+
+    retry = await compiler._failed_consideration_retry(projection)  # noqa: SLF001
+
+    assert retry is None
+
+
+@pytest.mark.asyncio
 async def test_each_situation_window_survives_a_newer_window_until_considered() -> None:
     compiler, projection, _committed = _compiler_fixture(receptive=True)
     first_at = NOW + timedelta(minutes=10)

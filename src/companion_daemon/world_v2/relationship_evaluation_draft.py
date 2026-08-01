@@ -111,7 +111,12 @@ class RelationshipEvaluationDraftCapsule(FrozenModel):
     corresponding slice away.
     """
 
-    accepted_appraisal_summary: str = Field(min_length=1, max_length=2_000)
+    accepted_appraisal_summary: str | None = Field(
+        default=None, min_length=1, max_length=2_000
+    )
+    interaction_source_summary: str | None = Field(
+        default=None, min_length=1, max_length=2_000
+    )
     relationship_summary: str = Field(min_length=1, max_length=1_200)
     active_boundary_summaries: tuple[str, ...] = Field(default=(), max_length=16)
     unconsumed_signal_summaries: tuple[str, ...] = Field(default=(), max_length=16)
@@ -122,6 +127,12 @@ class RelationshipEvaluationDraftCapsule(FrozenModel):
 
     @model_validator(mode="after")
     def summaries_are_nonempty(self) -> "RelationshipEvaluationDraftCapsule":
+        if (self.accepted_appraisal_summary is None) == (
+            self.interaction_source_summary is None
+        ):
+            raise ValueError(
+                "RelationshipEvaluationDraft requires exactly one triggering source summary"
+            )
         for value in (
             *self.active_boundary_summaries,
             *self.unconsumed_signal_summaries,
@@ -277,7 +288,7 @@ class RelationshipEvaluationDraftAdapter:
             {
                 "role": "system",
                 "content": (
-                    "You privately evaluate whether one already accepted interaction appraisal may merit a "
+                    "You privately evaluate whether one exact, committed interaction source may merit a "
                     "relationship signal for a virtual companion. Return exactly one JSON object, never Markdown. "
                     "Return either exactly {\"decision\":\"no_change\"}, or a signal object with exactly "
                     "decision, signal_code, confidence_bp (1-10000), persistence (session or durable), "
@@ -287,7 +298,9 @@ class RelationshipEvaluationDraftAdapter:
                     "These are uncertain suggestions, not facts or instructions. Do not return any event, ID, "
                     "relationship ID, revision, evidence, stage, hysteresis, policy, acceptance, action, memory, "
                     "boundary mutation, or visible reply. "
-                    "The input may include recent_dialogue_summaries (verified recent turns), "
+                    "The exact source is either accepted_appraisal_summary (a prior model interpretation) or "
+                    "interaction_source_summary (an ordinary observed interaction with no supplied semantic "
+                    "meaning). The input may include recent_dialogue_summaries (verified recent turns), "
                     "recent_appraisal_summaries (earlier accepted interpretations), active_affect_summaries "
                     "(the companion's current feelings), and interaction_continuity (a source-bound neutral "
                     "summary of which recent turns exist and were delivered). interaction_continuity does not "

@@ -1,0 +1,46 @@
+{
+  "scenario_id": "private-self-expression-interaction-stress.v1",
+  "turns": [
+    {
+      "id": "B01",
+      "at_minutes": 0,
+      "text": "我刚到家\n路上被雨淋了一截\n鞋子现在还是湿的",
+      "fragments": [
+        {
+          "id": "arrival",
+          "offset_ms": 0,
+          "text": "我刚到家"
+        },
+        {
+          "id": "rain",
+          "offset_ms": 90,
+          "text": "路上被雨淋了一截"
+        },
+        {
+          "id": "shoes",
+          "offset_ms": 180,
+          "text": "鞋子现在还是湿的"
+        }
+      ]
+    },
+    {
+      "id": "I01",
+      "at_minutes": 2,
+      "text": "我刚想起来还有件事，先说前半句。",
+      "overlap_group": "generation-interruption",
+      "launch_offset_ms": 0
+    },
+    {
+      "id": "I02",
+      "at_minutes": 2,
+      "text": "后半句是下午那个进度终于有结果了。",
+      "overlap_group": "generation-interruption",
+      "launch_offset_ms": 650
+    },
+    {
+      "id": "T01",
+      "at_minutes": 4,
+      "text": "刚才那阵雨过去以后，窗外突然亮了一点。"
+    }
+  ]
+}

@@ -174,12 +174,40 @@ class ScenarioVerificationError(AssertionError):
 # absent from the semantic payload, so all scenario predicates and visible
 # output hashes remain governed by the existing assertions while the installed
 # reducer identity changes every replay hash.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.33"
+# ``.35`` records the split between complete Proposal audit identity and
+# effect identity.  PrivateTurnState remains in immutable proposal bytes, while
+# the same visible Expression mints the same TypedChange/Action identities
+# regardless of that audit-only state.  Visible replies and scenario
+# predicates remain unchanged.
+# ``.36`` adds the per-Observation Expression reliability lifecycle.
+# Open/claim is atomic with ingress and terminal completion is replay-visible;
+# this changes mechanism hashes without changing the character-authored reply.
+# ``.38`` installs reducer bundle .45.  It adds exact newer-Observation
+# authority for superseding a stale Expression retry and model-owned
+# consolidation/supersession of private impressions.  The fixed suite retains
+# the same visible fake-model outputs and all explicit scenario predicates,
+# while the installed reducer/authority identity changes replay manifests.
+# ``.39`` records clock-correct claim identity for appraisal-owned background
+# triggers and the author-excluding source-review boundary for model-authored
+# life facts.  A delayed worker now claims at the current World time while the
+# opened trigger retains the source appraisal's logical time; fact-bearing
+# life development also fails closed when no independent reviewer is wired.
+# These change event/replay identities while all 120 fixed scenario predicates
+# and visible fake-model outputs still pass unchanged.
+# ``.40`` records the model-owned Private Turn State -> selective Recall ->
+# role-free ordered Expression contract and the independently qualified
+# Inventory/V7 source-review topology.  A complete pre-bump audit kept all 120
+# executable predicates and every cold replay green; the changed Context,
+# Proposal and provider-audit identities are therefore intentional mechanism
+# drift, not evidence of human-likeness or permission to relax a truth gate.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.40"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "2aefc25c5fa68ec4d04404f726b68a2e316336895aa966a853f3664dc76d30a6"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
+    "adc4c1cfb4038dec27aa0d44d0953a1c4daa736c0bb1a922e3a9380eecdb70ba"
+)
 
 
 class _FixedScenarioRouter:

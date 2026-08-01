@@ -69,6 +69,10 @@ from companion_daemon.world_v2.schemas import (
     validate_plan_authority_state,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from companion_daemon.world_v2.social_initiative import (
+    SocialInitiativeCompiler,
+    SocialInitiativePolicy,
+)
 from companion_daemon.world_v2.typed_proposals import AmbiguousTypedProposalAuthority
 
 
@@ -708,7 +712,7 @@ def assert_completed_vertical(ledger: LedgerPort) -> None:
 
 @pytest.mark.asyncio
 async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -> None:
-    """A real life settlement is an opportunity, never a timer-authored message."""
+    """A real life settlement enters the V3 event window, never a direct-send lane."""
 
     class Router:
         async def route(self, _request) -> ModelRoute:  # type: ignore[no-untyped-def]
@@ -723,18 +727,22 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
 
         def __init__(self) -> None:
             self.calls = 0
+            self.proactive_opportunity: dict[str, object] | None = None
 
-        async def complete(self, _messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
             del temperature
             self.calls += 1
+            self.proactive_opportunity = json.loads(messages[-1]["content"])[
+                "proactive_opportunity"
+            ]
             return json.dumps(
                 {
                     "timing_choice": "now",
-                    "response_text": "刚才和小林泡茶时发生了件挺有意思的事。",
-                    "behavior_tendency": "share_lived_experience",
+                    "cadence": "conversational",
+                    "beats": [{"modality": "text", "text": "突然有点想和你说两句。"}],
                     "stance": "warm_but_unforced",
-                    "display_strategy": "casual_recollection",
-                    "brief_rationale": "新近经历与当前关系值得分享，但不把分享写成固定规则。",
+                    "brief_rationale": "当前情境让我想联系，但说什么仍由我自己决定。",
+                    "impulse_summary": "此刻自然地想起了对方。",
                     "confidence": 8_100,
                 },
                 ensure_ascii=False,
@@ -792,36 +800,71 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
             category="proactive",
         ),
         owner_id="worker:proactive:life-test",
+        social_initiative=SocialInitiativeCompiler(
+            ledger=ledger,
+            policy=SocialInitiativePolicy(),
+        ),
+    )
+
+    not_due = await runtime.drain_one()
+    assert not_due.status == "idle"
+
+    consideration_due_at = LIFE_TIME + timedelta(minutes=45)
+    commit(
+        ledger,
+        [
+            event(
+                "clock-proactive-life-window",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": LIFE_TIME.isoformat(),
+                    "logical_time_to": consideration_due_at.isoformat(),
+                },
+                at=consideration_due_at,
+            )
+        ],
     )
 
     opened = await runtime.drain_one()
     authorized = await runtime.drain_one()
 
     assert opened.status == "opened"
-    assert opened.source_ref == "occurrence-settled"
+    assert opened.source_ref == "occurrence-activated"
     assert authorized.status == "authorized"
     assert model.calls == 1
+    assert model.proactive_opportunity is not None
+    assert model.proactive_opportunity["source_kind"] == "situation_change"
+    assert model.proactive_opportunity["source_refs"] == [
+        "occurrence-activated",
+        "occurrence-settled",
+        "experience-committed",
+    ]
     projection = ledger.project()
     assert projection.actions[-1].kind == "proactive_message"
     assert projection.actions[-1].intent_ref.startswith(
         projection.proposal_audits[-1].proposal_id + ":"
     )
-    assert projection.proposal_audits[-1].trigger_ref == "occurrence-settled"
+    assert projection.proposal_audits[-1].trigger_ref == "occurrence-activated"
     audited_proposal = validate_proposal_envelope(
         json.loads(projection.proposal_audits[-1].proposal_json)
     )
     expression_payload = audited_proposal.proposed_changes[0].payload.value()
-    settlement_ref = next(
+    opportunity_ref = next(
         item
         for item in projection.committed_world_event_refs
-        if item.event_id == "occurrence-settled"
+        if item.event_id == "occurrence-activated"
     )
-    assert expression_payload["event_share_claim"] == {
-        "claim_text": "刚才和小林泡茶时发生了件挺有意思的事。",
-        "recipient_ref": "user:primary",
-        "source_event_ref": "occurrence-settled",
-        "source_payload_hash": "sha256:" + settlement_ref.payload_hash,
-        "source_world_revision": settlement_ref.world_revision,
+    assert expression_payload["world_claims"] == []
+    assert expression_payload["proactive_source_plan_binding_v2"] == {
+        "source_kind": "situation_change",
+        "source_event_ref": "occurrence-activated",
+        "source_payload_hash": "sha256:" + opportunity_ref.payload_hash,
+        "source_world_revision": opportunity_ref.world_revision,
+        "plan_id": expression_payload["plan_id"],
+        "beat_payload_hashes": [
+            projection.actions[-1].payload_hash,
+        ],
+        "target_ref": "user:primary",
     }
     assert projection.budget_reservations[-1].category == "proactive"
     process = next(
@@ -829,7 +872,7 @@ async def test_settled_world_occurrence_reaches_model_owned_proactive_action() -
         for item in projection.trigger_processes
         if item.process_kind == "proactive_action_deliberation"
     )
-    assert process.source_evidence_ref == "occurrence-settled"
+    assert process.source_evidence_ref == "occurrence-activated"
     assert process.state == "terminal"
     assert (
         ledger.project_at(

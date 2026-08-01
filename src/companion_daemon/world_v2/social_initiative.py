@@ -444,6 +444,15 @@ class SocialInitiativeCompiler:
     async def _failed_consideration_retry(
         self, projection
     ) -> SocialInitiativeOpportunity | None:
+        settled_considerations = {
+            item.trigger_ref
+            for item in getattr(projection, "trigger_processes", ())
+            if item.process_kind == "proactive_action_deliberation"
+            and item.state == "terminal"
+            and not str(item.runtime_outcome_ref).startswith(
+                "proactive:deliberation-failed:"
+            )
+        }
         process = next(
             (
                 item
@@ -453,6 +462,7 @@ class SocialInitiativeCompiler:
                 and str(item.runtime_outcome_ref).startswith(
                     "proactive:deliberation-failed:"
                 )
+                and item.trigger_ref not in settled_considerations
                 and item.trigger_ref.startswith("proactive-consideration:")
                 and item.source_evidence_ref is not None
             ),

@@ -4,6 +4,7 @@ import pytest
 
 from companion_daemon.world_v2.life_content_store import (
     InMemoryImmutableLifeContentStore,
+    MAX_RAW_MODEL_RESULT_UTF8_BYTES,
     SQLiteImmutableLifeContentStore,
     StoredLifeContent,
     life_content_payload_hash,
@@ -63,4 +64,42 @@ def test_life_content_rejects_a_hash_that_does_not_bind_the_text() -> None:
             content_kind="experience_summary",
             content_payload_hash="0" * 64,
             text="这不是对应的内容。",
+        )
+
+
+@pytest.mark.parametrize("adapter", ("memory", "sqlite"))
+def test_internal_raw_model_result_has_a_separate_bounded_audit_lane(
+    adapter: str,
+    tmp_path,
+) -> None:
+    raw = "x" * 12_500
+    record = StoredLifeContent(
+        content_ref="content:model-result:bounded",
+        content_kind="raw_model_result",
+        content_payload_hash=life_content_payload_hash(raw),
+        text=raw,
+    )
+    store = (
+        InMemoryImmutableLifeContentStore()
+        if adapter == "memory"
+        else SQLiteImmutableLifeContentStore(
+            path=str(tmp_path / "raw-model-result.sqlite"),
+            world_id="world:1",
+        )
+    )
+    try:
+        store.put_if_absent(record)
+        assert store.read_exact(content_ref=record.content_ref) == record
+    finally:
+        close = getattr(store, "close", None)
+        if close is not None:
+            close()
+
+    over_cap = "x" * (MAX_RAW_MODEL_RESULT_UTF8_BYTES + 1)
+    with pytest.raises(ValueError, match="audit byte limit"):
+        StoredLifeContent(
+            content_ref="content:model-result:over-cap",
+            content_kind="raw_model_result",
+            content_payload_hash=life_content_payload_hash(over_cap),
+            text=over_cap,
         )

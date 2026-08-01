@@ -1,20 +1,149 @@
+import asyncio
+import json
+from types import SimpleNamespace
+
+import httpx
 import pytest
 
 from companion_daemon.config import Settings
-from companion_daemon.llm import FailoverChatModel, OpenAICompatibleChatModel
+from companion_daemon.llm import (
+    FailoverChatModel,
+    FakeCompanionModel,
+    OpenAICompatibleChatModel,
+    ProviderCapacityGate,
+    ProviderCircuitBreaker,
+)
 from companion_daemon.world_v2.semantic_chat_composition import (
     build_semantic_chat_composition,
 )
+from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+    SourceClosureReselectionLane,
+)
+from companion_daemon.world_v2.model_authority_identity import (
+    provider_lane_sets_are_independent,
+    semantic_authority_id,
+    transport_route_id,
+)
+from companion_daemon.world_v2.source_review_authority import (
+    SourceReviewAttemptsExhausted,
+    SourceReviewAuthority,
+)
+from companion_daemon.world_v2.structured_source_review_model import (
+    InventoryAvailabilityAuthority,
+    StructuredSourceReviewModel,
+)
+from companion_daemon.world_v2.structured_expression_reselection_model import (
+    EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT,
+    StructuredExpressionReselectionModel,
+)
+
+
+class _InjectedModel:
+    def __init__(self, model: str) -> None:
+        self.model = model
+        # Composition fakes declare checkpoint authority explicitly. A model
+        # display name alone is deliberately insufficient in production.
+        self.semantic_authority_id = f"semantic-authority:test:{model.casefold()}"
+        self.closed = False
+
+    async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
+        del messages, temperature
+        return "{}"
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _StrictInventoryInjectedModel(_InjectedModel):
+    def supports_strict_output_contract(self, contract: str) -> bool:
+        return contract == "candidate-external-proposition-inventory.5"
+
+
+class _StrictCoverageInjectedModel(_InjectedModel):
+    def supports_strict_output_contract(self, contract: str) -> bool:
+        return contract == "candidate-external-proposition-coverage.5"
+
+
+class _StrictInventoryAndCoverageInjectedModel(_InjectedModel):
+    def supports_strict_output_contract(self, contract: str) -> bool:
+        return contract in {
+            "candidate-external-proposition-inventory.5",
+            "candidate-external-proposition-coverage.5",
+        }
+
+
+def test_remote_production_requires_qualified_ordinary_and_recovery_reviewers() -> None:
+    """Independent transports do not prove the V7/RR.3 review contract."""
+
+    with pytest.raises(
+        ValueError,
+        match="independently qualified source-closure reviewers for ordinary and recovery",
+    ):
+        build_semantic_chat_composition(
+            settings=Settings(
+                _env_file=None,
+                DEEPSEEK_API_KEY="deepseek-test-key",
+                OPENAI_API_KEY="openai-test-key",
+                WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=False,
+            ),
+            model_id_prefix="test",
+        )
+
+
+def test_remote_production_rejects_unqualified_redundant_review_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two independent transports remain unusable without exact contract audits."""
+
+    created_clients: list[object] = []
+
+    class _TrackingClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            created_clients.append(self)
+
+        async def aclose(self) -> None:
+            return None
+
+        async def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("preflight must not reach a provider")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _TrackingClient)
+
+    with pytest.raises(
+        ValueError,
+        match="independently qualified source-closure reviewers for ordinary and recovery",
+    ):
+        build_semantic_chat_composition(
+            settings=Settings(
+                _env_file=None,
+                DEEPSEEK_API_KEY="deepseek-test-key",
+                OPENAI_API_KEY="openai-test-key",
+                OPENROUTER_API_KEY="openrouter-test-key",
+                WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+                WORLD_V2_SOURCE_REVIEW_SECONDARY_MODEL="openai/gpt-5.4-mini",
+                WORLD_V2_SOURCE_REVIEW_FALLBACK_MODEL="gpt-5.4-nano",
+                WORLD_V2_SOURCE_REVIEW_RECOVERY_MODEL="openai/gpt-5.4-mini",
+                WORLD_V2_SOURCE_REVIEW_RECOVERY_FALLBACK_MODEL=(
+                    "gpt-5.4-nano"
+                ),
+            ),
+            model_id_prefix="test",
+        )
+
+    assert created_clients == []
 
 
 @pytest.mark.asyncio
-async def test_world_v2_composition_installs_configured_openai_fallback() -> None:
+async def test_world_v2_composition_installs_configured_openai_fallback_without_using_it_as_reviewer() -> None:
     settings = Settings(
         _env_file=None,
         DEEPSEEK_API_KEY="deepseek-test-key",
+        deepseek_model="deepseek-v4-flash",
         OPENAI_API_KEY="openai-test-key",
+        OPENROUTER_API_KEY="openrouter-test-key",
         OPENAI_PROXY_URL="http://127.0.0.1:7890",
-        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna-test",
+        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
     )
 
     composition = build_semantic_chat_composition(
@@ -24,9 +153,1076 @@ async def test_world_v2_composition_installs_configured_openai_fallback() -> Non
 
     assert isinstance(composition.flash_model, FailoverChatModel)
     assert isinstance(composition.flash_model.fallback, OpenAICompatibleChatModel)
-    assert composition.flash_model.fallback.model == "gpt-5.6-luna-test"
+    assert isinstance(composition.flash_model.fallback, StructuredSourceReviewModel)
+    assert isinstance(
+        composition.flash_model.fallback,
+        StructuredExpressionReselectionModel,
+    )
+    assert composition.flash_model.fallback.model == "gpt-5.6-luna"
     assert composition.flash_model.fallback.proxy_url == "http://127.0.0.1:7890"
-    assert composition.main_model._owner._source_closure_reviewer is composition.flash_model
+    assert isinstance(composition.source_closure_model, SourceReviewAuthority)
+    assert composition.source_closure_model is not composition.flash_model.fallback
+    assert composition.source_closure_model.supports_strict_output_contract(
+        "report-relative-entailment-adjudication.3"
+    )
+    assert composition.source_closure_model.supports_strict_output_contract(
+        "source-closure-review.7"
+    )
+    assert isinstance(composition.recovery_source_closure_model, SourceReviewAuthority)
+    assert composition.recovery_source_closure_model.supports_strict_output_contract(
+        "report-relative-entailment-adjudication.3"
+    )
+    assert composition.recovery_source_closure_model.supports_strict_output_contract(
+        "source-closure-review.7"
+    )
+    assert composition.source_closure_reselection_lane is not None
+    assert composition.source_closure_reselection_lane.author is not (
+        composition.flash_model.fallback
+    )
+    assert composition.proactive_source_authority_health()["status"] == "ready"
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_recovery_leaves_do_not_install_local_serial_capacity_cooldown() -> None:
+    """A timed-out remote request must not locally veto the next user turn."""
+
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        deepseek_model="deepseek-v4-flash",
+        OPENAI_API_KEY="openai-test-key",
+        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+    )
+
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="test",
+    )
+
+    assert isinstance(composition.flash_model, FailoverChatModel)
+    technical_recovery = composition.flash_model.fallback
+    source_reselection = composition.source_closure_reselection_lane
+    assert isinstance(technical_recovery, OpenAICompatibleChatModel)
+    assert source_reselection is not None
+    assert isinstance(source_reselection.author, OpenAICompatibleChatModel)
+    assert technical_recovery.client is not source_reselection.author.client
+    assert technical_recovery.circuit_breaker is not source_reselection.author.circuit_breaker
+
+    entered = asyncio.Event()
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await asyncio.Event().wait()
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{}"}}]},
+        )
+
+    await technical_recovery.client.aclose()
+    technical_recovery.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    )
+    timed_out = asyncio.create_task(
+        technical_recovery.complete_json(
+            [{"role": "user", "content": "first remote recovery"}]
+        )
+    )
+    await entered.wait()
+    timed_out.cancel("provider_timeout")
+    with pytest.raises(asyncio.CancelledError):
+        await timed_out
+
+    assert (
+        await technical_recovery.complete_json(
+            [{"role": "user", "content": "next user turn"}]
+        )
+        == "{}"
+    )
+    assert calls == 2
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shadow_composition_uses_role_identical_but_resource_isolated_observer() -> None:
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        deepseek_model="deepseek-v4-flash",
+        OPENAI_API_KEY="openai-test-key",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
+        WORLD_V2_EXPRESSION_EPISODE_MODE="shadow",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+    )
+
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="test",
+    )
+
+    assert isinstance(composition.flash_model, FailoverChatModel)
+    recovery = composition.flash_model.fallback
+    observer = composition.expression_episode_observer_model
+    assert isinstance(recovery, OpenAICompatibleChatModel)
+    assert isinstance(observer, OpenAICompatibleChatModel)
+    assert observer is not recovery
+    assert observer.model == recovery.model == "gpt-5.6-luna"
+    assert observer.client is not recovery.client
+    assert observer.capacity_gate is None
+    assert recovery.capacity_gate is None
+    assert isinstance(observer.circuit_breaker, ProviderCircuitBreaker)
+    assert isinstance(recovery.circuit_breaker, ProviderCircuitBreaker)
+    assert observer.circuit_breaker is not recovery.circuit_breaker
+
+    observer.circuit_breaker.record_failure()
+    observer.circuit_breaker.record_failure()
+    try:
+        assert observer.circuit_breaker.snapshot().status == "open"
+        assert recovery.circuit_breaker.snapshot().status == "closed"
+    finally:
+        await composition.aclose()
+    assert composition.flash_model.primary.client.is_closed
+    assert recovery.client.is_closed
+    assert observer.client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_explicit_author_does_not_implicitly_enable_shadow_observer() -> None:
+    author = _InjectedModel("injected-author")
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            OPENAI_API_KEY="openai-test-key",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="shadow",
+        ),
+        flash_model=author,
+        model_id_prefix="test",
+    )
+
+    assert composition.expression_episode_observer_model is None
+    assert composition.main_model.shadow_observer_provider_available(object()) is False
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_shadow_observer_remains_caller_owned() -> None:
+    author = _InjectedModel("injected-author")
+    observer = _InjectedModel("injected-observer")
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="shadow",
+        ),
+        flash_model=author,
+        expression_episode_observer_model=observer,
+        model_id_prefix="test",
+    )
+
+    assert composition.expression_episode_observer_model is observer
+    assert composition.main_model.shadow_observer_provider_available(object()) is True
+    await composition.aclose()
+    assert author.closed is False
+    assert observer.closed is False
+
+
+@pytest.mark.asyncio
+async def test_production_composition_keeps_unverified_inventory_out_of_every_candidate() -> None:
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        deepseek_model="deepseek-v4-flash",
+        OPENAI_API_KEY="openai-test-key",
+        OPENAI_PROXY_URL="http://127.0.0.1:7890",
+        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        OPENROUTER_BASE_URL="https://openrouter.ai/api/v1",
+        WORLD_V2_SOURCE_INVENTORY_MODEL="nousresearch/hermes-test-inventory",
+        WORLD_V2_SOURCE_REVIEW_SECONDARY_MODEL="qwen/qwen-plus",
+        WORLD_V2_SOURCE_REVIEW_FALLBACK_MODEL="gpt-4.1-mini",
+        WORLD_V2_SOURCE_REVIEW_RECOVERY_MODEL="qwen/qwen-plus",
+        WORLD_V2_SOURCE_REVIEW_RECOVERY_FALLBACK_MODEL="gpt-4.1-mini",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SOURCE_REVIEW_HEDGE_AFTER_SECONDS=3.5,
+        WORLD_V2_SOURCE_REVIEW_DEADLINE_SECONDS=19.0,
+        WORLD_V2_SOURCE_INVENTORY_TIMEOUT_SECONDS=5.0,
+    )
+
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="test",
+    )
+
+    main_authority = composition.source_closure_model
+    assert isinstance(main_authority, SourceReviewAuthority)
+    assert isinstance(main_authority.primary, StructuredSourceReviewModel)
+    assert main_authority.primary.model == "qwen/qwen-plus"
+    assert main_authority.primary.base_url == "https://openrouter.ai/api/v1"
+    assert main_authority.primary.proxy_url == "http://127.0.0.1:7890"
+    assert isinstance(main_authority.secondary, OpenAICompatibleChatModel)
+    assert main_authority.secondary.model == "gpt-4.1-mini"
+    assert main_authority.secondary.reasoning_effort == ""
+    assert main_authority.hedge_after_seconds == 3.5
+    assert main_authority.deadline_seconds == 19.0
+    assert composition.proactive_source_closure_model is main_authority
+    inventory = composition.candidate_external_proposition_inventory_model
+    assert inventory is None
+    assert composition.main_model._owner._candidate_external_proposition_inventory_model is None
+
+    owner = composition.main_model._owner
+    recovery_authority = owner._recovery_expression._source_closure_reviewer
+    assert isinstance(recovery_authority, SourceReviewAuthority)
+    assert recovery_authority is not main_authority
+    assert recovery_authority.primary is not main_authority.primary
+    assert recovery_authority.primary.model == "qwen/qwen-plus"
+    assert isinstance(recovery_authority.secondary, StructuredSourceReviewModel)
+    assert recovery_authority.secondary.model == "gpt-4.1-mini"
+    assert recovery_authority.secondary.provider == "openai"
+    assert (
+        recovery_authority.supports_strict_output_contract(
+            "candidate-external-proposition-coverage.5"
+        )
+        is False
+    )
+    assert owner._recovery_expression._report_relative_reviewer is recovery_authority
+    assert owner._recovery_expression._candidate_external_proposition_inventory_model is None
+    assert isinstance(composition.flash_model.fallback, StructuredExpressionReselectionModel)
+    assert composition.flash_model.fallback.supports_strict_output_contract(
+        EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT
+    )
+    reselection_lane = composition.source_closure_reselection_lane
+    assert reselection_lane is not None
+    assert isinstance(reselection_lane.author, StructuredExpressionReselectionModel)
+    assert reselection_lane.author is not composition.flash_model.fallback
+    assert reselection_lane.author.model == composition.flash_model.fallback.model
+    assert reselection_lane.author.capacity_gate is None
+    assert composition.flash_model.fallback.capacity_gate is None
+    assert reselection_lane.author.client is not composition.flash_model.fallback.client
+    assert (
+        reselection_lane.author.circuit_breaker
+        is not composition.flash_model.fallback.circuit_breaker
+    )
+    assert reselection_lane.reviewer is recovery_authority
+    assert reselection_lane.report_relative_reviewer is recovery_authority
+    assert reselection_lane.inventory_model is None
+    assert owner._source_closure_reselection_lane is reselection_lane
+    assert owner._flash_expression._source_closure_reselection_lane is reselection_lane
+    assert owner._fallback_expression._flash._source_closure_reselection_lane is reselection_lane
+    assert owner._recovery_expression._source_closure_reselection_lane is reselection_lane
+
+    health = composition.proactive_source_authority_health()
+    assert health["status"] == "ready"
+    assert health["redundancy_state"] == "redundant"
+    assert health["visible_review_strategy"] == "full_source_review"
+    assert health["candidate_review_capabilities"] == {
+        "ordinary": {
+            "inventory_v5": False,
+            "coverage_v5": False,
+            "roles_independent": False,
+        },
+        "recovery": {
+            "inventory_v5": False,
+            "coverage_v5": False,
+            "roles_independent": False,
+        },
+        "reselection": {
+            "inventory_v5": False,
+            "coverage_v5": False,
+            "roles_independent": False,
+        },
+    }
+    assert health["candidate_inventory_model"] is None
+    assert health["requested_candidate_inventory_model"] == (
+        "nousresearch/hermes-test-inventory"
+    )
+    assert health["inventory_capability_evidence"]["status"] == "unverified"
+    assert health["inventory_call_timeout_seconds"] == 11.75
+    assert health["inventory_transport"]["route_count"] == 0
+    assert health["inventory_transport"]["single_transport"] is False
+    assert health["warning"] is True
+    assert (
+        "source_inventory.strict_output_capability_unverified"
+        in health["warning_reasons"]
+    )
+    assert health["source_review_authority"]["configured_lanes"] == (
+        "primary",
+        "secondary",
+    )
+    assert health["source_review_authority"]["lane_models"] == {
+        "primary": "qwen/qwen-plus",
+        "secondary": "gpt-4.1-mini",
+    }
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_production_composition_does_not_install_unverified_openrouter_inventory() -> None:
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        deepseek_model="deepseek-v4-flash",
+        OPENAI_API_KEY="openai-test-key",
+        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        OPENROUTER_BASE_URL="https://openrouter.ai/api/v1",
+        WORLD_V2_SOURCE_INVENTORY_ENABLED=True,
+        WORLD_V2_SOURCE_INVENTORY_MODEL="nousresearch/hermes-4-70b",
+        WORLD_V2_SOURCE_REVIEW_SECONDARY_MODEL="qwen/qwen-plus",
+        WORLD_V2_SOURCE_REVIEW_FALLBACK_MODEL="gpt-4.1-mini",
+        WORLD_V2_SOURCE_REVIEW_RECOVERY_MODEL="qwen/qwen-plus",
+        WORLD_V2_SOURCE_REVIEW_RECOVERY_FALLBACK_MODEL="gpt-4.1-mini",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+    )
+
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="test",
+    )
+
+    assert composition.candidate_external_proposition_inventory_model is None
+    health = composition.proactive_source_authority_health()
+    assert health["status"] == "ready"
+    assert health["visible_review_strategy"] == "full_source_review"
+    assert health["candidate_inventory_model"] is None
+    assert health["requested_candidate_inventory_model"] == (
+        "nousresearch/hermes-4-70b"
+    )
+    assert health["inventory_capability_evidence"] == {
+        "status": "unverified",
+        "evidence_source": "openrouter_model_metadata",
+        "reason_code": "source_inventory.structured_outputs_not_advertised",
+        "provider": "openrouter",
+        "model": "nousresearch/hermes-4-70b",
+        "contracts": (),
+        "observed_at": "2026-08-01",
+        "qualified_at": None,
+        "evidence_revision": None,
+        "audit_sample_count": None,
+        "audit_success_count": None,
+        "contract_schema_digests": {},
+    }
+    assert health["inventory_call_timeout_seconds"] == 11.75
+    assert (
+        "source_inventory.structured_outputs_not_advertised"
+        in health["warning_reasons"]
+    )
+    assert health["candidate_review_capabilities"]["ordinary"]["inventory_v5"] is False
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_production_composition_installs_inventory_guard_with_qualified_reserve() -> None:
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY="deepseek-test-key",
+            OPENAI_API_KEY="openai-test-key",
+            OPENROUTER_API_KEY="openrouter-test-key",
+            OPENROUTER_BASE_URL="https://openrouter.ai/api/v1",
+            WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        ),
+        model_id_prefix="test",
+    )
+
+    assert isinstance(
+        composition.candidate_external_proposition_inventory_model,
+        InventoryAvailabilityAuthority,
+    )
+    requested_inventory = (
+        composition.proactive_source_authority.inventory_runtime_model
+    )
+    assert isinstance(requested_inventory, InventoryAvailabilityAuthority)
+    assert composition.candidate_external_proposition_inventory_model is requested_inventory
+    assert requested_inventory.primary.model == "openai/gpt-5.4-nano"
+    assert requested_inventory.secondary.model == "gpt-5.4-mini"
+    assert requested_inventory.primary.reasoning_effort == "none"
+    assert requested_inventory.secondary.reasoning_effort == "none"
+    assert requested_inventory.inventory_attempt_timeout_seconds == 3.0
+    assert requested_inventory.inventory_secondary_reserved_seconds == 8.0
+    assert requested_inventory.inventory_call_timeout_seconds == 11.75
+    assert requested_inventory.primary.circuit_breaker is None
+    assert requested_inventory.secondary.circuit_breaker is None
+    health = composition.proactive_source_authority_health()
+    assert health["visible_review_strategy"] == (
+        "inventory_v5_guard_then_full_source_review"
+    )
+    assert health["inventory_qualification_state"] == "verified"
+    assert health["active_source_review_protocol"] == (
+        "inventory_v5_guard_then_full_source_review.7"
+    )
+    assert health["source_review_qualification_transition"] == (
+        "verified -> inventory_v5_guard_then_full_source_review.7"
+    )
+    assert health["candidate_review_capabilities"]["ordinary"] == {
+        "inventory_v5": True,
+        "coverage_v5": False,
+        "roles_independent": True,
+    }
+    evidence = health["inventory_capability_evidence"]
+    assert evidence["status"] == "verified"
+    assert evidence["evidence_revision"] == (
+        "inventory-v5-openrouter-gpt54nano-20260801.1"
+    )
+    assert evidence["audit_sample_count"] == 14
+    assert evidence["audit_success_count"] == 13
+    assert evidence["qualified_at"] == "2026-08-01"
+    assert evidence["contract_schema_digests"] == {
+        "candidate-external-proposition-inventory.5": (
+            "cd55ce09687b5b4e68b1a6805244f76e9c43d4e286b3bee5bb183715a38519fb"
+        )
+    }
+    assert health["inventory_runtime"]["status"] == "qualified_unprobed"
+    assert health["inventory_runtime"]["last_winner_lane"] is None
+    assert set(health["inventory_runtime"]["lanes"]) == {"primary", "secondary"}
+    assert (
+        health["inventory_runtime"]["route_rejection_cooldown_seconds"]
+        == 600.0
+    )
+    assert (
+        health["inventory_runtime"]["provider_timeout_cooldown_seconds"]
+        == 600.0
+    )
+    assert (
+        "source_inventory.contract_response_unverified"
+        not in health["warning_reasons"]
+    )
+    assert health["inventory_transport"]["route_count"] == 2
+    assert health["inventory_transport"]["provider_count"] == 2
+    assert health["inventory_transport"]["single_provider"] is False
+    assert health["inventory_transport"]["attempt_timeout_seconds"] == 3.0
+    assert health["inventory_transport"]["secondary_reserved_seconds"] == 8.0
+    route_evidence = health["inventory_transport"]["capability_evidence"]
+    assert [item["model"] for item in route_evidence] == [
+        "openai/gpt-5.4-nano",
+        "gpt-5.4-mini",
+    ]
+    assert [item["provider"] for item in route_evidence] == [
+        "openrouter",
+        "openai",
+    ]
+    assert route_evidence[1]["status"] == "verified"
+    assert route_evidence[1]["evidence_source"] == "production_contract_audit"
+    assert route_evidence[1]["reason_code"] == (
+        "strict_output.endpoint_capability_verified"
+    )
+    assert route_evidence[1]["evidence_revision"] == (
+        "inventory-v5-openai-gpt54mini-20260801.2"
+    )
+    assert route_evidence[1]["audit_sample_count"] == 12
+    assert route_evidence[1]["audit_success_count"] == 11
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_production_inventory_can_be_disabled_without_weakening_full_review() -> None:
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY="deepseek-test-key",
+            OPENAI_API_KEY="openai-test-key",
+            OPENROUTER_API_KEY="openrouter-test-key",
+            WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+            WORLD_V2_SOURCE_INVENTORY_ENABLED=False,
+        ),
+        model_id_prefix="test",
+    )
+
+    assert composition.candidate_external_proposition_inventory_model is None
+    health = composition.proactive_source_authority_health()
+    assert health["status"] == "ready"
+    assert health["visible_review_strategy"] == "full_source_review"
+    assert health["inventory_capability_evidence"]["status"] == "disabled"
+    assert (
+        "source_inventory.disabled_by_configuration" in health["warning_reasons"]
+    )
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_source_closure_injection_is_not_replaced_by_auto_wiring() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _InjectedModel("injected-reviewer")
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY="deepseek-test-key",
+            OPENAI_API_KEY="openai-test-key",
+        ),
+        flash_model=author,
+        source_closure_model=reviewer,
+        model_id_prefix="test",
+    )
+
+    assert composition.flash_model is author
+    assert composition.main_model._owner._source_closure_reviewer is reviewer
+    assert composition.main_model._owner._report_relative_reviewer is reviewer
+    assert composition.source_closure_model is reviewer
+    assert composition.proactive_source_closure_model is reviewer
+    # A full-review injection does not silently acquire a second wire
+    # responsibility. Without explicit Inventory V5 and Coverage V5 support,
+    # production retains the full source-review boundary instead of sending
+    # either strict contract to a generic model.
+    assert composition.candidate_external_proposition_inventory_model is None
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_schema_capable_reviewer_is_not_reused_as_its_own_inventory() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _StrictInventoryAndCoverageInjectedModel("injected-reviewer")
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=author,
+        source_closure_model=reviewer,
+        model_id_prefix="test",
+    )
+
+    assert composition.proactive_source_closure_model is reviewer
+    assert composition.candidate_external_proposition_inventory_model is None
+    assert composition.proactive_source_authority_health()["candidate_inventory_model"] is None
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_offline_auto_composition_never_installs_character_self_review() -> None:
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY=None,
+            OPENAI_API_KEY=None,
+        ),
+        model_id_prefix="test",
+    )
+
+    assert isinstance(composition.flash_model, FakeCompanionModel)
+    assert composition.main_model._owner._source_closure_reviewer is None
+    assert composition.main_model._owner._report_relative_reviewer is None
+    assert composition.source_closure_model is None
+    assert composition.proactive_source_closure_model is None
+    assert composition.proactive_source_authority_health() == {
+        "status": "fact_effects_fail_closed",
+        "warning": True,
+        "warning_reasons": [
+            "proactive_source_authority.independent_reviewer_unavailable",
+        ],
+        "independent_reviewer": False,
+        "fact_effects_available": False,
+        "subjective_expression_available": True,
+        "author_model": "FakeCompanionModel",
+        "reviewer_model": None,
+        "candidate_inventory_model": None,
+        "requested_candidate_inventory_model": None,
+        "inventory_capability_evidence": None,
+        "inventory_runtime": {
+            "status": "unavailable",
+            "successful_calls": 0,
+            "failed_calls": 0,
+            "last_checked_at": None,
+            "last_failure_code": None,
+        },
+        "inventory_call_timeout_seconds": None,
+        "visible_review_strategy": "full_source_review",
+        "inventory_qualification_state": "unavailable",
+        "active_source_review_protocol": "full_source_review.7",
+        "source_review_qualification_transition": (
+            "unavailable -> full_source_review.7"
+        ),
+        "candidate_review_capabilities": {
+            "ordinary": {
+                "inventory_v5": False,
+                "coverage_v5": False,
+                "roles_independent": False,
+            },
+            "recovery": {
+                "inventory_v5": False,
+                "coverage_v5": False,
+                "roles_independent": False,
+            },
+            "reselection": {
+                "inventory_v5": False,
+                "coverage_v5": False,
+                "roles_independent": False,
+            },
+        },
+        "inventory_transport": {
+            "route_count": 0,
+            "routes": (),
+            "single_transport": False,
+            "provider_count": 0,
+            "single_provider": False,
+            "capability_evidence": [],
+            "attempt_timeout_seconds": None,
+            "secondary_reserved_seconds": None,
+        },
+        "redundancy_state": "unavailable",
+        "source_review_authority": None,
+    }
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_proactive_source_authority_refuses_an_explicit_author_self_review() -> None:
+    author = _InjectedModel("same-role-model")
+    same_model_reviewer = _InjectedModel("same-role-model")
+    with pytest.raises(ValueError, match="independent source-closure reviewer"):
+        build_semantic_chat_composition(
+            settings=Settings(_env_file=None),
+            flash_model=author,
+            source_closure_model=same_model_reviewer,
+            model_id_prefix="test",
+        )
+
+
+def test_remote_production_composition_requires_an_independent_reviewer() -> None:
+    with pytest.raises(ValueError, match="independent source-closure reviewer"):
+        build_semantic_chat_composition(
+            settings=Settings(
+                _env_file=None,
+                DEEPSEEK_API_KEY="deepseek-test-key",
+                OPENAI_API_KEY=None,
+                OPENROUTER_API_KEY=None,
+            ),
+            model_id_prefix="test",
+        )
+
+
+@pytest.mark.asyncio
+async def test_inventory_v5_is_not_installed_without_qualified_followup_review() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _InjectedModel("injected-reviewer")
+    inventory = _StrictInventoryInjectedModel("injected-inventory")
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=author,
+        source_closure_model=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+        model_id_prefix="test",
+    )
+
+    assert composition.candidate_external_proposition_inventory_model is None
+    assert composition.proactive_source_authority_health()["candidate_inventory_model"] is None
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_inventory_v5_is_installed_with_coverage_v5_authority() -> None:
+    author = _InjectedModel("injected-author")
+    reviewer = _StrictCoverageInjectedModel("injected-reviewer")
+    inventory = _StrictInventoryInjectedModel("injected-inventory")
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=author,
+        source_closure_model=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+        model_id_prefix="test",
+    )
+
+    assert composition.candidate_external_proposition_inventory_model is inventory
+    assert composition.proactive_source_authority_health()["candidate_inventory_model"] == (
+        "injected-inventory"
+    )
+    await composition.aclose()
+
+
+def test_openrouter_and_official_routes_share_one_semantic_authority() -> None:
+    openrouter = _StrictCoverageInjectedModel("openai/gpt-5.6-terra")
+    openrouter.provider = "openrouter"
+    official = _StrictInventoryInjectedModel("gpt-5.6-terra")
+    official.provider = "openai"
+    openrouter.semantic_authority_id = official.semantic_authority_id = (
+        "semantic-authority:test:openai:gpt-5.6-terra"
+    )
+
+    assert semantic_authority_id(openrouter) == semantic_authority_id(official)
+    assert transport_route_id(openrouter) != transport_route_id(official)
+    with pytest.raises(ValueError, match="inventory model.*reviewer"):
+        SourceClosureReselectionLane(
+            author=_InjectedModel("gpt-5.6-luna"),
+            inventory_model=official,
+            reviewer=openrouter,
+        )
+
+
+def test_release_registry_closes_non_openai_cross_route_checkpoint_aliases() -> None:
+    official_deepseek = SimpleNamespace(
+        provider="deepseek",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+    )
+    openrouter_deepseek = SimpleNamespace(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="deepseek/deepseek-v4-flash",
+    )
+    dashscope_qwen = SimpleNamespace(
+        # The generic OpenAI-compatible adapter labels the wire protocol, not
+        # the actual semantic provider. The exact endpoint closes that gap.
+        provider="openai",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen-plus",
+    )
+    openrouter_qwen = SimpleNamespace(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen-plus",
+    )
+
+    assert semantic_authority_id(official_deepseek) == semantic_authority_id(
+        openrouter_deepseek
+    )
+    assert semantic_authority_id(dashscope_qwen) == semantic_authority_id(
+        openrouter_qwen
+    )
+    assert not provider_lane_sets_are_independent(
+        official_deepseek,
+        openrouter_deepseek,
+    )
+    assert not provider_lane_sets_are_independent(dashscope_qwen, openrouter_qwen)
+
+
+def test_unknown_model_identity_fails_closed_but_registered_checkpoints_remain_independent() -> None:
+    unknown = SimpleNamespace(
+        provider="custom-proxy",
+        base_url="https://models.example.invalid/v1",
+        model="friendly-alias",
+    )
+    another_unknown = SimpleNamespace(
+        provider="another-proxy",
+        base_url="https://other.example.invalid/v1",
+        model="different-friendly-alias",
+    )
+    malformed_declaration = SimpleNamespace(
+        semantic_authority_id=object(),
+        provider="deepseek",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+    )
+    deepseek = SimpleNamespace(
+        provider="deepseek",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+    )
+    qwen = SimpleNamespace(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen-plus",
+    )
+
+    assert semantic_authority_id(unknown) is None
+    assert semantic_authority_id(malformed_declaration) is None
+    assert not provider_lane_sets_are_independent(unknown, another_unknown)
+    assert provider_lane_sets_are_independent(deepseek, qwen)
+
+
+@pytest.mark.asyncio
+async def test_inventory_v5_rejects_cross_transport_same_semantic_reviewer() -> None:
+    author = _InjectedModel("deepseek-v4-flash")
+    inventory = _StrictInventoryInjectedModel("gpt-5.6-terra")
+    inventory.provider = "openai"
+    reviewer = _StrictCoverageInjectedModel("openai/gpt-5.6-terra")
+    reviewer.provider = "openrouter"
+    inventory.semantic_authority_id = reviewer.semantic_authority_id = (
+        "semantic-authority:test:openai:gpt-5.6-terra"
+    )
+
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=author,
+        source_closure_model=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+        model_id_prefix="test",
+    )
+
+    assert composition.candidate_external_proposition_inventory_model is None
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_composition_defers_owned_reviewer_close_until_authority_is_quiescent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY="deepseek-test-key",
+            OPENAI_API_KEY="openai-test-key",
+            OPENROUTER_API_KEY="openrouter-test-key",
+            WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        ),
+        model_id_prefix="test",
+    )
+    authority = composition.source_closure_model
+    assert isinstance(authority, SourceReviewAuthority)
+    reviewer = authority.primary
+    started = asyncio.Event()
+    ignored_cancellation = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cancellation_suppressing_review(
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> tuple[str, object]:
+        del messages, temperature
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            ignored_cancellation.set()
+            await release.wait()
+            return "late-review", {"lane": "primary"}
+
+    monkeypatch.setattr(
+        reviewer,
+        "complete_json_with_usage",
+        cancellation_suppressing_review,
+    )
+    authority.hedge_after_seconds = 0.001
+    authority.deadline_seconds = 0.3
+
+    try:
+        with pytest.raises(SourceReviewAttemptsExhausted):
+            await authority.complete_json_with_usage(
+                [{"role": "user", "content": "review"}],
+                temperature=0.0,
+            )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(ignored_cancellation.wait(), timeout=1)
+
+        await asyncio.wait_for(composition.aclose(), timeout=0.2)
+
+        assert reviewer.client.is_closed is False
+        assert composition.shutdown_pending_task_count == 1
+    finally:
+        release.set()
+
+    await asyncio.wait_for(composition.wait_for_shutdown_quiescence(), timeout=1)
+    assert reviewer.client.is_closed is True
+    assert composition.shutdown_pending_task_count == 0
+
+
+@pytest.mark.asyncio
+async def test_composition_preserves_models_while_advisory_shutdown_lease_is_open() -> None:
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY="deepseek-test-key",
+            OPENAI_API_KEY="openai-test-key",
+            OPENROUTER_API_KEY="openrouter-test-key",
+            WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        ),
+        model_id_prefix="test",
+    )
+    authority = composition.source_closure_model
+    assert isinstance(authority, SourceReviewAuthority)
+    leased_model = authority.primary
+    release = asyncio.Event()
+
+    class _LeasedAdvisoryCompiler:
+        close_called = False
+
+        async def aclose(self) -> None:
+            self.close_called = True
+
+        @property
+        def shutdown_pending_task_count(self) -> int:
+            return 0 if release.is_set() else int(self.close_called)
+
+        async def wait_for_shutdown_quiescence(self) -> None:
+            await release.wait()
+
+    advisory = _LeasedAdvisoryCompiler()
+    composition.advisory_compiler = advisory  # type: ignore[assignment]
+
+    await asyncio.wait_for(composition.aclose(), timeout=0.2)
+
+    assert leased_model.client.is_closed is False
+    assert composition.shutdown_pending_task_count == 1
+
+    release.set()
+    await asyncio.wait_for(composition.wait_for_shutdown_quiescence(), timeout=1)
+    assert leased_model.client.is_closed is True
+    assert composition.shutdown_pending_task_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overlap_pair",
+    ("author_inventory", "author_reviewer", "inventory_reviewer"),
+)
+async def test_inventory_v5_rejects_overlap_in_any_possible_provider_lane(
+    overlap_pair: str,
+) -> None:
+    shared_identity = f"shared-{overlap_pair}"
+    author: object = _InjectedModel("independent-author")
+    inventory: object = _StrictInventoryInjectedModel("independent-inventory")
+    reviewer: object = _StrictCoverageInjectedModel("independent-reviewer")
+
+    if overlap_pair == "author_inventory":
+        author = SourceReviewAuthority(
+            primary=_InjectedModel("author-primary"),
+            secondary=_InjectedModel(shared_identity),
+            hedge_after_seconds=1.0,
+            deadline_seconds=2.0,
+        )
+        inventory = _StrictInventoryInjectedModel(shared_identity)
+    elif overlap_pair == "author_reviewer":
+        author = SourceReviewAuthority(
+            primary=_InjectedModel("author-primary"),
+            secondary=_InjectedModel(shared_identity),
+            hedge_after_seconds=1.0,
+            deadline_seconds=2.0,
+        )
+        reviewer = _StrictCoverageInjectedModel(shared_identity)
+    else:
+        inventory = SourceReviewAuthority(
+            primary=_StrictInventoryInjectedModel("inventory-primary"),
+            secondary=_StrictInventoryInjectedModel(shared_identity),
+            hedge_after_seconds=1.0,
+            deadline_seconds=2.0,
+        )
+        reviewer = _StrictCoverageInjectedModel(shared_identity)
+
+    if overlap_pair == "author_reviewer":
+        with pytest.raises(ValueError, match="independent source-closure reviewer"):
+            build_semantic_chat_composition(
+                settings=Settings(_env_file=None),
+                flash_model=author,  # type: ignore[arg-type]
+                source_closure_model=reviewer,  # type: ignore[arg-type]
+                candidate_external_proposition_inventory_model=inventory,  # type: ignore[arg-type]
+                model_id_prefix="test",
+            )
+        return
+
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=author,  # type: ignore[arg-type]
+        source_closure_model=reviewer,  # type: ignore[arg-type]
+        candidate_external_proposition_inventory_model=inventory,  # type: ignore[arg-type]
+        model_id_prefix="test",
+    )
+
+    assert composition.candidate_external_proposition_inventory_model is None
+    assert composition.proactive_source_authority_health()["candidate_inventory_model"] is None
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_route", ("flash", "thinking"))
+async def test_inventory_v5_rejects_overlap_with_every_configured_recovery_author(
+    recovery_route: str,
+) -> None:
+    primary_author = _InjectedModel("primary-author")
+    recovery_author_and_inventory = _StrictInventoryInjectedModel("recovery-author")
+    fallback_route = FailoverChatModel(
+        primary=primary_author,
+        fallback=recovery_author_and_inventory,
+        implicit_failover=False,
+    )
+    reviewer = _StrictCoverageInjectedModel("independent-reviewer")
+    flash_model: object = fallback_route
+    thinking_model: object | None = None
+    if recovery_route == "thinking":
+        flash_model = _InjectedModel("independent-flash-author")
+        thinking_model = fallback_route
+
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=flash_model,  # type: ignore[arg-type]
+        thinking_model=thinking_model,  # type: ignore[arg-type]
+        source_closure_model=reviewer,
+        candidate_external_proposition_inventory_model=recovery_author_and_inventory,
+        model_id_prefix="test",
+    )
+
+    assert composition.proactive_source_closure_model is reviewer
+    assert composition.candidate_external_proposition_inventory_model is None
+    assert composition.proactive_source_authority_health()["candidate_inventory_model"] is None
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overlap_author", ("flash", "thinking"))
+async def test_inventory_v5_checks_every_expression_author_when_background_author_differs(
+    overlap_author: str,
+) -> None:
+    expression_author = _InjectedModel(
+        "shared-expression-author" if overlap_author == "flash" else "independent-flash-author"
+    )
+    thinking_author = (
+        _InjectedModel("shared-expression-author")
+        if overlap_author == "thinking"
+        else None
+    )
+    background_author = _InjectedModel("independent-background-author")
+    inventory = _StrictInventoryInjectedModel("shared-expression-author")
+    reviewer = _StrictCoverageInjectedModel("independent-reviewer")
+
+    composition = build_semantic_chat_composition(
+        settings=Settings(_env_file=None),
+        flash_model=expression_author,
+        thinking_model=thinking_author,
+        advisory_model=background_author,
+        source_closure_model=reviewer,
+        candidate_external_proposition_inventory_model=inventory,
+        model_id_prefix="test",
+    )
+
+    assert composition.background_model is background_author
+    assert composition.candidate_external_proposition_inventory_model is None
+    assert composition.proactive_source_authority_health()["candidate_inventory_model"] is None
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_production_source_authority_finishes_inside_its_22_second_caller() -> None:
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        OPENAI_API_KEY="openai-test-key",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+        WORLD_V2_SOURCE_REVIEW_HEDGE_AFTER_SECONDS=8.0,
+        WORLD_V2_SOURCE_REVIEW_DEADLINE_SECONDS=30.0,
+    )
+
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="test",
+    )
+
+    main_authority = composition.source_closure_model
+    assert isinstance(main_authority, SourceReviewAuthority)
+    assert main_authority.primary.model == "qwen/qwen-plus"
+    assert main_authority.primary.reasoning_effort == ""
+    assert main_authority.secondary.model == "gpt-4.1-mini"
+    assert main_authority.secondary.reasoning_effort == ""
+    assert main_authority.configured_deadline_seconds == 30.0
+    assert main_authority.caller_timeout_seconds == 22.0
+    assert main_authority.terminal_reserve_seconds == 0.5
+    assert main_authority.deadline_seconds == 21.5
+    assert main_authority.health_snapshot()[
+        "configured_absolute_timeout_seconds"
+    ] == 30.0
+    assert main_authority.health_snapshot()["absolute_timeout_seconds"] == 21.5
+    assert main_authority.health_snapshot()["caller_timeout_seconds"] == 22.0
+    assert main_authority.health_snapshot()[
+        "terminal_completion_reserve_seconds"
+    ] == 0.5
+
+    recovery_authority = (
+        composition.main_model._owner._recovery_expression._source_closure_reviewer
+    )
+    assert isinstance(recovery_authority, SourceReviewAuthority)
+    assert recovery_authority.configured_deadline_seconds == 30.0
+    assert recovery_authority.caller_timeout_seconds == 22.0
+    assert recovery_authority.deadline_seconds == 21.5
     await composition.aclose()
 
 
@@ -35,6 +1231,17 @@ def test_world_v2_fallback_model_defaults_to_official_high_volume_tier() -> None
 
     assert settings.world_v2_fallback_model == "gpt-5.6-luna"
     assert settings.world_v2_contextual_failsafe_enabled is False
+    assert settings.world_v2_source_review_redundancy_enabled is False
+    assert settings.world_v2_source_review_secondary_model == "qwen/qwen-plus"
+    assert settings.world_v2_source_review_fallback_model == "gpt-4.1-mini"
+    assert settings.world_v2_source_review_recovery_model == "qwen/qwen-plus"
+    assert settings.world_v2_source_review_recovery_fallback_model == "gpt-4.1-mini"
+    assert settings.world_v2_source_inventory_enabled is True
+    assert settings.world_v2_source_inventory_model == "openai/gpt-5.4-nano"
+    assert settings.world_v2_source_inventory_fallback_model == "openai/gpt-5.4-mini"
+    assert settings.world_v2_source_inventory_timeout_seconds == 10.0
+    assert settings.world_v2_source_review_hedge_after_seconds == 8.0
+    assert settings.world_v2_source_review_deadline_seconds == 30.0
 
 
 def test_contextual_failsafe_requires_an_explicit_deployment_switch() -> None:
@@ -47,15 +1254,109 @@ def test_contextual_failsafe_requires_an_explicit_deployment_switch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_production_identity_does_not_freeze_dynamic_relationship_or_turn_shape() -> None:
-    """Relationship and cadence belong to current World Context and the role model."""
+async def test_production_identity_leaves_current_relationship_to_the_world_projection() -> None:
+    """Stable identity must not freeze the deployment's initial relationship stage."""
 
-    settings = Settings(_env_file=None)
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY=None,
+        OPENAI_API_KEY=None,
+        OPENROUTER_API_KEY=None,
+    )
     composition = build_semantic_chat_composition(
         settings=settings,
         model_id_prefix="test",
     )
 
     assert composition.identity_frame.relationship_frame is None
+    assert composition.identity_frame.style_rules == (
+        "像手机私聊；消息长度、条数和间隔由她当下真正想怎样表达决定，不固定成一两句。",
+        "你的消息就是纯粹的私聊文字。",
+        "语气平实，偶尔俏皮就好。",
+        "先真实，再可爱；先自然，再浪漫。",
+    )
+    assert "刚认识" not in json.dumps(
+        composition.identity_frame.model_dump(mode="json"),
+        ensure_ascii=False,
+    )
+    assert composition.identity_frame.shared_history_facts == (
+        "她与用户在 QQ 的读书/城市漫游兴趣群相识。",
+    )
+    assert composition.identity_frame.counterpart_history_facts == ()
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_production_identity_does_not_invent_absent_relationship_or_style(
+    tmp_path,
+) -> None:
+    character_path = tmp_path / "minimal-character.yaml"
+    character_path.write_text(
+        "name: 无预设角色\n"
+        "base_prompt: 只保留这个测试角色明确写下的资料。\n",
+        encoding="utf-8",
+    )
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            character_path=character_path,
+            DEEPSEEK_API_KEY=None,
+            OPENAI_API_KEY=None,
+            OPENROUTER_API_KEY=None,
+        ),
+        model_id_prefix="test",
+    )
+
+    assert composition.identity_frame.relationship_frame is None
     assert composition.identity_frame.style_rules == ()
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_local_appraisal_completion_budget_fits_the_complete_typed_contract() -> None:
+    settings = Settings(
+        _env_file=None,
+        LOCAL_APPRAISAL_ENABLED=True,
+        DEEPSEEK_API_KEY=None,
+        OPENAI_API_KEY=None,
+        OPENROUTER_API_KEY=None,
+    )
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="test",
+    )
+
+    local = composition.appraisal_model.local_appraisal_model
+    assert isinstance(local, OpenAICompatibleChatModel)
+    # A captured Qwen response was cut mid-JSON at both 96 and 128 tokens.
+    assert local.max_completion_tokens >= 192
+    await composition.aclose()
+
+
+@pytest.mark.asyncio
+async def test_local_advisory_and_appraisal_share_one_non_queueing_capacity_gate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            LOCAL_APPRAISAL_ENABLED=True,
+            DEEPSEEK_API_KEY=None,
+            OPENAI_API_KEY=None,
+            OPENROUTER_API_KEY=None,
+        ),
+        model_id_prefix="test",
+    )
+
+    appraisal = composition.appraisal_model.local_appraisal_model
+    semantic_adapter = composition.advisory_compiler._adapters[0]
+    advisory = semantic_adapter._model
+    assert isinstance(appraisal, OpenAICompatibleChatModel)
+    assert isinstance(advisory, OpenAICompatibleChatModel)
+    assert isinstance(composition.local_provider_capacity, ProviderCapacityGate)
+    assert appraisal.capacity_gate is composition.local_provider_capacity
+    assert advisory.capacity_gate is composition.local_provider_capacity
+    assert composition.local_provider_capacity.health_snapshot()["status"] == "idle"
     await composition.aclose()

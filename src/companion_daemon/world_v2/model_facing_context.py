@@ -7,13 +7,17 @@ cryptographic transport envelopes that the host has already verified.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 
 _CHAT_OMITTED_SLICES = frozenset({"action_budget", "available_capabilities"})
 CHAT_RECENT_DIALOGUE_ITEM_LIMIT = 6
+_PINNED_TIME_CONTRACT = "pinned-time-context.1"
+_PINNED_TIME_SLICE = "pinned_time"
 _CHAT_ITEM_LIMITS = {
     "recent_dialogue": CHAT_RECENT_DIALOGUE_ITEM_LIMIT,
+    _PINNED_TIME_SLICE: 1,
     "current_situation": 1,
     "relationship_slice": 2,
     "character_core": 2,
@@ -34,6 +38,7 @@ _CHAT_ITEM_LIMITS = {
 _AUTHORITY_VALUE_KEYS = frozenset(
     {
         "origin",
+        "proposal_source",
         "source_bindings",
         "source_evidence_refs",
         "anchor_evidence_refs",
@@ -49,8 +54,14 @@ _AUTHORITY_VALUE_KEYS = frozenset(
 )
 _RECOVERY_SLICE_LIMITS = {
     "recent_dialogue": 8,
+    _PINNED_TIME_SLICE: 1,
     "relevant_facts": 12,
     "active_memory_candidates": 8,
+    # A selected private impression may be the exact memory the primary role
+    # chose before a later truth-review failure. Technical recovery receives
+    # that same pinned attention result instead of reconstructing a new motive
+    # or answering from a thinner Context.
+    "private_impressions": 4,
     "recent_experiences": 6,
     "current_situation": 1,
     "world_life": 6,
@@ -60,6 +71,126 @@ _RECOVERY_SLICE_LIMITS = {
     "appraisals": 4,
     "open_threads": 4,
 }
+
+
+def _pinned_time_view(
+    *,
+    context: dict[str, object],
+    slices: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    """Derive one replay-stable attention source from verified clock coordinates.
+
+    ``logical_time`` is a top-level Capsule coordinate rather than a slice item,
+    so it previously had no copyable source token.  The derived token is
+    intentionally rebuilt here instead of trusting any caller-supplied
+    ``pinned_time`` field or slice.  Production reaches this view only through a
+    verified Context Capsule; the digest binds the exact turn coordinates and
+    the verified current-situation segment without granting World mutation
+    authority.
+    """
+
+    logical_time = context.get("logical_time")
+    if not isinstance(logical_time, str) or not logical_time:
+        return None
+
+    time_segment: str | None = None
+    local_logical_time: str | None = None
+    situation_source_ref: str | None = None
+    situation_slice = slices.get("current_situation")
+    if (
+        isinstance(situation_slice, dict)
+        and situation_slice.get("availability") == "available"
+        and isinstance(situation_slice.get("items"), list)
+    ):
+        for item in situation_slice["items"]:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("value")
+            if not isinstance(value, dict):
+                continue
+            candidate = value.get("time_segment")
+            if isinstance(candidate, str) and candidate:
+                time_segment = candidate
+                local_candidate = value.get("logical_time")
+                if isinstance(local_candidate, str) and local_candidate:
+                    local_logical_time = local_candidate
+                raw_source_ref = item.get("source_ref")
+                if isinstance(raw_source_ref, str) and raw_source_ref:
+                    situation_source_ref = raw_source_ref
+                break
+
+    source_material: dict[str, object] = {
+        "contract": _PINNED_TIME_CONTRACT,
+        "logical_time": logical_time,
+    }
+    for key in ("world_id", "actor_ref", "trigger_ref", "world_revision"):
+        value = context.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            source_material[key] = value
+    if time_segment is not None:
+        source_material["time_segment"] = time_segment
+    if local_logical_time is not None:
+        source_material["local_logical_time"] = local_logical_time
+    if situation_source_ref is not None:
+        source_material["current_situation_source_ref"] = situation_source_ref
+    source_ref = "pinned-time:sha256:" + hashlib.sha256(
+        json.dumps(
+            source_material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    value: dict[str, object] = {
+        "contract": _PINNED_TIME_CONTRACT,
+        "authority": "derived_from_verified_context",
+        "logical_time": logical_time,
+    }
+    if local_logical_time is not None:
+        value["local_logical_time"] = local_logical_time
+    if time_segment is not None:
+        value["time_segment"] = time_segment
+    return (
+        {**value, "source_ref": source_ref},
+        {
+            "availability": "available",
+            "items": [
+                {
+                    "value": value,
+                    "source_ref": source_ref,
+                    "attention_source_refs": [source_ref],
+                }
+            ],
+        },
+    )
+
+
+def _attention_source_refs(
+    *,
+    slice_name: str,
+    item_ref: str | None,
+    value: object,
+) -> list[str]:
+    """Name the exact non-authorizing refs a model may cite as attended.
+
+    Inbound dialogue uses a semantic item ref wrapped around the durable
+    Observation ref. Models can see both inside the verified dialogue value,
+    so the compact view names both aliases explicitly instead of leaving one
+    visible-but-rejected. These refs authorize no factual claim or World
+    mutation; claim lanes continue to use their separate source closure.
+    """
+
+    refs = [item_ref] if isinstance(item_ref, str) else []
+    if slice_name != "recent_dialogue" or not isinstance(value, dict):
+        return refs
+    dialogue_id = value.get("dialogue_id")
+    prefix = "dialogue:observation:"
+    if dialogue_id == item_ref and isinstance(dialogue_id, str) and dialogue_id.startswith(prefix):
+        observation_ref = dialogue_id.removeprefix(prefix)
+        if observation_ref.startswith("observation:"):
+            refs.append(observation_ref)
+    return list(dict.fromkeys(refs))
 
 
 def _context_items_for_chat(name: str, items: list[object], limit: int) -> list[object]:
@@ -85,7 +216,7 @@ def _context_items_for_chat(name: str, items: list[object], limit: int) -> list[
     ]
     injected_ids = {id(item) for item in injected}
     ordinary = [item for item in items if id(item) not in injected_ids]
-    keyed: list[tuple[tuple[str, int, str], object]] = []
+    keyed: list[tuple[tuple[int, str, str], object]] = []
     for index, item in enumerate(ordinary):
         if not isinstance(item, dict):
             return ordinary[-limit:] + injected
@@ -101,16 +232,14 @@ def _context_items_for_chat(name: str, items: list[object], limit: int) -> list[
         keyed.append(
             (
                 (
-                    occurred_at if isinstance(occurred_at, str) else "",
                     sequence if isinstance(sequence, int) else -1,
+                    occurred_at if isinstance(occurred_at, str) else "",
                     str(item.get("item_ref") or index),
                 ),
                 item,
             )
         )
-    return [
-        item for _, item in sorted(keyed, key=lambda pair: pair[0])[-limit:]
-    ] + injected
+    return [item for _, item in sorted(keyed, key=lambda pair: pair[0])[-limit:]] + injected
 
 
 def compact_model_facing_context(raw: str) -> str:
@@ -159,6 +288,13 @@ def compact_model_facing_context(raw: str) -> str:
                     # item_ref is an accepted semantic source token in the
                     # complete Capsule's claim validator.
                     material["source_ref"] = item_ref
+                attention_refs = _attention_source_refs(
+                    slice_name=name,
+                    item_ref=item_ref if isinstance(item_ref, str) else None,
+                    value=item.get("value"),
+                )
+                if attention_refs:
+                    material["attention_source_refs"] = attention_refs
                 privacy = item.get("privacy_class")
                 if isinstance(privacy, str):
                     material["privacy_class"] = privacy
@@ -169,6 +305,9 @@ def compact_model_facing_context(raw: str) -> str:
             "availability": "available",
             "items": compact_items,
         }
+    pinned_time = _pinned_time_view(context=compact, slices=compact_slices)
+    if pinned_time is not None:
+        compact["pinned_time"], compact_slices[_PINNED_TIME_SLICE] = pinned_time
     compact["slices"] = compact_slices
     compact["current_self_state"] = _build_current_self_state(
         slices=compact_slices,
@@ -182,9 +321,10 @@ def compact_model_facing_context(raw: str) -> str:
                 "subject_ref",
                 "trigger_appraisal_id",
                 "appraisal_summary_json",
+                "interaction_source_summary_json",
                 "relationship_summary_json",
             )
-            if key in relationship
+            if key in relationship and relationship[key] is not None
         }
     return json.dumps(
         compact,
@@ -235,11 +375,7 @@ def _state_entry(
     value = item.get("value")
     if not isinstance(value, dict):
         return None
-    semantic = (
-        {key: value[key] for key in fields if key in value}
-        if fields is not None
-        else value
-    )
+    semantic = {key: value[key] for key in fields if key in value} if fields is not None else value
     if not semantic:
         return None
     result: dict[str, object] = dict(semantic)
@@ -258,9 +394,7 @@ def _affect_state_entry(item: dict[str, object]) -> dict[str, object] | None:
     raw_components = value.get("components")
     if isinstance(raw_components, list):
         for component in raw_components:
-            if not isinstance(component, dict) or not isinstance(
-                component.get("dimension"), str
-            ):
+            if not isinstance(component, dict) or not isinstance(component.get("dimension"), str):
                 continue
             material = {
                 key: component[key]
@@ -282,11 +416,7 @@ def _affect_state_entry(item: dict[str, object]) -> dict[str, object] | None:
         return None
     result: dict[str, object] = {
         "components": components,
-        **{
-            key: value[key]
-            for key in ("opened_at", "updated_at")
-            if key in value
-        },
+        **{key: value[key] for key in ("opened_at", "updated_at") if key in value},
     }
     result["source_ref"] = source_ref
     return result
@@ -306,6 +436,49 @@ def _core_state_entry(item: dict[str, object]) -> dict[str, object] | None:
     return {"slow_evolving": slow, "source_ref": source_ref}
 
 
+def _recalled_document_state_entry(
+    item: dict[str, object],
+    *,
+    memory_kinds: frozenset[str],
+) -> dict[str, object] | None:
+    """Project one trusted, already-selected RecallDocument into Current Self."""
+
+    source_ref = item.get("source_ref")
+    value = item.get("value")
+    if (
+        not isinstance(source_ref, str)
+        or not source_ref
+        or not isinstance(value, dict)
+        or value.get("memory_kind") not in memory_kinds
+        or not isinstance(value.get("actor_ref"), str)
+        or not isinstance(value.get("text"), str)
+        or not value["text"].strip()
+    ):
+        return None
+    fields = (
+        "memory_kind",
+        "authority",
+        "epistemic_scope",
+        "actor_ref",
+        "speaker_ref",
+        "subject_refs",
+        "text",
+        "occurred_from",
+        "occurred_to",
+        "valid_from",
+        "valid_to",
+        "status",
+    )
+    return {
+        **{
+            key: value[key]
+            for key in fields
+            if key in value and value[key] is not None
+        },
+        "source_ref": source_ref,
+    }
+
+
 def _recent_experience_state_entry(
     item: dict[str, object],
     *,
@@ -321,45 +494,75 @@ def _recent_experience_state_entry(
 
     source_ref = item.get("source_ref")
     value = item.get("value")
-    if (
-        not isinstance(source_ref, str)
-        or not source_ref
-        or not isinstance(value, dict)
-    ):
+    if not isinstance(source_ref, str) or not source_ref or not isinstance(value, dict):
         return None
-    if lane == "world_life":
+    recalled = _recalled_document_state_entry(
+        item,
+        memory_kinds=frozenset({"episodic"}),
+    )
+    if recalled is not None:
+        # A trusted RecallTrace is injected as a compact, flat document view
+        # rather than either nested live projection below. Keep the selected
+        # first-person episode in the working-self view instead of burying it
+        # back in a generic Context lane after the character's own attention
+        # mechanism surfaced it.
+        return recalled
+    elif lane == "world_life":
         if value.get("context_kind") == "biographical_context":
             return None
         fields = (
-            "occurrence_id",
-            "occurrence_entity_revision",
-            "participant_refs",
-            "location_ref",
-            "result_id",
-            "settled_at",
-            "privacy_class",
-            "content",
+            (
+                "occurrence_id",
+                "occurrence_entity_revision",
+                "participant_refs",
+                "location_ref",
+                "time_window",
+                "activated_at",
+                "status",
+                "privacy_class",
+                "premise",
+            )
+            if value.get("context_kind") == "active_world_occurrence"
+            else (
+                "occurrence_id",
+                "occurrence_entity_revision",
+                "participant_refs",
+                "location_ref",
+                "result_id",
+                "settled_at",
+                "privacy_class",
+                "content",
+            )
         )
         semantic = {key: value[key] for key in fields if key in value}
     else:
         values = value.get("values")
-        if not isinstance(values, dict):
+        if isinstance(values, dict):
+            fields = (
+                "summary_ref",
+                "occurred_from",
+                "occurred_to",
+                "participant_refs",
+                "privacy_class",
+            )
+            semantic = {
+                **(
+                    {"experience_id": value["experience_id"]}
+                    if isinstance(value.get("experience_id"), str)
+                    else {}
+                ),
+                **{key: values[key] for key in fields if key in values},
+            }
+            content = value.get("content")
+            if isinstance(content, dict):
+                content_fields = ("content_ref", "text", "truncated")
+                compact_content = {
+                    key: content[key] for key in content_fields if key in content
+                }
+                if isinstance(compact_content.get("text"), str):
+                    semantic["content"] = compact_content
+        else:
             return None
-        fields = (
-            "summary_ref",
-            "occurred_from",
-            "occurred_to",
-            "participant_refs",
-            "privacy_class",
-        )
-        semantic = {
-            **(
-                {"experience_id": value["experience_id"]}
-                if isinstance(value.get("experience_id"), str)
-                else {}
-            ),
-            **{key: values[key] for key in fields if key in values},
-        }
     if not semantic:
         return None
     return {**semantic, "source_ref": source_ref}
@@ -534,13 +737,78 @@ def _build_current_self_state(
     ]
     if affect:
         state["affect"] = affect
-    recent_self_experiences = [
+    remembered_material = [
         entry
-        for lane in ("world_life", "recent_experiences")
-        for item in _slice_items(slices, lane)
-        for entry in (_recent_experience_state_entry(item, lane=lane),)
+        for item in _slice_items(slices, "active_memory_candidates")
+        for entry in (_state_entry(item),)
         if entry is not None
     ][:2]
+    if remembered_material:
+        # These are already source-bound retrieval excerpts, not a host-authored
+        # suggestion to mention them.  Keeping a tiny working set beside Affect
+        # and current life makes memory available to the character's own
+        # attention without inventing a memory-to-response rule.
+        state["remembered_material"] = remembered_material
+    recalled_emotional_associations = [
+        entry
+        for item in _slice_items(slices, "recalled_emotional_associations")
+        for entry in (
+            _recalled_document_state_entry(
+                item,
+                memory_kinds=frozenset({"reflective"}),
+            ),
+        )
+        if entry is not None
+    ][:2]
+    if recalled_emotional_associations:
+        # These are defeasible memories of prior feeling/interpretation, not a
+        # host-generated mood or a fact about the counterpart. Their source
+        # labels remain visible so the role can notice or ignore them.
+        state["recalled_emotional_associations"] = recalled_emotional_associations
+    private_impressions = [
+        entry
+        for item in _slice_items(slices, "private_impressions")
+        for entry in (
+            _state_entry(
+                item,
+                fields=(
+                    "subject_ref",
+                    "reflection_summary",
+                    "confidence_bp",
+                    "first_seen",
+                    "last_supported",
+                    "expiry_condition",
+                    "contradiction_refs",
+                    "status",
+                ),
+            ),
+        )
+        if entry is not None
+    ][:2]
+    if private_impressions:
+        state["private_impressions"] = private_impressions
+    experience_lanes = [
+        [
+            entry
+            for item in _slice_items(slices, lane)
+            for entry in (_recent_experience_state_entry(item, lane=lane),)
+            if entry is not None
+        ]
+        for lane in ("world_life", "recent_experiences")
+    ]
+    # Keep the tiny current-self budget representative of both immediate life
+    # occurrences and committed experiences.  A busy world-life lane must not
+    # crowd durable personal experience out of the character's own attention.
+    recent_self_experiences = [
+        entries[0] for entries in experience_lanes if entries
+    ]
+    if len(recent_self_experiences) < 2:
+        recent_self_experiences.extend(
+            entry
+            for entries in experience_lanes
+            for entry in entries[1:]
+        )
+    recent_self_experiences = recent_self_experiences[:2]
     state["recent_self_experiences"] = (
         {
             "availability": "available",
@@ -596,6 +864,11 @@ def compact_chat_model_facing_context(raw: str) -> str:
             for key in ("source_ref", "privacy_class"):
                 if isinstance(item.get(key), str):
                     material[key] = item[key]
+            attention_refs = item.get("attention_source_refs")
+            if isinstance(attention_refs, list):
+                retained_attention_refs = [ref for ref in attention_refs if isinstance(ref, str)]
+                if retained_attention_refs:
+                    material["attention_source_refs"] = retained_attention_refs
             semantic_items.append(material)
         if semantic_items:
             slices[name] = {"availability": "available", "items": semantic_items}
@@ -642,6 +915,11 @@ def compact_recovery_model_facing_context(raw: str) -> str:
                 "items": _context_items_for_chat(name, items, limit),
             }
     context["slices"] = retained
+    # Recovery keeps the source-bearing slice because validators and the
+    # reviewer resolve attention refs through slice items.  Its duplicate
+    # top-level convenience view is unnecessary on this deliberately tiny
+    # fallback path.
+    context.pop("pinned_time", None)
     context["current_self_state"] = _build_current_self_state(
         slices=retained,
         logical_time=context.get("logical_time"),

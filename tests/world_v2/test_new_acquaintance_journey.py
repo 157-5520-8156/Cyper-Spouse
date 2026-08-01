@@ -39,12 +39,6 @@ class _Delivery:
         return {"status": "ok", "data": {"message_id": f"journey-typing-{len(self.non_text)}"}}
 
 
-class _ImmediateEmotionGateModel:
-    async def complete(self, messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
-        del messages, temperature
-        return '{"immediate": true}'
-
-
 class _JourneyRecallEmbedding:
     """Semantic fixture for the cross-session paraphrase in T27."""
 
@@ -68,6 +62,7 @@ class _JourneyReplyModel:
     """External-model test double that turns supplied evidence into visible probes."""
 
     model = "fixture:new-acquaintance-reply"
+    semantic_authority_id = "semantic-authority:test:new-acquaintance-reply"
 
     def __init__(self, turns: list[dict[str, object]]) -> None:
         self._by_text = {str(item["text"]): item for item in turns}
@@ -84,12 +79,21 @@ class _JourneyReplyModel:
         model_context = str(request.get("model_content_json", ""))
         if len(messages) > 2:
             model_context += "\n" + str(messages[-1].get("content", ""))
+        private_turn_state = {
+            "contract": "private-turn-state.1",
+            "inner_state_summary": (
+                f"{turn_id} 当前这句话和已经提供的情境，"
+                "是我决定这一轮怎样回应时首先在意的内容。"
+            ),
+            "attended_source_refs": [],
+        }
 
         if turn_id == "T27" and not all(
             value in model_context for value in ("丁奥轩", "乌龙茶")
         ):
             return json.dumps(
                 {
+                    "private_turn_state": private_turn_state,
                     "recall_request": {
                         "query_text": "用户的中文名和最喜欢喝什么",
                         "memory_kinds": ["semantic"],
@@ -122,10 +126,13 @@ class _JourneyReplyModel:
         if turn_id == "T15":
             beats.append({"modality": "text", "text": "T15:second-beat"})
         draft = {
+            "private_turn_state": private_turn_state,
             "timing_choice": "now",
+            "cadence": "conversational",
             "beats": beats,
             "stance": "answer_without_world_claims",
             "brief_rationale": "Expose whether the public turn supplied the required grounded context.",
+            "confidence": 7_500,
         }
         if turn_id == "T32":
             # “晚点聊” is an explicit open loop, so this journey proves the
@@ -148,7 +155,7 @@ class _JourneyReplyModel:
                     "attribution": "user",
                     "severity": 6500,
                     "affect": "open",
-                    "components": [{"dimension": "hurt", "intensity_bp": 5800}],
+                    "components": [{"dimension": "hurt", "target_intensity_bp": 5800}],
                     "brief_rationale": (
                         "The current message materially changes the relational feeling."
                     ),
@@ -188,6 +195,7 @@ class _JourneyBackgroundModel:
     """One deterministic external LLM boundary for all QQ background adapters."""
 
     model = "fixture:new-acquaintance-background"
+    semantic_authority_id = "semantic-authority:test:new-acquaintance-background"
 
     async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
         del temperature
@@ -206,7 +214,7 @@ class _JourneyBackgroundModel:
                     "attribution": "user",
                     "severity": 6500,
                     "affect": "open",
-                    "components": [{"dimension": "hurt", "intensity_bp": 5800}],
+                    "components": [{"dimension": "hurt", "target_intensity_bp": 5800}],
                     "brief_rationale": "The current message materially changes the relational feeling.",
                     "behavior_tendency": "attend",
                     "stance": "respond_with_self_respect",
@@ -273,6 +281,33 @@ class _JourneyBackgroundModel:
         return '{"decision":"no_change"}'
 
 
+class _JourneySourceReviewer:
+    """Distinct strict fixture authority for visible factual release."""
+
+    model = "fixture:new-acquaintance-source-reviewer"
+    semantic_authority_id = "semantic-authority:test:new-acquaintance-source-reviewer"
+
+    def supports_strict_output_contract(self, contract: str) -> bool:
+        return contract in {
+            "report-relative-entailment-adjudication.3",
+            "source-closure-review.7",
+        }
+
+    async def complete(self, messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+        del temperature
+        system = str(messages[0]["content"])
+        if "Audit only factual source closure" not in system:
+            raise AssertionError(f"unexpected source review prompt: {system[:120]}")
+        return json.dumps(
+            {
+                "ci": [],
+                "v": [],
+                "p": [],
+                "r": "The fixture expression adds no unsupported factual claim.",
+            }
+        )
+
+
 def _load() -> dict[str, object]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
@@ -311,6 +346,7 @@ async def test_fact_memory_recall_survives_two_source_facts_before_later_probe(t
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
         advisory_model=_JourneyBackgroundModel(),
+        source_closure_model=_JourneySourceReviewer(),
         delivery=delivery,
         semantic_recall_embedding=_JourneyRecallEmbedding(),
     )
@@ -333,10 +369,10 @@ async def test_fact_memory_recall_survives_two_source_facts_before_later_probe(t
 
 
 @pytest.mark.asyncio
-async def test_same_turn_affect_is_accepted_before_emotional_journey_replies(
+async def test_emotional_journey_replies_do_not_wait_for_durable_affect(
     tmp_path: Path,
 ) -> None:
-    """Tight regression for the combined-cognition contract used by T09/T21/T22/T24."""
+    """T09/T21/T22/T24 reply from private state while durable Affect trails."""
 
     fixture = _load()
     all_turns = fixture["turns"]
@@ -355,7 +391,7 @@ async def test_same_turn_affect_is_accepted_before_emotional_journey_replies(
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
         advisory_model=_JourneyBackgroundModel(),
-        immediate_emotion_gate_model=_ImmediateEmotionGateModel(),
+        source_closure_model=_JourneySourceReviewer(),
         delivery=delivery,
     )
     try:
@@ -368,6 +404,17 @@ async def test_same_turn_affect_is_accepted_before_emotional_journey_replies(
             )
             await host.drain(max_action_units=8, max_background_units=0)
             assert outcome.status == "action_authorized", turn["id"]
+            before_background = host._host._application.export_replay_evidence()  # noqa: SLF001
+            at = NOW + timedelta(minutes=int(turn["at_minutes"]))
+            before_event_types = [
+                item.event.event_type
+                for item in before_background.events
+                if item.event.created_at == at
+            ]
+            assert "ExpressionPlanAccepted" in before_event_types, turn["id"]
+            assert "ActionAuthorized" in before_event_types, turn["id"]
+            assert "AppraisalAccepted" not in before_event_types, turn["id"]
+            await host.drain(max_action_units=0, max_background_units=32)
         evidence = host._host._application.export_replay_evidence()  # noqa: SLF001
     finally:
         await host.aclose()
@@ -382,15 +429,15 @@ async def test_same_turn_affect_is_accepted_before_emotional_journey_replies(
             for item in evidence.events
             if item.event.created_at == at
         ]
-        assert event_types.index("AppraisalAccepted") < event_types.index(
-            "ExpressionPlanAccepted"
+        assert event_types.index("ExpressionPlanAccepted") < event_types.index(
+            "AppraisalAccepted"
         ), turn["id"]
         affect_index = next(
             index
             for index, event_type in enumerate(event_types)
             if event_type in {"AffectEpisodeOpened", "AffectEpisodeUpdated"}
         )
-        assert affect_index < event_types.index("ActionAuthorized"), turn["id"]
+        assert event_types.index("ActionAuthorized") < affect_index, turn["id"]
 
 
 @pytest.mark.asyncio
@@ -410,6 +457,7 @@ async def test_new_acquaintance_journey_exposes_grounded_memory_life_and_initiat
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
         advisory_model=_JourneyBackgroundModel(),
+        source_closure_model=_JourneySourceReviewer(),
         delivery=delivery,
         semantic_recall_embedding=_JourneyRecallEmbedding(),
     )
@@ -488,6 +536,7 @@ async def test_scheduler_does_not_promote_response_expectation_into_proactive_co
         bootstrap_at=NOW,
         model=_JourneyReplyModel(turns),
         advisory_model=_JourneyBackgroundModel(),
+        source_closure_model=_JourneySourceReviewer(),
         delivery=delivery,
     )
     try:
