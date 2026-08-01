@@ -922,7 +922,7 @@ async def test_missing_proposal_keeps_observation_bound_failure_audit_without_pr
     finally:
         cold_ledger.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert live_evidence.cursor == evidence.cursor
     assert evidence.projection == evidence.replay
     report = PrivateSelfExpressionAuditEvaluator().evaluate(
@@ -1227,7 +1227,7 @@ async def test_nested_reviewer_winner_does_not_hide_failed_expression_author_cha
         if attempt.model_result_ref == reselection.model_result_ref
     )
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert turn.proposal_selection == "missing"
     assert turn.observations == ("model_result_failure_recorded",)
     assert report.summary.technical_failure_turn_count == 1

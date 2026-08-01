@@ -293,7 +293,7 @@ async def test_http_production_profile_fails_closed_when_model_selects_unavailab
     finally:
         await host.aclose()
 
-    assert result.status == "observed_only"
+    assert result.status == "deferred"
     assert result.action_id is None and result.text is None
     assert projection.actions == ()
 

@@ -1914,7 +1914,7 @@ async def test_qq_c2c_host_runs_text_ingress_and_restart_recovery_without_a_lega
 
 
 @pytest.mark.asyncio
-async def test_qq_restart_scheduler_retries_an_observed_only_expression_failure_once(
+async def test_qq_restart_scheduler_retries_a_deferred_expression_failure_once(
     tmp_path: Path,
 ) -> None:
     """A validation outage must not turn one accepted Observation into permanent silence."""
@@ -1968,7 +1968,7 @@ async def test_qq_restart_scheduler_retries_an_observed_only_expression_failure_
     finally:
         await first.aclose()
 
-    assert failed.status == "observed_only"
+    assert failed.status == "deferred"
     assert _visible(first_delivery) == []
     assert any("This is a recovery attempt" in prompt for prompt in recovery.prompts)
     assert any(
@@ -2114,7 +2114,7 @@ async def test_restart_waits_for_foreign_reclaimed_attempt_that_crashed_before_m
         )
     finally:
         await first.aclose()
-    assert failed.status == "observed_only"
+    assert failed.status == "deferred"
 
     retry_state["ready"] = True
     crashed = build_qq_c2c_host(
@@ -2240,7 +2240,7 @@ async def test_newer_qq_inbound_supersedes_older_technical_expression_retry_afte
             text="这条没接住也不用晚点补了。",
             observed_at=NOW,
         )
-        assert failed.status == "observed_only"
+        assert failed.status == "deferred"
         assert _visible(first_delivery) == []
 
         retry_state["ready"] = True
@@ -2707,7 +2707,7 @@ async def test_napcat_typing_only_choice_cannot_become_a_silent_expression_plan(
     finally:
         await host.aclose()
 
-    assert result.status == "observed_only"
+    assert result.status == "deferred"
     assert projection.actions == ()
     assert projection.expression_plans == ()
     assert delivery.sent == []

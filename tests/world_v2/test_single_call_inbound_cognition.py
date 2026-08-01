@@ -2887,7 +2887,7 @@ async def test_public_combined_invalid_recall_final_stops_before_a_third_role_ca
     finally:
         app.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert len(provider.calls) == 2
     assert evidence.projection.actions == ()
     audits = [
@@ -4448,7 +4448,7 @@ async def test_public_turn_allows_one_backup_correction_then_fails_closed(
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert [audit["failure_code"] for audit in audits[-2:]] == [
         "corrective_invalid",
         "backup_invalid",
@@ -6334,7 +6334,7 @@ async def test_loose_unsupported_autobiography_never_reaches_an_action(tmp_path)
     finally:
         app.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert not transport.bodies
     audits = [
         json.loads(item.event.payload()["audit_json"])
@@ -6392,7 +6392,7 @@ async def test_model_expression_is_not_replaced_by_a_local_role_template(
     finally:
         app.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert delivery.status == "idle"
     assert not transport.bodies
     audits = [
@@ -6443,7 +6443,7 @@ async def test_model_owned_world_answer_is_not_rewritten_by_a_keyword_gate(
     finally:
         app.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert delivery.status == "idle"
     assert len(provider.calls) >= 2
     assert not transport.bodies
@@ -6647,7 +6647,7 @@ async def test_first_greeting_provider_failure_records_technical_silence(tmp_pat
     finally:
         app.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert transport.bodies == []
 
 
@@ -6716,7 +6716,7 @@ async def test_colloquial_world_probe_provider_failure_records_no_fake_reply(tmp
     finally:
         app.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert transport.bodies == []
 
 
@@ -6755,7 +6755,7 @@ async def test_double_provider_failure_records_recovery_failure_without_fake_ack
     finally:
         app.close()
 
-    assert outcome.status == "observed_only"
+    assert outcome.status == "deferred"
     assert transport.bodies == []
     audits = [
         json.loads(item.event.payload()["audit_json"])

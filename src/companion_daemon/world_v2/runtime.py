@@ -622,6 +622,38 @@ class WorldRuntime:
             task = self._expression_attempt_tasks.get(attempt_id)
             return task is not None and not task.done()
 
+    async def _cancel_superseded_expression_attempt_tasks(
+        self,
+        attempt_ids: tuple[str, ...],
+    ) -> None:
+        """Release provider work after newer inbound durably superseded it.
+
+        The ledger commit is the authority for supersession.  This method is
+        only process-local cleanup after that commit: it cannot choose which
+        turn wins and it never touches an episode that already authorized an
+        Action.  Without this cleanup, obsolete author/reviewer calls retain
+        the shared provider ceiling and can make the newest user turn fail.
+        """
+
+        if not attempt_ids:
+            return
+        async with self._expression_attempt_task_lock:
+            tasks = tuple(
+                task
+                for attempt_id in attempt_ids
+                if (task := self._expression_attempt_tasks.get(attempt_id)) is not None
+                and not task.done()
+            )
+            for task in tasks:
+                task.cancel()
+        if not tasks:
+            return
+        # Normal HTTP transports unwind cancellation immediately.  Give their
+        # callbacks one bounded scheduling window to release provider slots,
+        # but never let a cancellation-suppressing transport delay the newest
+        # visible turn.
+        await asyncio.wait(tasks, timeout=0.05)
+
     async def drain_background_once(self):
         """Run one background job and turn an expected cursor race into a retry."""
 
@@ -1703,6 +1735,19 @@ class WorldRuntime:
             == "expression-episode:superseded-by-newer-inbound"
         )
 
+    async def _cancelled_expression_attempt_was_superseded(
+        self,
+        process: TriggerProcess | None,
+    ) -> bool:
+        """Distinguish local stale-work cleanup from caller cancellation."""
+
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            # Shutdown or an explicit caller cancellation must keep unwinding,
+            # even if a newer inbound happened to supersede the same episode.
+            return False
+        return await self._expression_episode_was_superseded(process)
+
     async def _expression_attempt_repin_cursor(
         self,
         *,
@@ -1885,6 +1930,10 @@ class WorldRuntime:
                     turn_budget=turn_budget,
                     expression_attempt_id=expression_attempt_id,
                 )
+            except asyncio.CancelledError:
+                if await self._cancelled_expression_attempt_was_superseded(process):
+                    return None
+                raise
             except ConcurrencyConflict:
                 if await self._expression_episode_was_superseded(process):
                     return None
@@ -1934,6 +1983,10 @@ class WorldRuntime:
                     turn_budget=turn_budget,
                     expression_attempt_id=expression_attempt_id,
                 )
+            except asyncio.CancelledError:
+                if await self._cancelled_expression_attempt_was_superseded(process):
+                    return None
+                raise
             except ConcurrencyConflict:
                 if await self._expression_episode_was_superseded(process):
                     return None
@@ -2541,7 +2594,14 @@ class WorldRuntime:
         observation: Observation,
         event: WorldEvent,
         _retry_ordinal: int = 0,
-    ) -> tuple[Observation, WorldEvent, CommitResult, TriggerProcess | None, bool]:
+    ) -> tuple[
+        Observation,
+        WorldEvent,
+        CommitResult,
+        TriggerProcess | None,
+        bool,
+        tuple[str, ...],
+    ]:
         """Commit one Observation and its source-owned triggers under a short lock.
 
         The returned boolean distinguishes an idempotent existing Observation.
@@ -2582,6 +2642,7 @@ class WorldRuntime:
                     original_commit,
                     None,
                     True,
+                    (),
                 )
 
             before = await self._project_for_write()
@@ -2621,6 +2682,14 @@ class WorldRuntime:
             # Observation, reconsideration, and source-owned trigger openings
             # are one ingress fact. Commit them as one CAS batch so a newer
             # Observation can atomically supersede a still-unanswered episode.
+            superseded_expression_processes = tuple(
+                process
+                for process in before.trigger_processes
+                if process.process_kind == "expression_episode"
+                and process.state == "claimed"
+                and process.claim_lease is not None
+                and not expression_episode_has_authorized_action(before, process)
+            )
             superseded_expression_events = tuple(
                 expression_episode_complete_event(
                     world_id=self._world_id,
@@ -2631,11 +2700,11 @@ class WorldRuntime:
                     outcome_ref="expression-episode:superseded-by-newer-inbound",
                     superseding_observation_event_ref=event.event_id,
                 )
-                for process in before.trigger_processes
-                if process.process_kind == "expression_episode"
-                and process.state == "claimed"
-                and process.claim_lease is not None
-                and not expression_episode_has_authorized_action(before, process)
+                for process in superseded_expression_processes
+            )
+            superseded_expression_attempt_ids = tuple(
+                process.claim_lease.attempt_id
+                for process in superseded_expression_processes
             )
             ingress_events = [
                 event,
@@ -2707,7 +2776,14 @@ class WorldRuntime:
                 if _retry_ordinal + 1 >= _INGRESS_CAS_MAX_ATTEMPTS:
                     raise
             else:
-                return observation, event, committed, episode_process, False
+                return (
+                    observation,
+                    event,
+                    committed,
+                    episode_process,
+                    False,
+                    superseded_expression_attempt_ids,
+                )
 
         # ``self._lock`` coordinates only this Runtime instance. Background
         # workers and another Runtime over the same SQLite World may still win
@@ -2768,9 +2844,13 @@ class WorldRuntime:
             committed,
             episode_process,
             existing_observation,
+            superseded_expression_attempt_ids,
         ) = await self._commit_ingress_observation(
             observation=observation,
             event=event,
+        )
+        await self._cancel_superseded_expression_attempt_tasks(
+            superseded_expression_attempt_ids
         )
         if existing_observation:
             return await self._existing_observation_outcome(
@@ -2886,6 +2966,18 @@ class WorldRuntime:
                             recorded_cadence_draws=cadence_draws,
                             expression_attempt_id=expression_attempt_id,
                         )
+                except asyncio.CancelledError:
+                    # A newer Observation first terminalizes this episode in
+                    # the ledger and only then cancels its obsolete local
+                    # provider task.  Treat that exact cancellation as the
+                    # already-recorded supersession; unrelated caller or
+                    # shutdown cancellation must still propagate.
+                    if await self._cancelled_expression_attempt_was_superseded(
+                        episode_process
+                    ):
+                        expression_superseded_by_inbound = True
+                    else:
+                        raise
                 except ConcurrencyConflict as initial_stale:
                     # A newer Observation may deliberately terminate this
                     # still-unanswered episode while its provider is in flight.
@@ -3327,6 +3419,11 @@ class WorldRuntime:
                 observation=observation,
                 observation_event=event,
             )
+            status = "deferred"
+            if not reply_deferred_refs:
+                reply_deferred_refs = (
+                    "expression_episode.technical_retry_pending",
+                )
         # This advisory ledger record must never sit in front of visible reply
         # authorization. Its helper is effect-once and absorbs a bounded CAS
         # race, so background World progress cannot turn a valid reply into
@@ -3968,13 +4065,21 @@ class WorldRuntime:
                 # lifecycle recoverable; a successful, source-bound `silent`
                 # proposal is handled and terminalized above.
                 projection = await self._project_for_write()
+                technical_retry_pending = has_bound_deliberation
                 return RuntimeOutcome(
                     outcome_id=f"outcome:{trigger_id}",
                     trigger_id=trigger_id,
                     observation_ref=observation.observation_id,
                     committed_world_revision=projection.world_revision,
                     ledger_sequence=projection.ledger_sequence,
-                    status="observed_only",
+                    status=(
+                        "deferred" if technical_retry_pending else "observed_only"
+                    ),
+                    deferred_refs=(
+                        ("expression_episode.technical_retry_pending",)
+                        if technical_retry_pending
+                        else ()
+                    ),
                     projection_hint=f"world-revision:{projection.world_revision}",
                 )
             return RuntimeOutcome(

@@ -1139,7 +1139,7 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
                 trace_id="trace:production-turn-application",
             )
         )
-        assert outcome.status == "observed_only"
+        assert outcome.status == "deferred"
         assert await app.drain_actions_once() is not None
     finally:
         app.close()

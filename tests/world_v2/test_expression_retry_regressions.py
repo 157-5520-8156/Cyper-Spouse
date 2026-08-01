@@ -11,6 +11,7 @@ import pytest
 from companion_daemon.config import Settings
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world_v2 import runtime as runtime_module
+from companion_daemon.world_v2 import deliberation as deliberation_module
 from companion_daemon.world_v2.appraisal_trigger import (
     interaction_appraisal_trigger_events as real_interaction_appraisal_trigger_events,
 )
@@ -188,6 +189,36 @@ class _BlockingExpressionModel:
             self.entered.set()
             await self.release.wait()
         return _expression_response(prompt, text="这句只应该生成一次。")
+
+
+class _LatestTurnCapacityModel:
+    """Hold superseded turns so they would otherwise consume every provider slot."""
+
+    model = "fixture:latest-turn-capacity"
+
+    def __init__(self) -> None:
+        self.expression_calls = 0
+        self.entered = (asyncio.Event(), asyncio.Event())
+        self.cancelled = (asyncio.Event(), asyncio.Event())
+        self._fallback = FakeCompanionModel()
+
+    async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        prompt = "\n".join(message["content"] for message in messages)
+        if not _is_expression_prompt(prompt):
+            return await self._fallback.complete(messages, temperature=temperature)
+        self.expression_calls += 1
+        ordinal = self.expression_calls
+        if ordinal <= 2:
+            self.entered[ordinal - 1].set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled[ordinal - 1].set()
+                raise
+        return _expression_response(
+            prompt,
+            text="我看到你连着发的这些了，这句接住了。",
+        )
 
 
 class _HeadAdvancingExpressionModel:
@@ -425,6 +456,133 @@ async def test_live_ingest_model_call_is_not_mistaken_for_crash_recovery(
         if not inbound.done():
             inbound.cancel()
         await asyncio.gather(inbound, return_exceptions=True)
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_newest_inbound_cancels_superseded_provider_work_before_authoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user volley must reserve real provider capacity for its newest turn."""
+
+    monkeypatch.setattr(deliberation_module, "MAX_INFLIGHT_PROVIDER_TASKS", 2)
+    monkeypatch.setattr(deliberation_module, "MAX_INFLIGHT_QUICK_TASKS", 0)
+    model = _LatestTurnCapacityModel()
+    host = build_qq_c2c_host(
+        settings=Settings(
+            database_path=tmp_path / "newest-inbound-provider-capacity.sqlite",
+            PRIMARY_USER_ID="geoff",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        advisory_model=FakeCompanionModel(),
+        delivery=_Delivery(),
+        use_configured_recall_embedding=False,
+    )
+    first = asyncio.create_task(
+        _direct_inbound(host, message_id="capacity-volley-1", text="先说第一句。")
+    )
+    second: asyncio.Task[object] | None = None
+    third: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(model.entered[0].wait(), timeout=3)
+        second = asyncio.create_task(
+            _direct_inbound(host, message_id="capacity-volley-2", text="再补第二句。")
+        )
+        await asyncio.wait_for(model.entered[1].wait(), timeout=3)
+        third = asyncio.create_task(
+            _direct_inbound(host, message_id="capacity-volley-3", text="最后是这一句。")
+        )
+
+        outcomes = await asyncio.wait_for(
+            asyncio.gather(first, second, third),
+            timeout=5,
+        )
+
+        assert [item.status for item in outcomes] == [
+            "observed_only",
+            "observed_only",
+            "action_authorized",
+        ]
+        assert model.expression_calls == 3
+        assert all(event.is_set() for event in model.cancelled)
+        projection = await host._host.action_due_projection()  # noqa: SLF001
+        assert [item.text for item in projection.stored_message_payloads] == [
+            "我看到你连着发的这些了，这句接住了。"
+        ]
+    finally:
+        for task in (first, second, third):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (first, second, third) if task is not None),
+            return_exceptions=True,
+        )
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_newer_inbound_cancels_scheduler_owned_retry_without_stopping_recovery(
+    tmp_path: Path,
+) -> None:
+    """A stale retry cancellation is a completed race, not scheduler shutdown."""
+
+    model = _LatestTurnCapacityModel()
+    host = build_qq_c2c_host(
+        settings=Settings(
+            database_path=tmp_path / "scheduler-owned-retry-cancellation.sqlite",
+            PRIMARY_USER_ID="geoff",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        advisory_model=FakeCompanionModel(),
+        delivery=_Delivery(),
+        use_configured_recall_embedding=False,
+    )
+    runtime = _runtime(host)
+    interrupted = asyncio.create_task(
+        _direct_inbound(host, message_id="scheduler-owned-old", text="旧消息。")
+    )
+    retry: asyncio.Task[object] | None = None
+    newest: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(model.entered[0].wait(), timeout=3)
+        interrupted.cancel()
+        interrupted_result = await asyncio.gather(
+            interrupted,
+            return_exceptions=True,
+        )
+        assert isinstance(interrupted_result[0], asyncio.CancelledError)
+
+        retry = asyncio.create_task(runtime._drain_expression_retry_once())  # noqa: SLF001
+        await asyncio.wait_for(model.entered[1].wait(), timeout=3)
+        newest = asyncio.create_task(
+            _direct_inbound(host, message_id="scheduler-owned-new", text="以这句为准。")
+        )
+
+        retry_outcome, newest_outcome = await asyncio.wait_for(
+            asyncio.gather(retry, newest),
+            timeout=5,
+        )
+
+        assert retry_outcome is not None
+        assert retry_outcome.status == "observed_only"
+        assert newest_outcome.status == "action_authorized"
+        assert model.expression_calls == 3
+        assert all(event.is_set() for event in model.cancelled)
+    finally:
+        for task in (interrupted, retry, newest):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (interrupted, retry, newest) if task is not None),
+            return_exceptions=True,
+        )
         await host.aclose()
 
 
@@ -1148,7 +1306,10 @@ async def test_context_preparation_failure_is_a_durable_backed_off_attempt(
             text="即使上下文坏了，也不能在同一个 claim 上不停重试。",
         )
 
-        assert outcome.status == "observed_only"
+        assert outcome.status == "deferred"
+        assert outcome.deferred_refs == (
+            "expression_episode.technical_retry_pending",
+        )
         assert model.expression_calls == 0
         failed = await host._host.action_due_projection()  # noqa: SLF001
         episode = next(
@@ -1250,7 +1411,10 @@ async def test_snapshot_failure_is_a_durable_backed_off_pre_provider_attempt(
             text="快照读取失败也必须变成可恢复的技术失败。",
         )
 
-        assert outcome.status == "observed_only"
+        assert outcome.status == "deferred"
+        assert outcome.deferred_refs == (
+            "expression_episode.technical_retry_pending",
+        )
         assert model.expression_calls == 0
         failed = await host._host.action_due_projection()  # noqa: SLF001
         episode = next(
@@ -1345,7 +1509,10 @@ async def test_new_inbound_atomically_supersedes_old_retry_after_restart(
             message_id="old-technical-retry-before-restart",
             text="这一句先发生技术失败。",
         )
-        assert failed_outcome.status == "observed_only"
+        assert failed_outcome.status == "deferred"
+        assert failed_outcome.deferred_refs == (
+            "expression_episode.technical_retry_pending",
+        )
         failed = await first._host.action_due_projection()  # noqa: SLF001
         old_episode = next(
             item

@@ -376,7 +376,7 @@ async def test_sqlite_attachment_reaches_provider_and_next_turn_context_exactly_
             trace_id="trace:attachment:e2e",
             attachment_refs=("attachment:image:opaque:e2e",),
         )
-        assert outcome.status == "observed_only"
+        assert outcome.status == "deferred"
 
         raced = await asyncio.gather(
             app.drain_background_once(), app.drain_background_once(), return_exceptions=True

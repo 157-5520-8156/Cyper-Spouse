@@ -293,7 +293,7 @@ async def test_real_pieces_compose_into_next_turn_context_exactly_once(
             trace_id="trace:attachment:e2e",
             attachment_refs=(IMAGE_REF,),
         )
-        assert outcome.status == "observed_only"
+        assert outcome.status == "deferred"
 
         actions: tuple = ()
         for _ in range(8):
