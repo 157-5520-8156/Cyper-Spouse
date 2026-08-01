@@ -21,9 +21,14 @@ from companion_daemon.world_v2.schemas import (
     BudgetReservation,
     BudgetSettlement,
     ProjectionCursor,
+    ResponseExpectationAssessmentProjection,
     WorldEvent,
 )
-from companion_daemon.world_v2.reducers import REDUCER_BUNDLE_VERSION, ReducerState
+from companion_daemon.world_v2.reducers import (
+    REDUCER_BUNDLE_VERSION,
+    ReducerState,
+    make_projection,
+)
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
@@ -46,6 +51,40 @@ def event(event_id: str, observation_id: str) -> WorldEvent:
         idempotency_key=event_id,
         payload={"observation_id": observation_id},
     )
+
+
+def test_projection_state_round_trip_preserves_expectation_assessments() -> None:
+    assessment = ResponseExpectationAssessmentProjection(
+        assessment_id="assessment:sqlite-round-trip",
+        source_plan_id="plan:sqlite-round-trip",
+        source_acceptance_event_ref="event:acceptance:sqlite-round-trip",
+        inbound_observation_id="observation:sqlite-round-trip",
+        inbound_observation_event_ref="event:observation:sqlite-round-trip",
+        status="fulfilled",
+        reason="The later observation fulfilled the source-bound expectation.",
+        assessed_at=NOW,
+        event_ref="event:assessment:sqlite-round-trip",
+        world_revision=1,
+    )
+    projection = make_projection(
+        world_id="world-sqlite-test",
+        world_revision=1,
+        deliberation_revision=0,
+        ledger_sequence=1,
+        state=ReducerState(response_expectation_assessments=(assessment,)),
+    )
+
+    state = SQLiteWorldLedger._state_from_projection(projection)  # noqa: SLF001
+    round_tripped = make_projection(
+        world_id=projection.world_id,
+        world_revision=projection.world_revision,
+        deliberation_revision=projection.deliberation_revision,
+        ledger_sequence=projection.ledger_sequence,
+        state=state,
+    )
+
+    assert state.response_expectation_assessments == (assessment,)
+    assert round_tripped.semantic_hash == projection.semantic_hash
 
 
 def test_sqlite_ledger_survives_restart_and_retries_atomic_commit(tmp_path) -> None:

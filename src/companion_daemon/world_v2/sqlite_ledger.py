@@ -2871,6 +2871,58 @@ class SQLiteWorldLedger:
                     self._state_hash(state, cursor), str(persisted_state_hash)
                 ):
                     raise LedgerIntegrityError("head state hash is invalid")
+                projected = make_projection(
+                    world_id=self._world_id,
+                    world_revision=cursor.world_revision,
+                    deliberation_revision=cursor.deliberation_revision,
+                    ledger_sequence=cursor.ledger_sequence,
+                    state=state,
+                )
+                if projected.semantic_hash != str(head["semantic_hash"]):
+                    rebuilt = self._replay_locked(
+                        target_cursor=cursor,
+                        target_schema_version=CURRENT_SCHEMA_VERSION,
+                        reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                    )
+                    rebuilt_state = self._state_from_projection(rebuilt)
+                    current_dump = self._state_dump(state)
+                    rebuilt_dump = self._state_dump(rebuilt_state)
+                    changed_fields = {
+                        field
+                        for field in set(current_dump) | set(rebuilt_dump)
+                        if current_dump.get(field) != rebuilt_dump.get(field)
+                    }
+                    if (
+                        rebuilt.semantic_hash != str(head["semantic_hash"])
+                        or changed_fields != {"response_expectation_assessments"}
+                        or current_dump.get("response_expectation_assessments")
+                        not in (None, [])
+                        or not rebuilt_dump.get("response_expectation_assessments")
+                    ):
+                        raise LedgerIntegrityError(
+                            "head semantic hash does not match persisted state"
+                        )
+                    # Reducer .47 was briefly deployed with a projection-to-
+                    # state adapter that omitted this already-authoritative
+                    # assessment projection during bundle migration.  Repair
+                    # only that exact derived-cache loss from immutable replay;
+                    # every other semantic mismatch remains a hard failure.
+                    connection.execute(
+                        "DELETE FROM world_v2_head_state_items WHERE world_id = ?",
+                        (self._world_id,),
+                    )
+                    connection.execute(
+                        """UPDATE world_v2_heads
+                           SET state_json = ?, semantic_hash = ?, state_hash = ?,
+                               storage_epoch = storage_epoch + 1
+                           WHERE world_id = ?""",
+                        (
+                            self._encode_state(rebuilt_state),
+                            rebuilt.semantic_hash,
+                            self._state_hash(rebuilt_state, cursor),
+                            self._world_id,
+                        ),
+                    )
                 connection.commit()
                 return
             if installed not in {
@@ -3777,6 +3829,9 @@ class SQLiteWorldLedger:
             expression_beats=projection.expression_beats,
             interaction_bids=projection.interaction_bids,
             interaction_bid_proposals=projection.interaction_bid_proposals,
+            response_expectation_assessments=(
+                projection.response_expectation_assessments
+            ),
             perception_requests=projection.perception_requests,
             perception_results=projection.perception_results,
             read_only_tool_requests=projection.read_only_tool_requests,

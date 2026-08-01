@@ -30,6 +30,9 @@ from companion_daemon.world_v2.sqlite_ledger import (
 
 LEGACY_WORLD_ID = "zhizhi-world-v1"
 STALE_DERIVED_HEAD_SOURCE_BUNDLE = "world-v2-reducers.41"
+STALE_DERIVED_HEAD_SOURCE_BUNDLES = frozenset(
+    {STALE_DERIVED_HEAD_SOURCE_BUNDLE, REDUCER_BUNDLE_VERSION}
+)
 _HEAD_STATE_SENTINEL = "world-v2-head-state-items.1"
 _REPAIR_DERIVED_TABLES = frozenset(
     {
@@ -572,8 +575,10 @@ def _inspect_stale_derived_head(
             raise ValueError(
                 f"expected source bundle {expected_source_bundle!r}, found {source_bundle!r}"
             )
-        if source_bundle != STALE_DERIVED_HEAD_SOURCE_BUNDLE:
-            raise ValueError("stale-derived-head repair is restricted to world-v2-reducers.41")
+        if source_bundle not in STALE_DERIVED_HEAD_SOURCE_BUNDLES:
+            raise ValueError(
+                "stale-derived-head repair source bundle is not explicitly supported"
+            )
         actual_cursor = ProjectionCursor(
             world_revision=int(head["world_revision"]),
             deliberation_revision=int(head["deliberation_revision"]),
@@ -682,6 +687,11 @@ def _authorize_validation_copy(
 ) -> None:
     """Repair only the copied legacy hash so ordinary migration can validate it."""
 
+    if inspection.source_bundle == REDUCER_BUNDLE_VERSION:
+        # Current-bundle stale heads are admitted only by the ledger's exact,
+        # replay-proven compatibility seam.  Leaving the mismatch intact on
+        # this disposable copy exercises that same fail-closed path.
+        return
     with sqlite3.connect(database) as connection:
         connection.execute("BEGIN IMMEDIATE")
         try:
