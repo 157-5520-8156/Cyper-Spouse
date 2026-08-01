@@ -326,7 +326,7 @@ def test_sqlite_migrates_verified_v39_head_and_cold_replays_same_history(tmp_pat
 
 @pytest.mark.parametrize(
     "source_bundle",
-    ("world-v2-reducers.44", "world-v2-reducers.45"),
+    ("world-v2-reducers.44", "world-v2-reducers.46"),
 )
 def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_history(
     tmp_path,
@@ -442,7 +442,7 @@ def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_histor
 
     reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     migrated = reopened.project()
-    assert migrated.reducer_bundle_version == "world-v2-reducers.46"
+    assert migrated.reducer_bundle_version == "world-v2-reducers.47"
     assert migrated.observation_refs == expected.observation_refs
     assert (
         migrated.world_revision,

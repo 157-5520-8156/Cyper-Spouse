@@ -9,6 +9,7 @@ import pytest
 
 from companion_daemon.world_v2.fact_draft_adapter import (
     FactDraftTechnicalFailure,
+    FactObservationSource,
     FactObservationProposalAdapter,
     _PREDICATE_GUIDE,
     materialize_fact_observation_draft,
@@ -102,12 +103,115 @@ class _Chat:
         return '{"retain":false}'
 
 
+class _BatchChat:
+    model = "test-fact-batch"
+
+    def __init__(self, *, cross_ground: bool = False) -> None:
+        self.calls = 0
+        self.cross_ground = cross_ground
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.1
+        self.calls += 1
+        request = json.loads(messages[1]["content"])
+        first, second = request["observations"]
+        second_result = (
+            {
+                "retain": True,
+                "predicate_code": "preference.likes",
+                # This text belongs only to the first Observation and must
+                # never become evidence for the second one.
+                "value": "乌龙茶",
+                "privacy_class": "personal",
+                "confidence": 8300,
+                "rationale": "cross-source",
+            }
+            if self.cross_ground
+            else {"retain": False}
+        )
+        return json.dumps(
+            {
+                "decisions": [
+                    {"observation_id": first["observation_id"], "result": {"retain": False}},
+                    {"observation_id": second["observation_id"], "result": second_result},
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+
+def _second_observation() -> tuple[Observation, WorldEvent]:
+    first, _event = _observation()
+    text = "今天早点休息。"
+    observation = first.model_copy(
+        update={
+            "observation_id": "observation:fact-draft:second",
+            "source_event_id": "test:fact-draft:second",
+            "payload_ref": "payload:fact-draft:second",
+            "payload_hash": hashlib.sha256(text.encode()).hexdigest(),
+            "text": text,
+        }
+    )
+    event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:observation:fact-draft:second",
+        world_id=observation.world_id,
+        event_type="ObservationRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor=observation.actor,
+        source=observation.source,
+        trace_id=observation.trace_id,
+        causation_id=observation.causation_id,
+        correlation_id=observation.correlation_id,
+        idempotency_key="observation:fact-draft:second",
+        payload=observation.model_dump(mode="json"),
+    )
+    return observation, event
+
+
 @pytest.mark.asyncio
 async def test_adapter_no_change_does_not_create_a_proposal() -> None:
     observation, event = _observation()
     assert await FactObservationProposalAdapter(model=_Chat()).propose(
         observation=observation, observation_event=event, source_world_revision=1,
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_batch_adapter_decides_each_exact_source_in_one_call() -> None:
+    first, first_event = _observation()
+    second, second_event = _second_observation()
+    chat = _BatchChat()
+
+    decisions = await FactObservationProposalAdapter(model=chat).propose_batch(
+        sources=(
+            FactObservationSource(first, first_event, 1),
+            FactObservationSource(second, second_event, 2),
+        ),
+        evaluated_world_revision=2,
+    )
+
+    assert decisions == (None, None)
+    assert chat.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_adapter_rejects_cross_observation_grounding() -> None:
+    first, first_event = _observation()
+    second, second_event = _second_observation()
+    chat = _BatchChat(cross_ground=True)
+
+    with pytest.raises(FactDraftTechnicalFailure, match="invalid_output"):
+        await FactObservationProposalAdapter(model=chat).propose_batch(
+            sources=(
+                FactObservationSource(first, first_event, 1),
+                FactObservationSource(second, second_event, 2),
+            ),
+            evaluated_world_revision=2,
+        )
+
+    assert chat.calls == 2
 
 
 def test_normalizes_provider_probability_confidence_to_basis_points() -> None:

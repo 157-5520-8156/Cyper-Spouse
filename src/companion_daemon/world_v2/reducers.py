@@ -531,8 +531,8 @@ from .schemas import (
 
 _V43_REDUCER_BUNDLE_VERSION = "world-v2-reducers.43"
 _V44_REDUCER_BUNDLE_VERSION = "world-v2-reducers.44"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.45"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.46"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.46"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.47"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -885,6 +885,7 @@ class ReducerState(FrozenModel):
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     model_result_audits: tuple[ModelResultAuditProjection, ...] = ()
     proposal_audits: tuple[ProposalAuditProjection, ...] = ()
+    interaction_fact_decisions: tuple[InteractionFactDecisionRecordedPayload, ...] = ()
     acceptance_manifests_v2: tuple[AcceptanceManifestRefV2, ...] = ()
     fact_commit_proposal_audits_v2: tuple[FactCommitProposalAuditRefV2, ...] = ()
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
@@ -8642,14 +8643,22 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
     )
     inbound_supersession = superseding_observation_event_ref is not None
     if inbound_supersession:
-        if (
-            process.process_kind != "expression_episode"
-            or event.payload().get("runtime_outcome_ref")
-            != "expression-episode:superseded-by-newer-inbound"
-            or event.causation_id != superseding_observation_event_ref
-        ):
+        allowed_supersession = (
+            process.process_kind,
+            event.payload().get("runtime_outcome_ref"),
+        ) in {
+            (
+                "expression_episode",
+                "expression-episode:superseded-by-newer-inbound",
+            ),
+            (
+                "interaction_appraisal",
+                "interaction-appraisal:folded-into-newer-inbound",
+            ),
+        }
+        if not allowed_supersession or event.causation_id != superseding_observation_event_ref:
             raise ValueError(
-                "expression episode supersession lacks exact inbound authority"
+                "trigger supersession lacks exact inbound authority"
             )
         superseding_authority = next(
             (
@@ -8685,7 +8694,7 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
             <= source_observation.world_revision
         ):
             raise ValueError(
-                "expression episode supersession requires a newer inbound Observation"
+                "trigger supersession requires a newer inbound Observation"
             )
     if not (
         process.claim_lease.acquired_at <= completed_at
@@ -8823,16 +8832,21 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
                 "life_ecology_schedule": schedule,
             }
         )
-    return state.model_copy(
-        update={
+    updates: dict[str, object] = {
             "trigger_processes": (
                 *state.trigger_processes[:process_index],
                 completed,
                 *state.trigger_processes[process_index + 1 :],
             ),
             "completed_trigger_ids": (*state.completed_trigger_ids, trigger_id),
-        }
-    )
+    }
+    if process.process_kind == "interaction_fact":
+        updates["interaction_fact_decisions"] = tuple(
+            item
+            for item in state.interaction_fact_decisions
+            if item.trigger_id != trigger_id
+        )
+    return state.model_copy(update=updates)
 
 
 def _interaction_fact_technical_failure_recorded(
@@ -9105,10 +9119,17 @@ def _interaction_fact_decision_recorded(
             or not decision["brief_rationale"]
         ):
             raise ValueError("recorded withdrawal decision is malformed")
-    # This is immutable external-result audit, not Fact authority.  The stable
-    # event identity prevents a second decision; runtime recovery reads the
-    # exact event bytes and resumes the later branch.
-    return state
+    # This is immutable external-result audit, not Fact authority.  Keeping a
+    # compact replay index lets a coalesced batch resume its remaining exact
+    # source decisions after an earlier member changes Fact authority.
+    return state.model_copy(
+        update={
+            "interaction_fact_decisions": (
+                *state.interaction_fact_decisions,
+                payload,
+            )
+        }
+    )
 
 
 def _fact_memory_decision_recorded(
@@ -13379,6 +13400,7 @@ def make_projection(
         proposal_revisions=state.proposal_revisions,
         model_result_audits=state.model_result_audits,
         proposal_audits=state.proposal_audits,
+        interaction_fact_decisions=state.interaction_fact_decisions,
         acceptance_manifests_v2=state.acceptance_manifests_v2,
         fact_commit_proposal_audits_v2=state.fact_commit_proposal_audits_v2,
         acceptance_manifests_v3=state.acceptance_manifests_v3,

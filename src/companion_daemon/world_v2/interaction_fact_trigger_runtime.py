@@ -9,7 +9,8 @@ acceptance authority.  It never lets a model write a Fact or choose evidence.
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 import hashlib
 import json
 import logging
@@ -21,6 +22,7 @@ from .fact_accepted_contracts import rehydrate_fact_commit_intent_v2_json
 from .fact_correction_lifecycle import FactCorrectionLifecycle
 from .fact_draft_adapter import (
     FactDraftTechnicalFailure,
+    FactObservationSource,
     FactObservationProposalAdapter,
     FactWithdrawalDraft,
 )
@@ -72,6 +74,22 @@ logger = logging.getLogger(__name__)
 _NO_FACT_DECISION = object()
 _NO_MEMORY_DECISION = object()
 _STALE_MEMORY_DECISION = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _FactBurstMember:
+    """One exact source and claimed authority in a coalesced Fact decision."""
+
+    process: TriggerProcess
+    source: FactObservationSource
+
+
+@dataclass(frozen=True, slots=True)
+class _FactFailureMember:
+    """One claimed trigger and source event sharing a provider failure."""
+
+    process: TriggerProcess
+    source_event: WorldEvent
 
 
 def _digest(value: object) -> str:
@@ -178,22 +196,34 @@ class InteractionFactTriggerRuntime:
             )
         try:
             if not decision_recorded and proposal is None:
-                proposal = await self._adapter.propose(
-                    observation=observation,
-                    observation_event=source_event,
-                    source_world_revision=source_world_revision,
-                    evaluated_world_revision=cursor.world_revision,
-                    current_single_fact_sources=current_single_fact_sources,
-                )
-                recorded_decision = await self._record_decision(
-                    process=active,
-                    source_event=source_event,
-                    observation=observation,
-                    evaluated_cursor=cursor,
+                batch_decision = await self._decide_open_burst(
+                    primary_process=active,
+                    primary_source_event=source_event,
+                    primary_observation=observation,
+                    primary_source_world_revision=source_world_revision,
+                    projection=before,
                     current_single_fact_sources=current_single_fact_sources,
                     fact_context_hash=fact_context_hash,
-                    decision=proposal,
                 )
+                if batch_decision is None:
+                    proposal = await self._adapter.propose(
+                        observation=observation,
+                        observation_event=source_event,
+                        source_world_revision=source_world_revision,
+                        evaluated_world_revision=cursor.world_revision,
+                        current_single_fact_sources=current_single_fact_sources,
+                    )
+                    recorded_decision = await self._record_decision(
+                        process=active,
+                        source_event=source_event,
+                        observation=observation,
+                        evaluated_cursor=cursor,
+                        current_single_fact_sources=current_single_fact_sources,
+                        fact_context_hash=fact_context_hash,
+                        decision=proposal,
+                    )
+                else:
+                    recorded_decision = batch_decision
                 proposal = (
                     None
                     if recorded_decision is _NO_FACT_DECISION
@@ -604,6 +634,252 @@ class InteractionFactTriggerRuntime:
             return process
         return None
 
+    async def _decide_open_burst(
+        self,
+        *,
+        primary_process: TriggerProcess,
+        primary_source_event: WorldEvent,
+        primary_observation: Observation,
+        primary_source_world_revision: int,
+        projection,
+        current_single_fact_sources: tuple[dict[str, object], ...],
+        fact_context_hash: str,
+    ) -> FactCommitProposalEnvelopeV2 | FactWithdrawalDraft | object | None:
+        """Claim and decide nearby source-bound Fact opportunities together.
+
+        The 30-second boundary is only a resource/coalescing boundary.  It
+        never decides Fact semantics: the model returns an independent result
+        for every exact Observation and each result is audited separately.
+        """
+
+        members = [
+            _FactBurstMember(
+                process=primary_process,
+                source=FactObservationSource(
+                    observation=primary_observation,
+                    event=primary_source_event,
+                    world_revision=primary_source_world_revision,
+                ),
+            )
+        ]
+        working = projection
+        for candidate in projection.trigger_processes:
+            if len(members) >= 8:
+                break
+            if (
+                candidate.trigger_id == primary_process.trigger_id
+                or candidate.process_kind != "interaction_fact"
+                or candidate.state == "terminal"
+            ):
+                continue
+            candidate_event, candidate_observation = await self._source_observation(
+                candidate,
+                self._cursor(working),
+            )
+            if (
+                candidate_observation.actor != primary_observation.actor
+                or abs(
+                    (
+                        candidate_observation.logical_time
+                        - primary_observation.logical_time
+                    ).total_seconds()
+                )
+                > 30
+            ):
+                continue
+            if candidate.state == "claimed":
+                candidate_failure = await self._technical_failure(candidate)
+                at = working.logical_time or candidate_event.logical_time
+                if (
+                    candidate.claim_lease is None
+                    or (
+                        candidate_failure is not None
+                        and at < candidate_failure.next_retry_at
+                    )
+                    or (
+                        candidate.claim_lease.owner_id != self._owner_id
+                        and at < candidate.claim_lease.expires_at
+                    )
+                ):
+                    continue
+                existing = await self._existing_decision(
+                    trigger_id=candidate.trigger_id,
+                    source_event_ref=candidate_event.event_id,
+                    fact_context_hash=fact_context_hash,
+                    subject_ref=candidate_observation.actor,
+                )
+                if existing is not None:
+                    continue
+            claimed = await self._claim_or_reclaim(
+                process=candidate,
+                source_event=candidate_event,
+                projection=working,
+            )
+            if claimed is None:
+                continue
+            source_commit = await self._lookup_event_commit(candidate_event.event_id)
+            if source_commit is None:
+                raise ValueError("interaction fact batch source is unavailable")
+            members.append(
+                _FactBurstMember(
+                    process=claimed,
+                    source=FactObservationSource(
+                        observation=candidate_observation,
+                        event=candidate_event,
+                        world_revision=source_commit[1].world_revision,
+                    ),
+                )
+            )
+            working = await self._project()
+        if len(members) == 1:
+            return None
+
+        evaluated_cursor = self._cursor(working)
+        batch_sources = tuple(member.source for member in members)
+        request_hash = _digest(
+            {
+                "adapter_version": self._adapter.adapter_version,
+                "batch_sources": tuple(
+                    {
+                        "source_event_ref": member.source.event.event_id,
+                        "source_payload_hash": member.source.event.payload_hash,
+                    }
+                    for member in members
+                ),
+                "evaluated_cursor": evaluated_cursor.model_dump(mode="json"),
+                "current_single_fact_sources": current_single_fact_sources,
+                "fact_context_hash": fact_context_hash,
+            }
+        )
+        try:
+            decisions = await self._adapter.propose_batch(
+                sources=batch_sources,
+                evaluated_world_revision=evaluated_cursor.world_revision,
+                current_single_fact_sources=current_single_fact_sources,
+            )
+        except FactDraftTechnicalFailure as failure:
+            await self._record_batch_technical_failures(
+                members=tuple(
+                    _FactFailureMember(
+                        process=member.process,
+                        source_event=member.source.event,
+                    )
+                    for member in members
+                ),
+                phase="fact_draft",
+                failure_code=failure.failure_code,
+            )
+            raise
+
+        await self._record_batch_decisions(
+            members=tuple(members),
+            decisions=decisions,
+            evaluated_cursor=evaluated_cursor,
+            fact_context_hash=fact_context_hash,
+            request_hash=request_hash,
+            subject_ref=primary_observation.actor,
+        )
+        primary_index = next(
+            index
+            for index, member in enumerate(members)
+            if member.process.trigger_id == primary_process.trigger_id
+        )
+        primary_decision = decisions[primary_index]
+        return _NO_FACT_DECISION if primary_decision is None else primary_decision
+
+    async def _record_batch_decisions(
+        self,
+        *,
+        members: tuple[_FactBurstMember, ...],
+        decisions: tuple[
+            FactCommitProposalEnvelopeV2 | FactWithdrawalDraft | None,
+            ...,
+        ],
+        evaluated_cursor: ProjectionCursor,
+        fact_context_hash: str,
+        request_hash: str,
+        subject_ref: str,
+    ) -> None:
+        """Commit every source decision from one model result atomically."""
+
+        commit_cursor = evaluated_cursor
+        trigger_ids = {member.process.trigger_id for member in members}
+        for _attempt in range(8):
+            projection = await self._project_at(commit_cursor)
+            recorded_at = (
+                projection.logical_time
+                or members[0].source.event.logical_time
+            )
+            events = tuple(
+                self._decision_event(
+                    process=member.process,
+                    source_event=member.source.event,
+                    observation=member.source.observation,
+                    evaluated_cursor=evaluated_cursor,
+                    fact_context_hash=fact_context_hash,
+                    request_hash=request_hash,
+                    batch_size=len(members),
+                    decision=decision,
+                    recorded_at=recorded_at,
+                )
+                for member, decision in zip(members, decisions, strict=True)
+            )
+            try:
+                await self._commit_at_cursor(
+                    events,
+                    cursor=commit_cursor,
+                    commit_id="commit:interaction-fact:decision-batch:"
+                    + request_hash,
+                )
+                return
+            except ConcurrencyConflict:
+                latest = await self._project()
+                existing_ids = {
+                    item.trigger_id
+                    for item in latest.interaction_fact_decisions
+                    if item.request_hash == request_hash
+                }
+                if existing_ids == trigger_ids:
+                    return
+                if existing_ids:
+                    raise ConcurrencyConflict(
+                        "interaction Fact batch decision commit was partial"
+                    )
+                active_by_id = {
+                    item.trigger_id: item
+                    for item in latest.trigger_processes
+                    if item.trigger_id in trigger_ids
+                }
+                if (
+                    len(active_by_id) != len(members)
+                    or any(
+                        active_by_id[member.process.trigger_id].state
+                        != "claimed"
+                        or active_by_id[member.process.trigger_id].claim_lease
+                        is None
+                        or member.process.claim_lease is None
+                        or active_by_id[
+                            member.process.trigger_id
+                        ].claim_lease.attempt_id
+                        != member.process.claim_lease.attempt_id
+                        for member in members
+                    )
+                    or _digest(
+                        self._single_fact_authority_context(
+                            latest,
+                            subject_ref=subject_ref,
+                        )
+                    )
+                    != fact_context_hash
+                ):
+                    raise ConcurrencyConflict(
+                        "interaction Fact batch Context changed before recording"
+                    )
+                commit_cursor = self._cursor(latest)
+        raise ConcurrencyConflict(
+            "interaction Fact batch decision could not join a stable cursor"
+        )
+
     async def _technical_failure(
         self, process: TriggerProcess
     ) -> InteractionFactTechnicalFailurePayload | None:
@@ -632,14 +908,118 @@ class InteractionFactTriggerRuntime:
         phase: Literal["fact_draft", "memory_draft"],
         failure_code: str,
     ) -> None:
+        await self._record_batch_technical_failures(
+            members=(
+                _FactFailureMember(
+                    process=process,
+                    source_event=source_event,
+                ),
+            ),
+            phase=phase,
+            failure_code=failure_code,
+        )
+
+    async def _record_batch_technical_failures(
+        self,
+        *,
+        members: tuple[_FactFailureMember, ...],
+        phase: Literal["fact_draft", "memory_draft"],
+        failure_code: str,
+    ) -> None:
+        """Record one provider failure for every coalesced source atomically."""
+
+        if not members:
+            raise ValueError("interaction fact failure batch cannot be empty")
+        if any(member.process.claim_lease is None for member in members):
+            raise ValueError("interaction fact failure requires claimed processes")
+        attempts = {
+            member.process.trigger_id: member.process.claim_lease.attempt_id
+            for member in members
+            if member.process.claim_lease is not None
+        }
+        commit_cursor = self._cursor(await self._project())
+        recorded_payloads: tuple[InteractionFactTechnicalFailurePayload, ...] = ()
+        for _attempt in range(8):
+            existing_items = []
+            for member in members:
+                existing_items.append(await self._technical_failure(member.process))
+            existing = tuple(existing_items)
+            if all(item is not None for item in existing):
+                return
+            if any(item is not None for item in existing):
+                raise ConcurrencyConflict(
+                    "interaction Fact batch technical-failure commit was partial"
+                )
+            projection = await self._project_at(commit_cursor)
+            events_and_payloads = tuple(
+                self._technical_failure_event(
+                    process=member.process,
+                    source_event=member.source_event,
+                    logical_time=projection.logical_time,
+                    phase=phase,
+                    failure_code=failure_code,
+                )
+                for member in members
+            )
+            events = tuple(item[0] for item in events_and_payloads)
+            recorded_payloads = tuple(item[1] for item in events_and_payloads)
+            try:
+                await self._commit_at_cursor(
+                    events,
+                    cursor=commit_cursor,
+                    commit_id="commit:interaction-fact:technical-failure-batch:"
+                    + _digest(sorted(attempts.items())),
+                )
+                break
+            except ConcurrencyConflict:
+                latest = await self._project()
+                active_by_id = {
+                    item.trigger_id: item
+                    for item in latest.trigger_processes
+                    if item.trigger_id in attempts
+                }
+                if (
+                    len(active_by_id) != len(members)
+                    or any(
+                        active_by_id[trigger_id].state != "claimed"
+                        or active_by_id[trigger_id].claim_lease is None
+                        or active_by_id[trigger_id].claim_lease.attempt_id != attempt_id
+                        for trigger_id, attempt_id in attempts.items()
+                    )
+                ):
+                    raise ConcurrencyConflict(
+                        "interaction Fact batch claims changed before failure recording"
+                    )
+                commit_cursor = self._cursor(latest)
+        else:
+            raise ConcurrencyConflict(
+                "interaction Fact batch failure could not join a stable cursor"
+            )
+
+        for member, payload in zip(members, recorded_payloads, strict=True):
+            logger.warning(
+                "interaction fact model failure scheduled for retry: trigger=%s "
+                "phase=%s retry_ordinal=%s next_retry_at=%s failure=%s",
+                member.process.trigger_id,
+                phase,
+                payload.retry_ordinal,
+                payload.next_retry_at.isoformat(),
+                payload.failure_code,
+            )
+
+    def _technical_failure_event(
+        self,
+        *,
+        process: TriggerProcess,
+        source_event: WorldEvent,
+        logical_time: datetime | None,
+        phase: Literal["fact_draft", "memory_draft"],
+        failure_code: str,
+    ) -> tuple[WorldEvent, InteractionFactTechnicalFailurePayload]:
         if process.claim_lease is None:
             raise ValueError("interaction fact failure requires a claimed process")
-        existing = await self._technical_failure(process)
-        if existing is not None:
-            return
-        projection = await self._project()
         failed_at = max(
-            projection.logical_time or source_event.logical_time,
+            logical_time or source_event.logical_time,
             process.claim_lease.acquired_at,
         )
         retry_ordinal = len(process.attempt_ids)
@@ -681,21 +1061,7 @@ class InteractionFactTriggerRuntime:
             idempotency_key=identity,
             payload=payload_json,
         )
-        await self._commit_at_cursor(
-            (event,),
-            cursor=self._cursor(projection),
-            commit_id="commit:interaction-fact:technical-failure:"
-            + _digest([process.trigger_id, process.claim_lease.attempt_id]),
-        )
-        logger.warning(
-            "interaction fact model failure scheduled for retry: trigger=%s "
-            "phase=%s retry_ordinal=%s next_retry_at=%s failure=%s",
-            process.trigger_id,
-            phase,
-            retry_ordinal,
-            payload.next_retry_at.isoformat(),
-            payload.failure_code,
-        )
+        return event, payload
 
     async def _existing_legacy_proposal(
         self,
@@ -782,7 +1148,32 @@ class InteractionFactTriggerRuntime:
             )
         )
         if stored is None:
-            return None
+            projection = await self._project()
+            candidates = tuple(
+                item
+                for item in projection.interaction_fact_decisions
+                if item.trigger_id == trigger_id
+                and item.source_event_ref == source_event_ref
+                and item.batch_size > 1
+            )
+            if len(candidates) > 1:
+                raise ValueError(
+                    "interaction Fact trigger has multiple batch decisions"
+                )
+            if not candidates:
+                return None
+            payload = candidates[0]
+            await self._validate_decision_context(
+                payload,
+                subject_ref=subject_ref,
+            )
+            if not self._batch_decision_is_current(
+                projection,
+                payload=payload,
+                subject_ref=subject_ref,
+            ):
+                return None
+            return payload
         event, _commit = stored
         if event.event_type != "InteractionFactDecisionRecorded":
             raise ValueError("interaction Fact decision identity resolved to another event")
@@ -795,6 +1186,18 @@ class InteractionFactTriggerRuntime:
             or payload.fact_context_hash != fact_context_hash
         ):
             raise ValueError("interaction Fact decision does not bind its source")
+        await self._validate_decision_context(
+            payload,
+            subject_ref=subject_ref,
+        )
+        return payload
+
+    async def _validate_decision_context(
+        self,
+        payload: InteractionFactDecisionRecordedPayload,
+        *,
+        subject_ref: str,
+    ) -> None:
         evaluated = await self._project_at(
             ProjectionCursor(
                 world_revision=payload.evaluated_world_revision,
@@ -809,7 +1212,64 @@ class InteractionFactTriggerRuntime:
             )
         ) != payload.fact_context_hash:
             raise ValueError("interaction Fact decision Context hash is invalid")
-        return payload
+
+    @staticmethod
+    def _batch_decision_is_current(
+        projection,
+        *,
+        payload: InteractionFactDecisionRecordedPayload,
+        subject_ref: str,
+    ) -> bool:
+        """Allow ordered batch settlement unless newer source authority won.
+
+        Earlier members from the same model snapshot may change the relevant
+        Fact slot before later members drain.  A user Observation newer than
+        this member still wins and forces fresh role-model evaluation.
+        """
+
+        if payload.decision_kind == "no_change":
+            return True
+        decision = json.loads(payload.decision_json)
+        if payload.decision_kind == "withdraw":
+            predicate = decision.get("predicate_code")
+        else:
+            proposal = validate_fact_commit_proposal_v2(
+                decision,
+                world_id=projection.world_id,
+            )
+            intent = rehydrate_fact_commit_intent_v2_json(
+                proposal.proposed_changes[0].payload.canonical_json
+            )
+            predicate = intent.predicate_code
+        source = next(
+            (
+                item
+                for item in projection.message_observations
+                if item.observation_id == payload.source_observation_ref
+            ),
+            None,
+        )
+        if source is None:
+            return False
+        for fact in projection.facts:
+            if (
+                fact.values.status != "active"
+                or fact.values.subject_ref != subject_ref
+                or fact.values.predicate_code != predicate
+            ):
+                continue
+            authority = next(
+                (
+                    item
+                    for item in projection.message_observations
+                    if item.observation_id
+                    == fact.values.assertion_binding.source_ref
+                ),
+                None,
+            )
+            if authority is None or authority.world_revision > source.world_revision:
+                return False
+        return True
 
     @staticmethod
     def _single_fact_authority_context(
@@ -914,81 +1374,38 @@ class InteractionFactTriggerRuntime:
         current_single_fact_sources: tuple[dict[str, object], ...],
         fact_context_hash: str,
         decision,
+        commit_cursor: ProjectionCursor | None = None,
+        request_hash: str | None = None,
+        batch_size: int = 1,
     ):
         if process.claim_lease is None:
             raise ValueError("interaction Fact decision requires a claimed process")
-        if decision is None:
-            decision_kind = "no_change"
-            decision_value: object = {"decision": "no_change"}
-        elif isinstance(decision, FactWithdrawalDraft):
-            decision_kind = "withdraw"
-            decision_value = decision.model_dump(mode="json")
-        else:
-            decision_kind = "retain"
-            decision_value = decision.model_dump(mode="json")
-        decision_json = canonical_interaction_fact_decision_json(decision_value)
-        request_hash = _digest(
-            {
-                "adapter_version": self._adapter.adapter_version,
-                "source_event_ref": source_event.event_id,
-                "source_payload_hash": source_event.payload_hash,
-                "evaluated_cursor": evaluated_cursor.model_dump(mode="json"),
-                "current_single_fact_sources": current_single_fact_sources,
-                "fact_context_hash": fact_context_hash,
-            }
-        )
-        commit_cursor = evaluated_cursor
+        if request_hash is None:
+            request_hash = _digest(
+                {
+                    "adapter_version": self._adapter.adapter_version,
+                    "source_event_ref": source_event.event_id,
+                    "source_payload_hash": source_event.payload_hash,
+                    "evaluated_cursor": evaluated_cursor.model_dump(mode="json"),
+                    "current_single_fact_sources": current_single_fact_sources,
+                    "fact_context_hash": fact_context_hash,
+                }
+            )
+        if commit_cursor is None:
+            commit_cursor = evaluated_cursor
         for _attempt in range(8):
             projection = await self._project_at(commit_cursor)
             recorded_at = projection.logical_time or source_event.logical_time
-            payload = InteractionFactDecisionRecordedPayload(
-                decision_id=interaction_fact_decision_identity(
-                    trigger_id=process.trigger_id,
-                    fact_context_hash=fact_context_hash,
-                ),
-                trigger_id=process.trigger_id,
-                attempt_id=process.claim_lease.attempt_id,
-                source_event_ref=source_event.event_id,
-                source_observation_ref=observation.observation_id,
-                evaluated_world_revision=evaluated_cursor.world_revision,
-                evaluated_deliberation_revision=(
-                    evaluated_cursor.deliberation_revision
-                ),
-                evaluated_ledger_sequence=evaluated_cursor.ledger_sequence,
-                adapter_version=self._adapter.adapter_version,
-                model_id=self._adapter.model_id,
-                request_hash=request_hash,
+            event = self._decision_event(
+                process=process,
+                source_event=source_event,
+                observation=observation,
+                evaluated_cursor=evaluated_cursor,
                 fact_context_hash=fact_context_hash,
-                decision_kind=decision_kind,
-                decision_json=decision_json,
-                decision_hash=interaction_fact_decision_hash(decision_json),
+                request_hash=request_hash,
+                batch_size=batch_size,
+                decision=decision,
                 recorded_at=recorded_at,
-            )
-            payload_json = payload.model_dump(mode="json")
-            identity = domain_idempotency_key(
-                event_type="InteractionFactDecisionRecorded",
-                world_id=self._ledger.world_id,
-                payload=payload_json,
-            )
-            if identity is None:
-                raise ValueError("interaction Fact decision has no domain identity")
-            event = WorldEvent.from_payload(
-                schema_version="world-v2.1",
-                event_id=interaction_fact_decision_event_id(
-                    trigger_id=process.trigger_id,
-                    fact_context_hash=fact_context_hash,
-                ),
-                world_id=self._ledger.world_id,
-                event_type="InteractionFactDecisionRecorded",
-                logical_time=recorded_at,
-                created_at=max(source_event.created_at, recorded_at),
-                actor=self._owner_id,
-                source=self._source,
-                trace_id=source_event.trace_id,
-                causation_id=source_event.event_id,
-                correlation_id=source_event.correlation_id,
-                idempotency_key=identity,
-                payload=payload_json,
             )
             try:
                 await self._commit_at_cursor(
@@ -1037,6 +1454,80 @@ class InteractionFactTriggerRuntime:
             return _NO_FACT_DECISION if decision is None else decision
         raise ConcurrencyConflict(
             "interaction Fact decision could not join a stable ledger cursor"
+        )
+
+    def _decision_event(
+        self,
+        *,
+        process: TriggerProcess,
+        source_event: WorldEvent,
+        observation: Observation,
+        evaluated_cursor: ProjectionCursor,
+        fact_context_hash: str,
+        request_hash: str,
+        batch_size: int,
+        decision,
+        recorded_at: datetime,
+    ) -> WorldEvent:
+        if process.claim_lease is None:
+            raise ValueError("interaction Fact decision requires a claimed process")
+        if decision is None:
+            decision_kind = "no_change"
+            decision_value: object = {"decision": "no_change"}
+        elif isinstance(decision, FactWithdrawalDraft):
+            decision_kind = "withdraw"
+            decision_value = decision.model_dump(mode="json")
+        else:
+            decision_kind = "retain"
+            decision_value = decision.model_dump(mode="json")
+        decision_json = canonical_interaction_fact_decision_json(decision_value)
+        payload = InteractionFactDecisionRecordedPayload(
+            decision_id=interaction_fact_decision_identity(
+                trigger_id=process.trigger_id,
+                fact_context_hash=fact_context_hash,
+            ),
+            trigger_id=process.trigger_id,
+            attempt_id=process.claim_lease.attempt_id,
+            source_event_ref=source_event.event_id,
+            source_observation_ref=observation.observation_id,
+            evaluated_world_revision=evaluated_cursor.world_revision,
+            evaluated_deliberation_revision=evaluated_cursor.deliberation_revision,
+            evaluated_ledger_sequence=evaluated_cursor.ledger_sequence,
+            adapter_version=self._adapter.adapter_version,
+            model_id=self._adapter.model_id,
+            request_hash=request_hash,
+            batch_size=batch_size,
+            fact_context_hash=fact_context_hash,
+            decision_kind=decision_kind,
+            decision_json=decision_json,
+            decision_hash=interaction_fact_decision_hash(decision_json),
+            recorded_at=recorded_at,
+        )
+        payload_json = payload.model_dump(mode="json")
+        identity = domain_idempotency_key(
+            event_type="InteractionFactDecisionRecorded",
+            world_id=self._ledger.world_id,
+            payload=payload_json,
+        )
+        if identity is None:
+            raise ValueError("interaction Fact decision has no domain identity")
+        return WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id=interaction_fact_decision_event_id(
+                trigger_id=process.trigger_id,
+                fact_context_hash=fact_context_hash,
+            ),
+            world_id=self._ledger.world_id,
+            event_type="InteractionFactDecisionRecorded",
+            logical_time=recorded_at,
+            created_at=max(source_event.created_at, recorded_at),
+            actor=self._owner_id,
+            source=self._source,
+            trace_id=source_event.trace_id,
+            causation_id=source_event.event_id,
+            correlation_id=source_event.correlation_id,
+            idempotency_key=identity,
+            payload=payload_json,
         )
 
     async def _materialize_memory(

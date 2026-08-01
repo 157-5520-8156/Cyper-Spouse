@@ -42,6 +42,7 @@ from .resource_authority_schemas import (
 from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
 from .acceptance_manifest import AcceptanceManifestRefV2
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
+from .interaction_fact_decision import InteractionFactDecisionRecordedPayload
 from .appearance_state import AppearanceStateProjection
 from .visible_physical_state import VisiblePhysicalStateProjection
 from .media_v2 import (
@@ -5379,7 +5380,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.46"
+    reducer_bundle_version: str = "world-v2-reducers.47"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -5505,6 +5506,7 @@ class LedgerProjection(FrozenModel):
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     model_result_audits: tuple[ModelResultAuditProjection, ...] = ()
     proposal_audits: tuple[ProposalAuditProjection, ...] = ()
+    interaction_fact_decisions: tuple[InteractionFactDecisionRecordedPayload, ...] = ()
     acceptance_manifests_v2: tuple[AcceptanceManifestRefV2, ...] = ()
     fact_commit_proposal_audits_v2: tuple[FactCommitProposalAuditRefV2, ...] = ()
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()

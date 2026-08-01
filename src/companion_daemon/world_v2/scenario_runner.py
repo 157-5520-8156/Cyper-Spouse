@@ -205,13 +205,17 @@ class ScenarioVerificationError(AssertionError):
 # visible output, event type, Action state, model-call count and explicit
 # predicate identical across all 120 cases; only replay hashes changed because
 # the model request/audit identity now records the order-independent contract.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.41"
+# ``.42`` upgrades the replay reducer to ``.47`` for compact pending Fact-batch
+# decision recovery.  The complete fixed suite keeps all 120 explicit
+# predicates and visible fake-model outputs unchanged; its replay/audit hashes
+# intentionally change because the authenticated projection schema changed.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.42"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "6f06d80b8479acaf8e8e8920ff6caaa9e8ac4ee57e70f2e411aeb59e4a21e9d8"
+    "ee2cd0ad73862dc7289b93187af91e70f4d838a536ddbeaddcefe9ba541e4d97"
 )
 
 

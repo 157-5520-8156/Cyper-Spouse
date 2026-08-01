@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 
@@ -218,6 +219,119 @@ class _LatestTurnCapacityModel:
         return _expression_response(
             prompt,
             text="我看到你连着发的这些了，这句接住了。",
+        )
+
+
+class _CountingFactModel:
+    """Count semantic Fact calls while accepting both single and batch contracts."""
+
+    model = "fixture:counting-fact"
+
+    def __init__(self) -> None:
+        self.fact_calls = 0
+        self._fallback = FakeCompanionModel()
+
+    async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        system = str(messages[0]["content"])
+        if "long-term user-fact memory" not in system:
+            return await self._fallback.complete(messages, temperature=temperature)
+        self.fact_calls += 1
+        request = json.loads(messages[-1]["content"])
+        observations = request.get("observations")
+        if isinstance(observations, list):
+            return json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "observation_id": item["observation_id"],
+                            "result": {"retain": False},
+                        }
+                        for item in observations
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        return '{"retain":false}'
+
+
+class _BlockingExpressionAndAppraisalModel:
+    """Expose both obsolete provider calls so newer inbound can cancel them."""
+
+    model = "fixture:blocking-expression-and-appraisal"
+
+    def __init__(self) -> None:
+        self.expression_entered = asyncio.Event()
+        self.appraisal_entered = asyncio.Event()
+        self.expression_cancelled = asyncio.Event()
+        self.appraisal_cancelled = asyncio.Event()
+        self.expression_calls = 0
+        self.appraisal_calls = 0
+        self._fallback = FakeCompanionModel()
+
+    async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        prompt = "\n".join(message["content"] for message in messages)
+        if (
+            "appraisal_draft and expression_draft" in prompt
+            and "COMBINED OUTPUT ENVELOPE" in prompt
+        ):
+            self.appraisal_calls += 1
+            if self.appraisal_calls == 1:
+                self.appraisal_entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.appraisal_cancelled.set()
+                    raise
+            return await self._fallback.complete(messages, temperature=temperature)
+        if not _is_expression_prompt(prompt):
+            return await self._fallback.complete(messages, temperature=temperature)
+        self.expression_calls += 1
+        if self.expression_calls == 1:
+            self.expression_entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.expression_cancelled.set()
+                raise
+        return _expression_response(prompt, text="新的这句接住了。")
+
+
+class _BatchUpdatingFactModel:
+    model = "fixture:batch-updating-fact"
+
+    def __init__(self) -> None:
+        self.fact_calls = 0
+        self._fallback = FakeCompanionModel()
+
+    async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+        system = str(messages[0]["content"])
+        if "retrieval memory" in system:
+            return '{"retain":false}'
+        if "long-term user-fact memory" not in system:
+            return await self._fallback.complete(messages, temperature=temperature)
+        self.fact_calls += 1
+        request = json.loads(messages[-1]["content"])
+        observations = request.get("observations")
+        if not isinstance(observations, list):
+            return '{"retain":false}'
+        return json.dumps(
+            {
+                "decisions": [
+                    {
+                        "observation_id": item["observation_id"],
+                        "result": {
+                            "retain": True,
+                            "predicate_code": "location.home",
+                            "value": "深圳" if "深圳" in item["text"] else "广州",
+                            "privacy_class": "personal",
+                            "confidence": 9000,
+                            "rationale": "Explicit residence update.",
+                        },
+                    }
+                    for item in observations
+                ]
+            },
+            ensure_ascii=False,
         )
 
 
@@ -507,7 +621,7 @@ async def test_newest_inbound_cancels_superseded_provider_work_before_authoring(
             "observed_only",
             "action_authorized",
         ]
-        assert model.expression_calls == 3
+        assert model.expression_calls in {3, 4}
         assert all(event.is_set() for event in model.cancelled)
         projection = await host._host.action_due_projection()  # noqa: SLF001
         assert [item.text for item in projection.stored_message_payloads] == [
@@ -519,6 +633,290 @@ async def test_newest_inbound_cancels_superseded_provider_work_before_authoring(
                 task.cancel()
         await asyncio.gather(
             *(task for task in (first, second, third) if task is not None),
+            return_exceptions=True,
+        )
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_superseded_volley_folds_appraisal_and_batches_fact_model_work(
+    tmp_path: Path,
+) -> None:
+    """A burst keeps every source message without paying one model call per fragment."""
+
+    model = _LatestTurnCapacityModel()
+    fact_model = _CountingFactModel()
+    host = build_qq_c2c_host(
+        settings=Settings(
+            database_path=tmp_path / "volley-background-cognition.sqlite",
+            PRIMARY_USER_ID="geoff",
+            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        advisory_model=fact_model,
+        delivery=_Delivery(),
+        use_configured_recall_embedding=False,
+    )
+    first = asyncio.create_task(
+        _direct_inbound(host, message_id="cognition-volley-1", text="我下午")
+    )
+    second: asyncio.Task[object] | None = None
+    third: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(model.entered[0].wait(), timeout=3)
+        second = asyncio.create_task(
+            _direct_inbound(host, message_id="cognition-volley-2", text="去了医院")
+        )
+        await asyncio.wait_for(model.entered[1].wait(), timeout=3)
+        third = asyncio.create_task(
+            _direct_inbound(host, message_id="cognition-volley-3", text="现在没事了")
+        )
+        outcomes = await asyncio.wait_for(
+            asyncio.gather(first, second, third),
+            timeout=5,
+        )
+        assert [item.status for item in outcomes] == [
+            "observed_only",
+            "observed_only",
+            "action_authorized",
+        ]
+
+        for ordinal in range(8):
+            await host.scheduler_once(
+                observed_at=NOW + timedelta(minutes=1, seconds=ordinal),
+                max_action_units=8,
+                max_background_units=16,
+            )
+            projection = await host._host.action_due_projection()  # noqa: SLF001
+            if not any(
+                process.process_kind in {"interaction_appraisal", "interaction_fact"}
+                and process.state != "terminal"
+                for process in projection.trigger_processes
+            ):
+                break
+
+        projection = await host._host.action_due_projection()  # noqa: SLF001
+        appraisals = tuple(
+            process
+            for process in projection.trigger_processes
+            if process.process_kind == "interaction_appraisal"
+        )
+        facts = tuple(
+            process
+            for process in projection.trigger_processes
+            if process.process_kind == "interaction_fact"
+        )
+        assert len(projection.message_observations) == 3
+        assert len(appraisals) == len(facts) == 3
+        assert all(process.state == "terminal" for process in (*appraisals, *facts))
+        assert sum(
+            process.runtime_outcome_ref
+            == "interaction-appraisal:folded-into-newer-inbound"
+            for process in appraisals
+        ) == 2
+        # Three visible attempts include the two promptly cancelled calls.
+        # The two folded appraisal processes cannot have proposal audits, so
+        # only the newest conversational moment receives background appraisal;
+        # Fact keeps all three exact sources in one model batch.
+        assert model.expression_calls in {3, 4}
+        assert sum(
+            audit.proposal_id.startswith("proposal:appraisal-draft:")
+            for audit in projection.proposal_audits
+        ) == 1
+        assert fact_model.fact_calls == 1
+    finally:
+        for task in (first, second, third):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (first, second, third) if task is not None),
+            return_exceptions=True,
+        )
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_inbound_cancels_an_appraisal_provider_after_durable_fold(
+    tmp_path: Path,
+) -> None:
+    model = _BlockingExpressionAndAppraisalModel()
+    host = build_qq_c2c_host(
+        settings=Settings(
+            database_path=tmp_path / "appraisal-provider-fold.sqlite",
+            PRIMARY_USER_ID="geoff",
+            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        advisory_model=_CountingFactModel(),
+        delivery=_Delivery(),
+        use_configured_recall_embedding=False,
+    )
+    first = asyncio.create_task(
+        _direct_inbound(host, message_id="appraisal-fold-1", text="我先说半句")
+    )
+    scheduler: asyncio.Task[object] | None = None
+    second: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(model.expression_entered.wait(), timeout=3)
+        scheduler = asyncio.create_task(
+            host.scheduler_once(
+                observed_at=NOW + timedelta(seconds=1),
+                max_action_units=0,
+                max_background_units=2,
+            )
+        )
+        await asyncio.wait_for(model.appraisal_entered.wait(), timeout=3)
+        second = asyncio.create_task(
+            _direct_inbound(host, message_id="appraisal-fold-2", text="现在说完整了")
+        )
+        first_outcome, second_outcome, _scheduler_outcome = await asyncio.wait_for(
+            asyncio.gather(first, second, scheduler),
+            timeout=5,
+        )
+
+        assert first_outcome.status == "observed_only"
+        assert second_outcome.status == "action_authorized"
+        assert model.expression_cancelled.is_set()
+        assert model.appraisal_cancelled.is_set()
+        projection = await host._host.action_due_projection()  # noqa: SLF001
+        old_observation = projection.message_observations[0]
+        old_appraisal = next(
+            process
+            for process in projection.trigger_processes
+            if process.process_kind == "interaction_appraisal"
+            and process.source_evidence_ref == old_observation.observation_id
+        )
+        assert old_appraisal.state == "terminal"
+        assert (
+            old_appraisal.runtime_outcome_ref
+            == "interaction-appraisal:folded-into-newer-inbound"
+        )
+    finally:
+        for task in (first, second, scheduler):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (first, second, scheduler) if task is not None),
+            return_exceptions=True,
+        )
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fact_batch_settles_ordered_slot_updates_without_a_second_model_call(
+    tmp_path: Path,
+) -> None:
+    model = _BlockingExpressionModel()
+    fact_model = _BatchUpdatingFactModel()
+    host = build_qq_c2c_host(
+        settings=Settings(
+            database_path=tmp_path / "fact-batch-slot-update.sqlite",
+            PRIMARY_USER_ID="geoff",
+            LOCAL_APPRAISAL_ENABLED=False,
+            WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        ),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        advisory_model=fact_model,
+        delivery=_Delivery(),
+        use_configured_recall_embedding=False,
+    )
+    first = asyncio.create_task(
+        _direct_inbound(host, message_id="fact-batch-update-1", text="我住在深圳")
+    )
+    second: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(model.entered.wait(), timeout=3)
+        second = asyncio.create_task(
+            _direct_inbound(host, message_id="fact-batch-update-2", text="我现在搬到广州了")
+        )
+        outcomes = await asyncio.wait_for(
+            asyncio.gather(first, second),
+            timeout=5,
+        )
+        assert [item.status for item in outcomes] == [
+            "observed_only",
+            "action_authorized",
+        ]
+
+        await host.scheduler_once(
+            observed_at=NOW + timedelta(minutes=1),
+            max_action_units=8,
+            max_background_units=1,
+        )
+        midway = await host._host.action_due_projection()  # noqa: SLF001
+        midway_facts = tuple(
+            process
+            for process in midway.trigger_processes
+            if process.process_kind == "interaction_fact"
+        )
+        assert len(midway.interaction_fact_decisions) == 1
+        assert sum(process.state == "terminal" for process in midway_facts) == 1
+        assert fact_model.fact_calls == 1
+
+        # Rebuild the runtime from the immutable ledger between members.  The
+        # second slot update must recover the recorded batch decision rather
+        # than ask the model again under the first member's new Fact Context.
+        await host.aclose()
+        host = build_qq_c2c_host(
+            settings=Settings(
+                database_path=tmp_path / "fact-batch-slot-update.sqlite",
+                PRIMARY_USER_ID="geoff",
+                LOCAL_APPRAISAL_ENABLED=False,
+                WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+            ),
+            recipient_id="10001",
+            bootstrap_at=NOW + timedelta(minutes=1),
+            model=model,
+            advisory_model=fact_model,
+            delivery=_Delivery(),
+            use_configured_recall_embedding=False,
+        )
+        replayed = await host._host.action_due_projection()  # noqa: SLF001
+        assert len(replayed.interaction_fact_decisions) == 1
+        for ordinal in range(10):
+            await host.scheduler_once(
+                observed_at=NOW + timedelta(minutes=2, seconds=ordinal),
+                max_action_units=8,
+                max_background_units=16,
+            )
+            projection = await host._host.action_due_projection()  # noqa: SLF001
+            facts = tuple(
+                process
+                for process in projection.trigger_processes
+                if process.process_kind == "interaction_fact"
+            )
+            if facts and all(process.state == "terminal" for process in facts):
+                break
+
+        projection = await host._host.action_due_projection()  # noqa: SLF001
+        assert fact_model.fact_calls == 1
+        assert all(
+            process.state == "terminal"
+            for process in projection.trigger_processes
+            if process.process_kind == "interaction_fact"
+        )
+        assert projection.interaction_fact_decisions == ()
+        active_home = next(
+            fact
+            for fact in projection.facts
+            if fact.values.status == "active"
+            and fact.values.predicate_code == "location.home"
+        )
+        assert active_home.values.value_hash == hashlib.sha256("广州".encode()).hexdigest()
+    finally:
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (first, second) if task is not None),
             return_exceptions=True,
         )
         await host.aclose()

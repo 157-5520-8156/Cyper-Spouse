@@ -9,6 +9,7 @@ derived by this adapter from one committed observation.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import json
 from typing import Protocol
@@ -49,6 +50,15 @@ class FactWithdrawalDraft(FrozenModel):
     assertion_source_ref: str
     confidence_bp: int
     brief_rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class FactObservationSource:
+    """Exact committed evidence supplied to one Fact model decision."""
+
+    observation: Observation
+    event: WorldEvent
+    world_revision: int
 
 
 def _digest(value: object) -> str:
@@ -128,6 +138,154 @@ class FactObservationProposalAdapter:
             raise
         except TimeoutError as exc:
             raise FactDraftTechnicalFailure("provider_timeout") from exc
+
+    async def propose_batch(
+        self,
+        *,
+        sources: tuple[FactObservationSource, ...],
+        evaluated_world_revision: int,
+        current_single_fact_sources: tuple[dict[str, object], ...] = (),
+    ) -> tuple[FactCommitProposalEnvelopeV2 | FactWithdrawalDraft | None, ...]:
+        """Assess one short conversational burst in one semantic model call.
+
+        Every returned decision is still materialized against its own exact
+        Observation.  Batching therefore removes repeated prompt/model work;
+        it does not merge evidence or let one fragment authorize another.
+        """
+
+        if not sources:
+            return ()
+        if len(sources) == 1:
+            source = sources[0]
+            return (
+                await self.propose(
+                    observation=source.observation,
+                    observation_event=source.event,
+                    source_world_revision=source.world_revision,
+                    evaluated_world_revision=evaluated_world_revision,
+                    current_single_fact_sources=current_single_fact_sources,
+                ),
+            )
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                return await self._propose_batch_with_retry(
+                    sources=sources,
+                    evaluated_world_revision=evaluated_world_revision,
+                    current_single_fact_sources=current_single_fact_sources,
+                )
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError as exc:
+            raise FactDraftTechnicalFailure("provider_timeout") from exc
+
+    async def _propose_batch_with_retry(
+        self,
+        *,
+        sources: tuple[FactObservationSource, ...],
+        evaluated_world_revision: int,
+        current_single_fact_sources: tuple[dict[str, object], ...],
+    ) -> tuple[FactCommitProposalEnvelopeV2 | FactWithdrawalDraft | None, ...]:
+        messages = self._batch_messages(
+            sources,
+            current_single_fact_sources=current_single_fact_sources,
+        )
+        try:
+            raw = await self._complete(messages)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            raise FactDraftTechnicalFailure("provider_exception") from exc
+        try:
+            return self._materialize_batch(
+                raw=raw,
+                sources=sources,
+                evaluated_world_revision=evaluated_world_revision,
+                current_single_fact_sources=current_single_fact_sources,
+            )
+        except ValueError as violation:
+            retry_messages = [
+                *messages,
+                {"role": "assistant", "content": raw},
+                {
+                    "role": "user",
+                    "content": (
+                        "Your answer violated the batch contract: "
+                        + str(violation)
+                        + ". Return exactly one corrected JSON object with exactly one "
+                        "decision for every supplied observation_id. Each result must obey "
+                        "the original single-message evidence rules."
+                    ),
+                },
+            ]
+            try:
+                corrected = await self._complete(retry_messages)
+                return self._materialize_batch(
+                    raw=corrected,
+                    sources=sources,
+                    evaluated_world_revision=evaluated_world_revision,
+                    current_single_fact_sources=current_single_fact_sources,
+                )
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError:
+                raise
+            except ValueError as exc:
+                raise FactDraftTechnicalFailure("invalid_output") from exc
+            except Exception as exc:
+                raise FactDraftTechnicalFailure("provider_exception") from exc
+
+    def _materialize_batch(
+        self,
+        *,
+        raw: str,
+        sources: tuple[FactObservationSource, ...],
+        evaluated_world_revision: int,
+        current_single_fact_sources: tuple[dict[str, object], ...],
+    ) -> tuple[FactCommitProposalEnvelopeV2 | FactWithdrawalDraft | None, ...]:
+        outer = _parse(raw)
+        if set(outer) != {"decisions"} or not isinstance(
+            outer.get("decisions"), list
+        ):
+            raise ValueError("FactDraft batch must contain only decisions")
+        decisions = outer["decisions"]
+        expected_ids = tuple(item.observation.observation_id for item in sources)
+        if len(decisions) != len(expected_ids):
+            raise ValueError("FactDraft batch must decide every observation exactly once")
+        by_id: dict[str, dict[str, object]] = {}
+        for item in decisions:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"observation_id", "result"}
+                or not isinstance(item.get("observation_id"), str)
+                or not isinstance(item.get("result"), dict)
+                or item["observation_id"] in by_id
+            ):
+                raise ValueError("FactDraft batch decision shape is invalid")
+            by_id[item["observation_id"]] = item["result"]
+        if set(by_id) != set(expected_ids):
+            raise ValueError("FactDraft batch observation identities do not match")
+        output: list[FactCommitProposalEnvelopeV2 | FactWithdrawalDraft | None] = []
+        for source in sources:
+            observation = source.observation
+            result = materialize_fact_observation_draft(
+                raw=json.dumps(
+                    by_id[observation.observation_id],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                observation=observation,
+                observation_event=source.event,
+                source_world_revision=source.world_revision,
+                evaluated_world_revision=evaluated_world_revision,
+            )
+            self._validate_withdrawal_slot(
+                result,
+                current_single_fact_sources=current_single_fact_sources,
+            )
+            output.append(result)
+        return tuple(output)
 
     async def _propose_with_retry(
         self,
@@ -235,16 +393,53 @@ class FactObservationProposalAdapter:
         source_world_revision: int,
         current_single_fact_sources: tuple[dict[str, object], ...] = (),
     ) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": FactObservationProposalAdapter._system_contract(
+                    batch=False
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "observation_id": observation.observation_id,
+                        "actor": observation.actor,
+                        "text": observation.text,
+                        "observation_logical_time": observation.logical_time.isoformat(),
+                        "observation_received_at": observation.received_at.isoformat(),
+                        "observation_source_world_revision": source_world_revision,
+                        "current_single_facts": current_single_fact_sources,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+
+    @staticmethod
+    def _system_contract(*, batch: bool) -> str:
         predicates = "\n".join(
             f"- {code} ({INSTALLED_FACT_PREDICATE_CARDINALITY[code]}): {_PREDICATE_GUIDE[code]}"
             for code in sorted(INSTALLED_FACT_PREDICATE_CARDINALITY)
         )
-        return [
-            {
-                "role": "system",
-                "content": (
-                    "You maintain the long-term user-fact memory of a companion character. Assess one "
-                    "verified user message for one personal fact about the user worth remembering. "
+        scope = (
+            "each verified user message in one short conversational burst"
+            if batch
+            else "one verified user message"
+        )
+        output_contract = (
+            '\nReturn {"decisions":[{"observation_id":"...","result":{...}},...]}. '
+            "Include every supplied observation_id exactly once. Each result independently uses "
+            "the single-message contract above; text from one observation cannot ground another."
+            if batch
+            else ""
+        )
+        return (
+                    "You maintain the long-term user-fact memory of a companion character. Assess "
+                    + scope
+                    + " for one personal fact about the user worth remembering. "
                     "Return exactly one JSON object. Retain a fact when the message clearly states "
                     "something about the user's life: their work or studies, schedule and commitments, "
                     "recent circumstances, what they are doing, family and friends, health and routines, "
@@ -275,18 +470,34 @@ class FactObservationProposalAdapter:
                     "or shareable. predicate_code must be one of:\n"
                     + predicates
                     + "\nDo not return ids, hashes, evidence refs, actions, memories, or world changes."
-                ),
-            },
+                    + output_contract
+        )
+
+    @classmethod
+    def _batch_messages(
+        cls,
+        sources: tuple[FactObservationSource, ...],
+        *,
+        current_single_fact_sources: tuple[dict[str, object], ...],
+    ) -> list[dict[str, str]]:
+        observations = [
+            {
+                "observation_id": source.observation.observation_id,
+                "actor": source.observation.actor,
+                "text": source.observation.text,
+                "observation_logical_time": source.observation.logical_time.isoformat(),
+                "observation_received_at": source.observation.received_at.isoformat(),
+                "observation_source_world_revision": source.world_revision,
+            }
+            for source in sources
+        ]
+        return [
+            {"role": "system", "content": cls._system_contract(batch=True)},
             {
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "observation_id": observation.observation_id,
-                        "actor": observation.actor,
-                        "text": observation.text,
-                        "observation_logical_time": observation.logical_time.isoformat(),
-                        "observation_received_at": observation.received_at.isoformat(),
-                        "observation_source_world_revision": source_world_revision,
+                        "observations": observations,
                         "current_single_facts": current_single_fact_sources,
                     },
                     ensure_ascii=False,
@@ -448,6 +659,7 @@ def materialize_fact_observation_draft(
 __all__ = [
     "FactDraftChatModel",
     "FactDraftTechnicalFailure",
+    "FactObservationSource",
     "FactObservationProposalAdapter",
     "materialize_fact_observation_draft",
 ]

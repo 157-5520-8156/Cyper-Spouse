@@ -58,7 +58,11 @@ from .expression_plan_acceptance import (
 )
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder, expression_plan_event_id
 from .expression_payload_store import ImmutableExpressionPayloadStore
-from .appraisal_trigger import interaction_appraisal_trigger_events
+from .appraisal_trigger import (
+    interaction_appraisal_folded_event,
+    interaction_appraisal_trigger_events,
+    is_interaction_appraisal_audit,
+)
 from .fact_trigger import interaction_fact_trigger_event
 from .fact_draft_adapter import FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
@@ -524,6 +528,10 @@ class WorldRuntime:
         self._expression_attempt_tasks: dict[
             str, asyncio.Task[ProposalAuditCommit]
         ] = {}
+        self._interaction_appraisal_task_lock = asyncio.Lock()
+        self._interaction_appraisal_tasks: dict[
+            str, asyncio.Task[AppraisalTriggerRunResult]
+        ] = {}
         # Background cognition is serialized with itself, but must not hold
         # the world mutation lock while an external model is thinking.  The
         # visible inbound lane can then commit/answer while affect, memory,
@@ -653,6 +661,76 @@ class WorldRuntime:
         # but never let a cancellation-suppressing transport delay the newest
         # visible turn.
         await asyncio.wait(tasks, timeout=0.05)
+
+    async def _run_interaction_appraisal_task(
+        self,
+        *,
+        trigger_id: str,
+        observation_id: str,
+        runtime: InteractionAppraisalTriggerRuntime,
+    ) -> AppraisalTriggerRunResult:
+        """Publish one cancellable local task for a durable appraisal trigger."""
+
+        async with self._interaction_appraisal_task_lock:
+            task = self._interaction_appraisal_tasks.get(trigger_id)
+            if task is None:
+                task = asyncio.create_task(
+                    runtime.run_observation(observation_id),
+                    name=f"interaction-appraisal:{trigger_id}",
+                )
+                self._interaction_appraisal_tasks[trigger_id] = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            projection = await self._project_for_write()
+            process = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.trigger_id == trigger_id
+                ),
+                None,
+            )
+            if (
+                process is not None
+                and process.state == "terminal"
+                and process.runtime_outcome_ref
+                == "interaction-appraisal:folded-into-newer-inbound"
+            ):
+                return AppraisalTriggerRunResult(
+                    trigger_id=trigger_id,
+                    status="completed_existing",
+                )
+            raise
+        finally:
+            async with self._interaction_appraisal_task_lock:
+                if self._interaction_appraisal_tasks.get(trigger_id) is task:
+                    self._interaction_appraisal_tasks.pop(trigger_id, None)
+
+    async def _cancel_folded_interaction_appraisal_tasks(
+        self,
+        trigger_ids: tuple[str, ...],
+    ) -> None:
+        """Release only provider work already made obsolete by ledger fact."""
+
+        if not trigger_ids:
+            return
+        async with self._interaction_appraisal_task_lock:
+            tasks = tuple(
+                task
+                for trigger_id in trigger_ids
+                if (
+                    task := self._interaction_appraisal_tasks.get(trigger_id)
+                ) is not None
+                and not task.done()
+            )
+            for task in tasks:
+                task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=0.05)
 
     async def drain_background_once(self):
         """Run one background job and turn an expected cursor race into a retry."""
@@ -809,7 +887,7 @@ class WorldRuntime:
             if self._interaction_appraisal_turn is not None:
                 assert self._appraisal_worker is not None
                 assert self._interaction_appraisal_owner is not None
-                appraisal = await InteractionAppraisalTriggerRuntime(
+                appraisal_runtime = InteractionAppraisalTriggerRuntime(
                     ledger=self._ledger,
                     pinned_turn=self._interaction_appraisal_turn,
                     worker=self._appraisal_worker,
@@ -817,7 +895,33 @@ class WorldRuntime:
                     affect_owner_id=self._affect_deliberation_owner,
                     relationship_owner_id=self._relationship_deliberation_owner,
                     immediate_emotion_worker=self._immediate_emotion_worker,
-                ).drain_one()
+                )
+                appraisal_projection = await self._project_for_write()
+                appraisal_process = next(
+                    (
+                        item
+                        for item in appraisal_projection.trigger_processes
+                        if item.process_kind == "interaction_appraisal"
+                        and item.state != "terminal"
+                    ),
+                    None,
+                )
+                if (
+                    appraisal_process is not None
+                    and appraisal_process.source_evidence_ref is None
+                ):
+                    raise ValueError(
+                        "interaction appraisal trigger has no source observation"
+                    )
+                appraisal = (
+                    await self._run_interaction_appraisal_task(
+                        trigger_id=appraisal_process.trigger_id,
+                        observation_id=appraisal_process.source_evidence_ref,
+                        runtime=appraisal_runtime,
+                    )
+                    if appraisal_process is not None
+                    else await appraisal_runtime.drain_one()
+                )
                 if appraisal.status not in {"idle", "owned_elsewhere"}:
                     return appraisal
                 appraisal_result = appraisal
@@ -2601,6 +2705,7 @@ class WorldRuntime:
         TriggerProcess | None,
         bool,
         tuple[str, ...],
+        tuple[str, ...],
     ]:
         """Commit one Observation and its source-owned triggers under a short lock.
 
@@ -2642,6 +2747,7 @@ class WorldRuntime:
                     original_commit,
                     None,
                     True,
+                    (),
                     (),
                 )
 
@@ -2706,9 +2812,51 @@ class WorldRuntime:
                 process.claim_lease.attempt_id
                 for process in superseded_expression_processes
             )
+            superseded_expression_source_refs = {
+                process.source_evidence_ref
+                for process in superseded_expression_processes
+                if process.source_evidence_ref is not None
+            }
+            appraisal_audit_trigger_refs = {
+                audit.trigger_ref
+                for audit in before.proposal_audits
+                if is_interaction_appraisal_audit(audit)
+            }
+            observation_event_ref_by_id = {
+                source.observation_id: authority.event_id
+                for source in before.message_observations
+                if 0 < source.world_revision <= len(before.committed_world_event_refs)
+                and (
+                    authority := before.committed_world_event_refs[
+                        source.world_revision - 1
+                    ]
+                ).event_type
+                == "ObservationRecorded"
+                and authority.payload_hash == source.event_payload_hash
+            }
+            folded_appraisal_events = tuple(
+                interaction_appraisal_folded_event(
+                    process=process,
+                    superseding_observation=observation,
+                    superseding_observation_event=event,
+                )
+                for process in before.trigger_processes
+                if process.process_kind == "interaction_appraisal"
+                and process.state == "claimed"
+                and process.claim_lease is not None
+                and process.source_evidence_ref
+                in superseded_expression_source_refs
+                and observation_event_ref_by_id.get(process.source_evidence_ref)
+                not in appraisal_audit_trigger_refs
+            )
+            folded_appraisal_trigger_ids = tuple(
+                event.payload()["trigger_id"]
+                for event in folded_appraisal_events
+            )
             ingress_events = [
                 event,
                 *superseded_expression_events,
+                *folded_appraisal_events,
                 *expression_reconsideration_events_for_observation(
                     projection=before,
                     observation=observation,
@@ -2783,6 +2931,7 @@ class WorldRuntime:
                     episode_process,
                     False,
                     superseded_expression_attempt_ids,
+                    folded_appraisal_trigger_ids,
                 )
 
         # ``self._lock`` coordinates only this Runtime instance. Background
@@ -2845,12 +2994,16 @@ class WorldRuntime:
             episode_process,
             existing_observation,
             superseded_expression_attempt_ids,
+            folded_appraisal_trigger_ids,
         ) = await self._commit_ingress_observation(
             observation=observation,
             event=event,
         )
         await self._cancel_superseded_expression_attempt_tasks(
             superseded_expression_attempt_ids
+        )
+        await self._cancel_folded_interaction_appraisal_tasks(
+            folded_appraisal_trigger_ids
         )
         if existing_observation:
             return await self._existing_observation_outcome(

@@ -769,6 +769,97 @@ async def test_invalid_fact_model_output_is_audited_for_retry_without_world_effe
     ledger.close()
 
 
+@pytest.mark.asyncio
+async def test_fact_batch_failure_is_all_or_nothing_across_process_loss(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "interaction-fact-batch-failure-atomic.sqlite3",
+        world_id=WORLD_ID,
+        accepted_batch_issuer=issuer,
+    )
+    for index, text in ((81, "我住在深圳。"), (82, "我刚搬到广州。")):
+        observation, event = _home_observation(
+            index,
+            text,
+            at=NOW,
+        )
+        cursor = ledger.project()
+        ledger.commit(
+            (event, interaction_fact_trigger_event(observation=observation, observation_event=event)),
+            expected_world_revision=cursor.world_revision,
+            expected_deliberation_revision=cursor.deliberation_revision,
+        )
+    runtime = InteractionFactTriggerRuntime(
+        ledger=ledger,
+        acceptance=FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer),
+        adapter=FactObservationProposalAdapter(model=_InvalidFactChat()),
+        owner_id="worker:interaction-fact",
+    )
+    original_commit = ledger.commit_at_cursor
+    saw_atomic_batch = False
+
+    def lose_process_before_failure_commit(events, *, expected_cursor, commit_id=None):  # type: ignore[no-untyped-def]
+        nonlocal saw_atomic_batch
+        if events and all(
+            item.event_type == "InteractionFactTechnicalFailureRecorded"
+            for item in events
+        ):
+            saw_atomic_batch = True
+            assert len(events) == 2
+            raise RuntimeError("simulated loss before atomic Fact failure commit")
+        return original_commit(
+            events,
+            expected_cursor=expected_cursor,
+            commit_id=commit_id,
+        )
+
+    monkeypatch.setattr(ledger, "commit_at_cursor", lose_process_before_failure_commit)
+    with pytest.raises(RuntimeError, match="before atomic Fact failure commit"):
+        await runtime.drain_one()
+    assert saw_atomic_batch
+    interrupted = ledger.project()
+    claimed = tuple(
+        item
+        for item in interrupted.trigger_processes
+        if item.process_kind == "interaction_fact"
+    )
+    assert len(claimed) == 2
+    assert all(item.claim_lease is not None for item in claimed)
+    assert all(
+        ledger.lookup_event_commit(
+            interaction_fact_failure_event_id(
+                trigger_id=item.trigger_id,
+                attempt_id=item.claim_lease.attempt_id,
+            )
+        )
+        is None
+        for item in claimed
+        if item.claim_lease is not None
+    )
+
+    monkeypatch.setattr(ledger, "commit_at_cursor", original_commit)
+    assert (await runtime.drain_one()).work_status == "technical_failure"
+    stored = tuple(
+        ledger.lookup_event_commit(
+            interaction_fact_failure_event_id(
+                trigger_id=item.trigger_id,
+                attempt_id=item.claim_lease.attempt_id,
+            )
+        )
+        for item in claimed
+        if item.claim_lease is not None
+    )
+    assert len(stored) == 2
+    assert all(item is not None for item in stored)
+    assert stored[0] is not None and stored[1] is not None
+    assert stored[0][1].event_ids == stored[1][1].event_ids
+    assert set(stored[0][1].event_ids) == {stored[0][0].event_id, stored[1][0].event_id}
+    ledger.close()
+
+
 class _SingleSlotChat:
     """Answer a single-cardinality predicate whose value follows the message."""
 

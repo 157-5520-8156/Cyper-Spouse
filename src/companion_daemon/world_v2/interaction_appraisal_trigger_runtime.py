@@ -30,6 +30,7 @@ from .immediate_emotion_proposal_worker import (
 )
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .event_identity import domain_idempotency_key
+from .appraisal_trigger import is_interaction_appraisal_audit
 from .ledger import LedgerPort, ObservationEventLocator
 from .pinned_turn import PinnedTurnCompiler
 from .interactive_turn_budget import InteractiveTurnBudget
@@ -713,16 +714,14 @@ class InteractionAppraisalTriggerRuntime:
             (
                 item
                 for item in reversed(projection.proposal_audits)
-                if item.proposal_kind == "decision"
-                and item.trigger_ref == source_event.event_id
+                if is_interaction_appraisal_audit(
+                    item,
+                    trigger_ref=source_event.event_id,
+                )
                 # The visible-expression draft intentionally shares the same
                 # immutable source Observation.  It is not an appraisal audit
                 # and may have been committed at an earlier cursor, so never
                 # join it merely because both proposals are DecisionProposal.
-                and (
-                    item.proposal_id.startswith("proposal:appraisal-draft:")
-                    or item.proposal_id.startswith("proposal:interaction-appraisal:")
-                )
             ),
             None,
         )

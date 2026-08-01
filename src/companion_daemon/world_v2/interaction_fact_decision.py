@@ -50,6 +50,7 @@ class InteractionFactDecisionRecordedPayload(FrozenModel):
     adapter_version: str = Field(min_length=1, max_length=128)
     model_id: str = Field(min_length=1, max_length=256)
     request_hash: str = Field(pattern=_HASH)
+    batch_size: int = Field(default=1, ge=1, le=8)
     fact_context_hash: str = Field(pattern=_HASH)
     decision_kind: Literal["retain", "withdraw", "no_change"]
     decision_json: str = Field(min_length=2, max_length=_MAX_DECISION_BYTES)

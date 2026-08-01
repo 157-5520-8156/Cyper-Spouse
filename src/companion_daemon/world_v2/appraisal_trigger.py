@@ -19,10 +19,35 @@ from .schemas import ClaimLease, Observation, TriggerProcess, WorldEvent
 
 INTERACTION_APPRAISAL_TRIGGER_VERSION = "interaction-appraisal-trigger.1"
 DEFAULT_INTERACTION_APPRAISAL_LEASE_SECONDS = 120
+INTERACTION_APPRAISAL_PROPOSAL_ID_PREFIXES = (
+    "proposal:appraisal-draft:",
+    "proposal:interaction-appraisal:",
+)
+INTERACTION_APPRAISAL_FOLDED_OUTCOME = (
+    "interaction-appraisal:folded-into-newer-inbound"
+)
 
 
 class InteractionAppraisalTriggerError(ValueError):
     """Stable invalid-authority failure for interaction trigger derivation."""
+
+
+def is_interaction_appraisal_audit(
+    audit: object,
+    *,
+    trigger_ref: str | None = None,
+) -> bool:
+    """Classify the installed appraisal proposal family at one source event."""
+
+    return (
+        getattr(audit, "proposal_kind", None) == "decision"
+        and (
+            trigger_ref is None
+            or getattr(audit, "trigger_ref", None) == trigger_ref
+        )
+        and isinstance((proposal_id := getattr(audit, "proposal_id", None)), str)
+        and proposal_id.startswith(INTERACTION_APPRAISAL_PROPOSAL_ID_PREFIXES)
+    )
 
 
 def _digest(value: object) -> str:
@@ -134,9 +159,86 @@ def interaction_appraisal_trigger_events(
     return events[0], events[1]
 
 
+def interaction_appraisal_folded_event(
+    *,
+    process: TriggerProcess,
+    superseding_observation: Observation,
+    superseding_observation_event: WorldEvent,
+) -> WorldEvent:
+    """Fold an unanswered burst fragment into the newer conversational moment.
+
+    The newer Observation is durable authority for the fold.  Original
+    messages remain immutable World evidence; only the redundant appraisal
+    opportunity is terminalized, so the newest appraisal can read the whole
+    recent-dialogue packet once.
+    """
+
+    lease = process.claim_lease
+    if (
+        process.process_kind != "interaction_appraisal"
+        or process.state != "claimed"
+        or lease is None
+        or not process.source_evidence_ref
+    ):
+        raise InteractionAppraisalTriggerError(
+            "appraisal fold requires one claimed interaction process"
+        )
+    if (
+        superseding_observation_event.world_id != superseding_observation.world_id
+        or superseding_observation_event.event_type != "ObservationRecorded"
+        or superseding_observation_event.payload()
+        != superseding_observation.model_dump(mode="json")
+    ):
+        raise InteractionAppraisalTriggerError(
+            "appraisal fold requires its exact superseding Observation"
+        )
+    completed_at = max(
+        superseding_observation.logical_time,
+        lease.acquired_at,
+    )
+    payload = {
+        "trigger_id": process.trigger_id,
+        "owner_id": lease.owner_id,
+        "attempt_id": lease.attempt_id,
+        "completed_at": completed_at.isoformat(),
+        "runtime_outcome_ref": INTERACTION_APPRAISAL_FOLDED_OUTCOME,
+        "superseding_observation_event_ref": superseding_observation_event.event_id,
+    }
+    # Generic TriggerProcessCompleted events intentionally have no installed
+    # domain codec.  Bind this completion to the claimed attempt exactly as
+    # the other trigger runtimes do.
+    identity = "world-v2:interaction-appraisal:completion:" + _digest(
+        [
+            superseding_observation.world_id,
+            process.trigger_id,
+            lease.attempt_id,
+        ]
+    )
+    return WorldEvent.from_payload(
+        schema_version=superseding_observation.schema_version,
+        event_id="event:interaction-appraisal:trigger:completed:"
+        + _digest([process.trigger_id, lease.attempt_id]),
+        world_id=superseding_observation.world_id,
+        event_type="TriggerProcessCompleted",
+        logical_time=completed_at,
+        created_at=max(superseding_observation.created_at, completed_at),
+        actor=lease.owner_id,
+        source="world-runtime:interaction-appraisal-fold",
+        trace_id=superseding_observation.trace_id,
+        causation_id=superseding_observation_event.event_id,
+        correlation_id=superseding_observation.correlation_id,
+        idempotency_key=identity,
+        payload=payload,
+    )
+
+
 __all__ = [
     "DEFAULT_INTERACTION_APPRAISAL_LEASE_SECONDS",
+    "INTERACTION_APPRAISAL_FOLDED_OUTCOME",
+    "INTERACTION_APPRAISAL_PROPOSAL_ID_PREFIXES",
     "INTERACTION_APPRAISAL_TRIGGER_VERSION",
     "InteractionAppraisalTriggerError",
+    "interaction_appraisal_folded_event",
     "interaction_appraisal_trigger_events",
+    "is_interaction_appraisal_audit",
 ]

@@ -3764,6 +3764,7 @@ class SQLiteWorldLedger:
             proposal_revisions=projection.proposal_revisions,
             model_result_audits=projection.model_result_audits,
             proposal_audits=projection.proposal_audits,
+            interaction_fact_decisions=projection.interaction_fact_decisions,
             acceptance_manifests_v2=projection.acceptance_manifests_v2,
             fact_commit_proposal_audits_v2=projection.fact_commit_proposal_audits_v2,
             acceptance_manifests_v3=projection.acceptance_manifests_v3,
