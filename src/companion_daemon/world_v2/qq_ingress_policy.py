@@ -68,18 +68,23 @@ class QQIngressPolicyCatalog:
 
     version = "world-v2-qq-ingress-matrix.2"
 
-    def __init__(self, rows: Sequence[QQIngressPolicyRow] | None = None) -> None:
+    def __init__(
+        self,
+        rows: Sequence[QQIngressPolicyRow] | None = None,
+        *,
+        default_window_ms: int = 280,
+    ) -> None:
         if rows is None:
             windows = {
                 # A first bubble gets a short observation opportunity.  Once
                 # another bubble actually arrives, QQC2CHost's sender-rhythm
                 # hold rolls from that newer evidence; a hypothetical second
                 # bubble must not tax every ordinary turn by 600–800ms.
-                "unknown": 280,
-                "complete_thought": 280,
-                "possible_continuation": 280,
-                "long_narration": 280,
-                "new_interjection": 280,
+                "unknown": default_window_ms,
+                "complete_thought": default_window_ms,
+                "possible_continuation": default_window_ms,
+                "long_narration": default_window_ms,
+                "new_interjection": default_window_ms,
             }
             rows = tuple(
                 QQIngressPolicyRow(shape, signal, window, "ordered_multimodal")

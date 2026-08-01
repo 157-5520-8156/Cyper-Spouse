@@ -12,6 +12,7 @@ from .deliberation import (
     DeliberationResult,
     ModelResultAudit,
     ModelRoute,
+    PhysicalProviderInvocationAudit,
     ProviderSubcallAudit,
 )
 from .event_identity import domain_idempotency_key
@@ -154,12 +155,18 @@ class ProposalAuditRecorder:
             tuple[ModelResultAudit, AuthoredCandidateInvocationAudit]
         ] = []
         provider_subcalls: list[tuple[ModelResultAudit, ProviderSubcallAudit]] = []
+        physical_providers: list[
+            tuple[ModelResultAudit, PhysicalProviderInvocationAudit]
+        ] = []
         previous_cause = context.causation_id
         for index, audit in enumerate(result.attempt_audits):
             audit_json = model_audit_json(audit)  # type: ignore[arg-type]
             model_payload = ModelResultRecordedPayload(
                 audit_contract=(
-                    "model-result-audit.5"
+                    "model-result-audit.6"
+                    if audit.semantic_stream_part is not None
+                    or audit.status.startswith("provider_")
+                    else "model-result-audit.5"
                     if audit.presented_prefetch_traces
                     else "model-result-audit.4"
                     if audit.recall_trace is not None
@@ -174,6 +181,7 @@ class ProposalAuditRecorder:
                 deliberation_result_id=result.result_id,
                 proposal_hash=proposal.proposal_hash if proposal is not None else None,
                 model_call_id=audit.model_call_id,
+                parent_model_call_id=audit.parent_model_call_id,
                 attempt_id=audit.attempt_id,
                 capsule_id=result.capsule_id,
                 trigger_ref=context.trigger_ref,
@@ -198,6 +206,10 @@ class ProposalAuditRecorder:
             )
             provider_subcalls.extend(
                 (audit, subcall) for subcall in audit.provider_subcall_audits
+            )
+            physical_providers.extend(
+                (audit, physical)
+                for physical in audit.physical_provider_audits
             )
         # Keep the authored main/recovery attempts as the first complete
         # deliberation group. Earlier author candidates and reviewer
@@ -288,6 +300,48 @@ class ProposalAuditRecorder:
             )
             model_events.append(provider_event)
             previous_cause = provider_event.event_id
+        for semantic_audit, physical in physical_providers:
+            physical_audit = physical_provider_model_audit(
+                physical,
+                attempt_id=semantic_audit.attempt_id,
+            )
+            physical_audit_json = model_audit_json(physical_audit)  # type: ignore[arg-type]
+            physical_result_id = "deliberation:" + sha256(
+                canonical_json(
+                    {
+                        "capsule_id": result.capsule_id,
+                        "proposal_hash": None,
+                        "attempt_audits": [json.loads(physical_audit_json)],
+                    }
+                )
+            )
+            physical_payload = ModelResultRecordedPayload(
+                audit_contract="model-result-audit.6",
+                model_result_ref=physical_audit.model_result_ref,
+                deliberation_result_id=physical_result_id,
+                proposal_hash=None,
+                model_call_id=physical_audit.model_call_id,
+                attempt_id=physical_audit.attempt_id,
+                capsule_id=result.capsule_id,
+                trigger_ref=context.trigger_ref,
+                evaluated_world_revision=evaluated_world_revision,
+                attempt_index=0,
+                attempt_count=1,
+                audit_json=physical_audit_json,
+                audit_hash=sha256(physical_audit_json),
+            )
+            physical_event = _event(
+                context,
+                event_type="ModelResultRecorded",
+                identity=(
+                    physical_audit.model_call_id,
+                    physical_audit.model_result_ref,
+                ),
+                payload=physical_payload.model_dump(mode="json"),
+                causation_id=previous_cause,
+            )
+            model_events.append(physical_event)
+            previous_cause = physical_event.event_id
         if proposal is None:
             return tuple(model_events)
         proposal_json = canonical_json(proposal.model_dump(mode="json"))
@@ -342,11 +396,14 @@ def _strict_result(value: DeliberationResult) -> DeliberationResult:
 def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
     raw_candidates = value.authored_candidate_audits
     raw_subcalls = value.provider_subcall_audits
+    raw_physical = value.physical_provider_audits
     if (
         not isinstance(raw_candidates, tuple)
         or len(raw_candidates) > 8
         or not isinstance(raw_subcalls, tuple)
         or len(raw_subcalls) > 16
+        or not isinstance(raw_physical, tuple)
+        or len(raw_physical) > 1
     ):
         raise ValueError("nested provider audit count is out of bounds")
     candidates = tuple(
@@ -378,6 +435,10 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         )
         for item in raw_subcalls
     )
+    physical = tuple(
+        PhysicalProviderInvocationAudit.model_validate(item)
+        for item in raw_physical
+    )
     route = ModelRoute(
         tier=value.route.tier,
         reason_code=value.route.reason_code,
@@ -386,6 +447,9 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
     audit = ModelResultAudit(
         model_call_id=value.model_call_id,
         parent_model_call_id=value.parent_model_call_id,
+        semantic_stream_part=value.semantic_stream_part,
+        usage_status=value.usage_status,
+        semantic_model_call_ids=value.semantic_model_call_ids,
         model_result_ref=value.model_result_ref,
         attempt_id=value.attempt_id,
         route=route,
@@ -407,9 +471,14 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         presented_prefetch_traces=value.presented_prefetch_traces,
         provider_subcall_audits=subcalls,
         authored_candidate_audits=candidates,
+        physical_provider_audits=physical,
     )
-    if audit.parent_model_call_id is not None:
-        raise ValueError("authored model attempt cannot claim a parent model call")
+    # A streamed expression unit is a distinct semantic result while its
+    # parent identifies the single physical provider request that emitted the
+    # head and tail.  This is grouping provenance, not an authority edge; the
+    # nested reviewer-parent checks below remain strict and batch-local.
+    if audit.parent_model_call_id == audit.model_call_id:
+        raise ValueError("model result cannot be its own provider parent")
     candidate_ids = tuple(
         candidate.model_call_id for candidate in audit.authored_candidate_audits
     )
@@ -429,6 +498,15 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         raise ValueError(
             "provider subcall parent has no batch-persisted author attempt"
         )
+    if physical:
+        terminal = physical[0]
+        if (
+            audit.semantic_stream_part != "tail"
+            or audit.parent_model_call_id != terminal.model_call_id
+            or audit.model_call_id not in terminal.semantic_model_call_ids
+            or audit.request_hash != terminal.request_hash
+        ):
+            raise ValueError("physical provider terminal is not bound to its stream tail")
     return audit
 
 
@@ -543,6 +621,49 @@ def provider_subcall_model_audit(
         input_tokens=value.usage.input_tokens if value.usage is not None else None,
         output_tokens=value.usage.output_tokens if value.usage is not None else None,
         usage=value.usage,
+    )
+
+
+def physical_provider_model_audit(
+    value: PhysicalProviderInvocationAudit,
+    *,
+    attempt_id: str,
+) -> ModelResultAudit:
+    """Expand the one physical stream parent into its immutable terminal row."""
+
+    completed = value.outcome == "completed"
+    model_result_ref = "model-result:" + sha256(
+        canonical_json(
+            {
+                "model_call_id": value.model_call_id,
+                "response_hash": value.response_hash,
+            }
+        )
+    )
+    return ModelResultAudit(
+        model_call_id=value.model_call_id,
+        model_result_ref=model_result_ref,
+        attempt_id=attempt_id,
+        route=ModelRoute(
+            tier="flash",
+            reason_code=f"transport.{value.purpose}.{value.outcome}"[:128],
+            router_version="physical-provider-audit.1",
+        ),
+        model_id=value.model_id if completed else None,
+        model_version=value.model_version if completed else None,
+        attempted_model_id=None if completed else value.model_id,
+        attempted_model_version=None if completed else value.model_version,
+        request_hash=value.request_hash,
+        response_hash=value.response_hash,
+        status=f"provider_{value.outcome}",  # type: ignore[arg-type]
+        failure_code=value.failure_code,
+        slot="primary",
+        outcome=value.outcome,
+        input_tokens=value.usage.input_tokens if value.usage is not None else None,
+        output_tokens=value.usage.output_tokens if value.usage is not None else None,
+        usage=value.usage,
+        usage_status=value.usage_status,
+        semantic_model_call_ids=value.semantic_model_call_ids,
     )
 
 

@@ -160,6 +160,76 @@ class PinnedTurnCompiler:
     def expression_episode_mode(self) -> str:
         return self._deliberation.expression_episode_mode
 
+    def has_expression_episode_tail(self, trigger_ref: str) -> bool:
+        return self._deliberation.has_expression_episode_tail(trigger_ref)
+
+    async def cancel_superseded_expression_streams(
+        self, current_trigger_ref: str
+    ) -> None:
+        terminals = await self._deliberation.cancel_superseded_expression_streams(
+            current_trigger_ref
+        )
+        for trigger_ref, tail in terminals:
+            if tail.deliberation is None or tail.deliberation.proposal is not None:
+                continue
+            stored = await self._lookup_event_commit(trigger_ref)
+            if stored is None or stored[0].event_type != "ObservationRecorded":
+                continue
+            try:
+                observation = Observation.model_validate_json(stored[0].payload_json)
+            except ValueError:
+                continue
+            projection = await self._project()
+            context = ProposalAuditContext(
+                world_id=observation.world_id,
+                trigger_ref=trigger_ref,
+                logical_time=projection.logical_time or observation.logical_time,
+                created_at=observation.created_at,
+                actor=self._companion_actor_ref,
+                source="world-runtime:expression-stream-cancelled",
+                trace_id=observation.trace_id,
+                causation_id=trigger_ref,
+                correlation_id=observation.correlation_id,
+                evaluated_world_revision=projection.world_revision,
+                expected_commit_world_revision=projection.world_revision,
+                expected_deliberation_revision=projection.deliberation_revision,
+                expected_ledger_sequence=projection.ledger_sequence,
+            )
+            # Cancellation races the already-authorized head's settlement by
+            # construction.  Rebase this content-free terminal audit at the
+            # latest head; a stale CAS must never abort the newer user's
+            # ingress.  If the sibling settlement already recorded the same
+            # semantic tail, the audit is complete and no retry is needed.
+            for retry_ordinal in range(3):
+                try:
+                    await self._record(tail.deliberation, context)
+                    break
+                except ConcurrencyConflict:
+                    projection = await self._project()
+                    terminal_call_ids = {
+                        audit.model_call_id for audit in projection.model_result_audits
+                    }
+                    if tail.deliberation.audit.model_call_id in terminal_call_ids:
+                        break
+                    if retry_ordinal == 2:
+                        _LOG.warning(
+                            "stream cancellation audit lost repeated CAS race trigger=%s",
+                            trigger_ref,
+                        )
+                        break
+                    context = context.model_copy(
+                        update={
+                            "logical_time": (
+                                projection.logical_time or observation.logical_time
+                            ),
+                            "expected_commit_world_revision": projection.world_revision,
+                            "expected_deliberation_revision": (
+                                projection.deliberation_revision
+                            ),
+                            "expected_ledger_sequence": projection.ledger_sequence,
+                        }
+                    )
+
     @property
     def recorded_cadence_mode(self) -> str:
         return self._recorded_cadence_mode
@@ -180,12 +250,79 @@ class PinnedTurnCompiler:
         )
         if tail is None:
             return None, "complete_without_more"
-        if tail.disposition != "append" or tail.deliberation is None:
+        if tail.deliberation is None:
             return None, tail.disposition
         projection = await self._project()
         proposal = tail.deliberation.proposal
+        if proposal is None:
+            context = ProposalAuditContext(
+                world_id=observation.world_id,
+                trigger_ref=observation_event.event_id,
+                logical_time=projection.logical_time or observation.logical_time,
+                created_at=observation.created_at,
+                actor=self._companion_actor_ref,
+                source="world-runtime:expression-stream-terminal",
+                trace_id=observation.trace_id,
+                causation_id=observation_event.event_id,
+                correlation_id=observation.correlation_id,
+                evaluated_world_revision=projection.world_revision,
+                expected_commit_world_revision=projection.world_revision,
+                expected_deliberation_revision=projection.deliberation_revision,
+                expected_ledger_sequence=projection.ledger_sequence,
+            )
+            return await self._record(tail.deliberation, context), tail.disposition
+        if tail.disposition != "append":
+            return None, tail.disposition
         if not isinstance(proposal, DecisionProposal):
             return None, "complete_without_more"
+        if any(
+            message.world_revision > proposal.evaluated_world_revision
+            for message in projection.message_observations
+        ):
+            # The tail was authored against an older user turn. Unlike the
+            # already-authorized head, it has no external effect yet and must
+            # not be rebound across a newer Observation.
+            return None, "cancel_pending"
+        if self._deliberation.expression_episode_mode == "stream":
+            # A streamed tail shares one physical authorship with its already
+            # accepted head. Rebase it only across that head's own expected
+            # settlement chain. Any Clock, Affect, relationship, life, or
+            # unrelated Action change invalidates the still-unsent unit.
+            #
+            # The historical test-only ``on`` mode has two independently
+            # authored proposals and its established receipt-gated semantics;
+            # do not retroactively apply the one-SSE identity rule to it.
+            allowed_head_settlement_types = {
+                "AcceptanceRecorded",
+                "MessagePayloadStored",
+                "ExpressionPlanAccepted",
+                "ExpressionBeatAuthorized",
+                "BudgetReserved",
+                "ActionAuthorized",
+                "ActionScheduled",
+                "ActionClaimed",
+                "ActionDispatchStarted",
+                "ActionProviderAccepted",
+                "ExecutionReceiptRecorded",
+                "ActionSettled",
+            }
+            intervening_refs = tuple(
+                item
+                for item in projection.committed_world_event_refs
+                if item.world_revision > proposal.evaluated_world_revision
+            )
+            for event_ref in intervening_refs:
+                if event_ref.event_type not in allowed_head_settlement_types:
+                    return None, "cancel_pending"
+                located = await self._lookup_event_commit(event_ref.event_id)
+                if located is None:
+                    return None, "cancel_pending"
+                event = located[0]
+                if (
+                    event.trace_id != observation.trace_id
+                    and event.correlation_id != observation.correlation_id
+                ):
+                    return None, "cancel_pending"
         rebound = proposal.model_copy(
             update={
                 "proposal_id": (
@@ -496,6 +633,9 @@ class PinnedTurnCompiler:
             )
             deliberate_kwargs["first_role_provider_completion_marker"] = (
                 latency_trace.mark_role_provider_completion
+            )
+            deliberate_kwargs["first_role_provider_token_marker"] = (
+                latency_trace.mark_role_provider_first_token
             )
         if self._affect_target_bounds_enabled:
             deliberate_kwargs["affect_target_bounds"] = lower_bounds_from_projection(

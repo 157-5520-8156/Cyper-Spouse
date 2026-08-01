@@ -293,6 +293,379 @@ class _JsonMeteredModel(_MeteredModel):
         )
 
 
+class _UnitStreamingModel(_Model):
+    reports_exact_request_emission = True
+
+    def __init__(self, reply: str) -> None:
+        super().__init__(reply)
+        self.release_tail = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ) -> tuple[str, ModelUsageProvenance]:
+        self.calls.append((messages, temperature))
+        boundary = self._reply.index('"continuation"')
+        if on_text_delta is not None:
+            on_text_delta(self._reply[:boundary])
+        try:
+            await self.release_tail.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        if on_text_delta is not None:
+            on_text_delta(self._reply[boundary:])
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 12,
+            "output_tokens": 8,
+            "thinking_tokens": 0,
+            "token_provenance": "provider_reported",
+            "transport": "provider_api",
+            "provider": "fake-provider",
+            "provider_usage_ref": "usage:fake:stream:1",
+        }
+        digest = sha256(
+            json.dumps(
+                material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return self._reply, ModelUsageProvenance(
+            **material,
+            provider_usage_hash=digest,
+        )
+
+
+class _BlockingStreamPrefetch:
+    """Hold one old route before its stream operation can be entered."""
+
+    is_closed = False
+
+    def __init__(self, blocked_trigger_ref: str) -> None:
+        self.blocked_trigger_ref = blocked_trigger_ref
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def is_available(self, _cursor: RecallCursor, *, trigger_ref: str) -> bool:
+        return True
+
+    def scheduled_prefetch_token(
+        self, *, expected_cursor: RecallCursor, trigger_ref: str
+    ) -> str:
+        return f"prefetch:{expected_cursor.ledger_sequence}:{trigger_ref}"
+
+    async def await_scheduled_prefetch(
+        self,
+        *,
+        expected_cursor: RecallCursor,
+        trigger_ref: str,
+        timeout_seconds: float | None,
+        job_token: str,
+    ) -> None:
+        del expected_cursor, timeout_seconds, job_token
+        if trigger_ref == self.blocked_trigger_ref:
+            self.entered.set()
+            await self.release.wait()
+        return None
+
+    def discard_scheduled_prefetch(
+        self,
+        _cursor: RecallCursor,
+        *,
+        trigger_ref: str,
+        job_token: str,
+    ) -> None:
+        del trigger_ref, job_token
+
+
+class _CorrectingUnitStreamingModel(_UnitStreamingModel):
+    def __init__(self, stream_reply: str, corrected_reply: str) -> None:
+        super().__init__(stream_reply)
+        self.corrected_reply = corrected_reply
+        self.stream_task: asyncio.Task[object] | None = None
+        self.correction_saw_stream_cancelling = False
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ) -> tuple[str, ModelUsageProvenance]:
+        self.stream_task = asyncio.current_task()
+        return await super().complete_json_stream_with_usage(
+            messages,
+            temperature=temperature,
+            on_text_delta=on_text_delta,
+        )
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        stream_task = self.stream_task
+        self.correction_saw_stream_cancelling = bool(
+            stream_task is not None and stream_task.cancelling()
+        )
+        self.calls.append((messages, temperature))
+        return _strict_source_reselection_fixture(messages, self.corrected_reply)
+
+
+@pytest.mark.asyncio
+async def test_expression_unit_stream_reuses_one_author_call_and_releases_head_early() -> None:
+    first = {
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "第一条先到。"}],
+        "stance": "speak_in_two_bubbles",
+        "brief_rationale": "I chose two messages.",
+        "world_claims": [],
+        "episode_disposition": "append",
+    }
+    raw = json.dumps(
+        {
+            "protocol": "expression-units.1",
+            "first": first,
+            "continuation": [
+                {
+                    "beat": {"modality": "text", "text": "第二条随后到。"},
+                    "world_claims": [],
+                }
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _UnitStreamingModel(raw)
+    adapter = ChatModelDeliberationAdapter(
+        model=model,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+    request = _qq_request()
+    head_task = asyncio.create_task(adapter.propose_stream_head(request))
+    tail_task = asyncio.create_task(
+        adapter.propose_stream_tail(request.model_copy(update={"call_id": "call:tail"}))
+    )
+
+    head = await asyncio.wait_for(head_task, timeout=0.5)
+    assert len(model.calls) == 1
+    assert head.raw_proposal["episode_disposition"] == "append"
+    assert len(head.raw_proposal["action_intents"]) == 1
+    assert not tail_task.done()
+
+    model.release_tail.set()
+    tail = await asyncio.wait_for(tail_task, timeout=0.5)
+    assert len(model.calls) == 1
+    assert head.provider_parent_model_call_id is not None
+    assert (
+        tail.provider_parent_model_call_id
+        == head.provider_parent_model_call_id
+    )
+    assert tail.winning_model_call_id != head.winning_model_call_id
+    assert tail.raw_proposal["episode_disposition"] == "append"
+    assert len(tail.raw_proposal["action_intents"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_expression_unit_stream_preserves_character_chosen_typing_before_first_text() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-units.1",
+            "first": {
+                "timing_choice": "now",
+                "beats": [
+                    {"modality": "typing"},
+                    {"modality": "text", "text": "我想一下……其实是这样。"},
+                ],
+                "stance": "hesitant_then_direct",
+                "brief_rationale": "I chose to visibly hesitate before answering.",
+                "world_claims": [],
+                "episode_disposition": "complete_without_more",
+            },
+            "continuation": [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _UnitStreamingModel(raw)
+    model.release_tail.set()
+    adapter = ChatModelDeliberationAdapter(
+        model=model,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+
+    head = await adapter.propose_stream_head(_qq_request())
+
+    action_intents = head.raw_proposal["action_intents"]
+    assert [item["kind"] for item in action_intents] == ["typing", "reply"]
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_expression_unit_stream_cancels_provider_when_its_last_waiter_is_superseded() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-units.1",
+            "first": {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": "先到。"}],
+                "stance": "brief",
+                "brief_rationale": "One first unit.",
+                "world_claims": [],
+                "episode_disposition": "append",
+            },
+            "continuation": [
+                {
+                    "beat": {"modality": "text", "text": "尾部。"},
+                    "world_claims": [],
+                }
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _UnitStreamingModel(raw)
+    adapter = ChatModelDeliberationAdapter(model=model)
+    request = _qq_request()
+    head_task = asyncio.create_task(adapter.propose_stream_head(request))
+    tail_task = asyncio.create_task(
+        adapter.propose_stream_tail(request.model_copy(update={"call_id": "call:tail-cancel"}))
+    )
+    await asyncio.wait_for(head_task, timeout=0.5)
+
+    tail_task.cancel()
+    await asyncio.gather(tail_task, return_exceptions=True)
+    await asyncio.wait_for(model.cancelled.wait(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_newer_thinking_cursor_rejects_old_flash_at_stream_operation_boundary() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-units.1",
+            "first": {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": "新的先说。"}],
+                "stance": "brief",
+                "brief_rationale": "One current unit.",
+                "world_claims": [],
+                "episode_disposition": "complete_without_more",
+            },
+            "continuation": [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    flash = _UnitStreamingModel(raw)
+    thinking = _UnitStreamingModel(raw)
+    old_request = _qq_request().model_copy(
+        update={"evaluated_ledger_sequence": 10}
+    )
+    prefetch = _BlockingStreamPrefetch(old_request.trigger_ref)
+    adapter = RoutedChatModelDeliberationAdapter(
+        flash_model=flash,
+        thinking_model=thinking,
+        recall_coordinator=prefetch,  # type: ignore[arg-type]
+    )
+    old_task = asyncio.create_task(adapter.propose_stream_head(old_request))
+    try:
+        await asyncio.wait_for(prefetch.entered.wait(), timeout=0.5)
+        assert old_request.trigger_message is not None
+        new_request = old_request.model_copy(
+            update={
+                "call_id": "call:new-thinking",
+                "attempt_id": "attempt:new-thinking",
+                "route": ModelRoute(
+                    tier="thinking",
+                    reason_code="newer_cursor",
+                    router_version="test.1",
+                ),
+                "trigger_ref": "trigger:new-thinking",
+                "evaluated_world_revision": 4,
+                "evaluated_deliberation_revision": 1,
+                "evaluated_ledger_sequence": 11,
+                "trigger_message": old_request.trigger_message.model_copy(
+                    update={
+                        "event_ref": "event:observation:qq:2",
+                        "event_payload_hash": "sha256:" + "c" * 64,
+                        "observation_ref": "observation:qq:2",
+                        "source_world_revision": 4,
+                        "platform_message_id": "qq-message-7789",
+                        "text": "等等，我补充一句。",
+                    }
+                ),
+            }
+        )
+        new_head = await asyncio.wait_for(
+            adapter.propose_stream_head(new_request), timeout=0.5
+        )
+        prefetch.release.set()
+        old_result = await asyncio.gather(old_task, return_exceptions=True)
+    finally:
+        prefetch.release.set()
+        flash.release_tail.set()
+        thinking.release_tail.set()
+        if not old_task.done():
+            old_task.cancel()
+        await asyncio.gather(old_task, return_exceptions=True)
+
+    assert new_head.raw_proposal["episode_disposition"] == "complete_without_more"
+    assert flash.calls == []
+    assert len(thinking.calls) == 1
+    assert isinstance(old_result[0], asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+async def test_structural_reselection_cancels_original_sse_before_correction_starts() -> None:
+    first = {
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "先给一个不完整草稿。"}],
+        "confidence": 8_000,
+        "world_claims": [],
+        "episode_disposition": "append",
+    }
+    stream_raw = json.dumps(
+        {
+            "protocol": "expression-units.1",
+            "first": first,
+            "continuation": [
+                {
+                    "beat": {"modality": "text", "text": "这个尾部不该再发。"},
+                    "world_claims": [],
+                }
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    corrected = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": "我重新接好这句。"}],
+            "stance": "respond_naturally",
+            "brief_rationale": "Replace the structurally incomplete draft.",
+            "confidence": 8_200,
+            "world_claims": [],
+        },
+        ensure_ascii=False,
+    )
+    model = _CorrectingUnitStreamingModel(stream_raw, corrected)
+    output = await asyncio.wait_for(
+        ChatModelDeliberationAdapter(model=model).propose_stream_head(_qq_request()),
+        timeout=1,
+    )
+
+    assert model.correction_saw_stream_cancelling is True
+    assert output.provider_parent_model_call_id is None
+    assert output.raw_proposal["stance"] == "respond_naturally"
+
+
 class _SequenceJsonModel(_Model):
     def __init__(self, replies: list[str]) -> None:
         super().__init__("")

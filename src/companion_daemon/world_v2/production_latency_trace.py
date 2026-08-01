@@ -138,6 +138,7 @@ class TurnLatencyTrace:
         self._first_role_provider_call_id: str | None = None
         self._provider_entries_ns: dict[str, int] = {}
         self._provider_completions_ns: dict[str, int] = {}
+        self._provider_first_tokens_ns: dict[str, int] = {}
         self._provider_kinds: dict[str, ProviderKind] = {}
         self._first_role_provider_completion_call_id: str | None = None
         self._cognition_finished = False
@@ -314,6 +315,31 @@ class TurnLatencyTrace:
             observed_ns=observed_ns,
         )
 
+    def mark_role_provider_first_token(
+        self,
+        provider_call_id: str,
+        *,
+        observed_ns: int | None = None,
+    ) -> None:
+        """Record actual first streamed content, never infer it from completion."""
+
+        if not provider_call_id:
+            raise ValueError("provider call id is required")
+        observed = self._clock_ns() if observed_ns is None else observed_ns
+        with self._lock:
+            if self._cognition_finished:
+                return
+            started = self._provider_entries_ns.get(provider_call_id)
+            if started is None:
+                raise ValueError("provider first token has no matching entry")
+            if self._provider_kinds.get(provider_call_id) != "role":
+                raise ValueError("only a role provider can report role-model TTFT")
+            if observed < started:
+                raise ValueError("provider first token precedes entry")
+            self._provider_first_tokens_ns.setdefault(provider_call_id, observed)
+            if "model_ttft" not in self._durations_ns:
+                self._durations_ns["model_ttft"] = observed - started
+
     def mark_auxiliary_provider_completion(
         self,
         provider_call_id: str,
@@ -372,6 +398,7 @@ class TurnLatencyTrace:
             completion_ns = self._durations_ns.get("model_completion")
             entries = dict(self._provider_entries_ns)
             completions = dict(self._provider_completions_ns)
+            first_tokens = dict(self._provider_first_tokens_ns)
             provider_kinds = dict(self._provider_kinds)
         return {
             "entry": {
@@ -385,11 +412,21 @@ class TurnLatencyTrace:
                 ),
             },
             "ttft": {
-                "status": "unavailable",
+                "status": "observed" if first_tokens else "unavailable",
                 "segment": "model_ttft",
-                "provider_call_id": None,
-                "duration_ms": None,
-                "reason": "non_streaming_completion_api",
+                "provider_call_id": (
+                    min(first_tokens, key=first_tokens.get) if first_tokens else None
+                ),
+                "duration_ms": (
+                    None
+                    if not first_tokens
+                    else self._durations_ns.get("model_ttft", 0) / 1_000_000
+                ),
+                **(
+                    {"reason": "non_streaming_completion_api"}
+                    if not first_tokens
+                    else {}
+                ),
             },
             "completion": {
                 "status": (

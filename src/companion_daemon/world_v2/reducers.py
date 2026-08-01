@@ -2622,6 +2622,7 @@ def _authorization_changed(state: ReducerState, event: WorldEvent) -> ReducerSta
 
 def _model_result_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = ModelResultRecordedPayload.model_validate(event.payload())
+    recorded = RecordedModelResultAudit.model_validate_json(payload.audit_json)
     if payload.evaluated_world_revision > len(state.committed_world_event_refs):
         raise ValueError("model result cannot evaluate a future world revision")
     if any(
@@ -2630,6 +2631,48 @@ def _model_result_recorded(state: ReducerState, event: WorldEvent) -> ReducerSta
         for value in state.model_result_audits
     ):
         raise ValueError("model result identity is already registered")
+    existing_stream = tuple(
+        RecordedModelResultAudit.model_validate_json(value.audit_json)
+        for value in state.model_result_audits
+        if value.parent_model_call_id == recorded.model_call_id
+        or value.model_call_id == recorded.parent_model_call_id
+    )
+    if recorded.route.router_version == "physical-provider-audit.1":
+        semantic_children = tuple(
+            child
+            for child in existing_stream
+            if child.parent_model_call_id == recorded.model_call_id
+        )
+        if (
+            not semantic_children
+            or {child.model_call_id for child in semantic_children}
+            != set(recorded.semantic_model_call_ids)
+            or any(child.request_hash != recorded.request_hash for child in semantic_children)
+            or len({child.semantic_stream_part for child in semantic_children})
+            != len(semantic_children)
+        ):
+            raise ValueError("physical provider terminal changed stream lineage")
+    elif recorded.semantic_stream_part is not None:
+        if any(
+            sibling.parent_model_call_id == recorded.parent_model_call_id
+            and sibling.semantic_stream_part == recorded.semantic_stream_part
+            for sibling in existing_stream
+        ):
+            raise ValueError("stream semantic part is already registered")
+        physical_parent = next(
+            (
+                parent
+                for parent in existing_stream
+                if parent.model_call_id == recorded.parent_model_call_id
+                and parent.route.router_version == "physical-provider-audit.1"
+            ),
+            None,
+        )
+        if physical_parent is not None and (
+            recorded.model_call_id not in physical_parent.semantic_model_call_ids
+            or recorded.request_hash != physical_parent.request_hash
+        ):
+            raise ValueError("stream semantic result changed its physical lineage")
     prior = tuple(
         value
         for value in state.model_result_audits

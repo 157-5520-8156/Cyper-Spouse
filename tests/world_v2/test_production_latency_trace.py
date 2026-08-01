@@ -145,6 +145,30 @@ def test_non_streaming_role_provider_separates_entry_completion_and_unavailable_
     }
 
 
+def test_streaming_role_provider_records_real_ttft_separately_from_completion() -> None:
+    clock = _Clock()
+    trace = ProductionLatencyRecorder(clock_ns=clock).start_ingress(
+        trace_id="trace:stream-provider-timing",
+        environment="real_transport",
+    )
+    clock.advance_ms(100)
+    trace.mark_role_provider_entry("model-call:stream")
+    clock.advance_ms(900)
+    trace.mark_role_provider_first_token("model-call:stream")
+    clock.advance_ms(2_100)
+    trace.mark_role_provider_completion("model-call:stream")
+
+    samples = {sample.segment: sample.duration_ms for sample in trace.samples()}
+    assert samples["model_ttft"] == 900.0
+    assert samples["model_completion"] == 3_000.0
+    assert trace.role_provider_timing_evidence()["ttft"] == {
+        "status": "observed",
+        "segment": "model_ttft",
+        "provider_call_id": "model-call:stream",
+        "duration_ms": 900.0,
+    }
+
+
 def test_failover_intervals_are_independent_and_external_overhead_uses_their_union() -> None:
     clock = _Clock()
     trace = ProductionLatencyRecorder(clock_ns=clock).start_ingress(

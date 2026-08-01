@@ -17,7 +17,7 @@ import json
 import logging
 import math
 import time
-from typing import Any, Awaitable, Callable, Literal, Protocol, TypeVar
+from typing import Any, Awaitable, Callable, Iterable, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,6 +54,9 @@ MAX_MODEL_OUTPUT_BYTES = 512_000
 MAX_MODEL_OUTPUT_NODES = 16_384
 MAX_ROUTE_REASON_CHARACTERS = 128
 MAX_REPORTED_TOKENS = 10_000_000
+# Process-wide ceilings cover unrelated lanes and detached cancellation audit.
+# The expression-unit adapter separately enforces one active visible stream;
+# these broader ceilings must not turn background work into a global mutex.
 MAX_INFLIGHT_PROVIDER_TASKS = 8
 MAX_INFLIGHT_QUICK_TASKS = 2
 MAX_INFLIGHT_SHADOW_OBSERVER_TASKS = 2
@@ -81,6 +84,9 @@ _FIRST_ROLE_PROVIDER_MARKER: ContextVar[Callable[[str], None] | None] = ContextV
 _FIRST_ROLE_PROVIDER_COMPLETION_MARKER: ContextVar[
     Callable[[str], None] | None
 ] = ContextVar("world_v2_first_role_provider_completion_marker", default=None)
+_FIRST_ROLE_PROVIDER_TOKEN_MARKER: ContextVar[
+    Callable[[str], None] | None
+] = ContextVar("world_v2_first_role_provider_token_marker", default=None)
 _PROVIDER_SLOT_COORDINATOR: ContextVar["_ProviderSlotCoordinator | None"] = ContextVar(
     "world_v2_provider_slot_coordinator", default=None
 )
@@ -314,6 +320,20 @@ def mark_first_role_provider_completion(provider_call_id: str) -> None:
         marker(provider_call_id)
     except Exception:
         _LOG.warning("role-provider completion latency marker failed", exc_info=True)
+
+
+def mark_first_role_provider_token(provider_call_id: str) -> None:
+    """Emit first streamed content evidence for the exact role request."""
+
+    if not provider_call_id:
+        raise ValueError("role-provider call id is required")
+    marker = _FIRST_ROLE_PROVIDER_TOKEN_MARKER.get()
+    if marker is None:
+        return
+    try:
+        marker(provider_call_id)
+    except Exception:
+        _LOG.warning("role-provider first-token latency marker failed", exc_info=True)
 
 
 ValidationTechnicalFailureCode = Literal[
@@ -752,6 +772,18 @@ def _checked_output(value: object) -> ModelOutput:
             "output_tokens": getattr(value, "output_tokens", None),
             "winning_model_call_id": getattr(value, "winning_model_call_id", None),
             "winning_request_hash": getattr(value, "winning_request_hash", None),
+            "provider_parent_model_call_id": getattr(
+                value,
+                "provider_parent_model_call_id",
+                None,
+            ),
+            "semantic_stream_part": getattr(value, "semantic_stream_part", None),
+            "physical_provider_audits": tuple(
+                item.model_dump(mode="python")
+                if isinstance(item, PhysicalProviderInvocationAudit)
+                else item
+                for item in getattr(value, "physical_provider_audits", ())
+            ),
             "provider_subcall_audits": tuple(
                 item.model_dump(mode="python")
                 if isinstance(item, ProviderSubcallAudit)
@@ -1001,6 +1033,65 @@ class ProviderSubcallAudit(_FrozenModel):
         return self
 
 
+class PhysicalProviderInvocationAudit(_FrozenModel):
+    """Terminal evidence for one physical streamed provider request.
+
+    Head and tail are separate semantic results derived from this request.
+    Missing provider usage remains explicit; zero tokens are never invented.
+    """
+
+    purpose: Literal["expression_unit_stream"] = "expression_unit_stream"
+    model_call_id: str = Field(min_length=1, max_length=256)
+    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_id: str = Field(min_length=1, max_length=256)
+    model_version: str = Field(min_length=1, max_length=256)
+    outcome: Literal["completed", "cancelled", "unresolved"]
+    failure_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        exclude_if=lambda value: value is None,
+    )
+    response_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
+    usage_status: Literal["provider_reported", "unresolved", "cancelled"]
+    usage: ModelUsageProvenance | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    semantic_model_call_ids: tuple[str, ...] = Field(min_length=1, max_length=2)
+
+    @model_validator(mode="after")
+    def terminal_evidence_is_truthful(self) -> "PhysicalProviderInvocationAudit":
+        if len(set(self.semantic_model_call_ids)) != len(self.semantic_model_call_ids):
+            raise ValueError("stream semantic result identities must be distinct")
+        if self.model_call_id in self.semantic_model_call_ids:
+            raise ValueError("physical provider identity cannot also be a semantic unit")
+        completed = self.outcome == "completed"
+        if completed != (self.response_hash is not None):
+            raise ValueError("completed physical provider call must bind full response bytes")
+        if completed and self.failure_code is not None:
+            raise ValueError("completed physical provider call cannot carry a failure code")
+        if not completed and self.failure_code is None:
+            raise ValueError("incomplete physical provider call requires a failure code")
+        if (self.usage_status == "provider_reported") != (self.usage is not None):
+            raise ValueError("reported physical usage must carry provider provenance")
+        if self.outcome == "cancelled" and self.usage_status not in {
+            "cancelled",
+            "provider_reported",
+        }:
+            raise ValueError("cancelled physical call has an invalid usage state")
+        if self.outcome == "unresolved" and self.usage_status not in {
+            "unresolved",
+            "provider_reported",
+        }:
+            raise ValueError("unresolved physical call has an invalid usage state")
+        return self
+
+
 class ModelOutput(_FrozenModel):
     model_id: str = Field(min_length=1, max_length=256)
     model_version: str = Field(min_length=1, max_length=256)
@@ -1018,6 +1109,21 @@ class ModelOutput(_FrozenModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
         exclude_if=lambda value: value is None,
+    )
+    provider_parent_model_call_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
+    semantic_stream_part: Literal["head", "tail"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    physical_provider_audits: tuple[PhysicalProviderInvocationAudit, ...] = Field(
+        default=(),
+        max_length=1,
+        exclude=True,
     )
     provider_subcall_audits: tuple[ProviderSubcallAudit, ...] = Field(
         default=(),
@@ -1059,6 +1165,30 @@ class ModelOutput(_FrozenModel):
             raise ValueError("model output usage tokens do not match token fields")
         if (self.winning_model_call_id is None) != (self.winning_request_hash is None):
             raise ValueError("winning provider invocation identity must be complete")
+        if (
+            self.provider_parent_model_call_id is not None
+            and self.provider_parent_model_call_id == self.winning_model_call_id
+        ):
+            raise ValueError("stream unit identity must differ from its provider parent")
+        if (self.provider_parent_model_call_id is None) != (
+            self.semantic_stream_part is None
+        ):
+            raise ValueError("stream semantic part requires a physical provider parent")
+        if self.physical_provider_audits:
+            parent = self.physical_provider_audits[0]
+            bound_stream_tail = (
+                self.semantic_stream_part == "tail"
+                and self.winning_model_call_id in parent.semantic_model_call_ids
+                and self.provider_parent_model_call_id == parent.model_call_id
+                and self.winning_request_hash == parent.request_hash
+            )
+            corrected_after_stream = (
+                self.semantic_stream_part is None
+                and self.provider_parent_model_call_id is None
+                and self.winning_model_call_id not in parent.semantic_model_call_ids
+            )
+            if not (bound_stream_tail or corrected_after_stream):
+                raise ValueError("physical provider audit is not bound to its stream tail")
         subcall_ids = tuple(item.model_call_id for item in self.provider_subcall_audits)
         if len(subcall_ids) != len(set(subcall_ids)):
             raise ValueError("provider subcalls require distinct invocation identities")
@@ -1116,6 +1246,9 @@ AuditStatus = Literal[
     "main_invalid_recovered",
     "main_exception_recovered",
     "recovery_failed",
+    "provider_completed",
+    "provider_cancelled",
+    "provider_unresolved",
 ]
 
 
@@ -1153,6 +1286,19 @@ class ModelResultAudit(_FrozenModel):
         max_length=256,
         exclude_if=lambda value: value is None,
     )
+    semantic_stream_part: Literal["head", "tail"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    usage_status: Literal["provider_reported", "unresolved", "cancelled"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    semantic_model_call_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=2,
+        exclude_if=lambda value: not value,
+    )
     model_result_ref: str = Field(min_length=1)
     attempt_id: str = Field(min_length=1)
     route: ModelRoute
@@ -1185,6 +1331,9 @@ class ModelResultAudit(_FrozenModel):
             "hedge_cancelled",
             "hedge_lost",
             "budget_exhausted",
+            "completed",
+            "cancelled",
+            "unresolved",
         ]
         | None
     ) = Field(default=None, exclude_if=lambda value: value is None)
@@ -1212,9 +1361,43 @@ class ModelResultAudit(_FrozenModel):
         max_length=8,
         exclude=True,
     )
+    physical_provider_audits: tuple[PhysicalProviderInvocationAudit, ...] = Field(
+        default=(),
+        max_length=1,
+        exclude=True,
+    )
 
     @model_validator(mode="after")
     def result_ref_is_orchestrator_derived(self) -> ModelResultAudit:
+        if self.parent_model_call_id == self.model_call_id:
+            raise ValueError("model result cannot be its own provider parent")
+        # Nested reviewer/reselection audits already use parent_model_call_id
+        # to bind a provider subcall to its authored candidate.  Only a
+        # semantic stream part *requires* a physical parent; a parent by
+        # itself does not make an ordinary nested audit a stream unit.
+        if self.semantic_stream_part is not None and self.parent_model_call_id is None:
+            raise ValueError("stream semantic audit requires its physical provider parent")
+        physical_status = self.status.startswith("provider_")
+        if physical_status != bool(self.semantic_model_call_ids):
+            raise ValueError("physical provider terminal must bind its semantic lineage")
+        if physical_status:
+            if self.parent_model_call_id is not None or self.semantic_stream_part is not None:
+                raise ValueError("physical provider terminal cannot have a provider parent")
+            if self.model_call_id in self.semantic_model_call_ids or len(
+                set(self.semantic_model_call_ids)
+            ) != len(self.semantic_model_call_ids):
+                raise ValueError("physical provider semantic lineage is invalid")
+            expected_outcome = {
+                "provider_completed": "completed",
+                "provider_cancelled": "cancelled",
+                "provider_unresolved": "unresolved",
+            }[self.status]
+            if self.outcome != expected_outcome or self.slot != "primary":
+                raise ValueError("physical provider terminal has an invalid outcome")
+            if (self.usage_status == "provider_reported") != (self.usage is not None):
+                raise ValueError("physical provider usage status is not truthful")
+        elif self.usage_status is not None:
+            raise ValueError("usage status is reserved for physical provider terminals")
         if self.model_result_ref != _model_result_ref(self.model_call_id, self.response_hash):
             raise ValueError("model result ref is not bound to its call")
         identity = (self.model_id, self.model_version, self.response_hash)
@@ -1251,6 +1434,13 @@ class ModelResultAudit(_FrozenModel):
             # subcall. Preserve that evidence even when it exceeds the route's
             # expectation; telemetry may warn, but must not erase a valid
             # character result.
+        if physical_status:
+            if self.status == "provider_completed":
+                if not has_output or self.failure_code is not None:
+                    raise ValueError("completed physical provider audit lacks response identity")
+            elif has_output or not has_attempted_identity or self.failure_code is None:
+                raise ValueError("incomplete physical provider audit has invalid identity")
+            return self
         required_failures = {
             "main_timeout": {
                 "main_timeout",
@@ -1274,6 +1464,9 @@ class ModelResultAudit(_FrozenModel):
                 "affect_target_reselection_invalid",
                 "inventory_invalid",
                 "coverage_invalid",
+                "stream_superseded_by_newer_input",
+                "stream_tail_cancelled",
+                "stream_tail_unresolved",
             },
             "main_timeout_recovered": {
                 "main_timeout",
@@ -1390,6 +1583,11 @@ class DeliberationResult(_FrozenModel):
                 for audit in self.attempt_audits
                 for item in audit.authored_candidate_audits
             ),
+            *(
+                item.model_call_id
+                for audit in self.attempt_audits
+                for item in audit.physical_provider_audits
+            ),
         )
         if len(all_provider_call_ids) != len(set(all_provider_call_ids)):
             raise ValueError("all provider invocations require distinct call identities")
@@ -1400,7 +1598,13 @@ class DeliberationResult(_FrozenModel):
             raise ValueError("minimal proposal is not bound to its final model audit")
         if len(self.attempt_audits) == 1:
             if self.proposal is None:
-                if self.audit.outcome not in {
+                if (
+                    self.audit.semantic_stream_part == "tail"
+                    and self.audit.status == "candidate_returned"
+                    and self.audit.outcome == "returned"
+                ):
+                    pass
+                elif self.audit.outcome not in {
                     "invalid",
                     "timeout",
                     "exception",
@@ -1501,7 +1705,7 @@ class Deliberation:
         quick_timeout_seconds: float = 2.5,
         proposal_grammar: ProposalGrammar | None = None,
         recovery_mode: Literal["minimal_only", "proposal_grammar"] = "minimal_only",
-        expression_episode_mode: Literal["off", "shadow", "on"] = "off",
+        expression_episode_mode: Literal["off", "shadow", "on", "stream"] = "off",
         expression_episode_diagnostics: ExpressionEpisodeDiagnostics | None = None,
         expression_episode_grammar: ProposalGrammar | None = None,
     ) -> None:
@@ -1528,6 +1732,16 @@ class Deliberation:
         self._shadow_observer_tasks: set[asyncio.Task[object]] = set()
         self._shadow_observer_provider_tasks: set[asyncio.Task[object]] = set()
         self._episode_tail_tasks: dict[str, asyncio.Task[EpisodeTailResult | None]] = {}
+        self._episode_tail_superseded: dict[str, asyncio.Event] = {}
+        self._episode_tail_fallbacks: dict[
+            str, Callable[[bool, str], EpisodeTailResult]
+        ] = {}
+        self._detached_episode_tail_tasks: set[asyncio.Task[object]] = set()
+        # An inbound attention change can happen while an older author head is
+        # still validating, before its continuation has entered the registry.
+        # Every stream attempt captures this epoch before its first await; only
+        # an attempt still bound to the current epoch may publish a tail.
+        self._stream_attention_epoch = 0
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
 
@@ -1540,10 +1754,133 @@ class Deliberation:
         task = self._episode_tail_tasks.get(trigger_ref)
         if task is None:
             return None
-        return await asyncio.shield(task)
+        superseded = self._episode_tail_superseded.setdefault(trigger_ref, asyncio.Event())
+        superseded_waiter = asyncio.create_task(superseded.wait())
+        try:
+            try:
+                shielded = asyncio.shield(task)
+                done, _ = await asyncio.wait(
+                    (shielded, superseded_waiter),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if superseded_waiter in done and superseded.is_set():
+                    return EpisodeTailResult(
+                        disposition="complete_without_more",
+                        failure_code="stream_superseded_by_newer_input",
+                    )
+                return await shielded
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                return EpisodeTailResult(
+                    disposition="complete_without_more",
+                    failure_code="stream_superseded_by_newer_input",
+                )
+        finally:
+            superseded_waiter.cancel()
+            # Keep a completed result available until durable lifecycle
+            # settlement succeeds. Proposal-audit CAS can lose after this
+            # process-local task finishes; consuming it here would turn that
+            # ordinary retry into a permanently missing tail.
+
+    async def cancel_superseded_expression_streams(
+        self, current_trigger_ref: str
+    ) -> tuple[tuple[str, EpisodeTailResult], ...]:
+        """Drop process-local continuation work made stale by newer input."""
+
+        if self._expression_episode_mode != "stream":
+            return ()
+        advance_attention = getattr(self._main, "advance_expression_attention", None)
+        if callable(advance_attention):
+            advance_attention(current_trigger_ref)
+        self._stream_attention_epoch += 1
+        cancelled: list[asyncio.Task[EpisodeTailResult | None]] = []
+        trigger_by_task: dict[asyncio.Task[object], str] = {}
+        fallback_by_task: dict[
+            asyncio.Task[object], Callable[[bool, str], EpisodeTailResult]
+        ] = {}
+        for trigger_ref, task in tuple(self._episode_tail_tasks.items()):
+            if trigger_ref == current_trigger_ref:
+                continue
+            if self._episode_tail_tasks.get(trigger_ref) is task:
+                self._episode_tail_tasks.pop(trigger_ref, None)
+            fallback = self._episode_tail_fallbacks.pop(trigger_ref, None)
+            if fallback is not None:
+                fallback_by_task[task] = fallback
+            superseded = self._episode_tail_superseded.pop(trigger_ref, None)
+            if superseded is not None:
+                superseded.set()
+            if not task.done():
+                cancelled.append(task)
+                trigger_by_task[task] = trigger_ref
+        terminal_results = await self._cancel_and_observe_expression_tail_tasks(
+            cancelled,
+            reason="newer inbound attention",
+        )
+        results = list(
+            (trigger_by_task[task], result)
+            for task, result in terminal_results
+            if isinstance(result, EpisodeTailResult)
+        )
+        completed_tasks = {task for task, _ in terminal_results}
+        for task in cancelled:
+            fallback = fallback_by_task.get(task)
+            if task not in completed_tasks and fallback is not None:
+                results.append(
+                    (
+                        trigger_by_task[task],
+                        fallback(
+                            False,
+                            "stream_tail_unresolved_after_bounded_cancellation",
+                        ),
+                    )
+                )
+        return tuple(results)
+
+    async def _cancel_and_observe_expression_tail_tasks(
+        self,
+        tasks: Iterable[asyncio.Task[object]],
+        *,
+        reason: str,
+    ) -> tuple[tuple[asyncio.Task[object], object], ...]:
+        """Give cancelled tails a tiny drain, then observe them in background."""
+
+        pending_candidates = tuple(dict.fromkeys(task for task in tasks if not task.done()))
+        for task in pending_candidates:
+            task.cancel()
+        if not pending_candidates:
+            return ()
+        done, pending = await asyncio.wait(
+            pending_candidates,
+            timeout=_PROVIDER_CANCELLATION_AUDIT_GRACE_SECONDS,
+        )
+        results: list[tuple[asyncio.Task[object], object]] = []
+        for task in done:
+            if not task.cancelled():
+                try:
+                    results.append((task, task.result()))
+                except Exception:
+                    pass
+            self._finish_owned_shutdown_task(task)
+        for task in pending:
+            self._detached_episode_tail_tasks.add(task)
+            task.add_done_callback(self._finish_owned_shutdown_task)
+        if pending:
+            _LOG.warning(
+                "expression stream cancellation detached %d task(s): %s",
+                len(pending),
+                reason,
+            )
+        return tuple(results)
+
+    def has_expression_episode_tail(self, trigger_ref: str) -> bool:
+        """Whether this process owns a tail for the exact ledger trigger."""
+
+        return trigger_ref in self._episode_tail_tasks
 
     @property
-    def expression_episode_mode(self) -> Literal["off", "shadow", "on"]:
+    def expression_episode_mode(self) -> Literal["off", "shadow", "on", "stream"]:
         return self._expression_episode_mode
 
     async def deliberate(
@@ -1560,9 +1897,11 @@ class Deliberation:
         budget: InteractiveTurnBudget | None = None,
         first_role_provider_marker: Callable[[str], None] | None = None,
         first_role_provider_completion_marker: Callable[[str], None] | None = None,
+        first_role_provider_token_marker: Callable[[str], None] | None = None,
     ) -> DeliberationResult:
         if self._closed:
             raise RuntimeError("Deliberation is closing")
+        stream_attention_epoch = self._stream_attention_epoch
         if not isinstance(capsule_handle, TrustedContextCapsuleHandle):
             raise TypeError("Deliberation requires a compiler-issued Capsule handle")
         trusted = ContextCapsule.model_validate(
@@ -1616,6 +1955,10 @@ class Deliberation:
             first_role_provider_completion_marker
         ):
             raise TypeError("first role-provider completion marker must be callable")
+        if first_role_provider_token_marker is not None and not callable(
+            first_role_provider_token_marker
+        ):
+            raise TypeError("first role-provider token marker must be callable")
         content_hash = _digest(json.loads(trusted.model_content_json))
         route_hints = derive_route_hints(capsule_handle)
         route = await self._route(
@@ -1664,6 +2007,8 @@ class Deliberation:
                 first_role_provider_completion_marker=(
                     first_role_provider_completion_marker
                 ),
+                first_role_provider_token_marker=first_role_provider_token_marker,
+                stream_attention_epoch=stream_attention_epoch,
             )
         failure_code: str | None = None
         recovered_status: AuditStatus | None = None
@@ -1894,6 +2239,8 @@ class Deliberation:
         budget: InteractiveTurnBudget,
         first_role_provider_marker: Callable[[str], None] | None,
         first_role_provider_completion_marker: Callable[[str], None] | None,
+        first_role_provider_token_marker: Callable[[str], None] | None,
+        stream_attention_epoch: int,
     ) -> DeliberationResult:
         """Race at most two fully validated candidates under one absolute deadline."""
 
@@ -1926,6 +2273,9 @@ class Deliberation:
             completion_marker_token = _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.set(
                 first_role_provider_completion_marker
             )
+            first_token_marker_token = _FIRST_ROLE_PROVIDER_TOKEN_MARKER.set(
+                first_role_provider_token_marker
+            )
             validation_token = (
                 _VALIDATION_ATTEMPT.set(validation_state) if validation_state is not None else None
             )
@@ -1935,6 +2285,7 @@ class Deliberation:
                         provider_call_id=call_id,
                         entry_marker=first_role_provider_marker,
                         completion_marker=first_role_provider_completion_marker,
+                        first_token_marker=first_role_provider_token_marker,
                     )
                     if lane != "observer"
                     else nullcontext()
@@ -1996,6 +2347,7 @@ class Deliberation:
                 _FIRST_ROLE_PROVIDER_COMPLETION_MARKER.reset(
                     completion_marker_token
                 )
+                _FIRST_ROLE_PROVIDER_TOKEN_MARKER.reset(first_token_marker_token)
                 _FIRST_ROLE_PROVIDER_MARKER.reset(marker_token)
                 _INTERACTIVE_TURN_BUDGET.reset(turn_budget_token)
                 _ATTEMPT_DEADLINE.reset(token)
@@ -2003,9 +2355,16 @@ class Deliberation:
         primary_call_id = model_input.call_id
         slot_coordinator = _ProviderSlotCoordinator()
         isolated_shadow_episode = self._expression_episode_mode == "shadow"
+        unit_stream_episode = self._expression_episode_mode == "stream"
         provisional_operation = getattr(
             self._main,
-            ("propose_shadow_observer" if isolated_shadow_episode else "propose_provisional"),
+            (
+                "propose_shadow_observer"
+                if isolated_shadow_episode
+                else "propose_stream_tail"
+                if unit_stream_episode
+                else "propose_provisional"
+            ),
             None,
         )
         already_evaluated = getattr(self._main, "episode_provisional_already_evaluated", None)
@@ -2015,6 +2374,8 @@ class Deliberation:
             (
                 "shadow_observer_provider_available"
                 if isolated_shadow_episode
+                else "stream_provider_available"
+                if unit_stream_episode
                 else "provisional_provider_available"
             ),
             None,
@@ -2048,7 +2409,11 @@ class Deliberation:
             # shadow candidate is observational only, however, so always run
             # it with an isolated slot coordinator that cannot consume or
             # suppress Recall, factual review, or correction on the full lane.
-            and (not source_closure_review_active or isolated_shadow_episode)
+            and (
+                not source_closure_review_active
+                or isolated_shadow_episode
+                or unit_stream_episode
+            )
             and not (callable(already_evaluated) and already_evaluated(model_input))
         )
         episode_started_at = budget.clock()
@@ -2100,7 +2465,11 @@ class Deliberation:
         try:
             primary_task = asyncio.create_task(
                 candidate(
-                    lambda: self._main.propose(model_input),
+                    lambda: (
+                        self._main.propose_stream_head(model_input)
+                        if unit_stream_episode and episode_enabled
+                        else self._main.propose(model_input)
+                    ),
                     call_id=primary_call_id,
                     minimal_only=False,
                     lane="main",
@@ -2271,12 +2640,10 @@ class Deliberation:
                 _PROVIDER_SLOT_COORDINATOR.reset(token)
             return True
 
-        if (
-            episode_enabled
-            and not isolated_shadow_episode
-            and slot_coordinator.claim_second("backup")
+        if episode_enabled and not isolated_shadow_episode and (
+            unit_stream_episode or slot_coordinator.claim_second("backup")
         ):
-            slot_coordinator.episode_reserved = True
+            slot_coordinator.episode_reserved = not unit_stream_episode
             budget.mark("provisional")
             backup_call_id = f"model-call:{_digest({**call_identity, 'lane': 'provisional'})}"
             backup_input = model_input.model_copy(update={"call_id": backup_call_id})
@@ -2290,7 +2657,11 @@ class Deliberation:
                         minimal_only=False,
                         lane="quick",
                         candidate_deadline=primary_author_deadline,
-                        proposal_grammar_override=self._expression_episode_grammar,
+                        proposal_grammar_override=(
+                            None
+                            if unit_stream_episode
+                            else self._expression_episode_grammar
+                        ),
                     )
                 )
             finally:
@@ -2327,13 +2698,368 @@ class Deliberation:
                         primary_timing_recorded = True
                     proposal, output, failure = primary_result
                     if proposal is not None and failure is None:
+                        if (
+                            unit_stream_episode
+                            and stream_attention_epoch != self._stream_attention_epoch
+                        ):
+                            # The provider may have exposed a complete first
+                            # unit before source/shape validation finished.
+                            # New physical ingress invalidates that old
+                            # attention generation, not only its continuation;
+                            # never promote the stale head into a Proposal.
+                            if backup_task is not None:
+                                await self._cancel_and_observe_expression_tail_tasks(
+                                    (backup_task,),
+                                    reason="attention changed before head acceptance",
+                                )
+                                backup_task = None
+                            discard_candidate = getattr(
+                                self._main, "discard_candidate", None
+                            )
+                            if callable(discard_candidate):
+                                discard_candidate(model_input)
+                            stale_audit = self._audit(
+                                model_call_id=primary_call_id,
+                                attempt_id=attempt_id,
+                                route=route,
+                                request_hash=request_hash,
+                                output=None,
+                                status="main_exception",
+                                failure_code="stream_superseded_by_newer_input",
+                                slot="primary",
+                                outcome="exception",
+                            )
+                            return self._result(
+                                trusted,
+                                proposal=None,
+                                audit=stale_audit,
+                                attempt_audits=(stale_audit,),
+                            )
                         budget.mark("candidate_validated")
                         accept_candidate = getattr(self._main, "accept_candidate", None)
                         if callable(accept_candidate):
                             accept_candidate(model_input)
                         start_isolated_shadow()
                         loser_audit: ModelResultAudit | None = None
-                        if backup_task is not None and self._expression_episode_mode == "shadow":
+                        if backup_task is not None and unit_stream_episode:
+                            continuing_tail = backup_task
+                            tail_call_id = backup_call_id
+                            tail_request_hash = backup_request_hash
+                            head_output = output
+                            assert head_output is not None
+                            parent_call_id = head_output.provider_parent_model_call_id
+                            parent_request_hash = head_output.winning_request_hash
+                            tail_semantic_call_id = (
+                                "model-call:"
+                                + _digest(
+                                    {
+                                        "provider_call_id": parent_call_id,
+                                        "unit": "tail",
+                                    }
+                                )
+                            )
+
+                            def incomplete_stream_result(
+                                cancelled: bool,
+                                failure_code: str,
+                            ) -> EpisodeTailResult:
+                                assert parent_call_id is not None
+                                assert parent_request_hash is not None
+                                physical = PhysicalProviderInvocationAudit(
+                                    model_call_id=parent_call_id,
+                                    request_hash=parent_request_hash,
+                                    model_id=head_output.model_id,
+                                    model_version=head_output.model_version,
+                                    outcome="cancelled" if cancelled else "unresolved",
+                                    failure_code=failure_code,
+                                    usage_status=(
+                                        "cancelled" if cancelled else "unresolved"
+                                    ),
+                                    semantic_model_call_ids=(
+                                        head_output.winning_model_call_id,
+                                        tail_semantic_call_id,
+                                    ),
+                                )
+                                terminal_audit = ModelResultAudit(
+                                    model_call_id=tail_semantic_call_id,
+                                    parent_model_call_id=parent_call_id,
+                                    semantic_stream_part="tail",
+                                    model_result_ref=_model_result_ref(
+                                        tail_semantic_call_id, None
+                                    ),
+                                    attempt_id=attempt_id,
+                                    route=route,
+                                    attempted_model_id=head_output.model_id,
+                                    attempted_model_version=head_output.model_version,
+                                    request_hash=parent_request_hash,
+                                    status="main_exception",
+                                    failure_code=(
+                                        "stream_tail_cancelled"
+                                        if cancelled
+                                        else "stream_tail_unresolved"
+                                    ),
+                                    slot="backup",
+                                    outcome="exception",
+                                    physical_provider_audits=(physical,),
+                                )
+                                return EpisodeTailResult(
+                                    disposition="complete_without_more",
+                                    deliberation=self._result(
+                                        trusted,
+                                        proposal=None,
+                                        audit=terminal_audit,
+                                        attempt_audits=(terminal_audit,),
+                                    ),
+                                    failure_code=failure_code,
+                                )
+
+                            def completed_invalid_stream_result(
+                                tail_output: ModelOutput,
+                                failure_code: str,
+                            ) -> EpisodeTailResult:
+                                """Preserve a completed physical call when its tail is invalid.
+
+                                The provider can finish the one physical SSE successfully while
+                                the semantic tail fails proposal validation.  That is an invalid
+                                character result, not an unresolved network call.
+                                """
+
+                                normalized_failure = (
+                                    "main_invalid_output"
+                                    if failure_code == "invalid"
+                                    else failure_code
+                                )
+                                invalid_status: AuditStatus = (
+                                    "main_invalid"
+                                    if normalized_failure
+                                    in {
+                                        "main_invalid_output",
+                                        "primary_invalid",
+                                        "corrective_invalid",
+                                    }
+                                    else "main_exception"
+                                )
+                                invalid_outcome: Literal["invalid", "exception"] = (
+                                    "invalid"
+                                    if invalid_status == "main_invalid"
+                                    else "exception"
+                                )
+                                physical = tail_output.physical_provider_audits
+                                if (
+                                    tail_output.semantic_stream_part == "tail"
+                                    and tail_output.provider_parent_model_call_id
+                                    == parent_call_id
+                                ):
+                                    invalid_audit = self._audit(
+                                        model_call_id=tail_call_id or tail_semantic_call_id,
+                                        attempt_id=attempt_id,
+                                        route=route,
+                                        request_hash=tail_request_hash
+                                        or parent_request_hash,
+                                        output=tail_output,
+                                        status=invalid_status,
+                                        failure_code=normalized_failure,
+                                        slot="backup",
+                                        outcome=invalid_outcome,
+                                    )
+                                elif physical:
+                                    terminal = physical[0]
+                                    invalid_audit = ModelResultAudit(
+                                        model_call_id=tail_semantic_call_id,
+                                        parent_model_call_id=parent_call_id,
+                                        semantic_stream_part="tail",
+                                        model_result_ref=_model_result_ref(
+                                            tail_semantic_call_id, None
+                                        ),
+                                        attempt_id=attempt_id,
+                                        route=route,
+                                        attempted_model_id=terminal.model_id,
+                                        attempted_model_version=terminal.model_version,
+                                        request_hash=parent_request_hash,
+                                        status=invalid_status,
+                                        failure_code=normalized_failure,
+                                        slot="backup",
+                                        outcome=invalid_outcome,
+                                        physical_provider_audits=physical,
+                                    )
+                                else:
+                                    return incomplete_stream_result(
+                                        False,
+                                        failure_code,
+                                    )
+                                return EpisodeTailResult(
+                                    disposition="complete_without_more",
+                                    deliberation=self._result(
+                                        trusted,
+                                        proposal=None,
+                                        audit=invalid_audit,
+                                        attempt_audits=(invalid_audit,),
+                                    ),
+                                    failure_code=failure_code,
+                                )
+
+                            async def finish_stream_tail() -> EpisodeTailResult | None:
+                                if parent_call_id is None or parent_request_hash is None:
+                                    return EpisodeTailResult(
+                                        disposition="complete_without_more",
+                                        failure_code="stream_parent_identity_missing",
+                                    )
+
+                                try:
+                                    tail_proposal, tail_output, tail_failure = (
+                                        await continuing_tail
+                                    )
+                                except asyncio.CancelledError:
+                                    return incomplete_stream_result(
+                                        True,
+                                        "stream_superseded_by_newer_input",
+                                    )
+                                if tail_output is None:
+                                    return incomplete_stream_result(
+                                        False,
+                                        tail_failure or "missing_output",
+                                    )
+                                if tail_failure is not None:
+                                    return completed_invalid_stream_result(
+                                        tail_output,
+                                        tail_failure,
+                                    )
+                                if (
+                                    head_output.provider_parent_model_call_id is None
+                                    or tail_output.provider_parent_model_call_id
+                                    != head_output.provider_parent_model_call_id
+                                ):
+                                    physical = tail_output.physical_provider_audits
+                                    corrected_after_stream = bool(
+                                        physical
+                                        and tail_output.provider_parent_model_call_id is None
+                                        and tail_output.semantic_stream_part is None
+                                        and tail_output.winning_model_call_id
+                                        not in physical[0].semantic_model_call_ids
+                                    )
+                                    if corrected_after_stream:
+                                        original = completed_invalid_stream_result(
+                                            tail_output,
+                                            "main_invalid_output",
+                                        )
+                                        assert original.deliberation is not None
+                                        original_audit = original.deliberation.audit
+                                        disposition = (
+                                            tail_output.episode_disposition
+                                            or "complete_without_more"
+                                        )
+                                        corrected_output = tail_output.model_copy(
+                                            update={"physical_provider_audits": ()}
+                                        )
+                                        corrected_audit = self._audit(
+                                            model_call_id=tail_call_id
+                                            or tail_semantic_call_id,
+                                            attempt_id=attempt_id,
+                                            route=route,
+                                            request_hash=tail_request_hash
+                                            or parent_request_hash,
+                                            output=corrected_output,
+                                            status="main_invalid_recovered",
+                                            failure_code="main_invalid_output",
+                                            slot="corrective",
+                                            outcome=(
+                                                "winner"
+                                                if disposition == "append"
+                                                and tail_proposal is not None
+                                                else "returned"
+                                            ),
+                                        )
+                                        return EpisodeTailResult(
+                                            disposition=disposition,
+                                            deliberation=self._result(
+                                                trusted,
+                                                proposal=(
+                                                    tail_proposal
+                                                    if disposition == "append"
+                                                    else None
+                                                ),
+                                                audit=corrected_audit,
+                                                attempt_audits=(
+                                                    original_audit,
+                                                    corrected_audit,
+                                                ),
+                                            ),
+                                        )
+                                    # A correction/reselection replaced either
+                                    # semantic unit. Never splice continuation
+                                    # from the rejected original stream into
+                                    # that independently authored replacement.
+                                    _LOG.warning(
+                                        "expression stream tail discarded after author identity "
+                                        "change trigger=%s head_parent=%s tail_parent=%s",
+                                        trusted.trigger_ref,
+                                        head_output.provider_parent_model_call_id,
+                                        tail_output.provider_parent_model_call_id,
+                                    )
+                                    return incomplete_stream_result(
+                                        False,
+                                        "stream_author_identity_changed",
+                                    )
+                                disposition = (
+                                    tail_output.episode_disposition
+                                    or "complete_without_more"
+                                )
+                                assert tail_call_id is not None
+                                assert tail_request_hash is not None
+                                tail_audit = self._audit(
+                                    model_call_id=tail_call_id,
+                                    attempt_id=attempt_id,
+                                    route=route,
+                                    request_hash=tail_request_hash,
+                                    output=tail_output,
+                                    status=(
+                                        "proposal_validated"
+                                        if disposition == "append"
+                                        and tail_proposal is not None
+                                        else "candidate_returned"
+                                    ),
+                                    failure_code=None,
+                                    slot="backup",
+                                    outcome=(
+                                        "winner"
+                                        if disposition == "append"
+                                        and tail_proposal is not None
+                                        else "returned"
+                                    ),
+                                )
+                                return EpisodeTailResult(
+                                    disposition=disposition,
+                                    deliberation=self._result(
+                                        trusted,
+                                        proposal=(
+                                            tail_proposal
+                                            if disposition == "append"
+                                            else None
+                                        ),
+                                        audit=tail_audit,
+                                        attempt_audits=(tail_audit,),
+                                    ),
+                                )
+
+                            if stream_attention_epoch != self._stream_attention_epoch:
+                                await self._cancel_and_observe_expression_tail_tasks(
+                                    (continuing_tail,),
+                                    reason="attention changed before tail registration",
+                                )
+                            else:
+                                self._episode_tail_superseded[trusted.trigger_ref] = asyncio.Event()
+                                if parent_call_id is not None and parent_request_hash is not None:
+                                    self._episode_tail_fallbacks[trusted.trigger_ref] = (
+                                        incomplete_stream_result
+                                    )
+                                self._episode_tail_tasks[trusted.trigger_ref] = (
+                                    asyncio.create_task(
+                                        finish_stream_tail(),
+                                        name=f"expression-stream-tail:{trusted.trigger_ref}",
+                                    )
+                                )
+                            backup_task = None
+                        elif backup_task is not None and self._expression_episode_mode == "shadow":
                             if backup_task.done():
                                 record_episode(backup_task.result(), winner="provisional")
                             else:
@@ -2450,6 +3176,13 @@ class Deliberation:
                 if backup_task is not None and backup_task in done and backup_result is None:
                     backup_result = backup_task.result()
                     proposal, output, failure = backup_result
+                    if unit_stream_episode:
+                        # Tail units are never an independent winner.  They can
+                        # only append after the validated head from the same
+                        # provider stream has become authoritative.
+                        if primary_result is None:
+                            continue
+                        break
                     if self._expression_episode_mode == "shadow":
                         record_episode(backup_result, winner="provisional")
                         if primary_result is None:
@@ -2502,7 +3235,7 @@ class Deliberation:
                                         attempt_audits=(full_audit,),
                                     ),
                                 )
-
+                            self._episode_tail_superseded[trusted.trigger_ref] = asyncio.Event()
                             self._episode_tail_tasks[trusted.trigger_ref] = asyncio.create_task(
                                 finish_full_tail(),
                                 name=f"expression-tail:{trusted.trigger_ref}",
@@ -2864,6 +3597,7 @@ class Deliberation:
                     *self._shadow_observer_tasks,
                     *self._shadow_observer_provider_tasks,
                     *self._episode_tail_tasks.values(),
+                    *self._detached_episode_tail_tasks,
                     *self._provider_tasks,
                     *self._quick_provider_tasks,
                 )
@@ -2892,11 +3626,14 @@ class Deliberation:
 
         self._shadow_observer_tasks.discard(task)
         self._shadow_observer_provider_tasks.discard(task)
+        self._detached_episode_tail_tasks.discard(task)
         self._provider_tasks.discard(task)
         self._quick_provider_tasks.discard(task)
         for trigger_ref, tail in tuple(self._episode_tail_tasks.items()):
             if tail is task:
                 self._episode_tail_tasks.pop(trigger_ref, None)
+                self._episode_tail_superseded.pop(trigger_ref, None)
+                self._episode_tail_fallbacks.pop(trigger_ref, None)
         if not task.cancelled():
             # Retrieve a late exception even when no lifecycle caller remains
             # to await the cancellation-suppressing provider or episode tail.
@@ -2910,6 +3647,7 @@ class Deliberation:
                     *self._shadow_observer_tasks,
                     *self._shadow_observer_provider_tasks,
                     *self._episode_tail_tasks.values(),
+                    *self._detached_episode_tail_tasks,
                     *self._provider_tasks,
                     *self._quick_provider_tasks,
                 )
@@ -3210,6 +3948,7 @@ class Deliberation:
         slot: Literal["primary", "backup", "corrective"] | None = None,
         outcome: Literal[
             "winner",
+            "returned",
             "invalid",
             "timeout",
             "exception",
@@ -3254,6 +3993,14 @@ class Deliberation:
         response_hash = _output_response_hash(output) if output is not None else None
         return ModelResultAudit(
             model_call_id=model_call_id,
+            parent_model_call_id=(
+                output.provider_parent_model_call_id
+                if output is not None
+                else None
+            ),
+            semantic_stream_part=(
+                output.semantic_stream_part if output is not None else None
+            ),
             model_result_ref=_model_result_ref(model_call_id, response_hash),
             attempt_id=attempt_id,
             route=route,
@@ -3303,6 +4050,9 @@ class Deliberation:
             ),
             provider_subcall_audits=provider_subcall_audits,
             authored_candidate_audits=authored_candidate_audits,
+            physical_provider_audits=(
+                output.physical_provider_audits if output is not None else ()
+            ),
         )
 
     @staticmethod

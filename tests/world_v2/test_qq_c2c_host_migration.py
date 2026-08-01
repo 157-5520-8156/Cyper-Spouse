@@ -32,6 +32,8 @@ from companion_daemon.world_v2.action_pump import ActionPumpResult
 from companion_daemon.world_v2.interactive_turn_budget import (
     InteractiveTurnBudgetPolicy,
 )
+from companion_daemon.world_v2.deliberation import ModelUsageProvenance
+from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.production_turn_application import (
     MediaPreviewDeployment,
     MediaSelectionAcceptanceComposition,
@@ -154,7 +156,7 @@ async def test_qq_c2c_production_builder_rejects_bypassed_visible_episode_settin
     try:
         with pytest.raises(
             ValueError,
-            match="production QQ expression episode mode must be off or shadow",
+            match="production QQ expression episode mode must be off, shadow, or stream",
         ):
             host = build_qq_c2c_host(
                 settings=settings,
@@ -1417,6 +1419,110 @@ class _OneExpressionModel:
         )
 
 
+class _StreamingExpressionModel(_OneExpressionModel):
+    model = "fixture:one-streaming-expression"
+    reports_exact_request_emission = True
+
+    def __init__(self) -> None:
+        super().__init__({"modality": "text", "text": "unused"})
+        self.stream_calls = 0
+        self.tail_release = asyncio.Event()
+        self.tail_releases = [self.tail_release]
+        self.cancelled_stream_ordinals: list[int] = []
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages,  # type: ignore[no-untyped-def]
+        *,
+        temperature=0.8,  # type: ignore[no-untyped-def]
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ):
+        del temperature
+        self.stream_calls += 1
+        ordinal = self.stream_calls
+        tail_release = self.tail_release
+        if ordinal > 1:
+            tail_release = asyncio.Event()
+            self.tail_releases.append(tail_release)
+        self.calls += 1
+        self.prompt_kinds.append("stream")
+        first = {
+            "private_turn_state": {
+                "inner_state_summary": "I want to answer in two separate bubbles.",
+                "attended_source_refs": [],
+            },
+            "timing_choice": "now",
+            "beats": [
+                {
+                    "modality": "text",
+                    "text": (
+                        "第一条先发。" if ordinal == 1 else f"第{ordinal}轮先发。"
+                    ),
+                }
+            ],
+            "cadence": "conversational",
+            "stance": "two_bubble_reply",
+            "brief_rationale": "I chose two separate messages.",
+            "confidence": 7000,
+            "world_claims": [],
+            "episode_disposition": "append",
+        }
+        raw = json.dumps(
+            {
+                "protocol": "expression-units.1",
+                "first": first,
+                "continuation": [
+                    {
+                        "beat": {
+                            "modality": "text",
+                            "text": (
+                                "第二条再跟上。"
+                                if ordinal == 1
+                                else f"第{ordinal}轮尾条。"
+                            ),
+                        },
+                        "world_claims": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        boundary = raw.index('"continuation"')
+        if on_text_delta is not None:
+            on_text_delta(raw[:boundary])
+            try:
+                await tail_release.wait()
+            except asyncio.CancelledError:
+                self.cancelled_stream_ordinals.append(ordinal)
+                raise
+            on_text_delta(raw[boundary:])
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 10,
+            "output_tokens": 10,
+            "thinking_tokens": 0,
+            "token_provenance": "provider_reported",
+            "transport": "provider_api",
+            "provider": "fixture",
+            "provider_usage_ref": "usage:fixture:stream",
+        }
+        import hashlib
+
+        usage_hash = hashlib.sha256(
+            json.dumps(
+                material,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return raw, ModelUsageProvenance(
+            **material,
+            provider_usage_hash=usage_hash,
+        )
+
+
 class _SilentExpressionModel:
     model = "fixture:silent-expression"
 
@@ -1839,6 +1945,163 @@ async def test_qq_shared_reply_audit_reaches_deferred_followup_with_one_main_cal
     assert model.calls == 1
     assert len(projection.actions) == len(projection.commitments) == 1
     assert projection.actions[0].kind == "followup"
+
+
+@pytest.mark.asyncio
+async def test_qq_stream_mode_sends_two_units_from_one_role_author_request(
+    tmp_path: Path,
+) -> None:
+    model = _StreamingExpressionModel()
+    delivery = _Delivery()
+    host = build_qq_c2c_host(
+        settings=Settings(
+            _env_file=None,
+            database_path=tmp_path / "qq-unit-stream.sqlite",
+            PRIMARY_USER_ID="geoff",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="stream",
+            LOCAL_APPRAISAL_ENABLED=False,
+        ),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        delivery=delivery,
+        use_configured_recall_embedding=False,
+    )
+    inbound_task: asyncio.Task[object] | None = None
+    try:
+        inbound_task = asyncio.create_task(
+            host.inbound_text(
+                message_id="qq-stream-1",
+                recipient_id="10001",
+                text="你分两条回我试试",
+                observed_at=NOW,
+            )
+        )
+        for _ in range(200):
+            if _visible(delivery):
+                break
+            await asyncio.sleep(0.01)
+        assert _visible(delivery) == [("10001", "第一条先发。")]
+        model.tail_release.set()
+        result = await asyncio.wait_for(inbound_task, timeout=2)
+        await host.drain(max_action_units=8, max_background_units=0)
+        projection = host._host._application._ledger.project()  # type: ignore[attr-defined]
+        stream_audits = [
+            item for item in projection.model_result_audits
+            if item.parent_model_call_id is not None
+        ]
+        physical_audits = [
+            json.loads(item.audit_json)
+            for item in projection.model_result_audits
+            if json.loads(item.audit_json)["route"]["router_version"]
+            == "physical-provider-audit.1"
+        ]
+        pending_tails = host._host._application._turns._runtime._pinned_turn._deliberation._episode_tail_tasks  # type: ignore[attr-defined]
+        rebuilt = host._host._application._ledger.rebuild()  # type: ignore[attr-defined]
+    finally:
+        model.tail_release.set()
+        if inbound_task is not None and not inbound_task.done():
+            inbound_task.cancel()
+        await asyncio.gather(
+            *(task for task in (inbound_task,) if task is not None),
+            return_exceptions=True,
+        )
+        await host.aclose()
+
+    assert result.status == "action_authorized"
+    assert model.stream_calls == 1
+    assert len(stream_audits) == 2
+    assert len({item.model_call_id for item in stream_audits}) == 2
+    assert len({item.parent_model_call_id for item in stream_audits}) == 1
+    assert len(physical_audits) == 1
+    assert physical_audits[0]["status"] == "provider_completed"
+    assert physical_audits[0]["response_hash"] is not None
+    assert physical_audits[0]["usage"]["token_provenance"] == "provider_reported"
+    assert rebuilt.semantic_hash == projection.semantic_hash
+    assert pending_tails == {}
+    assert _visible(delivery) == [
+        ("10001", "第一条先发。"),
+        ("10001", "第二条再跟上。"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_new_user_message_supersedes_an_unfinished_stream_tail(
+    tmp_path: Path,
+) -> None:
+    model = _StreamingExpressionModel()
+    delivery = _Delivery()
+    host = build_qq_c2c_host(
+        settings=Settings(
+            _env_file=None,
+            database_path=tmp_path / "qq-unit-stream-interrupt.sqlite",
+            PRIMARY_USER_ID="geoff",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="stream",
+            LOCAL_APPRAISAL_ENABLED=False,
+        ),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        delivery=delivery,
+        use_configured_recall_embedding=False,
+    )
+    first: asyncio.Task[object] | None = None
+    second: asyncio.Task[object] | None = None
+    try:
+        first = asyncio.create_task(
+            host.inbound_text(
+                message_id="qq-stream-interrupt-1",
+                recipient_id="10001",
+                text="第一轮先说一半",
+                observed_at=NOW,
+            )
+        )
+        for _ in range(300):
+            if _visible(delivery):
+                break
+            await asyncio.sleep(0.01)
+        assert _visible(delivery) == [("10001", "第一条先发。")]
+
+        second = asyncio.create_task(
+            host.inbound_text(
+                message_id="qq-stream-interrupt-2",
+                recipient_id="10001",
+                text="等等，我补充一句",
+                observed_at=NOW + timedelta(seconds=1),
+            )
+        )
+        for _ in range(400):
+            if 1 in model.cancelled_stream_ordinals:
+                break
+            await asyncio.sleep(0.01)
+        assert 1 in model.cancelled_stream_ordinals, (
+            model.calls,
+            model.prompt_kinds,
+            host._host._application._turns.expression_episode_diagnostics(),  # type: ignore[attr-defined]
+            host._host._application._turns._runtime._pinned_turn._deliberation._episode_tail_tasks,  # type: ignore[attr-defined]
+        )
+        if len(model.tail_releases) > 1:
+            model.tail_releases[1].set()
+        for _ in range(300):
+            projection = host._host._application._ledger.project()  # type: ignore[attr-defined]
+            if len(projection.message_observations) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(projection.message_observations) == 2
+    finally:
+        for release in model.tail_releases:
+            release.set()
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (first, second) if task is not None),
+            return_exceptions=True,
+        )
+        await host.aclose()
+
+    visible = _visible(delivery)
+    assert ("10001", "第二条再跟上。") not in visible
 
 
 @pytest.mark.asyncio
@@ -3255,7 +3518,10 @@ async def test_qq_health_reads_a_recorded_delay_draw_as_model_consideration_cade
     tmp_path: Path,
 ) -> None:
     host = build_qq_c2c_host(
-        settings=Settings(database_path=tmp_path / "qq-health-delay-draw.sqlite"),
+        settings=Settings(
+            database_path=tmp_path / "qq-health-delay-draw.sqlite",
+            WORLD_V2_EXPRESSION_EPISODE_MODE="shadow",
+        ),
         recipient_id="10001",
         bootstrap_at=NOW,
         model=FakeCompanionModel(),
@@ -3294,24 +3560,37 @@ async def test_qq_health_reads_a_recorded_delay_draw_as_model_consideration_cade
             if item.event_type == "ObservationRecorded"
             and item.world_revision == projection.message_observations[-1].world_revision
         )
-        profile = SocialInitiativeContextPolicy(policy=policy).compile(
-            projection=projection, logical_time=logical_time
-        )
-        RandomAuthority(ledger=ledger, source="test:health-random").draw(
-            attempt_id=social_initiative_attempt_id(
-                source_event_ref=source.event_id,
-                profile=profile,
-            ),
-            candidate_refs=("delay:60",),
-            candidate_weights={"delay:60": 1},
-            weight_policy_version=SocialInitiativeContextPolicy.version,
-            catalog_version="social-initiative-delay.1",
-            logical_time=logical_time,
-            seed_instant=source.logical_time,
-            actor="system:social-initiative",
-            trace_id="trace:health-delay",
-            correlation_id="correlation:health-delay",
-        )
+        authority = RandomAuthority(ledger=ledger, source="test:health-random")
+        for _ in range(8):
+            current = ledger.project()
+            profile = SocialInitiativeContextPolicy(policy=policy).compile(
+                projection=current,
+                logical_time=current.logical_time,
+            )
+            try:
+                authority.draw(
+                    attempt_id=social_initiative_attempt_id(
+                        source_event_ref=source.event_id,
+                        profile=profile,
+                    ),
+                    candidate_refs=("delay:60",),
+                    candidate_weights={"delay:60": 1},
+                    weight_policy_version=SocialInitiativeContextPolicy.version,
+                    catalog_version="social-initiative-delay.1",
+                    logical_time=current.logical_time,
+                    seed_instant=source.logical_time,
+                    actor="system:social-initiative",
+                    trace_id="trace:health-delay",
+                    correlation_id="correlation:health-delay",
+                )
+                break
+            except ConcurrencyConflict:
+                # Direct test injection is outside the production scheduler's
+                # normal CAS retry loop. Re-pin both the head and logical time
+                # after a legitimate background projection wins the cursor.
+                await host._join_owned_scheduler_lane_tasks()  # noqa: SLF001
+        else:
+            raise AssertionError("health fixture could not obtain a stable ledger cursor")
 
         diagnostics = await host.world_health_diagnostics()
     finally:

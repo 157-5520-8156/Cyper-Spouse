@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 import fcntl
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -126,10 +127,12 @@ class ModelRequestEmissionScopeState:
     provider_call_id: str
     entry_marker: Callable[[str], None] | None
     completion_marker: Callable[[str], None] | None
+    first_token_marker: Callable[[str], None] | None = None
     emitted: bool = False
     _next_ordinal: int = 0
     _active_call_ids: set[str] = field(default_factory=set)
     _completed_call_ids: set[str] = field(default_factory=set)
+    _first_token_call_ids: set[str] = field(default_factory=set)
     _lock: Lock = field(default_factory=Lock)
 
     def begin(self) -> "ModelRequestSpanToken":
@@ -165,6 +168,18 @@ class ModelRequestEmissionScopeState:
             except Exception:
                 logger.warning("model request completion marker failed", exc_info=True)
 
+    def first_token(self, token: "ModelRequestSpanToken") -> None:
+        with self._lock:
+            call_id = token.provider_call_id
+            if call_id not in self._active_call_ids or call_id in self._first_token_call_ids:
+                return
+            self._first_token_call_ids.add(call_id)
+        if self.first_token_marker is not None:
+            try:
+                self.first_token_marker(call_id)
+            except Exception:
+                logger.warning("model first-token marker failed", exc_info=True)
+
 
 @dataclass(frozen=True)
 class ModelRequestSpanToken:
@@ -180,6 +195,7 @@ def model_request_emission_scope(
     provider_call_id: str,
     entry_marker: Callable[[str], None] | None,
     completion_marker: Callable[[str], None] | None,
+    first_token_marker: Callable[[str], None] | None = None,
 ) -> Iterator[ModelRequestEmissionScopeState]:
     """Observe every request when a provider reaches and leaves ``client.post``.
 
@@ -207,6 +223,7 @@ def model_request_emission_scope(
         provider_call_id=provider_call_id,
         entry_marker=entry_marker,
         completion_marker=completion_marker,
+        first_token_marker=first_token_marker,
     )
     token = _MODEL_REQUEST_EMISSION_STATE.set(state)
     try:
@@ -233,6 +250,14 @@ def mark_model_request_completed(token: ModelRequestSpanToken | None) -> None:
     if token is None:
         return
     token.scope.complete(token)
+
+
+def mark_model_request_first_token(token: ModelRequestSpanToken | None) -> None:
+    """Record the first non-empty streamed content delta for this request."""
+
+    if token is None:
+        return
+    token.scope.first_token(token)
 
 
 class ModelCircuitOpenError(ConnectionError):
@@ -854,6 +879,239 @@ class DeepSeekChatModel:
             raise AssertionError("metered JSON completion did not return usage")
         return result
 
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta: Callable[[str], object] | None = None,
+    ) -> tuple[str, dict[str, object] | None]:
+        """Stream one JSON completion while preserving one provider identity.
+
+        ``on_text_delta`` is presentation-neutral: it exposes provider bytes to
+        a higher-level incremental validator, but it cannot dispatch anything
+        itself.  The eventual text and usage still belong to this single HTTP
+        request, so a consumer can publish a validated first unit without
+        opening a second role-author call.
+        """
+
+        started = monotonic()
+        purpose = _MODEL_CALL_PURPOSE.get()
+        call_meta = _MODEL_CALL_META.get()
+        capacity_token: str | None = None
+        request_payload = self.request_payload(
+            messages,
+            temperature=temperature,
+            json_object=True,
+        )
+        request_payload["stream"] = True
+        request_payload["stream_options"] = {"include_usage": True}
+        response_payload: dict[str, object] = {}
+        usage: dict[str, object] = {}
+        pieces: list[str] = []
+        try:
+            if self.capacity_gate is not None:
+                capacity_token = self.capacity_gate.acquire()
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.before_call()
+            request_span = mark_model_request_emitted()
+            try:
+                async with self.client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=request_payload,
+                ) as response:
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "").lower()
+                    if "text/event-stream" not in content_type:
+                        # A few OpenAI-compatible gateways accept ``stream``
+                        # but answer with the ordinary JSON completion shape.
+                        # Preserve correctness and one-call accounting; this
+                        # path simply cannot improve TTFT.
+                        payload = json.loads((await response.aread()).decode("utf-8"))
+                        if not isinstance(payload, dict):
+                            raise ValueError("model response must be a JSON object")
+                        response_payload.update(payload)
+                        payload_usage = payload.get("usage")
+                        if isinstance(payload_usage, dict):
+                            usage = payload_usage
+                        choices = payload.get("choices")
+                        message = (
+                            choices[0].get("message")
+                            if isinstance(choices, list)
+                            and choices
+                            and isinstance(choices[0], dict)
+                            else None
+                        )
+                        content = (
+                            message.get("content") if isinstance(message, dict) else None
+                        )
+                        if not isinstance(content, str) or not content:
+                            raise ValueError("model response content must be non-empty")
+                        mark_model_request_first_token(request_span)
+                        pieces.append(content)
+                        if on_text_delta is not None:
+                            callback_result = on_text_delta(content)
+                            if inspect.isawaitable(callback_result):
+                                await callback_result
+                    else:
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if not data or data == "[DONE]":
+                                continue
+                            event = json.loads(data)
+                            if not isinstance(event, dict):
+                                raise ValueError("stream event must be a JSON object")
+                            response_payload.update(event)
+                            event_usage = event.get("usage")
+                            if isinstance(event_usage, dict):
+                                usage = event_usage
+                            choices = event.get("choices")
+                            if not isinstance(choices, list) or not choices:
+                                continue
+                            choice = choices[0]
+                            delta = choice.get("delta") if isinstance(choice, dict) else None
+                            content = delta.get("content") if isinstance(delta, dict) else None
+                            if not isinstance(content, str) or not content:
+                                continue
+                            if not pieces:
+                                mark_model_request_first_token(request_span)
+                            pieces.append(content)
+                            if on_text_delta is not None:
+                                callback_result = on_text_delta(content)
+                                if inspect.isawaitable(callback_result):
+                                    await callback_result
+            finally:
+                mark_model_request_completed(request_span)
+            content = "".join(pieces)
+            if not content.strip():
+                raise ValueError("model stream content must be a non-empty string")
+        except asyncio.CancelledError as exc:
+            cancellation_kind = str(exc.args[0]) if exc.args else "caller_cancelled"
+            provider_timeout = cancellation_kind == "provider_timeout"
+            if self.capacity_gate is not None and capacity_token is not None:
+                self.capacity_gate.abandon(
+                    capacity_token,
+                    reason=(
+                        "provider_timeout"
+                        if provider_timeout
+                        else "cancelled_may_still_be_running"
+                    ),
+                )
+            if self.circuit_breaker is not None:
+                if provider_timeout:
+                    self.circuit_breaker.record_failure()
+                else:
+                    self.circuit_breaker.release_probe()
+            self._report_usage(
+                ModelCallUsage(
+                    purpose=purpose,
+                    model=self.model,
+                    status="failed",
+                    provider=self.provider,
+                    latency_ms=max(0, int((monotonic() - started) * 1000)),
+                    error="provider_timeout" if provider_timeout else "caller_cancelled",
+                    world_id=str(call_meta.get("world_id") or ""),
+                    turn_id=str(call_meta.get("turn_id") or ""),
+                    action_id=str(call_meta.get("action_id") or ""),
+                    cadence=str(call_meta.get("cadence") or ""),
+                    attempt=max(1, int(call_meta.get("attempt") or 1)),
+                    budget_reservation_id=str(call_meta.get("budget_reservation_id") or ""),
+                    thinking_enabled=self.thinking_enabled,
+                    reasoning_effort=(self.reasoning_effort if self.thinking_enabled else ""),
+                    billing_state="unknown",
+                )
+            )
+            raise
+        except Exception as exc:
+            provider_outage = _is_provider_outage(exc)
+            if self.capacity_gate is not None and capacity_token is not None:
+                if _provider_completion_may_still_be_running(exc):
+                    self.capacity_gate.abandon(
+                        capacity_token,
+                        reason=f"transport_ambiguous:{type(exc).__name__}",
+                    )
+                else:
+                    self.capacity_gate.release(capacity_token)
+            if self.circuit_breaker is not None and provider_outage:
+                self.circuit_breaker.record_failure()
+            self._report_usage(
+                ModelCallUsage(
+                    purpose=purpose,
+                    model=self.model,
+                    status="failed",
+                    provider=self.provider,
+                    latency_ms=max(0, int((monotonic() - started) * 1000)),
+                    error=f"stream_error:{type(exc).__name__}:{exc}"[:500],
+                    world_id=str(call_meta.get("world_id") or ""),
+                    turn_id=str(call_meta.get("turn_id") or ""),
+                    action_id=str(call_meta.get("action_id") or ""),
+                    cadence=str(call_meta.get("cadence") or ""),
+                    attempt=max(1, int(call_meta.get("attempt") or 1)),
+                    budget_reservation_id=str(call_meta.get("budget_reservation_id") or ""),
+                    thinking_enabled=self.thinking_enabled,
+                    reasoning_effort=(self.reasoning_effort if self.thinking_enabled else ""),
+                    billing_state="unknown",
+                )
+            )
+            raise
+        if self.capacity_gate is not None and capacity_token is not None:
+            self.capacity_gate.release(capacity_token)
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.record_success()
+        details = usage.get("completion_tokens_details")
+        details = details if isinstance(details, dict) else {}
+        usage_is_complete = all(
+            isinstance(usage.get(key), int)
+            and not isinstance(usage.get(key), bool)
+            and int(usage[key]) >= 0
+            for key in ("prompt_tokens", "completion_tokens")
+        )
+        self._report_usage(
+            ModelCallUsage(
+                purpose=purpose,
+                model=self.model,
+                status="succeeded",
+                provider=self.provider,
+                latency_ms=max(0, int((monotonic() - started) * 1000)),
+                prompt_tokens=_usage_int(usage, "prompt_tokens"),
+                completion_tokens=_usage_int(usage, "completion_tokens"),
+                reasoning_tokens=_usage_int(details, "reasoning_tokens"),
+                cache_hit_tokens=_usage_int(usage, "prompt_cache_hit_tokens"),
+                cache_miss_tokens=_usage_int(usage, "prompt_cache_miss_tokens"),
+                total_tokens=_usage_int(usage, "total_tokens"),
+                world_id=str(call_meta.get("world_id") or ""),
+                turn_id=str(call_meta.get("turn_id") or ""),
+                action_id=str(call_meta.get("action_id") or ""),
+                cadence=str(call_meta.get("cadence") or ""),
+                attempt=max(1, int(call_meta.get("attempt") or 1)),
+                budget_reservation_id=str(call_meta.get("budget_reservation_id") or ""),
+                thinking_enabled=self.thinking_enabled,
+                reasoning_effort=(self.reasoning_effort if self.thinking_enabled else ""),
+                billing_state="known" if usage_is_complete else "unknown",
+            )
+        )
+        if not usage_is_complete:
+            logger.warning(
+                "model stream completed without provider token usage provider=%s model=%s",
+                self.provider,
+                self.model,
+            )
+            return content, None
+        return content, self._provider_usage_provenance(
+            content=content,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            usage=usage,
+            details=details,
+        )
+
     async def _complete(
         self,
         messages: list[dict[str, str]],
@@ -1220,6 +1478,46 @@ class FailoverChatModel:
         ):
             raise AttributeError("failover JSON route does not have end-to-end metering")
         return self._complete_json_with_usage
+
+    @property
+    def complete_json_stream_with_usage(
+        self,
+    ) -> Callable[..., Awaitable[tuple[str, object]]]:
+        primary_stream = getattr(self.primary, "complete_json_stream_with_usage", None)
+        if not callable(primary_stream):
+            raise AttributeError("primary route does not support JSON streaming")
+        if self.implicit_failover and not callable(
+            getattr(self.fallback, "complete_json_stream_with_usage", None)
+        ):
+            raise AttributeError("failover route does not have end-to-end JSON streaming")
+        return self._complete_json_stream_with_usage
+
+    async def _complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta: Callable[[str], object] | None = None,
+    ) -> tuple[str, object]:
+        """Stream one route; never restart after bytes were exposed.
+
+        An implicit fallback after partial output would splice two authors into
+        one apparent thought.  Production expression routing already sets
+        ``implicit_failover=False`` and lets Deliberation own a clean retry.
+        """
+
+        if self.implicit_failover:
+            raise RuntimeError("streaming requires deliberation-owned failover")
+        method = getattr(self.primary, "complete_json_stream_with_usage")
+        result = await method(
+            messages,
+            temperature=temperature,
+            on_text_delta=on_text_delta,
+        )
+        self.last_provider = str(getattr(self.primary, "provider", "primary"))
+        self.last_model = str(getattr(self.primary, "model", type(self.primary).__name__))
+        self.last_attempt_used_fallback = False
+        return result
 
     async def _complete_with_usage(
         self,

@@ -12,10 +12,15 @@ from companion_daemon.world_v2.qq_ingress_policy import (
     MemoryQQIngressStore,
     QQIngressFragment,
     QQIngressPolicyCatalog,
+    QQIngressPolicyRow,
     SQLiteQQIngressStore,
     normalize_onebot_qq_ingress,
 )
 from companion_daemon.world_v2.qq_c2c_host import QQC2CHost
+from companion_daemon.world_v2.text_turn_endpoint import (
+    SemanticEndpointPrediction,
+    TextTurnEndpointController,
+)
 
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
@@ -29,6 +34,44 @@ def _text(source: str, text: str, *, observed_at: datetime = NOW) -> QQIngressFr
         content_shape="text",
         text=text,
     )
+
+
+def _catalog_with_window(window_ms: int) -> QQIngressPolicyCatalog:
+    return QQIngressPolicyCatalog(
+        tuple(
+            QQIngressPolicyRow(
+                content_shape=shape,  # type: ignore[arg-type]
+                continuity_signal=signal,  # type: ignore[arg-type]
+                window_ms=window_ms,
+                batch_mode=("metadata_only" if shape == "control" else "ordered_multimodal"),
+            )
+            for shape in ("text", "attachment", "mixed", "reaction", "sticker", "control")
+            for signal in (
+                "unknown",
+                "complete_thought",
+                "possible_continuation",
+                "long_narration",
+                "new_interjection",
+            )
+        )
+    )
+
+
+class _SemanticEndpointFixture:
+    model = "fixture:semantic-endpoint"
+
+    def __init__(self, probability_bp: int) -> None:
+        self.probability_bp = probability_bp
+        self.evidence = []
+
+    async def predict(self, evidence):  # type: ignore[no-untyped-def]
+        self.evidence.append(evidence)
+        return SemanticEndpointPrediction(
+            continuation_probability_bp=self.probability_bp,
+            confidence_bp=8_000,
+            evidence_summary=f"observed {len(evidence.batch_texts)} bubble(s)",
+            model_id=self.model,
+        )
 
 
 def test_qq_ingress_matrix_is_complete_machine_readable_and_bounded() -> None:
@@ -430,6 +473,64 @@ class _FailOnceWorldHost(_WorldHost):
         )
 
 
+class _DeliveredShapeWorldHost(_WorldHost):
+    async def delivered_text_character_count(self, action_id: str) -> int | None:
+        return {"action:text:1": 4, "action:text:2": 28}.get(action_id)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_exchange_shape_counts_only_positively_delivered_text() -> None:
+    host = QQC2CHost(
+        host=_DeliveredShapeWorldHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(),
+    )
+    host._recent_exchange_shapes.extend(  # noqa: SLF001 - endpoint evidence regression
+        (("exchange:old", 2, 0), ("exchange:current", 1, 0))
+    )
+    host._exchange_id_by_action_id.update(  # noqa: SLF001 - endpoint evidence regression
+        {
+            "action:text:1": "exchange:old",
+            "action:text:2": "exchange:current",
+        }
+    )
+    try:
+        await host._record_delivered_text_unit(  # noqa: SLF001 - endpoint evidence regression
+            SimpleNamespace(
+                action_id="action:text:1",
+                action_kind="reply",
+                status="settled",
+                provider_status="provider_accepted",
+            )
+        )
+        await host._record_delivered_text_unit(  # noqa: SLF001 - endpoint evidence regression
+            SimpleNamespace(
+                action_id="action:typing",
+                action_kind="typing",
+                status="settled",
+                provider_status="delivered",
+            )
+        )
+        for action_id in ("action:text:1", "action:text:2", "action:text:2"):
+            await host._record_delivered_text_unit(  # noqa: SLF001
+                SimpleNamespace(
+                    action_id=action_id,
+                    action_kind="reply",
+                    status="settled",
+                    provider_status="delivered",
+                )
+            )
+
+        assert tuple(host._recent_exchange_shapes) == (  # noqa: SLF001
+            ("exchange:old", 2, 1),
+            ("exchange:current", 1, 1),
+        )
+        assert tuple(host._recent_character_message_character_counts) == (4, 28)  # noqa: SLF001
+    finally:
+        await host.aclose()
+
+
 @pytest.mark.asyncio
 async def test_failed_claim_retry_keeps_identical_observation_metadata() -> None:
     clock = {"now": NOW + timedelta(seconds=1)}
@@ -649,6 +750,133 @@ def _manual_clock(start: datetime):
         raise AssertionError("test clock driver exhausted its budget")
 
     return clock, idle_sleep, drive
+
+
+@pytest.mark.asyncio
+async def test_semantic_endpoint_commits_a_likely_complete_single_bubble_after_100ms() -> None:
+    clock, idle_sleep, drive = _manual_clock(NOW)
+    world = _WorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(catalog=_catalog_with_window(100)),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=idle_sleep,
+        endpoint_controller=TextTurnEndpointController(
+            model=_SemanticEndpointFixture(500)
+        ),
+    )
+    task = asyncio.create_task(
+        host.inbound_fragment(_text("message:endpoint-fast", "早", observed_at=NOW))
+    )
+    try:
+        await drive(lambda: len(world.inbounds) == 1, step=0.01, limit_seconds=1)
+        result = await task
+        assert result.status == "observed_only"
+        # The manual driver advances in 10ms quanta and may need several event
+        # loop handoffs for claim/commit; the configured listening opportunity
+        # itself remains the independently asserted 100ms below.
+        assert clock["now"] <= NOW + timedelta(milliseconds=200)
+        assert host.text_endpoint_health()["last_schedule"]["wait_ms"] == 100  # type: ignore[index]
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_semantic_endpoint_keeps_a_seconds_later_continuation_in_one_turn() -> None:
+    clock, idle_sleep, drive = _manual_clock(NOW)
+    world = _WorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(catalog=_catalog_with_window(100)),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=idle_sleep,
+        endpoint_controller=TextTurnEndpointController(
+            model=_SemanticEndpointFixture(9_000)
+        ),
+    )
+    first = asyncio.create_task(
+        host.inbound_fragment(
+            _text("message:endpoint-long-1", "其实我还想说", observed_at=NOW)
+        )
+    )
+    second: asyncio.Task[object] | None = None
+    try:
+        await drive(
+            lambda: clock["now"] >= NOW + timedelta(seconds=1),
+            step=0.05,
+        )
+        assert world.inbounds == []
+        second = asyncio.create_task(
+            host.inbound_fragment(
+                _text(
+                    "message:endpoint-long-2",
+                    "下午那件事后来有进展了",
+                    observed_at=clock["now"],
+                )
+            )
+        )
+        await drive(lambda: len(world.inbounds) == 1, step=0.05, limit_seconds=5)
+        left, right = await asyncio.gather(first, second)
+        assert left == right
+        assert world.inbounds[0].text == "其实我还想说\n下午那件事后来有进展了"
+    finally:
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (first, second) if task is not None),
+            return_exceptions=True,
+        )
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_endpoint_evidence_keeps_bounded_personal_cadence_and_exchange_shape() -> None:
+    model = _SemanticEndpointFixture(500)
+    world = _WorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(catalog=_catalog_with_window(100)),
+        endpoint_controller=TextTurnEndpointController(model=model),
+    )
+    try:
+        # Long-running personal cadence history remains bounded at the exact
+        # endpoint evidence contract instead of eventually throwing on the
+        # seventeenth observed gap.
+        host._personal_bubble_gap_seconds.extend(  # noqa: SLF001 - contract regression
+            0.2 + index / 100 for index in range(40)
+        )
+        host._recent_exchange_shapes.extend(  # noqa: SLF001 - contract regression
+            (f"exchange:{index}", index % 5, (index + 1) % 4)
+            for index in range(24)
+        )
+        host._endpoint_fragments.append(  # noqa: SLF001 - contract regression
+            ("message:endpoint-evidence", "我再想想")
+        )
+        host._restart_endpoint_prediction(received_at=NOW)  # noqa: SLF001
+        assert host._endpoint_task is not None  # noqa: SLF001
+        await host._endpoint_task  # noqa: SLF001
+
+        captured = model.evidence[-1]
+        assert len(captured.recent_gap_seconds) == 16
+        assert len(captured.recent_exchange_user_bubble_counts) == 16
+        assert len(captured.recent_exchange_character_bubble_counts) == 16
+        assert tuple(zip(
+            captured.recent_exchange_user_bubble_counts,
+            captured.recent_exchange_character_bubble_counts,
+            strict=True,
+        )) == tuple(
+            (user_count, character_count)
+            for _, user_count, character_count in host._recent_exchange_shapes  # noqa: SLF001
+        )
+    finally:
+        await host.aclose()
 
 
 @pytest.mark.asyncio

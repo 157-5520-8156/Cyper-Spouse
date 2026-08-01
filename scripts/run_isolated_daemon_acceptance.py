@@ -1136,6 +1136,11 @@ def _daemon_environment(
             "WORLD_V2_RECALL_SEMANTIC_ENABLED": "false",
             "LOCAL_APPRAISAL_ENABLED": "false",
             "WORLD_V2_CONTEXTUAL_FAILSAFE_ENABLED": "false",
+            # The legacy loopback provider fixture returns ordinary JSON and
+            # does not implement the expression-units SSE contract. Streaming
+            # has its own transport + production-host acceptance tests; keep
+            # this hash-capture harness on its declared non-streaming surface.
+            "WORLD_V2_EXPRESSION_EPISODE_MODE": "shadow",
             "ATTACHMENT_CACHE_PATH": str(attachment_cache),
         }
     )

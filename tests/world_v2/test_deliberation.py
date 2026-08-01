@@ -32,6 +32,7 @@ from companion_daemon.world_v2.deliberation import (
     ModelOutput,
     ModelRoute,
     ModelUsageProvenance,
+    PhysicalProviderInvocationAudit,
     RouteRequest,
     TriggerMessage,
     ValidationTechnicalFailure,
@@ -3199,3 +3200,286 @@ async def test_expression_episode_on_retains_auditable_full_append_tail() -> Non
     assert tail.deliberation is not None
     assert tail.deliberation.proposal is not None
     assert tail.deliberation.audit.status == "proposal_validated"
+
+
+@pytest.mark.asyncio
+async def test_new_attention_invalidates_tail_that_has_not_registered_yet() -> None:
+    class RegistrationRaceMain(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.head_started = asyncio.Event()
+            self.tail_started = asyncio.Event()
+            self.release_head = asyncio.Event()
+            self.release_tail = asyncio.Event()
+            self.tail_cancelled = asyncio.Event()
+
+        def stream_provider_available(self, _request: ModelInput) -> bool:
+            return True
+
+        async def propose_stream_head(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            self.head_started.set()
+            await self.release_head.wait()
+            return ModelOutput(
+                model_id="stream-head",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+                episode_disposition="append",
+            )
+
+        async def propose_stream_tail(self, request: ModelInput) -> ModelOutput:
+            self.tail_started.set()
+            try:
+                await self.release_tail.wait()
+            except asyncio.CancelledError:
+                self.tail_cancelled.set()
+                raise
+            raise AssertionError("stale stream tail must be cancelled before release")
+
+    main = RegistrationRaceMain()
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=_Quick(),
+        expression_episode_mode="stream",
+    )
+    turn = asyncio.create_task(
+        deliberation.deliberate(
+            _capsule(),
+            attempt_id="attempt:stream-registration-race",
+            budget=InteractiveTurnBudgetPolicy(
+                total_seconds=1.0,
+                hedge_after_seconds=0.2,
+                acceptance_dispatch_reserve_seconds=0.2,
+            ).start(),
+        )
+    )
+    try:
+        await asyncio.wait_for(main.head_started.wait(), timeout=0.1)
+        await asyncio.wait_for(main.tail_started.wait(), timeout=0.1)
+
+        # The newer inbound arrives before the old head has validated, so the
+        # old continuation is not present in the process-local registry yet.
+        await deliberation.cancel_superseded_expression_streams(
+            "event:observation:newer-attention"
+        )
+        main.release_head.set()
+        result = await asyncio.wait_for(turn, timeout=0.5)
+
+        assert result.proposal is None
+        assert result.audit.failure_code == "stream_superseded_by_newer_input"
+        assert not deliberation.has_expression_episode_tail(_capsule().capsule.trigger_ref)
+        await asyncio.wait_for(main.tail_cancelled.wait(), timeout=0.1)
+    finally:
+        main.release_head.set()
+        main.release_tail.set()
+        if not turn.done():
+            turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        await deliberation.aclose()
+
+
+@pytest.mark.asyncio
+async def test_completed_physical_stream_records_invalid_semantic_tail_as_completed() -> None:
+    parent_call_id = "model-call:physical-stream"
+    parent_request_hash = "a" * 64
+    head_call_id = "model-call:semantic-head"
+    tail_call_id = "model-call:semantic-tail"
+
+    class InvalidTailMain(_Main):
+        def stream_provider_available(self, _request: ModelInput) -> bool:
+            return True
+
+        async def propose_stream_head(self, request: ModelInput) -> ModelOutput:
+            return ModelOutput(
+                model_id="stream-role",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+                winning_model_call_id=head_call_id,
+                winning_request_hash=parent_request_hash,
+                provider_parent_model_call_id=parent_call_id,
+                semantic_stream_part="head",
+                episode_disposition="append",
+            )
+
+        async def propose_stream_tail(self, request: ModelInput) -> ModelOutput:
+            return ModelOutput(
+                model_id="stream-role",
+                model_version="v1",
+                raw_proposal={"not": "an expression proposal"},
+                winning_model_call_id=tail_call_id,
+                winning_request_hash=parent_request_hash,
+                provider_parent_model_call_id=parent_call_id,
+                semantic_stream_part="tail",
+                physical_provider_audits=(
+                    PhysicalProviderInvocationAudit(
+                        model_call_id=parent_call_id,
+                        request_hash=parent_request_hash,
+                        model_id="stream-role",
+                        model_version="v1",
+                        outcome="completed",
+                        response_hash="b" * 64,
+                        usage_status="unresolved",
+                        semantic_model_call_ids=(head_call_id, tail_call_id),
+                    ),
+                ),
+                episode_disposition="append",
+            )
+
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=InvalidTailMain(),
+        quick_recovery=_Quick(),
+        expression_episode_mode="stream",
+    )
+    result = await deliberation.deliberate(
+        _capsule(),
+        attempt_id="attempt:completed-invalid-tail",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+
+    assert result.proposal is not None
+    tail = await deliberation.await_expression_episode_tail(result.proposal.trigger_ref)
+    assert tail is not None
+    assert tail.failure_code == "invalid"
+    assert tail.deliberation is not None
+    audit = tail.deliberation.audit
+    assert audit.status == "main_invalid"
+    assert audit.failure_code == "main_invalid_output"
+    assert audit.physical_provider_audits[0].outcome == "completed"
+    await deliberation.aclose()
+
+
+@pytest.mark.asyncio
+async def test_corrected_stream_tail_keeps_original_physical_lineage_separate() -> None:
+    parent_call_id = "model-call:physical-corrected-stream"
+    parent_request_hash = "c" * 64
+    head_call_id = "model-call:corrected-stream-head"
+    tail_call_id = "model-call:" + sha256(
+        json.dumps(
+            {"provider_call_id": parent_call_id, "unit": "tail"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    correction_call_id = "model-call:corrected-stream-reselection"
+
+    class CorrectedTailMain(_Main):
+        def stream_provider_available(self, _request: ModelInput) -> bool:
+            return True
+
+        async def propose_stream_head(self, request: ModelInput) -> ModelOutput:
+            return ModelOutput(
+                model_id="stream-role",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+                winning_model_call_id=head_call_id,
+                winning_request_hash=parent_request_hash,
+                provider_parent_model_call_id=parent_call_id,
+                semantic_stream_part="head",
+                episode_disposition="append",
+            )
+
+        async def propose_stream_tail(self, request: ModelInput) -> ModelOutput:
+            return ModelOutput(
+                model_id="stream-role",
+                model_version="v1",
+                raw_proposal=_decision_raw(),
+                winning_model_call_id=correction_call_id,
+                winning_request_hash="d" * 64,
+                physical_provider_audits=(
+                    PhysicalProviderInvocationAudit(
+                        model_call_id=parent_call_id,
+                        request_hash=parent_request_hash,
+                        model_id="stream-role",
+                        model_version="v1",
+                        outcome="completed",
+                        response_hash="e" * 64,
+                        usage_status="unresolved",
+                        semantic_model_call_ids=(head_call_id, tail_call_id),
+                    ),
+                ),
+                episode_disposition="append",
+            )
+
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=CorrectedTailMain(),
+        quick_recovery=_Quick(),
+        expression_episode_mode="stream",
+    )
+    result = await deliberation.deliberate(
+        _capsule(),
+        attempt_id="attempt:corrected-stream-tail",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+
+    assert result.proposal is not None
+    tail = await deliberation.await_expression_episode_tail(result.proposal.trigger_ref)
+    assert tail is not None
+    assert tail.disposition == "append"
+    assert tail.deliberation is not None
+    assert tail.deliberation.proposal is not None
+    original, corrected = tail.deliberation.attempt_audits
+    assert original.model_call_id == tail_call_id
+    assert original.status == "main_invalid"
+    assert original.physical_provider_audits[0].outcome == "completed"
+    assert corrected.model_call_id == correction_call_id
+    assert corrected.status == "main_invalid_recovered"
+    assert corrected.physical_provider_audits == ()
+    await deliberation.aclose()
+
+
+@pytest.mark.asyncio
+async def test_superseded_tail_cancellation_join_is_bounded_and_observed() -> None:
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=_Main(),
+        quick_recovery=_Quick(),
+        expression_episode_mode="stream",
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cancellation_suppressing_tail() -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+
+    tail = asyncio.create_task(cancellation_suppressing_tail())
+    deliberation._episode_tail_tasks["event:observation:old"] = tail  # type: ignore[assignment]
+    await asyncio.wait_for(started.wait(), timeout=0.1)
+    cancellation = asyncio.create_task(
+        deliberation.cancel_superseded_expression_streams(
+            "event:observation:newer-attention"
+        )
+    )
+    returned_promptly = False
+    try:
+        done, _ = await asyncio.wait((cancellation,), timeout=0.05)
+        returned_promptly = cancellation in done
+        assert returned_promptly
+        await cancellation
+        assert cancelled.is_set()
+        assert deliberation.shutdown_pending_task_count == 1
+
+        release.set()
+        await asyncio.wait_for(deliberation.wait_for_shutdown_quiescence(), timeout=0.1)
+        assert deliberation.shutdown_pending_task_count == 0
+    finally:
+        release.set()
+        if not returned_promptly:
+            await asyncio.wait_for(cancellation, timeout=0.1)
+        await deliberation.aclose()

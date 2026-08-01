@@ -546,7 +546,7 @@ class WorldV2TurnApplicationConfig:
     interactive_turn_budget_policy: InteractiveTurnBudgetPolicy = InteractiveTurnBudgetPolicy()
     # Generic/test composition is byte-compatible by default. The production
     # QQ root explicitly selects shadow below; validation may explicitly use on.
-    expression_episode_mode: Literal["off", "shadow", "on"] = "off"
+    expression_episode_mode: Literal["off", "shadow", "on", "stream"] = "off"
     recorded_cadence_mode: Literal["off", "shadow", "on"] = "off"
     expression_action_kinds: frozenset[str] = frozenset({"reply", "followup", "proactive_message"})
     # Capability is a transport fact shared with proactive authoring.  It is
@@ -669,8 +669,8 @@ class WorldV2TurnApplicationConfig:
             raise ValueError("chat budget limits are invalid")
         if not self.reply_recovery_policy:
             raise ValueError("reply recovery policy must not be empty")
-        if self.expression_episode_mode not in {"off", "shadow", "on"}:
-            raise ValueError("expression episode mode must be off, shadow, or on")
+        if self.expression_episode_mode not in {"off", "shadow", "on", "stream"}:
+            raise ValueError("expression episode mode must be off, shadow, on, or stream")
         if self.recorded_cadence_mode not in {"off", "shadow", "on"}:
             raise ValueError("recorded cadence mode must be off, shadow, or on")
         if not self.expression_action_kinds:
@@ -816,6 +816,38 @@ class WorldV2TurnApplication:
         outcome = await self._turns.respond(inbound)
         self._last_character_outcome = outcome.status
         return outcome
+
+    async def cancel_superseded_expression_streams(
+        self, current_trigger_ref: str
+    ) -> None:
+        """Drop only process-local, not-yet-visible units for newer ingress."""
+
+        await self._turns.cancel_superseded_expression_streams(
+            current_trigger_ref
+        )
+
+    async def delivered_text_character_count(self, action_id: str) -> int | None:
+        """Resolve the exact immutable text behind one delivered Action."""
+
+        projection = (
+            await asyncio.to_thread(self._ledger.project)
+            if self._ledger.blocks_event_loop
+            else self._ledger.project()
+        )
+        actions = tuple(item for item in projection.actions if item.action_id == action_id)
+        if len(actions) != 1 or actions[0].kind not in {
+            "reply",
+            "followup",
+            "proactive_message",
+        }:
+            return None
+        payload = await LedgerAuthorizedPayloadReader(
+            ledger=self._ledger,
+            expression_payload_store=self._expression_payload_store,
+        ).resolve(actions[0])
+        if not payload.content_type.startswith("text/"):
+            return None
+        return len(payload.body)
 
     async def inbound(
         self,

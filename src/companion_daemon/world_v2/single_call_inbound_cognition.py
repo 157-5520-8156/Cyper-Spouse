@@ -611,6 +611,14 @@ class SingleCallExpressionAdapter:
 
         return self._owner._recovery_expression is not None
 
+    def stream_provider_available(self, _request: ModelInput) -> bool:
+        adapter = self._owner._fallback_expression
+        available = getattr(adapter, "stream_provider_available", None)
+        if callable(available):
+            return bool(available(_request))
+        available = getattr(adapter, "expression_unit_stream_available", None)
+        return bool(callable(available) and available())
+
     def shadow_observer_provider_available(self, _request: ModelInput) -> bool:
         """Never infer observation capacity from the formal recovery lane."""
 
@@ -629,6 +637,15 @@ class SingleCallExpressionAdapter:
         if adapter is None:
             raise RuntimeError("expression episode requires an independent recovery provider")
         return await adapter.propose_provisional(request)
+
+    async def propose_stream_head(self, request: ModelInput) -> ModelOutput:
+        return await self._owner._fallback_expression.propose_stream_head(request)
+
+    async def propose_stream_tail(self, request: ModelInput) -> ModelOutput:
+        return await self._owner._fallback_expression.propose_stream_tail(request)
+
+    def advance_expression_attention(self, attention_ref: str) -> None:
+        self._owner._fallback_expression.advance_expression_attention(attention_ref)
 
     async def propose_shadow_observer(self, request: ModelInput) -> ModelOutput:
         """Observe one candidate through the explicitly isolated client."""

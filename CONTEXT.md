@@ -453,6 +453,25 @@ If that cursor becomes stale before an authoritative write, the Pinned Turn is
 discarded and rebuilt; it never grants a stale Proposal acceptance.
 _Avoid_: Chat turn, mutable prompt session
 
+## Text Turn Endpoint
+
+A provider-local, advisory estimate of whether the same user is likely to add
+another text bubble soon. It may combine the uncommitted batch, personal
+bubble-gap history, typing presence, burst evidence, and recent message
+lengths to size one bounded listening opportunity. It has no authority over a
+character reply, interruption, silence, wording, or World mutation; new input
+invalidates the older estimate.
+_Avoid_: Turn-taking policy, punctuation rule, reply classifier
+
+## Expression Unit Stream
+
+One role-author provider response whose transport envelope exposes a complete,
+independently valid first Expression Beat before any additional model-chosen
+Beats finish arriving. Every unit still passes the normal source, permission,
+Action, receipt and latest-cursor gates. A tail cannot win independently or be
+regenerated after restart merely because its already delivered head survived.
+_Avoid_: Two-author provisional reply, token-by-token QQ output
+
 ## Internal World Snapshot
 
 A revision-pinned, read-only deep Projection containing the authoritative material required by WorldRuntime internals. It is produced by deterministic reducers and is never exposed as a viewer-facing projection or edited as a second source of truth.

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import logging
+from threading import Lock
 from typing import Any, Literal, NamedTuple, Protocol
 
 from pydantic import Field, ValidationError
@@ -33,6 +34,7 @@ from .deliberation import (
     ModelInput,
     ModelOutput,
     ModelUsageProvenance,
+    PhysicalProviderInvocationAudit,
     ProviderSubcallAudit,
     ValidationTechnicalFailure,
     begin_validation_reselection_recovery,
@@ -1070,6 +1072,22 @@ class ValidationReselectionResult(NamedTuple):
 class _ProviderInvocationIdentity(NamedTuple):
     model_call_id: str
     request_hash: str
+
+
+def _stream_unit_identity(
+    provider_identity: _ProviderInvocationIdentity,
+    part: Literal["head", "tail"],
+) -> _ProviderInvocationIdentity:
+    return _ProviderInvocationIdentity(
+        model_call_id="model-call:"
+        + _digest(
+            {
+                "provider_call_id": provider_identity.model_call_id,
+                "unit": part,
+            }
+        ),
+        request_hash=provider_identity.request_hash,
+    )
 
 
 def _provider_invocation_identity(
@@ -7379,6 +7397,271 @@ class MeteredChatCompletionModel(ChatCompletionModel, Protocol):
     ) -> tuple[str, ModelUsageProvenance | dict[str, Any]]: ...
 
 
+@dataclass(slots=True)
+class _ExpressionUnitStreamSession:
+    head: asyncio.Future[str]
+    completed: asyncio.Task[tuple[str, str, object, str]]
+    provider_identity: _ProviderInvocationIdentity
+    waiters: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpressionStreamGeneration:
+    attention_epoch: int
+    cursor: tuple[int, int, int]
+    observation_identity: tuple[str, str]
+    ordinal: int
+
+
+class _ExpressionStreamGenerationCoordinator:
+    """Serialize stream ownership across Flash and Thinking provider leaves."""
+
+    _MAX_OWNED_PROVIDER_TASKS = 2
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._attention_epoch = 0
+        self._ordinal = 0
+        self._latest: _ExpressionStreamGeneration | None = None
+        self._active: tuple[_ExpressionStreamGeneration, asyncio.Task[object]] | None = None
+        self._owned_provider_tasks: set[asyncio.Task[object]] = set()
+
+    def reserve(self, request: ModelInput) -> _ExpressionStreamGeneration:
+        trigger = request.trigger_message
+        identity = (
+            trigger.observation_ref if trigger is not None else request.trigger_ref,
+            trigger.event_payload_hash if trigger is not None else request.capsule_id,
+        )
+        cursor = (
+            request.evaluated_ledger_sequence,
+            request.evaluated_world_revision,
+            request.evaluated_deliberation_revision,
+        )
+        cancel: asyncio.Task[object] | None = None
+        with self._lock:
+            self._ordinal += 1
+            token = _ExpressionStreamGeneration(
+                attention_epoch=self._attention_epoch,
+                cursor=cursor,
+                observation_identity=identity,
+                ordinal=self._ordinal,
+            )
+            latest = self._latest
+            if latest is None or (token.attention_epoch, token.cursor, token.ordinal) > (
+                latest.attention_epoch,
+                latest.cursor,
+                latest.ordinal,
+            ):
+                self._latest = token
+                if self._active is not None and self._active[0] != token:
+                    cancel = self._active[1]
+                    self._active = None
+        if cancel is not None and not cancel.done():
+            cancel.cancel("expression_stream_superseded_by_newer_cursor")
+        return token
+
+    def activate(
+        self,
+        token: _ExpressionStreamGeneration,
+        task: asyncio.Task[object],
+    ) -> None:
+        cancel: asyncio.Task[object] | None = None
+        with self._lock:
+            self._owned_provider_tasks = {
+                owned for owned in self._owned_provider_tasks if not owned.done()
+            }
+            if token != self._latest or token.attention_epoch != self._attention_epoch:
+                raise asyncio.CancelledError("expression_stream_generation_superseded")
+            if (
+                task not in self._owned_provider_tasks
+                and len(self._owned_provider_tasks) >= self._MAX_OWNED_PROVIDER_TASKS
+            ):
+                raise asyncio.CancelledError("expression_stream_resource_bound")
+            if self._active is not None and self._active != (token, task):
+                cancel = self._active[1]
+            self._active = (token, task)
+            self._owned_provider_tasks.add(task)
+        if cancel is not None and not cancel.done():
+            cancel.cancel("expression_stream_superseded_at_provider_start")
+
+    def require_current(self, token: _ExpressionStreamGeneration) -> None:
+        with self._lock:
+            current = token == self._latest and token.attention_epoch == self._attention_epoch
+        if not current:
+            raise asyncio.CancelledError("expression_stream_generation_superseded")
+
+    def is_current(self, token: _ExpressionStreamGeneration) -> bool:
+        with self._lock:
+            return token == self._latest and token.attention_epoch == self._attention_epoch
+
+    def complete(
+        self,
+        token: _ExpressionStreamGeneration,
+        task: asyncio.Task[object],
+    ) -> None:
+        with self._lock:
+            if self._active == (token, task):
+                self._active = None
+            self._owned_provider_tasks.discard(task)
+
+    def advance_attention(self) -> None:
+        cancel: asyncio.Task[object] | None = None
+        with self._lock:
+            self._attention_epoch += 1
+            self._latest = None
+            if self._active is not None:
+                cancel = self._active[1]
+                self._active = None
+        if cancel is not None and not cancel.done():
+            cancel.cancel("expression_stream_superseded_by_newer_attention")
+
+    def cancel(self, token: _ExpressionStreamGeneration) -> None:
+        cancel: asyncio.Task[object] | None = None
+        with self._lock:
+            if self._latest == token:
+                self._latest = None
+            if self._active is not None and self._active[0] == token:
+                cancel = self._active[1]
+                self._active = None
+        if cancel is not None and not cancel.done():
+            cancel.cancel("expression_stream_reselection_started")
+
+
+def _stream_first_expression(raw: str) -> str:
+    value = _parse_json_object(raw)
+    if set(value) != {"protocol", "first", "continuation"}:
+        raise ValueError("expression unit stream envelope fields are invalid")
+    if value["protocol"] != "expression-units.1":
+        raise ValueError("expression unit stream protocol is invalid")
+    first = value["first"]
+    continuation = value["continuation"]
+    if not isinstance(first, dict) or not isinstance(continuation, list):
+        raise ValueError("expression unit stream envelope shape is invalid")
+    timing = first.get("timing_choice")
+    beats = first.get("beats")
+    if not isinstance(beats, list):
+        raise ValueError("expression stream first beats must be an array")
+    if timing == "now":
+        if len(beats) not in {1, 2}:
+            raise ValueError(
+                "immediate expression stream first unit must contain one visible beat "
+                "with at most one leading typing beat"
+            )
+        if len(beats) == 2 and (
+            not isinstance(beats[0], dict)
+            or beats[0].get("modality") != "typing"
+            or not isinstance(beats[1], dict)
+            or beats[1].get("modality") == "typing"
+        ):
+            raise ValueError(
+                "two-beat expression stream head must be typing then one visible beat"
+            )
+    if timing in {"later", "silent"} and continuation:
+        raise ValueError("deferred or silent stream cannot carry continuation units")
+    disposition = first.get("episode_disposition")
+    expected_disposition = "append" if continuation else "complete_without_more"
+    if disposition != expected_disposition:
+        raise ValueError("expression stream disposition does not match its units")
+    return json.dumps(first, ensure_ascii=False, separators=(",", ":"))
+
+
+def _stream_tail_expression(raw: str) -> str:
+    value = _parse_json_object(raw)
+    first_raw = _stream_first_expression(raw)
+    first = _parse_json_object(first_raw)
+    continuation = value["continuation"]
+    assert isinstance(continuation, list)
+    if first.get("timing_choice") in {"later", "silent"} and continuation:
+        raise ValueError("deferred or silent stream cannot carry continuation units")
+    tail_beats: list[object] = []
+    tail_claims: list[object] = []
+    for unit in continuation:
+        if not isinstance(unit, dict) or set(unit) != {"beat", "world_claims"}:
+            raise ValueError("expression continuation unit shape is invalid")
+        claims = unit["world_claims"]
+        if not isinstance(claims, list):
+            raise ValueError("expression continuation claims must be an array")
+        tail_beats.append(unit["beat"])
+        tail_claims.extend(claims)
+    tail = dict(first)
+    tail.pop("delay_seconds", None)
+    tail.pop("expires_after_seconds", None)
+    tail.pop("response_expectation", None)
+    tail.pop("response_expectation_assessment", None)
+    if tail_beats:
+        tail["timing_choice"] = "now"
+        tail["beats"] = tail_beats
+        tail["world_claims"] = tail_claims
+        tail["episode_disposition"] = "append"
+    else:
+        tail["timing_choice"] = "silent"
+        tail["beats"] = []
+        tail["world_claims"] = []
+        tail["episode_disposition"] = "complete_without_more"
+    return json.dumps(tail, ensure_ascii=False, separators=(",", ":"))
+
+
+def _incremental_first_expression(buffer: str) -> str | None:
+    marker = '"first"'
+    start = buffer.find(marker)
+    if start < 0:
+        return None
+    object_start = next(
+        (index for index, character in enumerate(buffer) if not character.isspace()),
+        -1,
+    )
+    if object_start < 0 or buffer[object_start] != "{":
+        raise ValueError("expression unit stream must begin with an object")
+    key_start = object_start + 1
+    while key_start < len(buffer) and buffer[key_start].isspace():
+        key_start += 1
+    try:
+        first_key, key_end = json.JSONDecoder().raw_decode(buffer, key_start)
+    except json.JSONDecodeError:
+        return None
+    if first_key != "protocol":
+        raise ValueError("expression unit stream must serialize protocol first")
+    protocol_colon = buffer.find(":", key_end, start)
+    if protocol_colon < 0:
+        return None
+    protocol_start = protocol_colon + 1
+    while protocol_start < len(buffer) and buffer[protocol_start].isspace():
+        protocol_start += 1
+    try:
+        protocol, protocol_end = json.JSONDecoder().raw_decode(buffer, protocol_start)
+    except json.JSONDecodeError:
+        return None
+    if protocol != "expression-units.1" or protocol_end > start:
+        raise ValueError("expression unit stream protocol is invalid")
+    second_key_start = protocol_end
+    while second_key_start < len(buffer) and buffer[second_key_start].isspace():
+        second_key_start += 1
+    if second_key_start >= len(buffer) or buffer[second_key_start] != ",":
+        return None
+    second_key_start += 1
+    while second_key_start < len(buffer) and buffer[second_key_start].isspace():
+        second_key_start += 1
+    try:
+        second_key, _ = json.JSONDecoder().raw_decode(buffer, second_key_start)
+    except json.JSONDecodeError:
+        return None
+    if second_key != "first" or second_key_start != start:
+        raise ValueError("expression unit stream must serialize first second")
+    colon = buffer.find(":", start + len(marker))
+    if colon < 0:
+        return None
+    value_start = colon + 1
+    while value_start < len(buffer) and buffer[value_start].isspace():
+        value_start += 1
+    try:
+        value, _ = json.JSONDecoder().raw_decode(buffer, value_start)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("expression stream first unit must be an object")
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 class ChatModelDeliberationAdapter:
     """Turn an ordinary chat completion into one inert World v2 proposal.
 
@@ -7409,6 +7692,7 @@ class ChatModelDeliberationAdapter:
         recall_coordinator: RecallCoordinator | None = None,
         recovery_context_store: _ExpressionRecoveryContextStore | None = None,
         require_explicit_authored_decision_fields: bool = False,
+        stream_generation_coordinator: _ExpressionStreamGenerationCoordinator | None = None,
     ) -> None:
         if not 0.0 <= temperature <= 2.0:
             raise ValueError("proposal adapter temperature must be between 0 and 2")
@@ -7434,6 +7718,15 @@ class ChatModelDeliberationAdapter:
         self._recall = recall_coordinator
         self._recovery_contexts = recovery_context_store or _ExpressionRecoveryContextStore()
         self._require_explicit_authored_decision_fields = require_explicit_authored_decision_fields
+        self._stream_generation_coordinator = (
+            stream_generation_coordinator or _ExpressionStreamGenerationCoordinator()
+        )
+        self._unit_stream_tokens: OrderedDict[
+            tuple[str, str, int, int, int], _ExpressionStreamGeneration
+        ] = OrderedDict()
+        self._unit_stream_sessions: OrderedDict[
+            tuple[str, str, int, int, int], _ExpressionUnitStreamSession
+        ] = OrderedDict()
 
     def accept_candidate(self, request: ModelInput) -> None:
         """Release process-local recovery attention after authoritative acceptance."""
@@ -7491,6 +7784,205 @@ class ChatModelDeliberationAdapter:
             failure_code=None,
         )
 
+    def expression_unit_stream_available(self) -> bool:
+        try:
+            operation = getattr(self._model, "complete_json_stream_with_usage")
+        except AttributeError:
+            return False
+        return callable(operation)
+
+    async def propose_stream_head(self, request: ModelInput) -> ModelOutput:
+        stream_generation = self._stream_generation(request)
+        return await self._complete_with_provider_audit(
+            request=request,
+            quick_recovery=False,
+            provisional=False,
+            failure_code=None,
+            stream_part="head",
+            stream_generation=stream_generation,
+        )
+
+    async def propose_stream_tail(self, request: ModelInput) -> ModelOutput:
+        stream_generation = self._stream_generation(request)
+        return await self._complete_with_provider_audit(
+            request=request,
+            quick_recovery=False,
+            provisional=False,
+            failure_code=None,
+            stream_part="tail",
+            stream_generation=stream_generation,
+        )
+
+    def _unit_stream_key(
+        self, request: ModelInput
+    ) -> tuple[str, str, int, int, int]:
+        trigger = request.trigger_message
+        source = trigger.event_payload_hash if trigger is not None else request.capsule_id
+        return (
+            request.trigger_ref,
+            source,
+            request.evaluated_world_revision,
+            request.evaluated_deliberation_revision,
+            request.evaluated_ledger_sequence,
+        )
+
+    def cancel_expression_unit_streams(self) -> None:
+        """Cancel every unfinished stream owned by this leaf adapter."""
+
+        for session in self._unit_stream_sessions.values():
+            if not session.completed.done():
+                session.completed.cancel()
+
+    @staticmethod
+    def _observe_expression_unit_stream_task(task: asyncio.Task[object]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    def advance_expression_attention(self, _attention_ref: str) -> None:
+        """Invalidate every older provider generation without awaiting teardown."""
+
+        self._stream_generation_coordinator.advance_attention()
+        self.cancel_expression_unit_streams()
+
+    def _stream_generation(self, request: ModelInput) -> _ExpressionStreamGeneration:
+        key = self._unit_stream_key(request)
+        token = self._unit_stream_tokens.get(key)
+        if token is not None:
+            self._unit_stream_tokens.move_to_end(key)
+            return token
+        token = self._stream_generation_coordinator.reserve(request)
+        self._unit_stream_tokens[key] = token
+        while len(self._unit_stream_tokens) > 32:
+            self._unit_stream_tokens.popitem(last=False)
+        return token
+
+    def _cancel_unit_stream_for(self, request: ModelInput) -> None:
+        key = self._unit_stream_key(request)
+        token = self._unit_stream_tokens.pop(key, None)
+        session = self._unit_stream_sessions.get(key)
+        if token is not None:
+            self._stream_generation_coordinator.cancel(token)
+        if session is not None and not session.completed.done():
+            session.completed.cancel("expression_stream_reselection_started")
+
+    async def _unit_stream_result(
+        self,
+        *,
+        request: ModelInput,
+        messages: list[dict[str, str]],
+        temperature: float,
+        part: Literal["head", "tail"],
+        provider_identity: _ProviderInvocationIdentity,
+        stream_generation: _ExpressionStreamGeneration,
+    ) -> tuple[str, object | None, _ProviderInvocationIdentity, str | None]:
+        key = self._unit_stream_key(request)
+        session = self._unit_stream_sessions.get(key)
+        if session is None:
+            # Reaching this point means the new request is already bound to a
+            # newer durable cursor. Keep at most one visible author stream:
+            # older speculative tails cannot consume provider work after the
+            # ledger has made them stale.
+            for old_key, old_session in tuple(self._unit_stream_sessions.items()):
+                if old_key != key and not old_session.completed.done():
+                    old_session.completed.cancel()
+            loop = asyncio.get_running_loop()
+            head_future: asyncio.Future[str] = loop.create_future()
+            chunks: list[str] = []
+
+            async def run() -> tuple[str, str, object, str]:
+                operation = getattr(self._model, "complete_json_stream_with_usage")
+                current = asyncio.current_task()
+                assert current is not None
+                activated = False
+
+                def on_delta(delta: str) -> None:
+                    if not self._stream_generation_coordinator.is_current(stream_generation):
+                        return
+                    chunks.append(delta)
+                    if head_future.done():
+                        return
+                    first = _incremental_first_expression("".join(chunks))
+                    if first is not None:
+                        # The final append/complete relationship cannot be
+                        # known until continuation arrives, but the first
+                        # ExpressionDraft itself is already structurally whole.
+                        head_future.set_result(first)
+
+                try:
+                    self._stream_generation_coordinator.activate(stream_generation, current)
+                    activated = True
+                    result = await operation(
+                        messages,
+                        temperature=temperature,
+                        on_text_delta=on_delta,
+                    )
+                    self._stream_generation_coordinator.require_current(stream_generation)
+                    if (
+                        not isinstance(result, tuple)
+                        or len(result) != 2
+                        or not isinstance(result[0], str)
+                    ):
+                        raise ValueError("streaming provider result must be (text, usage)")
+                    complete_raw, usage_raw = result
+                    first_raw = _stream_first_expression(complete_raw)
+                    if not head_future.done():
+                        head_future.set_result(first_raw)
+                    return (
+                        first_raw,
+                        _stream_tail_expression(complete_raw),
+                        usage_raw,
+                        complete_raw,
+                    )
+                except BaseException as exc:
+                    if not head_future.done():
+                        head_future.set_exception(exc)
+                    raise
+                finally:
+                    if activated:
+                        self._stream_generation_coordinator.complete(stream_generation, current)
+
+            completed = asyncio.create_task(
+                run(), name=f"expression-unit-stream:{request.trigger_ref}"
+            )
+            completed.add_done_callback(self._observe_expression_unit_stream_task)
+            session = _ExpressionUnitStreamSession(
+                head=head_future,
+                completed=completed,
+                provider_identity=provider_identity,
+            )
+            self._unit_stream_sessions[key] = session
+            self._unit_stream_sessions.move_to_end(key)
+            while len(self._unit_stream_sessions) > 32:
+                _, evicted = self._unit_stream_sessions.popitem(last=False)
+                if not evicted.completed.done():
+                    evicted.completed.cancel()
+        else:
+            self._unit_stream_sessions.move_to_end(key)
+        session.waiters += 1
+        try:
+            if part == "head":
+                head = await asyncio.shield(session.head)
+                self._stream_generation_coordinator.require_current(
+                    stream_generation
+                )
+                return (
+                    head,
+                    None,
+                    session.provider_identity,
+                    None,
+                )
+            _head, tail, usage, complete_raw = await asyncio.shield(session.completed)
+            return tail, usage, session.provider_identity, complete_raw
+        finally:
+            session.waiters -= 1
+            if (
+                session.waiters == 0
+                and not session.completed.done()
+                and asyncio.current_task() is not None
+                and asyncio.current_task().cancelling()
+            ):
+                session.completed.cancel()
+
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
         if not failure_code:
             raise ValueError("quick recovery requires a failure code")
@@ -7508,6 +8000,8 @@ class ChatModelDeliberationAdapter:
         quick_recovery: bool,
         failure_code: str | None,
         provisional: bool,
+        stream_part: Literal["head", "tail"] | None = None,
+        stream_generation: _ExpressionStreamGeneration | None = None,
     ) -> ModelOutput:
         """Capture every nested reviewer invocation under this authored call."""
 
@@ -7524,6 +8018,8 @@ class ChatModelDeliberationAdapter:
                     quick_recovery=quick_recovery,
                     provisional=provisional,
                     failure_code=failure_code,
+                    stream_part=stream_part,
+                    stream_generation=stream_generation,
                 )
             except ValidationTechnicalFailure as exc:
                 current_author = capture.current_author
@@ -7644,6 +8140,8 @@ class ChatModelDeliberationAdapter:
         quick_recovery: bool,
         failure_code: str | None,
         provisional: bool = False,
+        stream_part: Literal["head", "tail"] | None = None,
+        stream_generation: _ExpressionStreamGeneration | None = None,
     ) -> ModelOutput:
         expected_cursor = RecallCursor(
             world_revision=request.evaluated_world_revision,
@@ -7743,10 +8241,33 @@ class ChatModelDeliberationAdapter:
             source_ref_aliases=source_ref_aliases,
             source_closure_failure=inherited_source_failure,
         )
+        if stream_part is not None:
+            messages = [
+                {
+                    **messages[0],
+                    "content": messages[0]["content"]
+                    + "\n\nSTREAM PACKAGING CONTRACT (transport shape only; it does not choose your "
+                    "behavior): Return exactly one JSON object with protocol=expression-units.1, "
+                    "first, and continuation. Serialize protocol first, first second, and "
+                    "continuation last so a validated first unit can be delivered while the same "
+                    "request continues. first is one complete ExpressionDraft and includes "
+                    "episode_disposition. If timing_choice is now, first contains the first "
+                    "visible beat you choose and may also contain one leading typing beat you "
+                    "choose; put each additional chosen visible beat in continuation as "
+                    '{"beat":<one beat>,"world_claims":[<claims for only that beat>]}. '
+                    "If continuation is non-empty, first.episode_disposition is append; otherwise "
+                    "it is complete_without_more. For later or silent, continuation is empty and "
+                    "first contains the complete decision. Do not shorten, add, or split beats "
+                    "merely because of this wire format; message count and content remain yours.",
+                },
+                *messages[1:],
+            ]
         temperature = 0.25 if quick_recovery else self._temperature
         repair_messages = messages
         initial_purpose = (
-            "quick_recovery_initial"
+            "primary_stream"
+            if stream_part is not None
+            else "quick_recovery_initial"
             if quick_recovery
             else "provisional_initial"
             if provisional
@@ -7762,6 +8283,10 @@ class ChatModelDeliberationAdapter:
         if not callable(metered):
             metered = getattr(self._model, "complete_with_usage", None)
         usage: ModelUsageProvenance | None = None
+        stream_provider_identity: _ProviderInvocationIdentity | None = None
+        stream_unit_identity: _ProviderInvocationIdentity | None = None
+        stream_complete_raw: str | None = None
+        stream_provider_usage: ModelUsageProvenance | None = None
         winning_model_id = self._model_id
         last_reselection: ValidationReselectionResult | None = None
         exact_request_emission = bool(
@@ -7777,7 +8302,31 @@ class ChatModelDeliberationAdapter:
             entry_marker=mark_first_role_provider_entry,
             completion_marker=mark_first_role_provider_completion,
         ):
-            if callable(metered):
+            if stream_part is not None:
+                if stream_generation is None:
+                    raise ValueError("expression stream generation is missing")
+                (
+                    raw,
+                    usage_raw,
+                    stream_provider_identity,
+                    stream_complete_raw,
+                ) = await self._unit_stream_result(
+                    request=request,
+                    messages=messages,
+                    temperature=temperature,
+                    part=stream_part,
+                    provider_identity=winning_identity,
+                    stream_generation=stream_generation,
+                )
+                stream_unit_identity = _stream_unit_identity(
+                    stream_provider_identity,
+                    stream_part,
+                )
+                winning_identity = stream_unit_identity
+                if usage_raw is not None:
+                    stream_provider_usage = ModelUsageProvenance.model_validate(usage_raw)
+                    usage = stream_provider_usage
+            elif callable(metered):
                 result = await metered(messages, temperature=temperature)
                 if not isinstance(result, tuple) or len(result) != 2 or not isinstance(result[0], str):
                     raise ValueError("metered provider result must be (text, usage)")
@@ -8558,15 +9107,73 @@ class ChatModelDeliberationAdapter:
         if usage is not None:
             if quick_recovery:
                 usage = _usage_for_route_class(usage, route_class="quick_recovery")
+        physical_provider_audits: tuple[PhysicalProviderInvocationAudit, ...] = ()
+        if (
+            stream_part == "tail"
+            and stream_provider_identity is not None
+            and stream_complete_raw is not None
+        ):
+            physical_provider_audits = (
+                PhysicalProviderInvocationAudit(
+                    model_call_id=stream_provider_identity.model_call_id,
+                    request_hash=stream_provider_identity.request_hash,
+                    model_id=self._model_id,
+                    model_version=self.VERSION,
+                    outcome="completed",
+                    response_hash=hashlib.sha256(
+                        stream_complete_raw.encode("utf-8")
+                    ).hexdigest(),
+                    usage_status=(
+                        "provider_reported"
+                        if stream_provider_usage is not None
+                        else "unresolved"
+                    ),
+                    usage=stream_provider_usage,
+                    semantic_model_call_ids=(
+                        _stream_unit_identity(
+                            stream_provider_identity, "head"
+                        ).model_call_id,
+                        _stream_unit_identity(
+                            stream_provider_identity, "tail"
+                        ).model_call_id,
+                    ),
+                ),
+            )
+        semantic_usage = None if stream_part is not None else usage
+        if (
+            stream_generation is not None
+            and stream_unit_identity is not None
+            and winning_identity.model_call_id == stream_unit_identity.model_call_id
+        ):
+            # Recheck after every semantic/source validator. New attention may
+            # arrive after the first complete unit was parsed but before it is
+            # eligible to leave this adapter.
+            self._stream_generation_coordinator.require_current(stream_generation)
         return ModelOutput(
             model_id=winning_model_id,
             model_version=self.VERSION,
             raw_proposal=raw_proposal,
-            input_tokens=usage.input_tokens if usage is not None else None,
-            output_tokens=usage.output_tokens if usage is not None else None,
-            usage=usage,
+            input_tokens=(semantic_usage.input_tokens if semantic_usage is not None else None),
+            output_tokens=(semantic_usage.output_tokens if semantic_usage is not None else None),
+            usage=semantic_usage,
             winning_model_call_id=winning_identity.model_call_id,
             winning_request_hash=winning_identity.request_hash,
+            provider_parent_model_call_id=(
+                stream_provider_identity.model_call_id
+                if stream_provider_identity is not None
+                and stream_unit_identity is not None
+                and winning_identity.model_call_id
+                == stream_unit_identity.model_call_id
+                else None
+            ),
+            semantic_stream_part=(
+                stream_part
+                if stream_provider_identity is not None
+                and stream_unit_identity is not None
+                and winning_identity.model_call_id == stream_unit_identity.model_call_id
+                else None
+            ),
+            physical_provider_audits=physical_provider_audits,
             episode_disposition=episode_disposition,
             recall_trace=recall_trace,
             prefetch_trace=prefetch_trace,
@@ -8692,6 +9299,10 @@ class ChatModelDeliberationAdapter:
         allow_after_backup: bool = False,
         parent_call_id: str,
     ) -> ValidationReselectionResult:
+        # Once a complete candidate has failed an invariant, no continuation
+        # from its physical SSE may race the role model's one corrective choice.
+        # Match the exact pinned request; unrelated route work remains untouched.
+        self._cancel_unit_stream_for(request)
         is_private_state = is_private_turn_state_violation(violation)
         is_recall_choice = is_recall_choice_violation(violation)
         violation_text = str(violation)
@@ -9183,6 +9794,8 @@ class RoutedChatModelDeliberationAdapter:
         require_explicit_authored_decision_fields: bool = False,
     ) -> None:
         shared_recovery_contexts = recovery_context_store or _ExpressionRecoveryContextStore()
+        shared_stream_generations = _ExpressionStreamGenerationCoordinator()
+        self._stream_generation_coordinator = shared_stream_generations
         self._flash = ChatModelDeliberationAdapter(
             model=flash_model,
             model_id=flash_model_id,
@@ -9199,6 +9812,7 @@ class RoutedChatModelDeliberationAdapter:
             recall_coordinator=recall_coordinator,
             recovery_context_store=shared_recovery_contexts,
             require_explicit_authored_decision_fields=(require_explicit_authored_decision_fields),
+            stream_generation_coordinator=shared_stream_generations,
         )
         self._thinking = (
             ChatModelDeliberationAdapter(
@@ -9219,6 +9833,7 @@ class RoutedChatModelDeliberationAdapter:
                 require_explicit_authored_decision_fields=(
                     require_explicit_authored_decision_fields
                 ),
+                stream_generation_coordinator=shared_stream_generations,
             )
             if thinking_model is not None
             else None
@@ -9230,6 +9845,36 @@ class RoutedChatModelDeliberationAdapter:
                 raise RuntimeError("thinking deliberation route is not configured")
             return await self._thinking.propose(request)
         return await self._flash.propose(request)
+
+    def _route(self, request: ModelInput) -> ChatModelDeliberationAdapter:
+        if request.route.tier == "thinking":
+            if self._thinking is None:
+                raise RuntimeError("thinking deliberation route is not configured")
+            return self._thinking
+        return self._flash
+
+    def stream_provider_available(self, request: ModelInput) -> bool:
+        return self._route(request).expression_unit_stream_available()
+
+    async def propose_stream_head(self, request: ModelInput) -> ModelOutput:
+        route = self._route(request)
+        other = self._thinking if route is self._flash else self._flash
+        if other is not None:
+            other.cancel_expression_unit_streams()
+        return await route.propose_stream_head(request)
+
+    async def propose_stream_tail(self, request: ModelInput) -> ModelOutput:
+        route = self._route(request)
+        other = self._thinking if route is self._flash else self._flash
+        if other is not None:
+            other.cancel_expression_unit_streams()
+        return await route.propose_stream_tail(request)
+
+    def advance_expression_attention(self, _attention_ref: str) -> None:
+        self._stream_generation_coordinator.advance_attention()
+        self._flash.cancel_expression_unit_streams()
+        if self._thinking is not None:
+            self._thinking.cancel_expression_unit_streams()
 
     def source_closure_review_enabled(self) -> bool:
         return self._flash.source_closure_review_enabled()

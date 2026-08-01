@@ -228,6 +228,80 @@ async def test_openai_compatible_metered_completion_reports_openai_provenance() 
     await model.aclose()
 
 
+@pytest.mark.asyncio
+async def test_deepseek_json_stream_exposes_deltas_and_one_metered_result() -> None:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        body = b"".join(
+            (
+                b'data: {"id":"stream-1","choices":[{"delta":{"content":"{\\\"a\\\":"}}]}\n\n',
+                b'data: {"id":"stream-1","choices":[{"delta":{"content":"1}"}}]}\n\n',
+                b'data: {"id":"stream-1","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}\n\n',
+                b"data: [DONE]\n\n",
+            )
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=body,
+        )
+
+    model = DeepSeekChatModel(
+        "deepseek-key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    deltas: list[str] = []
+
+    text, usage_raw = await model.complete_json_stream_with_usage(
+        [{"role": "user", "content": "JSON"}], on_text_delta=deltas.append
+    )
+    usage = ModelUsageProvenance.model_validate(usage_raw)
+
+    assert text == '{"a":1}'
+    assert deltas == ['{"a":', "1}"]
+    assert requests[0]["stream"] is True
+    assert requests[0]["stream_options"] == {"include_usage": True}
+    assert usage.provider == "deepseek"
+    assert usage.input_tokens == 7
+    assert usage.output_tokens == 3
+    await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_deepseek_json_stream_keeps_completed_text_when_usage_is_missing() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"id":"stream-2","choices":[{"delta":{"content":"{}"}}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    model = DeepSeekChatModel(
+        "deepseek-key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        text, usage_raw = await model.complete_json_stream_with_usage(
+            [{"role": "user", "content": "JSON"}]
+        )
+    finally:
+        await model.aclose()
+
+    assert text == "{}"
+    assert usage_raw is None
+
+
 def test_deepseek_thinking_payload_uses_v4_controls_without_temperature() -> None:
     model = DeepSeekChatModel("key", "https://api.deepseek.com", "deepseek-v4-flash")
 

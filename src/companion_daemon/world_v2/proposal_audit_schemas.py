@@ -128,6 +128,19 @@ class RecordedModelResultAudit(FrozenModel):
         max_length=256,
         exclude_if=lambda value: value is None,
     )
+    semantic_stream_part: Literal["head", "tail"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    usage_status: Literal["provider_reported", "unresolved", "cancelled"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    semantic_model_call_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=2,
+        exclude_if=lambda value: not value,
+    )
     model_result_ref: str = Field(min_length=1, max_length=256)
     attempt_id: str = Field(min_length=1, max_length=256)
     route: RecordedModelRoute
@@ -163,6 +176,9 @@ class RecordedModelResultAudit(FrozenModel):
         "main_invalid_recovered",
         "main_exception_recovered",
         "recovery_failed",
+        "provider_completed",
+        "provider_cancelled",
+        "provider_unresolved",
     ]
     failure_code: str | None = Field(default=None, max_length=64)
     slot: Literal["primary", "backup", "corrective"] | None = Field(
@@ -178,6 +194,9 @@ class RecordedModelResultAudit(FrozenModel):
             "hedge_cancelled",
             "hedge_lost",
             "budget_exhausted",
+            "completed",
+            "cancelled",
+            "unresolved",
         ]
         | None
     ) = Field(default=None, exclude_if=lambda value: value is None)
@@ -198,6 +217,31 @@ class RecordedModelResultAudit(FrozenModel):
 
     @model_validator(mode="after")
     def output_and_failure_are_consistent(self) -> Self:
+        if self.parent_model_call_id == self.model_call_id:
+            raise ValueError("model result cannot be its own provider parent")
+        if self.semantic_stream_part is not None and self.parent_model_call_id is None:
+            raise ValueError("stream semantic audit requires its physical provider parent")
+        physical_status = self.status.startswith("provider_")
+        if physical_status != bool(self.semantic_model_call_ids):
+            raise ValueError("physical provider terminal must bind its semantic lineage")
+        if physical_status:
+            if self.parent_model_call_id is not None or self.semantic_stream_part is not None:
+                raise ValueError("physical provider terminal cannot have a provider parent")
+            if self.model_call_id in self.semantic_model_call_ids or len(
+                set(self.semantic_model_call_ids)
+            ) != len(self.semantic_model_call_ids):
+                raise ValueError("physical provider semantic lineage is invalid")
+            expected_outcome = {
+                "provider_completed": "completed",
+                "provider_cancelled": "cancelled",
+                "provider_unresolved": "unresolved",
+            }[self.status]
+            if self.outcome != expected_outcome or self.slot != "primary":
+                raise ValueError("physical provider terminal has an invalid outcome")
+            if (self.usage_status == "provider_reported") != (self.usage is not None):
+                raise ValueError("physical provider usage status is not truthful")
+        elif self.usage_status is not None:
+            raise ValueError("usage status is reserved for physical provider terminals")
         encoded = canonical_json(
             {"model_call_id": self.model_call_id, "response_hash": self.response_hash}
         )
@@ -242,6 +286,13 @@ class RecordedModelResultAudit(FrozenModel):
             # usage is observed evidence and can include hidden reasoning from
             # a recovery or source-review subcall. Replay preserves the real
             # token count instead of rejecting the successful result.
+        if physical_status:
+            if self.status == "provider_completed":
+                if not has_output or self.failure_code is not None:
+                    raise ValueError("completed physical provider audit lacks response identity")
+            elif has_output or not has_attempted_identity or self.failure_code is None:
+                raise ValueError("incomplete physical provider audit has invalid identity")
+            return self
         required = {
             "main_timeout": {
                 "main_timeout",
@@ -266,6 +317,9 @@ class RecordedModelResultAudit(FrozenModel):
                 "recall_exception",
                 "inventory_invalid",
                 "coverage_invalid",
+                "stream_superseded_by_newer_input",
+                "stream_tail_cancelled",
+                "stream_tail_unresolved",
             },
             "main_timeout_recovered": {
                 "main_timeout",
@@ -455,6 +509,7 @@ class ModelResultRecordedPayload(FrozenModel):
         "model-result-audit.3",
         "model-result-audit.4",
         "model-result-audit.5",
+        "model-result-audit.6",
     ] = "model-result-audit.1"
     model_result_ref: str = Field(min_length=1, max_length=256)
     deliberation_result_id: str = Field(min_length=1, max_length=256)
@@ -504,6 +559,7 @@ class ModelResultRecordedPayload(FrozenModel):
                 "model-result-audit.3",
                 "model-result-audit.4",
                 "model-result-audit.5",
+                "model-result-audit.6",
             }
             and audit.slot is not None
         ):
@@ -527,12 +583,22 @@ class ModelResultRecordedPayload(FrozenModel):
             not in {
                 "model-result-audit.4",
                 "model-result-audit.5",
+                "model-result-audit.6",
             }
             and has_recall_audit
         ):
             raise ValueError("recall trace requires model-result-audit.4")
-        if (self.audit_contract == "model-result-audit.5") != bool(audit.presented_prefetch_traces):
+        if self.audit_contract != "model-result-audit.6" and (
+            (self.audit_contract == "model-result-audit.5")
+            != bool(audit.presented_prefetch_traces)
+        ):
             raise ValueError("prefetch presentation sequence requires model-result-audit.5")
+        is_stream_audit = (
+            audit.semantic_stream_part is not None
+            or audit.status.startswith("provider_")
+        )
+        if (self.audit_contract == "model-result-audit.6") != is_stream_audit:
+            raise ValueError("stream lineage requires model-result-audit.6")
         if (
             audit.route.router_version == "life-development-router.2"
             and audit.recall_trace is not None
@@ -584,8 +650,20 @@ def validate_recorded_attempt_lineage(
         len(audits) == 1
         and audits[0].route.router_version == "authored-candidate-audit.1"
     )
+    physical_provider = (
+        len(audits) == 1
+        and audits[0].route.router_version == "physical-provider-audit.1"
+    )
     if len(audits) == 1:
-        if provider_subcall:
+        if physical_provider:
+            terminal = audits[0]
+            if proposal_hash is not None or terminal.status not in {
+                "provider_completed",
+                "provider_cancelled",
+                "provider_unresolved",
+            }:
+                raise ValueError("physical provider terminal cannot claim a proposal")
+        elif provider_subcall:
             if proposal_hash is not None:
                 raise ValueError("provider subcall cannot claim a proposal")
             if audits[0].status == "proposal_validated":
@@ -597,7 +675,13 @@ def validate_recorded_attempt_lineage(
             if proposal_hash is not None or audits[0].outcome != "returned":
                 raise ValueError("unresolved authored candidate cannot claim acceptance")
         elif proposal_hash is None:
-            if audits[0].outcome not in {
+            if (
+                audits[0].semantic_stream_part == "tail"
+                and audits[0].status == "candidate_returned"
+                and audits[0].outcome == "returned"
+            ):
+                pass
+            elif audits[0].outcome not in {
                 "invalid",
                 "timeout",
                 "exception",

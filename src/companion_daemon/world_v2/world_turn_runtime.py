@@ -68,6 +68,13 @@ class WorldTurnRuntime:
     def expression_episode_diagnostics(self) -> dict[str, object]:
         return self._runtime.expression_episode_diagnostics()
 
+    async def cancel_superseded_expression_streams(
+        self, current_trigger_ref: str
+    ) -> None:
+        await self._runtime.cancel_superseded_expression_streams(
+            current_trigger_ref
+        )
+
     async def reconcile_response_expectation_assessment(self) -> bool:
         return await self._runtime.reconcile_response_expectation_assessment()
 

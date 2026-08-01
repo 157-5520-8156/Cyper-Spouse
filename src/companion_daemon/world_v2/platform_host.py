@@ -240,6 +240,20 @@ class WorldV2PlatformHost:
             coalescing_metadata=message.coalescing_metadata,
         )
 
+    async def cancel_superseded_expression_streams(
+        self, current_trigger_ref: str
+    ) -> None:
+        """Notify composition that a newer provider message has arrived."""
+
+        await self._application.cancel_superseded_expression_streams(
+            current_trigger_ref
+        )
+
+    async def delivered_text_character_count(self, action_id: str) -> int | None:
+        """Return text length only after the adapter observed delivery."""
+
+        return await self._application.delivered_text_character_count(action_id)
+
     async def tick(self, tick: PlatformClockTick):
         """Advance logical time through the application-owned clock command."""
 

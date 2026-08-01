@@ -517,7 +517,7 @@ def compose_production_deliberation(
     expression_action_kinds: frozenset[str] | None = None,
     main_timeout_seconds: float = 6.0,
     quick_timeout_seconds: float = 2.5,
-    expression_episode_mode: Literal["off", "shadow", "on"] = "off",
+    expression_episode_mode: Literal["off", "shadow", "on", "stream"] = "off",
     expression_episode_diagnostics: ExpressionEpisodeDiagnostics | None = None,
 ):
     """Create the only Deliberation shape permitted by production composition.

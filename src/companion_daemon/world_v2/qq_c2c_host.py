@@ -48,6 +48,7 @@ from .qq_c2c_transport import QQC2CDelivery, QQC2CPlatformTransport
 from .qq_ingress_policy import (
     QQIngressBatch,
     QQIngressFragment,
+    QQIngressPolicyCatalog,
     QQIngressStore,
     SQLiteQQIngressStore,
 )
@@ -55,6 +56,11 @@ from .semantic_chat_composition import (
     SemanticChatComposition,
     build_semantic_chat_composition,
     unavailable_life_source_authority_health,
+)
+from .text_turn_endpoint import (
+    TextTurnEndpointController,
+    TextTurnEndpointEvidence,
+    TextTurnEndpointSchedule,
 )
 from .expression_draft import qq_expression_capabilities
 from .expression_episode_lifecycle import next_expression_retry_due
@@ -246,6 +252,7 @@ class QQC2CHost:
         action_due_now: Callable[[], datetime] | None = None,
         action_due_sleep: Callable[[float], Awaitable[None]] | None = None,
         interactive_turn_budget_policy: InteractiveTurnBudgetPolicy | None = None,
+        endpoint_controller: TextTurnEndpointController | None = None,
         recorded_cadence_mode: str = "off",
         idle_heartbeat_seconds: float = 0.0,
         owned_action_close_grace_seconds: float = 1.0,
@@ -281,6 +288,15 @@ class QQC2CHost:
         self._action_due_now = action_due_now or self._ingress_now
         self._action_due_sleep = action_due_sleep or asyncio.sleep
         self._interactive_turn_budget_policy = interactive_turn_budget_policy
+        self._endpoint_controller = endpoint_controller
+        self._endpoint_task: asyncio.Task[TextTurnEndpointSchedule] | None = None
+        self._endpoint_fragments: deque[tuple[str, str]] = deque(maxlen=8)
+        self._recent_message_character_counts: deque[int] = deque(maxlen=16)
+        self._recent_character_message_character_counts: deque[int] = deque(maxlen=16)
+        self._recent_exchange_shapes: deque[tuple[str, int, int]] = deque(maxlen=16)
+        self._exchange_id_by_action_id: dict[str, str] = {}
+        self._recorded_delivered_text_action_ids: deque[str] = deque(maxlen=64)
+        self._recorded_delivered_text_action_id_set: set[str] = set()
         if idle_heartbeat_seconds < 0:
             raise ValueError("idle heartbeat seconds must not be negative")
         self._idle_heartbeat_seconds = idle_heartbeat_seconds
@@ -333,6 +349,7 @@ class QQC2CHost:
         self._last_content_text: str | None = None
         self._last_typing_started_at: datetime | None = None
         self._recent_gap_seconds: deque[float] = deque(maxlen=8)
+        self._personal_bubble_gap_seconds: deque[float] = deque(maxlen=16)
         # Number of content arrivals currently inside their sender-rhythm
         # hold.  While it is non-zero a volley is still being absorbed, so
         # the periodic scheduler claim path (``drain_ingress_once``) yields
@@ -477,7 +494,9 @@ class QQC2CHost:
         # ledger CAS or observe the finite in-flight lease.  The narrow local
         # mutex only serializes provider handoffs, not background cognition.
         async with self._action_pump_lock:
-            return await self._host.drain_action(action_id)
+            result = await self._host.drain_action(action_id)
+        await self._record_delivered_text_unit(result)
+        return result
 
     async def _drain_scheduled_action_once(self) -> object:
         """Run one passive ActionPump unit without locking background work."""
@@ -504,7 +523,51 @@ class QQC2CHost:
             # user-perceived latency timestamp after the ingress observation
             # clock was intentionally released.
             record_visible_reply()
+            await self._record_delivered_text_unit(result)
         return result
+
+    async def _record_delivered_text_unit(self, result: object) -> None:
+        """Retain bounded, provider-observed dialogue shape for endpointing."""
+
+        action_id = getattr(result, "action_id", None)
+        if (
+            getattr(result, "status", None) != "settled"
+            or getattr(result, "provider_status", None) != "delivered"
+            or not isinstance(action_id, str)
+            or action_id in self._recorded_delivered_text_action_id_set
+        ):
+            return
+        resolve_length = getattr(self._host, "delivered_text_character_count", None)
+        if not callable(resolve_length):
+            return
+        try:
+            character_count = await resolve_length(action_id)
+        except (TypeError, ValueError):
+            return
+        if (
+            not isinstance(character_count, int)
+            or isinstance(character_count, bool)
+            or not 1 <= character_count <= 12_000
+        ):
+            return
+        if len(self._recorded_delivered_text_action_ids) == 64:
+            evicted = self._recorded_delivered_text_action_ids.popleft()
+            self._recorded_delivered_text_action_id_set.discard(evicted)
+        self._recorded_delivered_text_action_ids.append(action_id)
+        self._recorded_delivered_text_action_id_set.add(action_id)
+        self._recent_character_message_character_counts.append(character_count)
+        exchange_id = self._exchange_id_by_action_id.get(action_id)
+        if exchange_id is not None:
+            for index, (candidate_id, user_bubbles, character_bubbles) in enumerate(
+                self._recent_exchange_shapes
+            ):
+                if candidate_id == exchange_id:
+                    self._recent_exchange_shapes[index] = (
+                        candidate_id,
+                        user_bubbles,
+                        min(16, character_bubbles + 1),
+                    )
+                    break
 
     async def _drain_scheduled_action_once_unowned(self) -> object:
         async with self._action_pump_lock:
@@ -584,26 +647,48 @@ class QQC2CHost:
                 # The peer is visibly composing: any in-flight rhythm hold
                 # keeps waiting so the upcoming bubbles land in one turn.
                 self._last_typing_started_at = received_at
+            elif fragment.control_kind == "typing_stopped":
+                self._last_typing_started_at = None
+            self._restart_endpoint_prediction(received_at=received_at)
             return QQC2CIngressResult(
                 status="deferred",
                 action_id=None,
                 canonical_user_id=self._canonical_user_id,
             )
+        cancel_streams = getattr(
+            self._host,
+            "cancel_superseded_expression_streams",
+            None,
+        )
+        if callable(cancel_streams):
+            # Arrival, not a later batch claim, is the attention boundary.
+            # This cancels only process-local unsent continuation units. The
+            # already-authorized head and all durable facts remain immutable.
+            await cancel_streams(
+                f"qq-inbound-attention:{fragment.source_event_id}"
+            )
         self._arrival_ns_by_source_event_id.setdefault(
             fragment.source_event_id,
             arrival_ns,
         )
+        continuation_observed = (
+            burst_continuation
+            or self._rhythm_holds > 0
+            or self._coalescing_waits > 0
+        )
         self._register_content_gap(
             received_at=received_at,
             previous_received_at=previous_received_at,
-            continuation_observed=(
-                burst_continuation
-                or self._rhythm_holds > 0
-                or self._coalescing_waits > 0
-            ),
+            continuation_observed=continuation_observed,
         )
+        if not continuation_observed:
+            self._endpoint_fragments.clear()
         self._last_content_received_at = received_at
         self._last_content_text = fragment.text
+        if fragment.text:
+            self._endpoint_fragments.append((fragment.source_event_id, fragment.text))
+            self._recent_message_character_counts.append(len(fragment.text))
+            self._restart_endpoint_prediction(received_at=received_at)
         delay = max(0.0, (submitted.due_at - self._ingress_now()).total_seconds())
         if delay:
             self._coalescing_waits += 1
@@ -657,15 +742,15 @@ class QQC2CHost:
         )
 
     # Provider-local sender-rhythm pacing delays only the *claim*; it never
-    # changes batch identity, ledger state, or replay.  Its adaptive hint is
-    # deliberately bounded inside the durable 150–500ms coalescing budget:
-    # message shape may choose when inside that opportunity to claim, but may
-    # never add a second, multi-second wait before the model call.
+    # changes batch identity, ledger state, or replay. The durable transport
+    # floor absorbs packet jitter; the separate endpoint estimate may extend
+    # the listening opportunity when semantic and provider evidence says that
+    # another bubble is likely.
     _TEMPO_WINDOW_SECONDS = 600.0
     _TEMPO_SAMPLE_CEILING_SECONDS = 8.0
-    # The durable coalescing matrix already absorbs 150–500ms of adjacent
-    # bubbles.  Sender-rhythm courtesy must fit inside that same user-visible
-    # budget instead of adding several more seconds before any model call.
+    # The durable coalescing floor already absorbs 100ms of adjacent bubbles.
+    # Sender-rhythm courtesy remains subsecond; only the bounded semantic
+    # endpoint controller may extend the opportunity beyond it.
     _DEFAULT_QUIET_GAP_SECONDS = 0.15
     _MIN_QUIET_GAP_SECONDS = 0.10
     _MAX_QUIET_GAP_SECONDS = 0.42
@@ -679,6 +764,82 @@ class QQC2CHost:
     # half a minute they interject anyway — so the hold keeps rolling while
     # the volley continues and answers what has arrived once this cap hits.
     _BURST_HOLD_CAP_SECONDS = 30.0
+    _TYPING_SIGNAL_TTL_SECONDS = 8.0
+
+    def _typing_is_active(self, *, now: datetime) -> bool:
+        started = self._last_typing_started_at
+        if started is None:
+            return False
+        age = (now - started).total_seconds()
+        if age < 0 or age > self._TYPING_SIGNAL_TTL_SECONDS:
+            self._last_typing_started_at = None
+            return False
+        return True
+
+    def _restart_endpoint_prediction(self, *, received_at: datetime) -> None:
+        controller = self._endpoint_controller
+        if controller is None or not self._endpoint_fragments:
+            return
+        previous = self._endpoint_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        evidence = TextTurnEndpointEvidence(
+            batch_texts=tuple(text for _, text in self._endpoint_fragments),
+            # Personal bubble cadence survives exchange boundaries; the host's
+            # immediate quiet-gap controller below still uses only the current
+            # volley. Endpoint prediction gets both via this bounded history.
+            recent_gap_seconds=tuple(self._personal_bubble_gap_seconds),
+            typing_active=self._typing_is_active(now=received_at),
+            burst_fragment_count=len(self._endpoint_fragments),
+            recent_message_character_counts=tuple(
+                self._recent_message_character_counts
+            ),
+            recent_character_message_character_counts=tuple(
+                self._recent_character_message_character_counts
+            ),
+            recent_exchange_user_bubble_counts=tuple(
+                user_count for _, user_count, _ in self._recent_exchange_shapes
+            ),
+            recent_exchange_character_bubble_counts=tuple(
+                character_count
+                for _, _, character_count in self._recent_exchange_shapes
+            ),
+        )
+        task = asyncio.create_task(
+            controller.schedule(evidence),
+            name=f"qq-text-endpoint:{self._endpoint_fragments[-1][0]}",
+        )
+        self._endpoint_task = task
+
+        def observe(completed: asyncio.Task[TextTurnEndpointSchedule]) -> None:
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(observe)
+
+    async def _endpoint_wait_seconds(self) -> tuple[float | None, object | None]:
+        task = self._endpoint_task
+        if task is None:
+            return None, None
+        try:
+            schedule = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            return None, task
+        return schedule.wait_ms / 1_000, task
+
+    def _forget_endpoint_fragments(self, source_event_ids: tuple[str, ...]) -> None:
+        consumed = set(source_event_ids)
+        self._endpoint_fragments = deque(
+            (
+                item
+                for item in self._endpoint_fragments
+                if item[0] not in consumed
+            ),
+            maxlen=8,
+        )
 
     def _register_content_gap(
         self,
@@ -709,6 +870,7 @@ class QQC2CHost:
             # Only bubble-to-bubble gaps are cadence; a minutes-later reply
             # is a new thought, not typing rhythm.
             self._recent_gap_seconds.append(gap)
+            self._personal_bubble_gap_seconds.append(gap)
 
     def _quiet_gap_seconds(self, text: str | None, *, burst: bool = False) -> float:
         """One bounded composure gap derived only from observed sender cadence.
@@ -764,6 +926,9 @@ class QQC2CHost:
         """
 
         quiet_gap = self._quiet_gap_seconds(fragment.text, burst=burst_continuation)
+        endpoint_gap, observed_endpoint_task = await self._endpoint_wait_seconds()
+        if endpoint_gap is not None:
+            quiet_gap = max(quiet_gap, endpoint_gap)
         if burst_continuation:
             quiet_gap = max(
                 quiet_gap, self._BURST_CONTINUATION_QUIET_GAP_SECONDS
@@ -775,17 +940,36 @@ class QQC2CHost:
             while True:
                 now = self._ingress_now()
                 latest = self._last_content_received_at or received_at
+                if self._endpoint_task is not observed_endpoint_task:
+                    endpoint_gap, observed_endpoint_task = (
+                        await self._endpoint_wait_seconds()
+                    )
+                    if endpoint_gap is not None:
+                        quiet_gap = max(
+                            self._quiet_gap_seconds(
+                                self._last_content_text,
+                                burst=(latest > received_at),
+                            ),
+                            endpoint_gap,
+                        )
                 if latest > received_at:
                     # A newer bubble landed during this hold, so the volley is
                     # still going: let the newest bubble's shape and the
                     # just-measured cadence decide how much longer to wait.
-                    quiet_gap = self._quiet_gap_seconds(self._last_content_text, burst=True)
+                    cadence_gap = self._quiet_gap_seconds(
+                        self._last_content_text, burst=True
+                    )
+                    quiet_gap = max(cadence_gap, endpoint_gap or 0.0)
                 # A provider "peer is typing" pulse counts as not-quiet: she
                 # can see the person still composing, so she keeps waiting
                 # (within the same absolute cap) instead of answering half a
                 # thought.
                 typing_at = self._last_typing_started_at
-                if typing_at is not None and typing_at > latest:
+                if (
+                    typing_at is not None
+                    and typing_at > latest
+                    and self._typing_is_active(now=now)
+                ):
                     latest = typing_at
                 quiet_for = (now - latest).total_seconds()
                 if quiet_for >= quiet_gap or now >= hard_cap:
@@ -929,6 +1113,8 @@ class QQC2CHost:
     async def _process_ingress_batch(self, batch: QQIngressBatch) -> QQC2CIngressResult:
         """Run one claimed batch without serializing another provider phase."""
 
+        self._forget_endpoint_fragments(batch.source_event_ids)
+
         observed_started_ns = min(
             (
                 started_ns
@@ -992,6 +1178,23 @@ class QQC2CHost:
             dict.fromkeys(
                 (*outcome.authorized_action_ids, *outcome.scheduled_action_ids)
             )
+        )
+        # Character shape is updated only from positively delivered text
+        # Actions. Authorization, typing, media and failed sends are not
+        # evidence that the peer saw a character bubble.
+        self._recent_exchange_shapes.append(
+            (batch.batch_id, len(batch.source_event_ids), 0)
+        )
+        retained_exchange_ids = {
+            exchange_id for exchange_id, _, _ in self._recent_exchange_shapes
+        }
+        self._exchange_id_by_action_id = {
+            existing_action_id: exchange_id
+            for existing_action_id, exchange_id in self._exchange_id_by_action_id.items()
+            if exchange_id in retained_exchange_ids
+        }
+        self._exchange_id_by_action_id.update(
+            {candidate_action_id: batch.batch_id for candidate_action_id in action_ids}
         )
         action_id = next(iter(action_ids), None)
         if action_id is not None:
@@ -1756,6 +1959,13 @@ class QQC2CHost:
             return {"enabled": False, "status": "disabled"}
         return {"enabled": True, **capacity.health_snapshot()}
 
+    def text_endpoint_health(self) -> dict[str, object]:
+        """Expose endpoint timing evidence without reading or changing the World."""
+
+        if self._endpoint_controller is None:
+            return {"enabled": False, "status": "disabled"}
+        return self._endpoint_controller.health_snapshot()
+
     def proactive_source_authority_health(self) -> dict[str, object]:
         """Expose whether proactive factual effects have independent review."""
 
@@ -1854,6 +2064,12 @@ class QQC2CHost:
     async def _aclose_owned(self) -> None:
         if self._action_due_wake is not None:
             await self._action_due_wake.aclose()
+        endpoint_task = self._endpoint_task
+        if endpoint_task is not None and not endpoint_task.done():
+            endpoint_task.cancel()
+            await asyncio.gather(endpoint_task, return_exceptions=True)
+        if self._endpoint_controller is not None:
+            await self._endpoint_controller.aclose()
         # The clock and scheduled-work mutexes are intentionally never nested.
         # Joining the complete admitted operations bridges their phase gap and
         # also covers a Life provider call already holding the scheduler lane.
@@ -2051,13 +2267,15 @@ def build_qq_c2c_host(
     if not recipient_id:
         raise ValueError("QQ C2C v2 requires one configured private recipient")
     configured_expression_episode_mode = settings.world_v2_expression_episode_mode
-    if configured_expression_episode_mode not in {"off", "shadow"}:
-        raise ValueError("production QQ expression episode mode must be off or shadow")
+    if configured_expression_episode_mode not in {"off", "shadow", "stream"}:
+        raise ValueError(
+            "production QQ expression episode mode must be off, shadow, or stream"
+        )
     # The provisional Expression Episode remains useful for exercising its
     # dormant recovery lifecycle, but ADR 0014 forbids exposing that one-beat
     # candidate through production Settings.  Tests must opt in at this
     # conspicuous composition seam instead of smuggling ``on`` through env.
-    expression_episode_mode: Literal["off", "shadow", "on"] = (
+    expression_episode_mode: Literal["off", "shadow", "on", "stream"] = (
         _test_only_expression_episode_mode or configured_expression_episode_mode
     )
     expression_capabilities = qq_expression_capabilities(
@@ -2192,13 +2410,19 @@ def build_qq_c2c_host(
         recipient_id=recipient_id,
         canonical_user_id=settings.primary_user_id,
         semantic_chat=semantic_chat,
-        ingress_store=SQLiteQQIngressStore(Path(settings.database_path)),
+        ingress_store=SQLiteQQIngressStore(
+            Path(settings.database_path),
+            catalog=QQIngressPolicyCatalog(
+                default_window_ms=settings.qq_c2c_transport_coalesce_ms
+            ),
+        ),
         ingress_now=ingress_now,
         ingress_sleep=ingress_sleep if ingress_sleep is not None else asyncio.sleep,
         observation_clock_ns=observation_clock_ns,
         action_due_now=scheduler_now,
         action_due_sleep=action_due_sleep,
         interactive_turn_budget_policy=interactive_turn_budget_policy,
+        endpoint_controller=semantic_chat.text_endpoint_controller,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
         idle_heartbeat_seconds=settings.qq_c2c_idle_heartbeat_seconds,
     )

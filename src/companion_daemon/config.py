@@ -126,6 +126,28 @@ class Settings(BaseSettings):
         alias="QQ_C2C_IDLE_HEARTBEAT_SECONDS",
         ge=60,
     )
+    # This is transport packet coalescing only. Human turn completion is
+    # estimated separately by the advisory text endpoint model.
+    qq_c2c_transport_coalesce_ms: int = Field(
+        default=100,
+        alias="QQ_C2C_TRANSPORT_COALESCE_MS",
+        ge=100,
+        le=500,
+    )
+    world_v2_text_endpoint_enabled: bool = Field(
+        # Requires the explicitly enabled local inference deployment below;
+        # production opts in via environment rather than silently claiming an
+        # endpoint model exists when only fixed fallback pacing is available.
+        default=False,
+        alias="WORLD_V2_TEXT_ENDPOINT_ENABLED",
+    )
+    world_v2_text_endpoint_timeout_seconds: float = Field(
+        default=0.20,
+        alias="WORLD_V2_TEXT_ENDPOINT_TIMEOUT_SECONDS",
+        ge=0.01,
+        le=1.0,
+    )
+
     # Where the daemon's dashboard reads the QQ world's read-only life state.
     # The adapter process owns that world's ledger; the daemon only relays.
     qq_c2c_adapter_url: str = Field(
@@ -347,11 +369,10 @@ class Settings(BaseSettings):
         default="local",
         alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_API_KEY",
     )
-    # ADR 0014 keeps the single-beat provisional lane observational in every
-    # production deployment.  The lower World-v2 composition still accepts
-    # ``on`` for explicit lifecycle tests, but an environment setting must not
-    # turn that incomplete candidate into user-visible behavior.
-    world_v2_expression_episode_mode: Literal["off", "shadow"] = Field(
+    # ``stream`` exposes only a source-reviewed complete semantic unit from one
+    # role-author request. The historical two-author ``on`` mode remains
+    # test-only because its provisional author can disagree with the full one.
+    world_v2_expression_episode_mode: Literal["off", "shadow", "stream"] = Field(
         default="shadow", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
     )
     world_v2_recorded_cadence_mode: Literal["off", "shadow", "on"] = Field(

@@ -98,7 +98,7 @@ def _digest(value: object) -> str:
 class EpisodePolicy(FrozenModel):
     """Operational mode; production defaults to shadow, never implicit send."""
 
-    mode: Literal["off", "shadow", "on"] = "shadow"
+    mode: Literal["off", "shadow", "on", "stream"] = "shadow"
     provisional_target_seconds: float = Field(default=3.0, gt=0.0, le=5.5)
     max_provider_slots: Literal[2] = 2
 
@@ -106,7 +106,9 @@ class EpisodePolicy(FrozenModel):
 class ExpressionEpisodeDiagnostics:
     """Process-local aggregate shadow evidence; never stores candidate text."""
 
-    def __init__(self, *, mode: Literal["off", "shadow", "on"] = "shadow") -> None:
+    def __init__(
+        self, *, mode: Literal["off", "shadow", "on", "stream"] = "shadow"
+    ) -> None:
         self._mode = mode
         self._lock = Lock()
         self._counts: dict[str, int] = {
@@ -127,7 +129,7 @@ class ExpressionEpisodeDiagnostics:
         self._full_ms: list[float] = []
 
     @property
-    def mode(self) -> Literal["off", "shadow", "on"]:
+    def mode(self) -> Literal["off", "shadow", "on", "stream"]:
         return self._mode
 
     def record(

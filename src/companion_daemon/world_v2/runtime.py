@@ -1470,6 +1470,16 @@ class WorldRuntime:
             return {"mode": "off"}
         return self._pinned_turn.expression_episode_diagnostics()
 
+    async def cancel_superseded_expression_streams(
+        self, current_trigger_ref: str
+    ) -> None:
+        """Invalidate unsent stream units when provider ingress shifts attention."""
+
+        if self._pinned_turn is not None:
+            await self._pinned_turn.cancel_superseded_expression_streams(
+                current_trigger_ref
+            )
+
     async def _claim_expression_episode(
         self, observation: Observation
     ) -> tuple[TriggerProcess | None, ProjectionCursor | None]:
@@ -2336,6 +2346,22 @@ class WorldRuntime:
         )
         return disposition
 
+    def _expression_episode_tail_is_runtime_owned(self, trigger_ref: str) -> bool:
+        """Whether this runtime can still settle a visible Episode tail.
+
+        Legacy ``on`` episodes have a durable recovery path. A streamed tail
+        is deliberately process-local: after restart the already-sent head is
+        immutable and the missing tail must complete without regeneration.
+        """
+
+        if self._pinned_turn is None:
+            return False
+        mode = self._pinned_turn.expression_episode_mode
+        return mode == "on" or (
+            mode == "stream"
+            and self._pinned_turn.has_expression_episode_tail(trigger_ref)
+        )
+
     async def accept_appraisal_proposal(self, proposal_id: str) -> RuntimeOutcome:
         """Atomically consume one already-persisted appraisal proposal.
 
@@ -2794,7 +2820,13 @@ class WorldRuntime:
                 if process.process_kind == "expression_episode"
                 and process.state == "claimed"
                 and process.claim_lease is not None
-                and not expression_episode_has_authorized_action(before, process)
+                and (
+                    (
+                        self._pinned_turn is not None
+                        and self._pinned_turn.expression_episode_mode == "stream"
+                    )
+                    or not expression_episode_has_authorized_action(before, process)
+                )
             )
             superseded_expression_events = tuple(
                 expression_episode_complete_event(
@@ -2999,6 +3031,10 @@ class WorldRuntime:
             observation=observation,
             event=event,
         )
+        if self._pinned_turn is not None:
+            await self._pinned_turn.cancel_superseded_expression_streams(
+                event.event_id
+            )
         await self._cancel_superseded_expression_attempt_tasks(
             superseded_expression_attempt_ids
         )
@@ -3588,9 +3624,8 @@ class WorldRuntime:
                 observation_event=event,
             )
         episode_tail_pending = (
-            self._pinned_turn is not None
-            and self._pinned_turn.expression_episode_mode == "on"
-            and reply_authorized
+            reply_authorized
+            and self._expression_episode_tail_is_runtime_owned(event.event_id)
         )
         if (
             not episode_tail_pending
@@ -3868,8 +3903,9 @@ class WorldRuntime:
                 )
             if (
                 deferred
-                or self._pinned_turn is None
-                or self._pinned_turn.expression_episode_mode != "on"
+                or not self._expression_episode_tail_is_runtime_owned(
+                    observation_event.event_id
+                )
             ):
                 await self._complete_expression_episode(
                     observation=observation,
@@ -4171,8 +4207,9 @@ class WorldRuntime:
             if (
                 not cancelled
                 and (
-                    self._pinned_turn is None
-                    or self._pinned_turn.expression_episode_mode != "on"
+                    not self._expression_episode_tail_is_runtime_owned(
+                        observation_event.event_id
+                    )
                 )
             ):
                 await self._complete_expression_episode(
@@ -4256,8 +4293,9 @@ class WorldRuntime:
         if action_event.event_type != "ActionAuthorized":
             raise RuntimeError("minimal reply action identity resolves to another event type")
         if (
-            self._pinned_turn is None
-            or self._pinned_turn.expression_episode_mode != "on"
+            not self._expression_episode_tail_is_runtime_owned(
+                observation_event.event_id
+            )
         ):
             await self._complete_expression_episode(
                 observation=observation,

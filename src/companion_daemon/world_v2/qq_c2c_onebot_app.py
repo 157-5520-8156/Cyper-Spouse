@@ -484,6 +484,7 @@ def create_qq_c2c_onebot_app(
         scheduler_view["local_provider_capacity"] = (
             host.local_provider_capacity_health()
         )
+        scheduler_view["text_turn_endpoint"] = host.text_endpoint_health()
         scheduler_view["proactive_source_authority"] = (
             host.proactive_source_authority_health()
         )

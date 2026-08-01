@@ -28,6 +28,17 @@ def test_production_settings_keep_expression_episode_observational() -> None:
         Settings(_env_file=None, WORLD_V2_EXPRESSION_EPISODE_MODE="on")
 
 
+def test_text_endpoint_request_does_not_make_local_appraisal_mandatory() -> None:
+    settings = Settings(
+        _env_file=None,
+        WORLD_V2_TEXT_ENDPOINT_ENABLED=True,
+        LOCAL_APPRAISAL_ENABLED=False,
+    )
+
+    assert settings.world_v2_text_endpoint_enabled is True
+    assert settings.local_appraisal_enabled is False
+
+
 def test_napcat_settings_accept_legacy_snowluma_names() -> None:
     settings = Settings(SNOWLUMA_API_URL="http://127.0.0.1:5700", SNOWLUMA_ACCESS_TOKEN="legacy")
     assert settings.onebot_api_url == "http://127.0.0.1:5700"

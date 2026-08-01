@@ -654,6 +654,22 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
                 or recorded.parent_model_call_id == recorded.model_call_id
             ):
                 raise ValueError("provider subcall has no persisted author parent")
+        elif recorded.route.router_version == "physical-provider-audit.1":
+            semantic_children = tuple(
+                RecordedModelResultAudit.model_validate_json(candidate.audit_json)
+                for candidate in attempts
+                if candidate.parent_model_call_id == recorded.model_call_id
+            )
+            if (
+                recorded.parent_model_call_id is not None
+                or not semantic_children
+                or any(
+                    child.model_call_id not in recorded.semantic_model_call_ids
+                    or child.request_hash != recorded.request_hash
+                    for child in semantic_children
+                )
+            ):
+                raise ValueError("physical provider terminal has invalid stream lineage")
         else:
             raise ValueError("nested provider record uses an unknown audit contract")
         all_call_ids.add(nested.model_call_id)

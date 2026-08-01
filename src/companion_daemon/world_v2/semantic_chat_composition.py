@@ -58,6 +58,10 @@ from .structured_expression_reselection_model import (
     EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT,
     StructuredExpressionReselectionModel,
 )
+from .text_turn_endpoint import (
+    ChatSemanticEndpointModel,
+    TextTurnEndpointController,
+)
 from .structured_source_review_model import (
     direct_openai_model_id,
     InventoryAvailabilityAuthority,
@@ -665,6 +669,7 @@ class SemanticChatComposition:
     advisory_compiler: AdvisoryCompiler
     identity_frame: CompanionIdentityFrame
     local_provider_capacity: ProviderCapacityGate | None
+    text_endpoint_controller: TextTurnEndpointController | None
     _owned_models: tuple[object, ...] = ()
     # Close-only resources promise that ``aclose`` itself reaches quiescence.
     # Task owners may return from bounded close while retaining provider
@@ -1013,6 +1018,7 @@ def build_semantic_chat_composition(
 
     local_appraisal_model: ChatCompletionModel | None = None
     local_advisory_model: ChatCompletionModel | None = None
+    local_endpoint_model: ChatCompletionModel | None = None
     local_provider_capacity: ProviderCapacityGate | None = None
     if settings.local_appraisal_enabled:
         # MLX is configured as a serial inference worker. All local micro-lanes
@@ -1052,6 +1058,19 @@ def build_semantic_chat_composition(
             capacity_gate=local_provider_capacity,
         )
         owned.append(local_advisory_model)
+        if settings.world_v2_text_endpoint_enabled:
+            # Endpointing shares the local serial lease and fails open when it
+            # is busy. It predicts only another-bubble probability and never
+            # enters the character or World-authority lanes.
+            local_endpoint_model = OpenAICompatibleChatModel(
+                api_key=settings.local_appraisal_api_key,
+                base_url=settings.local_appraisal_base_url,
+                model=settings.local_appraisal_model,
+                reasoning_effort="none",
+                max_completion_tokens=96,
+                capacity_gate=local_provider_capacity,
+            )
+            owned.append(local_endpoint_model)
 
     if settings.world_v2_contextual_failsafe_enabled and contextual_failsafe_model is None:
         # This is an explicitly dormant-by-default third provider, not a
@@ -1773,6 +1792,14 @@ def build_semantic_chat_composition(
         advisory_compiler=advisory_compiler,
         identity_frame=identity_frame,
         local_provider_capacity=local_provider_capacity,
+        text_endpoint_controller=(
+            TextTurnEndpointController(
+                model=ChatSemanticEndpointModel(local_endpoint_model),
+                timeout_seconds=settings.world_v2_text_endpoint_timeout_seconds,
+            )
+            if local_endpoint_model is not None
+            else None
+        ),
         _owned_models=tuple(owned),
         _owned_closeables=tuple(owned_closeables),
         _owned_task_owners=tuple(owned_task_owners),
