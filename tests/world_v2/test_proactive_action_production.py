@@ -2501,6 +2501,47 @@ class _SlowPrimaryThenSilentDraftModel:
         )
 
 
+class _DelayedSupportingSourceReviewer(_ProactiveReplySequence):
+    def __init__(self, *, delay_seconds: float) -> None:
+        super().__init__([_source_closure_review()])
+        self.delay_seconds = delay_seconds
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(self.delay_seconds)
+        return await super().complete(messages, temperature=temperature)
+
+
+class _JsonPreferredProactiveModel:
+    model = "test-json-preferred-proactive"
+
+    def __init__(self) -> None:
+        self.general_calls = 0
+        self.json_calls = 0
+
+    async def complete_with_usage(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        self.general_calls += 1
+        return "{}", _usage(provider=self.model, ordinal=self.general_calls)
+
+    async def complete_json_with_usage(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        self.json_calls += 1
+        return (
+            json.dumps(
+                {
+                    "timing_choice": "silent",
+                    "cadence": "conversational",
+                    "stance": "quietly_content",
+                    "brief_rationale": "此刻没有想说的话。",
+                    "impulse_summary": "念头停在心里，没有形成表达冲动。",
+                    "confidence": 7_000,
+                },
+                ensure_ascii=False,
+            ),
+            _usage(provider=self.model, ordinal=self.json_calls),
+        )
+
+
 class _MalformedProactiveModel:
     model = "test-malformed-proactive"
 
@@ -3598,6 +3639,94 @@ async def test_production_proactive_lane_uses_its_configured_recovery_window(
 
 
 @pytest.mark.asyncio
+async def test_production_proactive_source_review_uses_its_validation_window_without_reauthoring(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    proactive = _DraftModel("now")
+    reviewer = _DelayedSupportingSourceReviewer(delay_seconds=0.05)
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "proactive-validation-window.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id="world:proactive-validation-window",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+            interactive_turn_budget_policy=InteractiveTurnBudgetPolicy(
+                total_seconds=0.03,
+                hedge_after_seconds=0.005,
+                acceptance_dispatch_reserve_seconds=0.005,
+                first_provider_entry_seconds=0.001,
+                technical_recovery_seconds=0.2,
+                validation_recovery_seconds=0.2,
+                validation_reselection_seconds=0.2,
+            ),
+            social_initiative_policy=SocialInitiativePolicy(
+                spontaneous_idle_seconds=60,
+                spontaneous_expiry_seconds=3_600,
+                consideration_band_override_seconds=(60, 60),
+            ),
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=_NoDispatchTransport(),
+        proactive_model=proactive,
+        proactive_source_closure_model=reviewer,
+        now=NOW,
+    )
+    try:
+        await app.inbound(
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:proactive-validation-window",
+            text="我先去忙一会儿",
+            observed_at=NOW,
+            trace_id="trace:proactive-validation-window",
+        )
+        due = NOW + timedelta(seconds=61)
+        await app.tick(
+            tick_id="tick:proactive-validation-window",
+            logical_time_from=NOW,
+            logical_time_to=due,
+            observed_at=due,
+            trace_id="trace:proactive-validation-window",
+            causation_id="scheduler:test",
+            correlation_id="conversation:proactive-validation-window",
+            reason="test_idle",
+        )
+
+        assert (await app.drain_background_once()).status == "opened"
+        result = await app.drain_background_once()
+
+        assert result.status == "authorized"
+        assert proactive.calls == 1
+        assert reviewer.calls == 1
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_proactive_author_prefers_provider_json_mode_when_usage_is_metered() -> None:
+    model = _JsonPreferredProactiveModel()
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+    ).propose(_proactive_model_request())
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+    assert (
+        proposal.proactive_opportunity_decision.disposition
+        == "silent_after_consideration"
+    )
+    assert model.json_calls == 1
+    assert model.general_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_production_application_opens_one_grounded_spontaneous_contact_after_idle(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -4279,7 +4408,10 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
 
         assert repeated_failure["initiative_consecutive_technical_failures"] == 3
         assert repeated_failure["initiative_warning"] is True
-        assert repeated_failure["initiative_warning_reasons"] == ["repeated_technical_failures"]
+        assert repeated_failure["initiative_warning_reasons"] == [
+            "technical_failures_24h",
+            "repeated_technical_failures",
+        ]
     finally:
         app.close()
 
@@ -4400,6 +4532,163 @@ async def test_newer_semantic_consideration_resets_older_technical_retry(
         assert health["initiative_last_failure_code"] is None
         assert health["initiative_last_model_decision"] == expected_decision
         assert (await runtime.drain_one()).status != "completed_existing"
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_proactive_health_keeps_a_24_hour_failure_visible_after_a_newer_success(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    proactive = _ProactiveReplySequence(
+        [
+            "{}",
+            "{}",
+            _proactive_draft("忽然想跟你说句话。"),
+        ]
+    )
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "proactive-health-window.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id=WORLD,
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=_DeliveredTransport(),
+        proactive_model=proactive,
+        now=NOW,
+    )
+    try:
+        _seed_due_thread(app._ledger)  # noqa: SLF001 - real persisted authority fixture
+        runtime = app._turns._runtime._proactive_action_runtime  # noqa: SLF001
+        assert runtime is not None
+        assert (await runtime.drain_one()).status == "opened"
+        assert (await runtime.drain_one()).status == "failed_safe"
+        current_time = app._ledger.project().logical_time  # noqa: SLF001
+        assert current_time is not None
+
+        _seed_due_thread(
+            app._ledger,  # noqa: SLF001
+            thread_key="newer",
+            advance_clock=False,
+            event_at=current_time,
+        )
+        assert (await runtime.drain_one()).status == "opened"
+        assert (await runtime.drain_one()).status == "authorized"
+        assert (await app.drain_actions_once()).status == "settled"
+
+        health = await app.world_health_diagnostics()
+        reliability = health["initiative_reliability_24h"]
+
+        assert reliability == {
+            "window_hours": 24,
+            "as_of": current_time.isoformat(),
+            "attempt_count": 2,
+            "consideration_count": 2,
+            "technical_failure_attempt_count": 1,
+            "technical_failure_consideration_count": 1,
+            "model_silent_count": 0,
+            "grounding_rejected_count": 0,
+            "authorized_count": 1,
+            "delivered_count": 1,
+            "delivery_pending_count": 0,
+            "delivery_non_delivered_terminal_count": 0,
+            "model_decision_success_rate": 0.5,
+            "technical_failure_rate": 0.5,
+            "technical_failure_attempt_rate": 0.5,
+            "visible_authorization_rate": 0.5,
+            "visible_delivery_rate": 0.5,
+            "delivery_success_rate": 1.0,
+            "technical_failure_codes": {
+                "authored_expression_reselection_invalid": 1,
+            },
+            "warning": True,
+            "warning_reasons": ["technical_failures_24h"],
+        }
+        assert health["initiative_last_model_decision"] == "now"
+        assert health["initiative_consecutive_technical_failures"] == 0
+        assert health["initiative_warning"] is True
+        assert "technical_failures_24h" in health["initiative_warning_reasons"]
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_proactive_health_keeps_a_failed_attempt_visible_after_same_consideration_recovers(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    proactive = _ProactiveReplySequence(
+        [
+            "{}",
+            "{}",
+            _proactive_draft("刚才想说的话现在说出来。"),
+        ]
+    )
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "proactive-health-recovered-retry.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id=WORLD,
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=_DeliveredTransport(),
+        proactive_model=proactive,
+        now=NOW,
+    )
+    try:
+        _seed_due_thread(app._ledger)  # noqa: SLF001 - durable retry fixture
+        runtime = app._turns._runtime._proactive_action_runtime  # noqa: SLF001
+        assert runtime is not None
+        assert (await runtime.drain_one()).status == "opened"
+        assert (await runtime.drain_one()).status == "failed_safe"
+
+        failed_projection = app._ledger.project()  # noqa: SLF001
+        failed_at = failed_projection.logical_time
+        assert failed_at is not None
+        retry_health = await app.world_health_diagnostics()
+        retry_due = datetime.fromisoformat(
+            str(retry_health["initiative_next_consideration_at"])
+        )
+        await app.tick(
+            tick_id="tick:proactive-health-recovered-retry",
+            logical_time_from=failed_at,
+            logical_time_to=retry_due,
+            observed_at=retry_due,
+            trace_id="trace:proactive-health-recovered-retry",
+            causation_id="scheduler:test",
+            correlation_id="conversation:proactive-health-recovered-retry",
+            reason="technical_retry_due",
+        )
+        assert (await runtime.drain_one()).status == "opened"
+        assert (await runtime.drain_one()).status == "authorized"
+        assert (await app.drain_actions_once()).status == "settled"
+
+        health = await app.world_health_diagnostics()
+        reliability = health["initiative_reliability_24h"]
+
+        assert reliability["attempt_count"] == 2
+        assert reliability["consideration_count"] == 1
+        assert reliability["technical_failure_attempt_count"] == 1
+        assert reliability["technical_failure_consideration_count"] == 0
+        assert reliability["technical_failure_rate"] == 0.0
+        assert reliability["technical_failure_attempt_rate"] == 0.5
+        assert reliability["authorized_count"] == 1
+        assert reliability["delivered_count"] == 1
+        assert reliability["warning"] is True
+        assert reliability["warning_reasons"] == ["technical_failures_24h"]
+        assert health["initiative_warning"] is True
     finally:
         app.close()
 

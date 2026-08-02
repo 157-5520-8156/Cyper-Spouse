@@ -3221,7 +3221,13 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
     assert response.status_code == 200
     scheduler = response.json()["scheduler"]
     assert scheduler["status"] == "running"
-    assert scheduler["initiative"] == {
+    initiative = scheduler["initiative"]
+    reliability = initiative.pop("reliability_24h")
+    assert reliability["window_hours"] == 24
+    assert reliability["attempt_count"] == 0
+    assert reliability["consideration_count"] == 0
+    assert reliability["warning"] is False
+    assert initiative == {
         "last_status": None,
         "last_reason": None,
         "pending_opportunity_count": 0,

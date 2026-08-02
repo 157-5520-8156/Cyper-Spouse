@@ -202,6 +202,32 @@ class QQC2CSchedulerDiagnostics:
                 "last_failure_code": world.get(
                     "initiative_last_failure_code"
                 ),
+                "reliability_24h": world.get(
+                    "initiative_reliability_24h",
+                    {
+                        "window_hours": 24,
+                        "as_of": None,
+                        "attempt_count": 0,
+                        "consideration_count": 0,
+                        "technical_failure_attempt_count": 0,
+                        "technical_failure_consideration_count": 0,
+                        "model_silent_count": 0,
+                        "grounding_rejected_count": 0,
+                        "authorized_count": 0,
+                        "delivered_count": 0,
+                        "delivery_pending_count": 0,
+                        "delivery_non_delivered_terminal_count": 0,
+                        "model_decision_success_rate": None,
+                        "technical_failure_rate": None,
+                        "technical_failure_attempt_rate": None,
+                        "visible_authorization_rate": None,
+                        "visible_delivery_rate": None,
+                        "delivery_success_rate": None,
+                        "technical_failure_codes": {},
+                        "warning": False,
+                        "warning_reasons": [],
+                    },
+                ),
                 "warning": bool(initiative_warning_reasons)
                 or unexplained_initiative_warning,
                 "warning_reasons": initiative_warning_reasons,

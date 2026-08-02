@@ -399,6 +399,146 @@ def _expression_retry_health(
     }
 
 
+def _proactive_reliability_health(
+    projection: LedgerProjection,
+    *,
+    window: timedelta = timedelta(hours=24),
+) -> dict[str, object]:
+    """Summarize the durable proactive funnel without conflating silence and failure."""
+
+    as_of = projection.logical_time
+    cutoff = as_of - window if as_of is not None else None
+    attempts = []
+    for process in projection.trigger_processes:
+        considered_at = (
+            process.claim_lease.acquired_at if process.claim_lease is not None else None
+        )
+        if (
+            process.process_kind != ProactiveActionRuntime.PROCESS_KIND
+            or process.state != "terminal"
+            or considered_at is None
+            or (cutoff is not None and considered_at < cutoff)
+        ):
+            continue
+        attempts.append(process)
+
+    latest_by_consideration = {}
+    for process in attempts:
+        latest_by_consideration[process.trigger_ref] = process
+    considerations = tuple(latest_by_consideration.values())
+    actions_by_id = {item.action_id: item for item in projection.actions}
+    audits_by_result = {
+        item.model_result_ref: item for item in projection.model_result_audits
+    }
+
+    technical_attempts = tuple(
+        item
+        for item in attempts
+        if str(item.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
+    )
+    technical_considerations = tuple(
+        item
+        for item in considerations
+        if str(item.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
+    )
+    silent = tuple(
+        item for item in considerations if item.runtime_outcome_ref == "proactive:silent"
+    )
+    grounding_rejected = tuple(
+        item
+        for item in considerations
+        if item.runtime_outcome_ref == "proactive:grounding-rejected"
+    )
+    authorized = tuple(
+        item
+        for item in considerations
+        if str(item.runtime_outcome_ref).startswith("proactive:authorized:")
+    )
+    authorized_actions = tuple(
+        actions_by_id.get(
+            str(item.runtime_outcome_ref).removeprefix("proactive:authorized:")
+        )
+        for item in authorized
+    )
+    delivered_count = sum(
+        item is not None and item.state == "delivered" for item in authorized_actions
+    )
+    non_delivered_terminal_count = sum(
+        item is not None
+        and item.state in {"failed", "cancelled", "expired", "unknown"}
+        for item in authorized_actions
+    )
+    delivery_pending_count = len(authorized_actions) - (
+        delivered_count + non_delivered_terminal_count
+    )
+    failure_codes: Counter[str] = Counter()
+    for process in technical_attempts:
+        result_ref = str(process.runtime_outcome_ref).removeprefix(
+            "proactive:deliberation-failed:"
+        )
+        audit = audits_by_result.get(result_ref)
+        audit_failure_code = None
+        if audit is not None:
+            try:
+                parsed_audit = json.loads(audit.audit_json)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed_audit = None
+            if isinstance(parsed_audit, dict):
+                candidate_failure_code = parsed_audit.get("failure_code")
+                if isinstance(candidate_failure_code, str) and candidate_failure_code:
+                    audit_failure_code = candidate_failure_code
+        failure_codes[
+            audit_failure_code or "unknown_technical_failure"
+        ] += 1
+
+    consideration_count = len(considerations)
+    terminal_delivery_count = delivered_count + non_delivered_terminal_count
+
+    def rate(numerator: int, denominator: int) -> float | None:
+        return round(numerator / denominator, 4) if denominator else None
+
+    warning_reasons = []
+    # A recovered retry must not erase evidence that the provider lane failed
+    # earlier in the same durable consideration.  The consideration-level rate
+    # describes final outcomes; availability warnings and the attempt rate use
+    # every terminal attempt in the rolling window.
+    if technical_attempts:
+        warning_reasons.append("technical_failures_24h")
+    if non_delivered_terminal_count:
+        warning_reasons.append("delivery_failures_24h")
+    if len(grounding_rejected) >= 3:
+        warning_reasons.append("repeated_grounding_rejections_24h")
+    return {
+        "window_hours": int(window.total_seconds() // 3_600),
+        "as_of": as_of.isoformat() if as_of is not None else None,
+        "attempt_count": len(attempts),
+        "consideration_count": consideration_count,
+        "technical_failure_attempt_count": len(technical_attempts),
+        "technical_failure_consideration_count": len(technical_considerations),
+        "model_silent_count": len(silent),
+        "grounding_rejected_count": len(grounding_rejected),
+        "authorized_count": len(authorized),
+        "delivered_count": delivered_count,
+        "delivery_pending_count": delivery_pending_count,
+        "delivery_non_delivered_terminal_count": non_delivered_terminal_count,
+        "model_decision_success_rate": rate(
+            len(authorized) + len(silent), consideration_count
+        ),
+        "technical_failure_rate": rate(
+            len(technical_considerations), consideration_count
+        ),
+        "technical_failure_attempt_rate": rate(
+            len(technical_attempts), len(attempts)
+        ),
+        "visible_authorization_rate": rate(len(authorized), consideration_count),
+        "visible_delivery_rate": rate(delivered_count, consideration_count),
+        "delivery_success_rate": rate(delivered_count, terminal_delivery_count),
+        "technical_failure_codes": dict(sorted(failure_codes.items())),
+        "warning": bool(warning_reasons),
+        "warning_reasons": warning_reasons,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class LifeEcologyComposition:
     """Explicit production profile for the durable Life Ecology worker.
@@ -2268,7 +2408,10 @@ class WorldV2TurnApplication:
                     logical_time is not None
                     and logical_time >= active_retry.next_retry_at
                 )
-        warning_reasons: list[str] = []
+        initiative_reliability_24h = _proactive_reliability_health(projection)
+        warning_reasons: list[str] = list(
+            initiative_reliability_24h["warning_reasons"]
+        )
         if consecutive_technical_failures >= 3:
             warning_reasons.append("repeated_technical_failures")
         if consecutive_technical_failures and initiative_state not in {
@@ -2607,6 +2750,7 @@ class WorldV2TurnApplication:
             "initiative_consecutive_technical_failures": (consecutive_technical_failures),
             "initiative_retry_ordinal": consecutive_technical_failures,
             "initiative_last_failure_code": last_failure_code,
+            "initiative_reliability_24h": initiative_reliability_24h,
             "initiative_warning": bool(warning_reasons),
             "initiative_warning_reasons": warning_reasons,
             "life_event_count": life_event_count,

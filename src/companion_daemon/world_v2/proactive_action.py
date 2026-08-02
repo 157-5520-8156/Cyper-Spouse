@@ -356,6 +356,26 @@ class ProactiveDraftAdapter:
 
         return False
 
+    def source_closure_review_enabled(self) -> bool:
+        """Expose proactive truth-boundary work to Deliberation budgeting.
+
+        Proactive authorship may be followed by claim binding, candidate
+        inventory and independent source review.  Those provider calls validate
+        already-authored bytes; they must use the candidate-local validation
+        windows instead of consuming the role-author deadline or its technical
+        recovery window.
+        """
+
+        return any(
+            dependency is not None
+            for dependency in (
+                self._source_closure_reviewer,
+                self._report_relative_reviewer,
+                self._candidate_external_proposition_inventory_model,
+                self._proactive_claim_binder_model,
+            )
+        )
+
     def _discard_proactive_prefetch(
         self,
         request: ModelInput,
@@ -683,7 +703,14 @@ class ProactiveDraftAdapter:
             messages=messages,
             temperature=initial_temperature,
         )
-        metered = getattr(self._model, "complete_with_usage", None)
+        # The proactive contract is one JSON object.  Provider-native JSON mode
+        # materially reduces shape failures (missing stance/private state,
+        # wrappers and prose fences) while leaving every semantic coordinate to
+        # the same role model.  Keep the metered generic call only as a
+        # compatibility fallback for providers without a JSON-capable method.
+        metered = getattr(self._model, "complete_json_with_usage", None)
+        if not callable(metered):
+            metered = getattr(self._model, "complete_with_usage", None)
         usage: ModelUsageProvenance | None = None
         winning_model_call_id: str | None = None
         winning_request_hash: str | None = None
