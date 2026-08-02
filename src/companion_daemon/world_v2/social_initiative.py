@@ -269,6 +269,16 @@ class SocialInitiativeCompiler:
         logical_time = projection.logical_time
         if logical_time is None:
             return None
+        pending = await self._pending_consideration(
+            projection,
+            excluded_consideration_ids=excluded_consideration_ids,
+        )
+        if pending is not None:
+            # Opening a process durably consumes the timing opportunity.
+            # Recovery therefore follows that process even if a later
+            # contact cooldown or an expired stimulus window would no longer
+            # mint the same opportunity from scratch.
+            return pending
         recent_contact = max(
             (
                 item.logical_time
@@ -312,6 +322,90 @@ class SocialInitiativeCompiler:
         ):
             return None
         return spontaneous
+
+    async def _pending_consideration(
+        self,
+        projection,
+        *,
+        excluded_consideration_ids: frozenset[str],
+    ) -> SocialInitiativeOpportunity | None:
+        latest_message_revision = (
+            projection.message_observations[-1].world_revision
+            if projection.message_observations
+            else 0
+        )
+        for process in getattr(projection, "trigger_processes", ()):
+            if (
+                process.process_kind != "proactive_action_deliberation"
+                or process.state not in {"open", "claimed"}
+                or process.source_evidence_ref is None
+                or not process.trigger_ref.startswith(
+                    "proactive-consideration:consideration:social-initiative:"
+                )
+            ):
+                continue
+            consideration_id = process.trigger_ref.removeprefix(
+                "proactive-consideration:"
+            )
+            if consideration_id in excluded_consideration_ids:
+                continue
+            source_ref = next(
+                (
+                    item
+                    for item in projection.committed_world_event_refs
+                    if item.event_id == process.source_evidence_ref
+                ),
+                None,
+            )
+            if source_ref is None or latest_message_revision > source_ref.world_revision:
+                continue
+            located = await self._lookup(source_ref.event_id)
+            if located is None:
+                continue
+            event = located[0]
+            if event.event_type == "ClockAdvanced":
+                source_kind = "ambient_presence"
+                source_id = f"ambient:recovery:{source_ref.world_revision}"
+                stimulus_event_refs: tuple[str, ...] = ()
+            elif event.event_type == "ObservationRecorded":
+                source_kind = "spontaneous_contact"
+                message = next(
+                    (
+                        item
+                        for item in projection.message_observations
+                        if item.world_revision == source_ref.world_revision
+                    ),
+                    None,
+                )
+                if message is None:
+                    continue
+                source_id = message.observation_id
+                stimulus_event_refs = ()
+            elif event.event_type in _SITUATION_STIMULUS_EVENT_TYPES:
+                source_kind = "situation_change"
+                source_id = "situation-window:" + source_ref.event_id
+                stimulus_event_refs = tuple(
+                    item.event_id
+                    for item in projection.committed_world_event_refs
+                    if item.event_type in _SITUATION_STIMULUS_EVENT_TYPES
+                    and event.logical_time
+                    <= item.logical_time
+                    < event.logical_time + _SITUATION_WINDOW
+                    and item.world_revision > latest_message_revision
+                )
+            else:
+                continue
+            return await self._from_source(
+                source_kind=source_kind,
+                source_id=source_id,
+                source_event_ref=source_ref.event_id,
+                source_world_revision=source_ref.world_revision,
+                consideration_id=consideration_id,
+                scheduled_for=source_ref.logical_time,
+                cadence_reason_codes=("recovery:persisted_process",),
+                stimulus_event_refs=stimulus_event_refs,
+            )
+        return None
 
     async def _situation_change(
         self,

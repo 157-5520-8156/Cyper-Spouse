@@ -191,6 +191,65 @@ def _compiler_fixture(*, receptive: bool):
 
 
 @pytest.mark.asyncio
+async def test_open_situation_consideration_recovers_before_contact_cooldown() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    source = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:experience:persisted-open",
+        world_id=projection.world_id,
+        event_type="ExperienceCommitted",
+        logical_time=NOW + timedelta(minutes=10),
+        created_at=NOW + timedelta(minutes=10),
+        actor="actor:companion",
+        source="test",
+        trace_id="trace:persisted-open",
+        causation_id="cause:persisted-open",
+        correlation_id="conversation:persisted-open",
+        idempotency_key="experience:persisted-open",
+        payload={},
+    )
+    compiler._ledger.lookup_event_commit = lambda event_id: (  # type: ignore[attr-defined]  # noqa: SLF001
+        (source, SimpleNamespace(world_revision=2))
+        if event_id == source.event_id
+        else None
+    )
+    consideration_id = "consideration:social-initiative:" + "a" * 64
+    projection.committed_world_event_refs = (
+        SimpleNamespace(
+            event_id=source.event_id,
+            event_type=source.event_type,
+            logical_time=source.logical_time,
+            world_revision=2,
+        ),
+    )
+    projection.actions = (
+        SimpleNamespace(
+            kind="proactive_message",
+            state="delivered",
+            logical_time=projection.logical_time - timedelta(minutes=1),
+        ),
+    )
+    projection.trigger_processes = (
+        SimpleNamespace(
+            trigger_id="trigger:proactive:persisted-open",
+            trigger_ref="proactive-consideration:" + consideration_id,
+            process_kind="proactive_action_deliberation",
+            source_evidence_ref=source.event_id,
+            state="open",
+            runtime_outcome_ref=None,
+        ),
+    )
+
+    opportunity = await compiler.next_opportunity(projection)
+
+    assert opportunity is not None
+    assert opportunity.consideration_id == consideration_id
+    assert opportunity.source_kind == "situation_change"
+    assert opportunity.source_event_ref == source.event_id
+    assert opportunity.cadence_reason_codes == ("recovery:persisted_process",)
+
+
+@pytest.mark.asyncio
 async def test_consideration_draw_selects_only_a_delay_and_never_act_or_hold() -> None:
     receptive, projection, receptive_commits = _compiler_fixture(receptive=True)
     draws: list[dict[str, object]] = []
@@ -671,13 +730,14 @@ async def test_not_due_retry_does_not_starve_an_independent_due_situation() -> N
         world_revision=5,
     )
     trigger_ref = "proactive-consideration:" + first.consideration_id
+    failed_trigger_id = ProactiveActionRuntime._trigger_id_for_world(  # noqa: SLF001
+        world_id=projection.world_id,
+        consideration_id=first.consideration_id,
+        retry_ordinal=0,
+    )
     projection.trigger_processes = (
         SimpleNamespace(
-            trigger_id=ProactiveActionRuntime._trigger_id_for_world(  # noqa: SLF001
-                world_id=projection.world_id,
-                consideration_id=first.consideration_id,
-                retry_ordinal=0,
-            ),
+            trigger_id=failed_trigger_id,
             process_kind=ProactiveActionRuntime.PROCESS_KIND,
             state="terminal",
             trigger_ref=trigger_ref,
@@ -686,6 +746,7 @@ async def test_not_due_retry_does_not_starve_an_independent_due_situation() -> N
             claim_lease=SimpleNamespace(acquired_at=failed_at),
         ),
     )
+    projection.completed_trigger_ids = (failed_trigger_id,)
     projection.model_result_audits = (
         SimpleNamespace(
             attempt_id=ProactiveActionRuntime._model_attempt_id(  # noqa: SLF001

@@ -16,7 +16,7 @@ import json
 import logging
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .biographical_claim_authority import (
@@ -29,6 +29,7 @@ from .chat_model_deliberation_adapter import (
     _provider_invocation_identity,
     _source_closure_reselection_envelope,
     complete_bounded_validation_reselection,
+    expression_draft_shape_contract,
     parse_character_recall_request,
     private_turn_state_reselection_instruction,
     review_candidate_external_proposition_coverage,
@@ -65,6 +66,7 @@ from .expression_draft import (
     validate_expression_private_turn_state,
     world_claim_source_refs_by_scope,
 )
+from .interactive_turn_budget import InteractiveTurnBudgetPolicy
 from .ledger import LedgerPort
 from .proposal_audit import ProposalAuditCommit, ProposalAuditContext, ProposalAuditRecorder
 from .proposal_envelope import (
@@ -113,6 +115,33 @@ def _canonical(value: object) -> str:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
+
+
+def _expression_draft_validation_failure(exc: Exception) -> str:
+    """Expose bounded wire coordinates without replaying rejected prose."""
+
+    if isinstance(exc, ValidationError):
+        coordinates = tuple(
+            {
+                "path": ".".join(str(part) for part in item.get("loc", ())),
+                "type": str(item.get("type", "validation_error")),
+                "message": str(item.get("msg", "invalid value"))[:160],
+            }
+            for item in exc.errors(include_url=False, include_input=False)[:8]
+        )
+        return _canonical(coordinates)
+    return f"{type(exc).__name__}: {str(exc)[:480]}"
+
+
+def _proactive_expression_shape_contract() -> str:
+    """Extend the shared wire shape without prescribing proactive behavior."""
+
+    return (
+        expression_draft_shape_contract()
+        + " For this proactive ExpressionDraft, impulse_summary is required as one "
+        "non-empty free-text string describing the character's own present impulse; "
+        "it is not a motive category and the host does not constrain its content."
+    )
 
 
 class ProactiveDraft(ExpressionDraft):
@@ -265,6 +294,17 @@ class ProactiveDraftAdapter:
             raise ValueError("proactive recall coordinator is already installed")
         self._recall = coordinator
 
+    def has_hedge_provider(self, _request: ModelInput) -> bool:
+        """Proactive recovery is conditional on an observed author failure.
+
+        Production deliberately installs this adapter as both the primary
+        character author and the one-shot recovery author. That is not an
+        independent speculative hedge: racing the same stochastic role twice
+        could let latency choose between two valid now/later/silent decisions.
+        """
+
+        return False
+
     def _discard_proactive_prefetch(
         self,
         request: ModelInput,
@@ -342,6 +382,11 @@ class ProactiveDraftAdapter:
             request=request,
             raw=_proactive_source_review_raw(draft),
             identity_frame=self._identity_frame,
+            # The proactive author receives this exact pinned profile rather
+            # than the ordinary chat compaction. Source review must resolve
+            # against the same visible refs; compacting again can discard
+            # source_bindings that the role was explicitly allowed to cite.
+            model_visible_context_json=request.model_content_json,
             allow_report_relative_adjudication=allow_report_relative_adjudication,
         )
         review = result.review
@@ -431,6 +476,7 @@ class ProactiveDraftAdapter:
             "coordinates may be cited only through their matching field-level current_world "
             "refs; each proves only the listed value and no unlisted activity or occurrence."
         )
+        system += " " + _proactive_expression_shape_contract()
         if self._identity_frame is not None:
             system += (
                 " Stable companion identity: "
@@ -669,6 +715,7 @@ class ProactiveDraftAdapter:
                     {
                         "contract": "proactive-expression-structure-reselection.1",
                         "authority": "wire_shape_only_not_behavior",
+                        "wire_contract": _proactive_expression_shape_contract(),
                         "validation_failure": str(exc)[:640],
                         "task": (
                             "Return one complete replacement proactive ExpressionDraft JSON "
@@ -796,6 +843,7 @@ class ProactiveDraftAdapter:
                     {
                         "contract": "proactive-grounding-reselection.1",
                         "authority": "hard_boundary_only_not_context_or_behavior",
+                        "wire_contract": _proactive_expression_shape_contract(),
                         "rejected_candidate_sha256": hashlib.sha256(raw.encode()).hexdigest(),
                         "validation_failure": {
                             "code": failure_coordinate.code,
@@ -925,7 +973,12 @@ class ProactiveDraftAdapter:
             raise ValueError("proactive model must return one JSON object") from exc
         if not isinstance(decoded, dict):
             raise ValueError("proactive model must return one JSON object")
-        for wrapper in ("proactive_draft", "decision"):
+        for wrapper in (
+            "proactive_draft",
+            "decision",
+            "proactive_opportunity",
+            "expression_draft",
+        ):
             wrapped = decoded.get(wrapper)
             if set(decoded) == {wrapper} and isinstance(wrapped, dict):
                 decoded = wrapped
@@ -936,7 +989,10 @@ class ProactiveDraftAdapter:
             normalized = normalize_expression_draft_wire(decoded)
             draft = ProactiveDraft.model_validate_json(_canonical(normalized), strict=True)
         except Exception as exc:
-            raise ValueError("proactive model must return one valid ExpressionDraft") from exc
+            detail = _expression_draft_validation_failure(exc)
+            raise ValueError(
+                f"proactive model must return one valid ExpressionDraft: {detail}"
+            ) from exc
         validate_expression_draft_capabilities(
             draft=draft,
             capabilities=self._expression_capabilities,
@@ -1263,11 +1319,13 @@ class ProactiveDeliberationTurn:
         capsule_compiler: ContextCapsuleCompiler,
         deliberation: Deliberation,
         companion_actor_ref: str,
+        budget_policy: InteractiveTurnBudgetPolicy | None = None,
     ) -> None:
         self._ledger = ledger
         self._capsules = capsule_compiler
         self._deliberation = deliberation
         self._actor = companion_actor_ref
+        self._budget_policy = budget_policy
         self._recorder = ProposalAuditRecorder(ledger=ledger)
 
     async def audit(
@@ -1530,6 +1588,7 @@ class ProactiveDeliberationTurn:
                     else (committed_ref,)
                 )
             ),
+            budget=(self._budget_policy.start() if self._budget_policy is not None else None),
         )
         projection_time = projection.logical_time or stored[0].logical_time
         context = ProposalAuditContext(
@@ -1633,6 +1692,12 @@ class ProactiveActionRuntime:
             "affect_target_reselection_invalid",
             "inventory_invalid",
             "coverage_invalid",
+        }
+    )
+    _SEMANTIC_TERMINAL_OUTCOMES = frozenset(
+        {
+            "proactive:silent",
+            "proactive:grounding-rejected",
         }
     )
 
@@ -2174,6 +2239,10 @@ class ProactiveActionRuntime:
         trigger_ref = "proactive-consideration:" + consideration_id
         refs = {item.event_id: item for item in projection.committed_world_event_refs}
         processes_by_id = {item.trigger_id: item for item in projection.trigger_processes}
+        completion_positions = {
+            trigger_id: index
+            for index, trigger_id in enumerate(projection.completed_trigger_ids)
+        }
         durable_failures = {
             (item.attempt_id, item.model_result_ref): item
             for item in projection.model_result_audits
@@ -2181,6 +2250,7 @@ class ProactiveActionRuntime:
         }
         failures: list[tuple[datetime, int, str | None, str]] = []
         retry_ordinal = 0
+        last_failure_completion_position: int | None = None
         source_evidence_ref: str | None = None
         retry_process_state: Literal["pending", "open", "claimed"] = "pending"
         while True:
@@ -2250,10 +2320,33 @@ class ProactiveActionRuntime:
                     process.source_evidence_ref or "",
                 )
             )
+            completion_position = completion_positions.get(process.trigger_id)
+            if completion_position is not None:
+                last_failure_completion_position = completion_position
             source_evidence_ref = process.source_evidence_ref
             retry_ordinal += 1
         if not failures or not source_evidence_ref:
             return None
+        # A later completed role decision proves that the proactive model lane
+        # recovered. Technical failures belong to attempts, not permanently
+        # to the social scheduler: carrying an older retry past a newer
+        # now/later/silent/grounding decision would misreport recovery as
+        # continued outage and could replay stale context hours later.
+        for process in projection.trigger_processes:
+            outcome = str(process.runtime_outcome_ref)
+            completion_position = completion_positions.get(process.trigger_id)
+            if (
+                last_failure_completion_position is not None
+                and completion_position is not None
+                and completion_position > last_failure_completion_position
+                and process.process_kind == cls.PROCESS_KIND
+                and process.state == "terminal"
+                and (
+                    outcome in cls._SEMANTIC_TERMINAL_OUTCOMES
+                    or outcome.startswith("proactive:authorized:")
+                )
+            ):
+                return None
         last_failed_at, last_failure_revision, last_failure_code, _ = failures[-1]
         latest_message_revision = (
             projection.message_observations[-1].world_revision
@@ -2309,12 +2402,21 @@ class ProactiveActionRuntime:
         *,
         excluded_consideration_ids: frozenset[str] = frozenset(),
     ) -> ProactiveOpportunity | None:
+        active_retry_sources = {
+            item.source_evidence_ref
+            for item in proactive_technical_retry_states(projection)
+        }
         terminal_sources = {
             item.source_evidence_ref
             for item in projection.trigger_processes
             if item.process_kind == self.PROCESS_KIND
             and item.state == "terminal"
-            and not str(item.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
+            and (
+                not str(item.runtime_outcome_ref).startswith(
+                    "proactive:deliberation-failed:"
+                )
+                or item.source_evidence_ref not in active_retry_sources
+            )
         }
         failed_source_revisions = {}
         for item in projection.trigger_processes:

@@ -1323,6 +1323,11 @@ def test_frozen_effect_is_excluded_from_legacy_semantic_hash_material() -> None:
         world_revision=1,
         reducer_bundle_version="world-v2-reducers.41",
     )
+    v47 = state.semantic_payload(
+        world_id="world:legacy-effect-hash",
+        world_revision=1,
+        reducer_bundle_version="world-v2-reducers.47",
+    )
     current = state.semantic_payload(
         world_id="world:legacy-effect-hash",
         world_revision=1,
@@ -1343,6 +1348,10 @@ def test_frozen_effect_is_excluded_from_legacy_semantic_hash_material() -> None:
     assert current["world_occurrences"][0]["candidate_outcomes"][0][
         "life_arc_effect"
     ]["descriptor_hash"] == effect.descriptor_hash
+    assert (
+        "objective_biographical_transition"
+        not in v47["world_occurrences"][0]["candidate_outcomes"][0]
+    )
     assert v41["world_occurrences"][0]["candidate_outcomes"][0][
         "life_arc_effect"
     ]["descriptor_hash"] == effect.descriptor_hash

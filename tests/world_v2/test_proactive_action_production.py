@@ -31,6 +31,7 @@ from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.expression_draft import TEXT_ONLY_EXPRESSION_CAPABILITIES
 from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.expression_plan_acceptance import ExpressionPlanBudgetPolicy
+from companion_daemon.world_v2.interactive_turn_budget import InteractiveTurnBudgetPolicy
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.ledger_context_resolver import (
     ContextRelevanceScope,
@@ -532,8 +533,29 @@ async def test_malformed_proactive_expression_gets_one_exact_structural_reselect
     assert model.calls == 2
     repair = json.loads(model.messages[1][-1]["content"])
     assert repair["contract"] == "proactive-expression-structure-reselection.1"
+    assert "Exact ExpressionDraft JSON field contract" in repair["wire_contract"]
+    assert "impulse_summary is required" in repair["wire_contract"]
     assert "valid ExpressionDraft" in repair["validation_failure"]
+    assert "brief_rationale" in repair["validation_failure"]
     assert "忽然想跟你说句话" not in json.dumps(model.messages[0], ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapper", ["proactive_opportunity", "expression_draft"])
+async def test_proactive_parser_accepts_provider_mirrored_opportunity_wrapper(
+    wrapper: str,
+) -> None:
+    draft = _proactive_draft("刚刚忽然想和你说句话。")
+    model = _ProactiveReplySequence([{wrapper: draft}])
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+    ).propose(_proactive_model_request())
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert proposal.timing_choice == "now"
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -875,6 +897,56 @@ async def test_proactive_can_cite_an_exact_current_biographical_coordinate() -> 
     assert reviewer.calls == 1
     assert proposal.proactive_grounding_outcome == "not_required"
     assert proposal.action_intents
+
+
+@pytest.mark.asyncio
+async def test_proactive_source_review_resolves_the_same_full_pinned_context_seen_by_role() -> None:
+    source_ref = "event:life-content:experience:production-visible"
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["recent_experiences"] = {
+        "availability": "available",
+        "items": [
+            {
+                "item_ref": "experience:production-visible",
+                "source_bindings": [{"ref": source_ref}],
+                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
+            }
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    model = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "刚才翻到那本《小王子》的时候，忽然有点想和你说句话。",
+                claims=[
+                    {
+                        "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
+                        "scope": "past_world",
+                        "source_refs": [source_ref],
+                    }
+                ],
+            )
+        ]
+    )
+    reviewer = _supporting_source_reviewer()
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+    ).propose(request)
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert proposal.proactive_grounding_outcome == "not_required"
+    assert reviewer.calls == 1
+    review = json.loads(reviewer.messages[0][1]["content"])
+    assert any(
+        source_ref in entry["source_refs"]
+        for entry in review["source_evidence"]["entries"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1889,6 +1961,44 @@ class _SequenceDraftModel(_DraftModel):
         return await super().complete(messages, temperature=temperature)
 
 
+class _SlowPrimaryThenSilentDraftModel:
+    model = "test-slow-primary-then-silent-proactive"
+
+    def __init__(self, *, primary_delay_seconds: float) -> None:
+        self.primary_delay_seconds = primary_delay_seconds
+        self.calls = 0
+        self.primary_cancelled = False
+        self.second_call_started_after_primary_cancel = False
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        self.calls += 1
+        if self.calls == 1:
+            try:
+                await asyncio.sleep(self.primary_delay_seconds)
+            except asyncio.CancelledError:
+                self.primary_cancelled = True
+                raise
+            choice = "now"
+        else:
+            self.second_call_started_after_primary_cancel = self.primary_cancelled
+            choice = "silent"
+        value: dict[str, object] = {
+            "timing_choice": choice,
+            "cadence": "conversational",
+            "stance": "self_directed",
+            "brief_rationale": "按此刻情境决定是否联系。",
+            "impulse_summary": "此刻自然地想到了对方。",
+            "confidence": 7_000,
+        }
+        if choice == "now":
+            value["beats"] = [{"modality": "text", "text": "刚刚想起你了。"}]
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+        )
+
+
 class _MalformedProactiveModel:
     model = "test-malformed-proactive"
 
@@ -2272,6 +2382,9 @@ async def test_visible_proactive_expression_is_bound_to_its_semantic_opportunity
         "target_ref": "user:primary",
     }
     system = model.messages[0][0]["content"]
+    assert "Exact ExpressionDraft JSON field contract" in system
+    assert 'A text beat uses exactly modality="text" and text=<non-empty string>' in system
+    assert "impulse_summary is required" in system
     for behavioral_instruction in (
         "curiosity, sharing, missing someone, asking for help or comfort",
         "semantic anchor",
@@ -2868,6 +2981,73 @@ async def test_sqlite_production_composition_installs_proactive_budget_without_a
 
 
 @pytest.mark.asyncio
+async def test_production_proactive_lane_uses_its_configured_recovery_window(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    proactive = _SlowPrimaryThenSilentDraftModel(primary_delay_seconds=0.05)
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "proactive-timeout-policy.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id="world:proactive-timeout-policy",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+            interactive_turn_budget_policy=InteractiveTurnBudgetPolicy(
+                total_seconds=0.03,
+                hedge_after_seconds=0.005,
+                acceptance_dispatch_reserve_seconds=0.005,
+                first_provider_entry_seconds=0.001,
+                technical_recovery_seconds=0.2,
+                validation_recovery_seconds=0.2,
+                validation_reselection_seconds=0.2,
+            ),
+            social_initiative_policy=SocialInitiativePolicy(
+                spontaneous_idle_seconds=60,
+                spontaneous_expiry_seconds=3_600,
+                consideration_band_override_seconds=(60, 60),
+            ),
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=_NoDispatchTransport(),
+        proactive_model=proactive,
+        now=NOW,
+    )
+    try:
+        await app.inbound(
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:proactive-timeout-policy",
+            text="我先去忙一会儿",
+            observed_at=NOW,
+            trace_id="trace:proactive-timeout-policy",
+        )
+        await app.tick(
+            tick_id="tick:proactive-timeout-policy",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(seconds=61),
+            observed_at=NOW + timedelta(seconds=61),
+            trace_id="trace:proactive-timeout-policy",
+            causation_id="scheduler:test",
+            correlation_id="conversation:proactive-timeout-policy",
+            reason="test_idle",
+        )
+
+        assert (await app.drain_background_once()).status == "opened"
+        result = await app.drain_background_once()
+
+        assert result.status == "silent"
+        assert proactive.calls == 2
+        assert proactive.primary_cancelled is True
+        assert proactive.second_call_started_after_primary_cancel is True
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
 async def test_production_application_opens_one_grounded_spontaneous_contact_after_idle(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -3459,21 +3639,37 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         second_retry = await app.world_health_diagnostics()
         assert second_retry["initiative_state"] == "retry_wait"
         assert second_retry["initiative_retry_ordinal"] == 2
-        assert second_retry["initiative_next_consideration_at"] == (
-            retry_due + timedelta(minutes=30)
-        ).isoformat()
+        third_due = retry_due + timedelta(minutes=30)
+        assert second_retry["initiative_next_consideration_at"] == third_due.isoformat()
+        await app.tick(
+            tick_id="tick:backoff:third-due",
+            logical_time_from=retry_due,
+            logical_time_to=third_due,
+            observed_at=third_due,
+            trace_id="trace:backoff:third-due",
+            causation_id="scheduler:test",
+            correlation_id="conversation:backoff",
+            reason="test_idle",
+        )
+        assert (await app.drain_background_once()).status == "opened"
+        assert (await app.drain_background_once()).status == "failed_safe"
+
+        repeated_failure = await app.world_health_diagnostics()
+
+        assert repeated_failure["initiative_consecutive_technical_failures"] == 3
+        assert repeated_failure["initiative_warning"] is True
+        assert repeated_failure["initiative_warning_reasons"] == [
+            "repeated_technical_failures"
+        ]
     finally:
         app.close()
 
 
 @pytest.mark.asyncio
-async def test_health_keeps_pending_retry_visible_after_newer_consideration_is_silent(
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
-    proactive = _ProactiveReplySequence(
-        [
-            "{}",
-            "{}",
+@pytest.mark.parametrize(
+    ("semantic_draft", "expected_status", "expected_outcome", "expected_decision"),
+    [
+        (
             {
                 "timing_choice": "silent",
                 "cadence": "conversational",
@@ -3483,6 +3679,30 @@ async def test_health_keeps_pending_retry_visible_after_newer_consideration_is_s
                 "confidence": 7_000,
                 "world_claims": [],
             },
+            "silent",
+            "proactive:silent",
+            "silent",
+        ),
+        (
+            _proactive_draft("忽然想跟你说句话。"),
+            "authorized",
+            "proactive:authorized:",
+            "now",
+        ),
+    ],
+)
+async def test_newer_semantic_consideration_resets_older_technical_retry(
+    tmp_path,
+    semantic_draft: dict[str, object],
+    expected_status: str,
+    expected_outcome: str,
+    expected_decision: str,
+) -> None:  # type: ignore[no-untyped-def]
+    proactive = _ProactiveReplySequence(
+        [
+            "{}",
+            "{}",
+            semantic_draft,
         ]
     )
     chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
@@ -3519,7 +3739,7 @@ async def test_health_keeps_pending_retry_visible_after_newer_consideration_is_s
             event_at=failed_at,
         )
         assert (await runtime.drain_one()).status == "opened"
-        assert (await runtime.drain_one()).status == "silent"
+        assert (await runtime.drain_one()).status == expected_status
         projection = app._ledger.project()  # noqa: SLF001
         proactive_processes = tuple(
             item
@@ -3527,15 +3747,42 @@ async def test_health_keeps_pending_retry_visible_after_newer_consideration_is_s
             if item.process_kind == ProactiveActionRuntime.PROCESS_KIND
         )
         assert len({item.trigger_ref for item in proactive_processes}) == 2
-        assert proactive_processes[-1].runtime_outcome_ref == "proactive:silent"
-        assert next_proactive_retry_due(projection) == retry_due
+        assert str(proactive_processes[-1].runtime_outcome_ref).startswith(
+            expected_outcome
+        )
+        # Simulate reverse completion without changing process-open order:
+        # the later-opened consideration completes first, then the
+        # earlier-opened attempt records its technical failure.
+        failed_trigger_id = proactive_processes[0].trigger_id
+        successful_trigger_id = proactive_processes[-1].trigger_id
+        reverse_completion = projection.model_copy(
+            update={
+                "completed_trigger_ids": tuple(
+                    successful_trigger_id
+                    if item == failed_trigger_id
+                    else failed_trigger_id
+                    if item == successful_trigger_id
+                    else item
+                    for item in projection.completed_trigger_ids
+                )
+            }
+        )
+        assert len(proactive_technical_retry_states(reverse_completion)) == 1
+        assert next_proactive_retry_due(reverse_completion) == retry_due
+        assert next_proactive_retry_due(projection) is None
+        assert proactive_technical_retry_states(projection) == ()
+        replayed = app._ledger.rebuild()  # noqa: SLF001 - verify immutable completion order
+        assert proactive_technical_retry_states(replayed) == ()
+        assert next_proactive_retry_due(replayed) is None
 
         health = await app.world_health_diagnostics()
 
-        assert health["initiative_state"] == "retry_wait"
-        assert health["initiative_next_consideration_at"] == retry_due.isoformat()
-        assert health["initiative_retry_ordinal"] == 1
-        assert health["initiative_last_model_decision"] == "silent"
+        assert health["initiative_next_consideration_at"] != retry_due.isoformat()
+        assert health["initiative_consecutive_technical_failures"] == 0
+        assert health["initiative_retry_ordinal"] == 0
+        assert health["initiative_last_failure_code"] is None
+        assert health["initiative_last_model_decision"] == expected_decision
+        assert (await runtime.drain_one()).status != "completed_existing"
     finally:
         app.close()
 

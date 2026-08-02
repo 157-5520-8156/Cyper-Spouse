@@ -1737,29 +1737,46 @@ class ReducerState(FrozenModel):
                             (
                                 None
                                 if declared_reducer_bundle_version
-                                in {
-                                    _V43_REDUCER_BUNDLE_VERSION,
-                                    _V44_REDUCER_BUNDLE_VERSION,
-                                    _V47_REDUCER_BUNDLE_VERSION,
-                                    PREVIOUS_REDUCER_BUNDLE_VERSION,
-                                    REDUCER_BUNDLE_VERSION,
-                                }
+                                == REDUCER_BUNDLE_VERSION
                                 else {
-                                    "settled_dynamic_life_direction_adopted": True,
+                                    **(
+                                        {}
+                                        if declared_reducer_bundle_version
+                                        in {
+                                            _V43_REDUCER_BUNDLE_VERSION,
+                                            _V44_REDUCER_BUNDLE_VERSION,
+                                            _V47_REDUCER_BUNDLE_VERSION,
+                                            PREVIOUS_REDUCER_BUNDLE_VERSION,
+                                        }
+                                        else {"settled_dynamic_life_direction_adopted": True}
+                                    ),
                                     "candidate_outcomes": {
                                         "__all__": {
-                                            "causal_authority",
-                                            "relative_plausibility_weight",
-                                            "provisional_npc_introductions",
-                                            "dynamic_life_arc_context",
+                                            "objective_biographical_transition",
                                             *(
                                                 ()
                                                 if declared_reducer_bundle_version
                                                 in {
-                                                    "world-v2-reducers.41",
-                                                    "world-v2-reducers.42",
+                                                    _V43_REDUCER_BUNDLE_VERSION,
+                                                    _V44_REDUCER_BUNDLE_VERSION,
+                                                    _V47_REDUCER_BUNDLE_VERSION,
+                                                    PREVIOUS_REDUCER_BUNDLE_VERSION,
                                                 }
-                                                else ("life_arc_effect",)
+                                                else (
+                                                    "causal_authority",
+                                                    "relative_plausibility_weight",
+                                                    "provisional_npc_introductions",
+                                                    "dynamic_life_arc_context",
+                                                    *(
+                                                        ()
+                                                        if declared_reducer_bundle_version
+                                                        in {
+                                                            "world-v2-reducers.41",
+                                                            "world-v2-reducers.42",
+                                                        }
+                                                        else ("life_arc_effect",)
+                                                    ),
+                                                )
                                             ),
                                         }
                                     }

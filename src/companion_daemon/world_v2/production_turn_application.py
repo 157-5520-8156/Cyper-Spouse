@@ -2269,6 +2269,8 @@ class WorldV2TurnApplication:
                     and logical_time >= active_retry.next_retry_at
                 )
         warning_reasons: list[str] = []
+        if consecutive_technical_failures >= 3:
+            warning_reasons.append("repeated_technical_failures")
         if consecutive_technical_failures and initiative_state not in {
             "retry_wait",
             "consideration_due",
@@ -3380,6 +3382,7 @@ def build_sqlite_world_v2_turn_application(
                         quick_recovery=proactive_adapter,
                     ),
                     companion_actor_ref=config.companion_actor_ref,
+                    budget_policy=config.interactive_turn_budget_policy,
                 ),
                 batch_issuer=issuer,
                 policy=ExpressionPlanBudgetPolicy(
