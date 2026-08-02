@@ -386,14 +386,21 @@ class PrivateImpressionDraftAdapter:
         self,
         messages: list[dict[str, str]],
     ) -> tuple[str, ModelUsageProvenance | None]:
-        metered = getattr(self._model, "complete_with_usage", None)
+        metered = getattr(self._model, "complete_json_with_usage", None)
+        if not callable(metered):
+            metered = getattr(self._model, "complete_with_usage", None)
         if callable(metered):
             value = await metered(messages, temperature=self._temperature)
             if not isinstance(value, tuple) or len(value) != 2 or not isinstance(value[0], str):
                 raise ValueError("private impression metered model returned an invalid result")
             return value[0], ModelUsageProvenance.model_validate(value[1])
+        complete_json = getattr(self._model, "complete_json", None)
         return (
-            await self._model.complete(messages, temperature=self._temperature),
+            await (
+                complete_json(messages, temperature=self._temperature)
+                if callable(complete_json)
+                else self._model.complete(messages, temperature=self._temperature)
+            ),
             None,
         )
 
@@ -969,24 +976,30 @@ class PrivateImpressionTriggerRuntime:
 
     async def drain_one(self) -> PrivateImpressionRunResult:
         projection = await _project(self._ledger)
-        process = next(
-            (
-                item
-                for item in projection.trigger_processes
-                if item.process_kind == "private_impression_deliberation"
-                and item.state != "terminal"
-            ),
-            None,
+        pending = tuple(
+            item
+            for item in projection.trigger_processes
+            if item.process_kind == "private_impression_deliberation"
+            and item.state != "terminal"
         )
-        if process is None:
+        if not pending:
             return PrivateImpressionRunResult(trigger_id="", status="idle")
-        source_event = await self._source_event(process)
-        active = await self._claim_or_reclaim(
-            process=process, source_event=source_event, projection=projection
-        )
-        if active is None:
+        active = None
+        source_event = None
+        for process in pending:
+            candidate_source = await self._source_event(process)
+            candidate = await self._claim_or_reclaim(
+                process=process,
+                source_event=candidate_source,
+                projection=projection,
+            )
+            if candidate is not None:
+                active = candidate
+                source_event = candidate_source
+                break
+        if active is None or source_event is None:
             return PrivateImpressionRunResult(
-                trigger_id=process.trigger_id, status="owned_elsewhere"
+                trigger_id=pending[0].trigger_id, status="owned_elsewhere"
             )
 
         before = await _project(self._ledger)

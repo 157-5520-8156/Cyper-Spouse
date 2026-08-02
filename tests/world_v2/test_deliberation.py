@@ -1029,6 +1029,13 @@ async def test_exhausted_source_review_does_not_fall_through_to_quick_author() -
             "exception",
             "corrective",
         ),
+        (
+            "proactive_claim_binding_invalid",
+            False,
+            "main_exception",
+            "exception",
+            "primary",
+        ),
     ),
 )
 async def test_terminal_validation_failure_mapping_is_budget_independent(

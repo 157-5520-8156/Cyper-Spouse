@@ -2513,6 +2513,24 @@ class _MalformedProactiveModel:
         return "{}"
 
 
+class _RetainedPreferenceFactModel:
+    model = "test-retained-preference-fact"
+
+    async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.1
+        return json.dumps(
+            {
+                "retain": True,
+                "predicate_code": "preference.likes",
+                "value": "乌龙茶",
+                "privacy_class": "personal",
+                "confidence": 8_600,
+                "rationale": "The user stated an enduring preference.",
+            },
+            ensure_ascii=False,
+        )
+
+
 class _JsonOnlyProactiveModel(_DraftModel):
     async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
         del temperature
@@ -4077,6 +4095,78 @@ async def test_new_user_observation_supersedes_an_old_technical_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_proactive_retry_wait_does_not_starve_ready_background_cognition(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    malformed = _MalformedProactiveModel()
+    chat = ChatModelDeliberationAdapter(model=_NoExpectationChat())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "proactive-retry-background-fairness.sqlite3",
+        config=WorldV2TurnApplicationConfig(
+            world_id="world:proactive-retry-background-fairness",
+            companion_actor_ref="actor:companion",
+            reply_target="user:primary",
+            action_pump_owner="worker:actions",
+            social_initiative_policy=SocialInitiativePolicy(
+                spontaneous_idle_seconds=60,
+                spontaneous_expiry_seconds=3_600,
+                consideration_band_override_seconds=(60, 60),
+            ),
+        ),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=chat,
+        quick_recovery=chat,
+        transport=_DeliveredTransport(),
+        proactive_model=malformed,
+        fact_model=_RetainedPreferenceFactModel(),
+        now=NOW,
+    )
+    try:
+        await app.inbound(
+            platform="http",
+            platform_user_id="user.1",
+            platform_message_id="message:background-fairness",
+            text="我最近很喜欢喝乌龙茶。",
+            observed_at=NOW,
+            trace_id="trace:background-fairness",
+        )
+        await app.drain_actions_once()
+        first_due = NOW + timedelta(seconds=61)
+        await app.tick(
+            tick_id="tick:background-fairness",
+            logical_time_from=NOW,
+            logical_time_to=first_due,
+            observed_at=first_due,
+            trace_id="trace:background-fairness",
+            causation_id="scheduler:test",
+            correlation_id="conversation:background-fairness",
+            reason="test_idle",
+        )
+
+        assert (await app.drain_background_once()).status == "opened"
+        assert (await app.drain_background_once()).status == "failed_safe"
+        retry_due = first_due + timedelta(minutes=10)
+
+        background = await app.drain_background_once()
+
+        assert background is not None
+        assert background.status == "processed"
+        assert background.work_status == "accepted"
+        assert malformed.calls == 2
+        health = await app.world_health_diagnostics()
+        assert health["initiative_state"] == "retry_wait"
+        assert health["initiative_next_consideration_at"] == retry_due.isoformat()
+        projection = app._ledger.project()  # noqa: SLF001 - public result corroboration
+        assert any(
+            fact.values.predicate_code == "preference.likes"
+            for fact in projection.facts
+        )
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
 async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -4146,8 +4236,9 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         assert health["initiative_retry_ordinal"] == 1
         assert health["initiative_last_failure_code"] == ("authored_expression_reselection_invalid")
         waiting = await app.drain_background_once()
-        assert waiting.status == "retry_wait"
-        assert waiting.retry_ordinal == 1
+        # A future retry remains visible in health/timer projections, but is
+        # not reported as work performed by this background pass.
+        assert waiting is None
         assert malformed.calls == 2
         await app.tick(
             tick_id="tick:backoff:retry-due",

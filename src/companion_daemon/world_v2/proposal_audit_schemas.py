@@ -313,6 +313,7 @@ class RecordedModelResultAudit(FrozenModel):
                 "authored_subcall_exception",
                 "recall_choice_reselection_invalid",
                 "authored_expression_reselection_invalid",
+                "proactive_claim_binding_invalid",
                 "affect_target_reselection_invalid",
                 "recall_exception",
                 "inventory_invalid",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from hashlib import sha256
 import json
 from types import SimpleNamespace
 
@@ -324,6 +325,67 @@ class _Model:
         del temperature
         self.calls.append(messages)
         return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_private_reflection_requests_provider_json_mode_when_available() -> None:
+    class _JsonModeModel:
+        model = "test-private-impression-json-mode"
+
+        def __init__(self) -> None:
+            self.json_calls = 0
+
+        async def complete_with_usage(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("private reflection must not use the plain-text route")
+
+        async def complete_json_with_usage(  # type: ignore[no-untyped-def]
+            self, _messages, *, temperature=0.1
+        ):
+            assert temperature == 0.1
+            self.json_calls += 1
+            usage = {
+                "usage_contract": "model-usage.1",
+                "route_class": "chat",
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "thinking_tokens": 0,
+                "token_provenance": "provider_reported",
+                "transport": "provider_api",
+                "provider": "test",
+                "provider_usage_ref": "usage:test:private-impression-json-mode",
+            }
+            encoded = json.dumps(
+                usage,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            return '{"decision":"no_change"}', {
+                **usage,
+                "provider_usage_hash": sha256(encoded).hexdigest(),
+            }
+
+    ledger = _ledger_with_active_appraisal()
+    appraisal = ledger.project().appraisals[0]
+    capsule = compile_private_impression_reflection_capsule(
+        projection=ledger.project(),
+        appraisal=appraisal,
+        identity_frame=CompanionIdentityFrame(
+            companion_name="沈知栀",
+            counterpart_name="对方",
+        ),
+        world_id=WORLD_ID,
+    )
+    model = _JsonModeModel()
+
+    run = await PrivateImpressionDraftAdapter(model=model).classify(
+        capsule=capsule,
+        attempt_id="attempt:test:private-impression-json-mode",
+    )
+
+    assert run.draft is None
+    assert run.audits[-1].status == "proposal_validated"
+    assert model.json_calls == 1
 
 
 def _retain(
@@ -680,6 +742,48 @@ async def test_provider_failure_is_audited_once_and_waits_for_a_fresh_attempt() 
     assert audit["outcome"] == "timeout"
     assert audit["attempted_model_id"] == "test-timeout-role"
     assert audit["attempted_model_version"] == "private-impression-draft.4"
+
+
+@pytest.mark.asyncio
+async def test_claimed_reflection_does_not_block_a_later_open_reflection() -> None:
+    class _TimeoutThenNoChangeModel:
+        model = "test-timeout-then-no-change-role"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature=0.1):  # type: ignore[no-untyped-def]
+            del messages, temperature
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("provider timed out")
+            return '{"decision":"no_change"}'
+
+    ledger = _ledger_with_active_appraisal()
+    opener = PrivateImpressionTriggerOpener(ledger=ledger, owner_id=OWNER)
+    await opener.open_once()
+    model = _TimeoutThenNoChangeModel()
+    runtime = PrivateImpressionTriggerRuntime(
+        ledger=ledger,
+        adapter=PrivateImpressionDraftAdapter(model=model),
+        owner_id=OWNER,
+    )
+    first = await runtime.drain_one()
+    assert first.work_status == "technical_failure"
+    _append_second_appraisal(ledger)
+    await opener.open_once()
+
+    second = await runtime.drain_one()
+
+    assert second.status == "processed"
+    assert second.work_status == "no_change"
+    assert model.calls == 2
+    processes = [
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "private_impression_deliberation"
+    ]
+    assert [item.state for item in processes] == ["claimed", "terminal"]
 
 
 @pytest.mark.asyncio

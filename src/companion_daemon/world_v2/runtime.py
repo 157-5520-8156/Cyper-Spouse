@@ -848,7 +848,14 @@ class WorldRuntime:
             # no authority, so ordinary appraisal/fact work keeps its order.
             if self._proactive_action_runtime is not None:
                 proactive = await self._proactive_action_runtime.drain_one()
-                if proactive.status != "idle":
+                # ``retry_wait`` is a durable timer state, not work performed
+                # by this pass. Returning it here makes a bounded host worker
+                # spend every slot rediscovering the same future deadline and
+                # permanently starves appraisal, fact, Affect, relationship,
+                # and memory lanes below. The exact retry wake is already
+                # derived from the ledger projection, so keep scanning for one
+                # ready background job without changing initiative authority.
+                if proactive.status not in {"idle", "retry_wait"}:
                     return proactive
             if self._outcome_deliberation_turn is not None:
                 assert self._outcome_worker is not None

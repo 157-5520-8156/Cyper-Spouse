@@ -2232,6 +2232,7 @@ class ProactiveActionRuntime:
             "source_review_exception",
             "recall_choice_reselection_invalid",
             "authored_expression_reselection_invalid",
+            "proactive_claim_binding_invalid",
             "affect_target_reselection_invalid",
             "inventory_invalid",
             "coverage_invalid",
