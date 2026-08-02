@@ -867,6 +867,30 @@ class RouteRequest(_FrozenModel):
         return self
 
 
+class TurnAttentionAdvisory(_FrozenModel):
+    """Provider-local endpoint evidence shown to the role as non-authority.
+
+    The endpoint model is deliberately reused only as an attention signal. It
+    cannot select a reply, an interruption, or a silence; those remain fields
+    authored by the character model below.
+    """
+
+    continuation_probability_bp: int = Field(ge=0, le=10_000)
+    confidence_bp: int = Field(ge=0, le=10_000)
+    typing_active: bool
+    status: Literal["predicted", "fallback"]
+    model_id: str | None = Field(default=None, min_length=1, max_length=256)
+    evidence_summary: str = Field(min_length=1, max_length=512)
+    reason_codes: tuple[str, ...] = Field(default=(), max_length=8)
+    authority: Literal["advisory_only"] = "advisory_only"
+
+    @model_validator(mode="after")
+    def reason_codes_are_bounded(self) -> "TurnAttentionAdvisory":
+        if any(not item or len(item) > 64 for item in self.reason_codes):
+            raise ValueError("turn attention advisory reason codes are invalid")
+        return self
+
+
 class TriggerMessage(_FrozenModel):
     """Current user text with the exact event evidence that authorizes it.
 
@@ -892,6 +916,12 @@ class TriggerMessage(_FrozenModel):
     attachment_refs: tuple[str, ...] = Field(default=(), max_length=16)
     attachment_media_types: tuple[Literal["image", "audio", "video", "file", "unknown"], ...] = (
         Field(default=(), max_length=16)
+    )
+    # The endpoint estimate is current transport evidence, not a response
+    # instruction. Keeping it on the verified trigger prevents it from being
+    # mistaken for a durable World fact or a host-selected social rule.
+    turn_attention_advisory: TurnAttentionAdvisory | None = Field(
+        default=None, exclude_if=lambda value: value is None
     )
 
     @model_validator(mode="after")

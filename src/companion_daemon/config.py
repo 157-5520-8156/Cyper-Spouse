@@ -134,6 +134,16 @@ class Settings(BaseSettings):
         ge=100,
         le=500,
     )
+    qq_c2c_barge_in_enabled: bool = Field(
+        default=True,
+        alias="QQ_C2C_BARGE_IN_ENABLED",
+    )
+    qq_c2c_barge_in_probe_ms: int = Field(
+        default=240,
+        alias="QQ_C2C_BARGE_IN_PROBE_MS",
+        ge=100,
+        le=1_000,
+    )
     world_v2_text_endpoint_enabled: bool = Field(
         # Requires the explicitly enabled local inference deployment below;
         # production opts in via environment rather than silently claiming an

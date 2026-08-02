@@ -42,6 +42,7 @@ from .deliberation import (
     ModelResultAudit,
     ModelRoute,
     TriggerMessage,
+    TurnAttentionAdvisory,
     _digest,
     _model_result_ref,
 )
@@ -1590,6 +1591,20 @@ class PinnedTurnCompiler:
             return None
         reply_context = observation.reply_context or {}
         platform_message_id = reply_context.get("platform_message_id")
+        attention_advisory = None
+        raw_attention_advisory = observation.coalescing_metadata.get(
+            "turn_attention_advisory"
+        )
+        if isinstance(raw_attention_advisory, dict):
+            try:
+                attention_advisory = TurnAttentionAdvisory.model_validate(
+                    raw_attention_advisory
+                )
+            except (TypeError, ValueError):
+                # Endpoint evidence is optional provider-local advice. A
+                # malformed/recovered batch still reaches the role with the
+                # verified message and no synthetic replacement.
+                attention_advisory = None
         return TriggerMessage(
             event_ref=observation_event.event_id,
             event_payload_hash=f"sha256:{observation_event.payload_hash}",
@@ -1608,6 +1623,7 @@ class PinnedTurnCompiler:
             attachment_media_types=tuple(
                 cls._attachment_media_type(item) for item in observation.attachment_refs
             ),
+            turn_attention_advisory=attention_advisory,
         )
 
     @staticmethod

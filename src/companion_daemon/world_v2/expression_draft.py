@@ -46,6 +46,7 @@ from .schema_core import FrozenModel
 
 ExpressionModality = Literal["text", "reaction", "sticker", "typing"]
 TimingChoice = Literal["now", "later", "silent"]
+TurnPosture = Literal["yield", "continue", "interject", "supersede"]
 EXPRESSION_DELAY_MAX_SECONDS = 86_400
 RESPONSE_EXPECTATION_WAIT_MAX_SECONDS = 86_400
 # Compatibility only: older role-model prompts emitted one of these host-owned
@@ -273,6 +274,12 @@ class ExpressionDraft(FrozenModel):
         default=None, exclude_if=lambda value: value is None
     )
     timing_choice: TimingChoice = "now"
+    # A role-owned conversational posture.  It is an advisory protocol
+    # coordinate for the current turn, not a host rule: the model may choose
+    # to yield, continue, interject, or supersede a pending expression.
+    turn_posture: TurnPosture | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     cadence: CadenceProfile = "conversational"
     beats: tuple[ExpressionBeatDraftChoice, ...] = Field(default=(), max_length=16)
     delay_seconds: int | None = Field(default=None, ge=1, le=EXPRESSION_DELAY_MAX_SECONDS)
@@ -292,6 +299,10 @@ class ExpressionDraft(FrozenModel):
     @model_validator(mode="after")
     def timing_and_visible_expression_are_orthogonal_but_complete(self) -> "ExpressionDraft":
         visible_content_seen = any(beat.modality != "typing" for beat in self.beats)
+        if self.turn_posture == "interject" and self.timing_choice != "now":
+            raise ValueError("interject posture requires an immediate expression")
+        if self.turn_posture == "yield" and self.timing_choice == "now":
+            raise ValueError("yield posture cannot authorize an immediate expression")
         if self.timing_choice == "silent":
             if (
                 self.beats
@@ -1947,6 +1958,12 @@ def materialize_expression_draft(
             stance=draft.stance,
             display_strategy="withhold_for_now",
             timing_choice="silent",
+            turn_posture=draft.turn_posture,
+            episode_disposition=(
+                "supersede_pending"
+                if draft.turn_posture == "supersede"
+                else None
+            ),
         )
 
     origin: datetime | None = None
@@ -2059,6 +2076,18 @@ def materialize_expression_draft(
         stance=draft.stance,
         display_strategy="model_selected_expression",
         timing_choice=draft.timing_choice,
+        turn_posture=draft.turn_posture,
+        # Translate only the model's explicit conversational posture into the
+        # existing episode lifecycle seam.  This is protocol plumbing, not a
+        # host-selected social rule: an explicit episode_disposition supplied
+        # by the adapter is applied afterwards and remains authoritative.
+        episode_disposition=(
+            "append"
+            if draft.turn_posture == "continue"
+            else "supersede_pending"
+            if draft.turn_posture == "supersede"
+            else None
+        ),
     )
 
 

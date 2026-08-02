@@ -52,6 +52,7 @@ async def test_semantic_probability_changes_only_the_bounded_listening_opportuni
     assert 1_800 <= likely_continuing.wait_ms <= 2_500
     assert likely_done.semantic_continuation_probability_bp == 500
     assert likely_continuing.semantic_continuation_probability_bp == 9_000
+    assert likely_continuing.semantic_evidence_summary == "semantic endpoint fixture"
     assert not hasattr(likely_continuing, "reply_decision")
     assert not hasattr(likely_continuing, "response_text")
 

@@ -614,6 +614,11 @@ def expression_draft_shape_contract() -> str:
         "to make this private state vivid; when external context is genuinely salient, mention "
         "only what the pinned Context presents and include that Context ref as attention "
         "provenance. It contains no motive or reply-mode category. "
+        "turn_posture, when supplied, is one of yield, continue, interject, or supersede; it is "
+        "your conversational posture, not a host-selected behavior. Older wires may omit it. "
+        "If the current trigger carries turn_attention_advisory, choose this posture yourself "
+        "from the complete context; the endpoint estimate is evidence about the peer's possible "
+        "continuation only and never a command to wait or speak. "
         "timing_choice is the string now, later, "
         "or silent; cadence is rapid, conversational, hesitant, or escalating and is required "
         "when expression_capabilities.recorded_cadence_mode is shadow or on, but may be omitted "
@@ -7559,7 +7564,16 @@ def _stream_first_expression(raw: str) -> str:
     if timing in {"later", "silent"} and continuation:
         raise ValueError("deferred or silent stream cannot carry continuation units")
     disposition = first.get("episode_disposition")
-    expected_disposition = "append" if continuation else "complete_without_more"
+    posture = first.get("turn_posture")
+    if posture == "supersede" and continuation:
+        raise ValueError("supersede posture cannot carry continuation units")
+    expected_disposition = (
+        "append"
+        if continuation
+        else "supersede_pending"
+        if posture == "supersede"
+        else "complete_without_more"
+    )
     if disposition != expected_disposition:
         raise ValueError("expression stream disposition does not match its units")
     return json.dumps(first, ensure_ascii=False, separators=(",", ":"))
@@ -7597,7 +7611,11 @@ def _stream_tail_expression(raw: str) -> str:
         tail["timing_choice"] = "silent"
         tail["beats"] = []
         tail["world_claims"] = []
-        tail["episode_disposition"] = "complete_without_more"
+        tail["episode_disposition"] = (
+            "supersede_pending"
+            if first.get("turn_posture") == "supersede"
+            else "complete_without_more"
+        )
     return json.dumps(tail, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -7972,6 +7990,10 @@ class ChatModelDeliberationAdapter:
                     None,
                 )
             _head, tail, usage, complete_raw = await asyncio.shield(session.completed)
+            # A tail may finish after a newer user observation invalidated the
+            # visible generation. Re-check the bound attention epoch before
+            # handing it back to PinnedTurn; only the latest cursor may emit.
+            self._stream_generation_coordinator.require_current(stream_generation)
             return tail, usage, session.provider_identity, complete_raw
         finally:
             session.waiters -= 1
@@ -8255,9 +8277,11 @@ class ChatModelDeliberationAdapter:
                     "visible beat you choose and may also contain one leading typing beat you "
                     "choose; put each additional chosen visible beat in continuation as "
                     '{"beat":<one beat>,"world_claims":[<claims for only that beat>]}. '
-                    "If continuation is non-empty, first.episode_disposition is append; otherwise "
-                    "it is complete_without_more. For later or silent, continuation is empty and "
-                    "first contains the complete decision. Do not shorten, add, or split beats "
+                    "If continuation is non-empty, first.episode_disposition is append. If "
+                    "turn_posture is supersede, continuation must be empty and the disposition "
+                    "is supersede_pending; otherwise an empty continuation uses "
+                    "complete_without_more. For later or silent, continuation is empty and first "
+                    "contains the complete decision. Do not shorten, add, or split beats "
                     "merely because of this wire format; message count and content remain yours.",
                 },
                 *messages[1:],
@@ -9149,6 +9173,15 @@ class ChatModelDeliberationAdapter:
             # arrive after the first complete unit was parsed but before it is
             # eligible to leave this adapter.
             self._stream_generation_coordinator.require_current(stream_generation)
+        output_episode_disposition = episode_disposition
+        if output_episode_disposition is None and isinstance(raw_proposal, dict):
+            proposal_disposition = raw_proposal.get("episode_disposition")
+            if isinstance(proposal_disposition, str):
+                # ExpressionDraft materialization may derive the lifecycle
+                # choice from the role-owned turn_posture. Preserve that
+                # derived choice on ModelOutput for full-tail orchestration;
+                # an explicit wire disposition above still takes precedence.
+                output_episode_disposition = proposal_disposition
         return ModelOutput(
             model_id=winning_model_id,
             model_version=self.VERSION,
@@ -9174,7 +9207,7 @@ class ChatModelDeliberationAdapter:
                 else None
             ),
             physical_provider_audits=physical_provider_audits,
-            episode_disposition=episode_disposition,
+            episode_disposition=output_episode_disposition,
             recall_trace=recall_trace,
             prefetch_trace=prefetch_trace,
             presented_prefetch_traces=presented_prefetch_traces,
@@ -9530,7 +9563,7 @@ class ChatModelDeliberationAdapter:
             "it as neither a behavior script nor a required topic. No context lane or expression "
             "form is privileged by the host. "
             + self._identity_instruction()
-            + "Return one raw JSON ExpressionDraft with timing_choice, beats, stance, "
+            + "Return one raw JSON ExpressionDraft with timing_choice, turn_posture, beats, stance, "
             "brief_rationale, confidence, and world_claims. "
             + expression_draft_shape_contract()
             + " "
@@ -9584,6 +9617,17 @@ class ChatModelDeliberationAdapter:
             "biographical_coordinate_authority, which proves no unlisted activity or occurrence. "
             "Return JSON only, without Markdown or a wrapper."
         )
+        if (
+            request.trigger_message is not None
+            and request.trigger_message.turn_attention_advisory is not None
+        ):
+            system += (
+                " The current trigger includes a bounded turn_attention_advisory from the "
+                "existing endpoint model. It is only evidence that the counterpart may continue "
+                "typing. You must explicitly choose turn_posture as yield, continue, interject, "
+                "or supersede from the full pinned context; the advisory never selects that "
+                "posture for you."
+            )
         if (
             self._recall_available(request)
             and not quick_recovery
@@ -9986,6 +10030,7 @@ def _require_explicit_authored_expression_fields(
     value: dict[str, object],
     *,
     capabilities: ExpressionDraftCapabilities,
+    require_turn_posture: bool = False,
 ) -> None:
     """Prevent provider omission from silently selecting character decisions.
 
@@ -9995,6 +10040,9 @@ def _require_explicit_authored_expression_fields(
     output. Cadence is likewise explicit whenever recorded cadence is enabled.
     ``world_claims=[]`` remains a safe wire default because it grants no fact
     authority and cannot create a visible or external effect by omission.
+    A live turn-attention advisory additionally requires the role to state its
+    own conversational posture explicitly; absent that advisory old wires stay
+    byte-compatible.
     """
 
     required = {
@@ -10006,6 +10054,8 @@ def _require_explicit_authored_expression_fields(
     }
     if capabilities.recorded_cadence_mode != "off":
         required.add("cadence")
+    if require_turn_posture:
+        required.add("turn_posture")
     missing = tuple(sorted(required.difference(value)))
     if missing:
         raise _AuthoredExpressionDraftShapeError(missing)
@@ -10251,6 +10301,7 @@ _MINIMAL_REPLY_ACCOUNTED_EXPRESSION_FIELDS = frozenset(
     {
         "private_turn_state",
         "timing_choice",
+        "turn_posture",
         "cadence",
         "beats",
         "delay_seconds",
@@ -10286,6 +10337,7 @@ def _is_lossless_minimal_reply_draft(draft: ExpressionDraft) -> bool:
         and draft.delay_seconds is None
         and draft.expires_after_seconds is None
         and draft.impulse_summary is None
+        and draft.turn_posture is None
         and draft.variation_profile is None
         and draft.response_expectation is None
         and not draft.world_claims
@@ -10330,11 +10382,24 @@ def _proposal_from_model_text(
                 "private turn state requires the chat model to return an ExpressionDraft, "
                 "not a complete proposal"
             )
+        if (
+            request.trigger_message is not None
+            and request.trigger_message.turn_attention_advisory is not None
+            and value.get("turn_posture")
+            not in {"yield", "continue", "interject", "supersede"}
+        ):
+            raise ValueError(
+                "turn attention advisory requires an explicit role-owned turn_posture"
+            )
         return value
     if require_explicit_authored_decision_fields:
         _require_explicit_authored_expression_fields(
             value,
             capabilities=capabilities,
+            require_turn_posture=(
+                request.trigger_message is not None
+                and request.trigger_message.turn_attention_advisory is not None
+            ),
         )
     aliases = source_ref_aliases or build_source_ref_alias_table(
         request=request,

@@ -1465,6 +1465,9 @@ class DecisionProposal(ProposalEnvelope):
     # Acceptance consumes ``now``; deferred social Acceptance consumes
     # ``later``; ``silent`` has no visible effect to authorize.
     timing_choice: Literal["now", "later", "silent"] = "now"
+    turn_posture: Literal["yield", "continue", "interject", "supersede"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     episode_disposition: Literal[
         "complete_without_more",
         "append",

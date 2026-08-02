@@ -255,12 +255,16 @@ class QQC2CHost:
         endpoint_controller: TextTurnEndpointController | None = None,
         recorded_cadence_mode: str = "off",
         idle_heartbeat_seconds: float = 0.0,
+        barge_in_enabled: bool = True,
+        barge_in_probe_seconds: float = 0.24,
         owned_action_close_grace_seconds: float = 1.0,
     ) -> None:
         if not recipient_id or not canonical_user_id:
             raise ValueError("QQ C2C host requires recipient and canonical user ids")
         if not 0 <= owned_action_close_grace_seconds <= 30:
             raise ValueError("owned Action close grace must be between zero and 30 seconds")
+        if barge_in_probe_seconds < 0.1 or barge_in_probe_seconds > 1.0:
+            raise ValueError("barge-in probe seconds must be between 0.1 and 1.0")
         self._host = host
         self._recipient_id = recipient_id
         self._canonical_user_id = canonical_user_id
@@ -289,7 +293,18 @@ class QQC2CHost:
         self._action_due_sleep = action_due_sleep or asyncio.sleep
         self._interactive_turn_budget_policy = interactive_turn_budget_policy
         self._endpoint_controller = endpoint_controller
+        self._barge_in_enabled = barge_in_enabled
+        self._barge_in_probe_seconds = barge_in_probe_seconds
         self._endpoint_task: asyncio.Task[TextTurnEndpointSchedule] | None = None
+        # Process-local endpoint results are copied into the exact batch
+        # metadata only after the listening hold closes. They are advisory
+        # trigger evidence, never durable World facts or response decisions.
+        self._endpoint_source_ids_by_task: dict[
+            asyncio.Task[TextTurnEndpointSchedule], tuple[str, ...]
+        ] = {}
+        self._endpoint_schedule_by_source_event_id: dict[
+            str, TextTurnEndpointSchedule
+        ] = {}
         self._endpoint_fragments: deque[tuple[str, str]] = deque(maxlen=8)
         self._recent_message_character_counts: deque[int] = deque(maxlen=16)
         self._recent_character_message_character_counts: deque[int] = deque(maxlen=16)
@@ -348,6 +363,7 @@ class QQC2CHost:
         self._last_content_received_at: datetime | None = None
         self._last_content_text: str | None = None
         self._last_typing_started_at: datetime | None = None
+        self._typing_signal_event = asyncio.Event()
         self._recent_gap_seconds: deque[float] = deque(maxlen=8)
         self._personal_bubble_gap_seconds: deque[float] = deque(maxlen=16)
         # Number of content arrivals currently inside their sender-rhythm
@@ -647,8 +663,23 @@ class QQC2CHost:
                 # The peer is visibly composing: any in-flight rhythm hold
                 # keeps waiting so the upcoming bubbles land in one turn.
                 self._last_typing_started_at = received_at
+                self._typing_signal_event.set()
+                cancel_streams = getattr(
+                    self._host,
+                    "cancel_superseded_expression_streams",
+                    None,
+                )
+                if callable(cancel_streams):
+                    # Speech-start/barge-in cancellation is separate from
+                    # endpointing: stop the old producer immediately, then
+                    # let the bounded probe below offer the new turn to the
+                    # same role model.
+                    await cancel_streams(
+                        f"qq-barge-in:{fragment.source_event_id}"
+                    )
             elif fragment.control_kind == "typing_stopped":
                 self._last_typing_started_at = None
+                self._typing_signal_event.set()
             self._restart_endpoint_prediction(received_at=received_at)
             return QQC2CIngressResult(
                 status="deferred",
@@ -682,7 +713,12 @@ class QQC2CHost:
             continuation_observed=continuation_observed,
         )
         if not continuation_observed:
-            self._endpoint_fragments.clear()
+            # A new exchange invalidates the previous endpoint opportunity.
+            # Retire its process-local task/index entries together with the
+            # fragment list so cancelled predictions cannot accumulate.
+            self._forget_endpoint_fragments(
+                tuple(source_event_id for source_event_id, _ in self._endpoint_fragments)
+            )
         self._last_content_received_at = received_at
         self._last_content_text = fragment.text
         if fragment.text:
@@ -809,6 +845,9 @@ class QQC2CHost:
             controller.schedule(evidence),
             name=f"qq-text-endpoint:{self._endpoint_fragments[-1][0]}",
         )
+        self._endpoint_source_ids_by_task[task] = tuple(
+            source_event_id for source_event_id, _ in self._endpoint_fragments
+        )
         self._endpoint_task = task
 
         def observe(completed: asyncio.Task[TextTurnEndpointSchedule]) -> None:
@@ -828,7 +867,80 @@ class QQC2CHost:
             if current is not None and current.cancelling():
                 raise
             return None, task
+        source_ids = self._endpoint_source_ids_by_task.get(task, ())
+        self._record_endpoint_schedule(task, schedule, source_ids)
         return schedule.wait_ms / 1_000, task
+
+    def _record_endpoint_schedule(
+        self,
+        task: asyncio.Task[TextTurnEndpointSchedule],
+        schedule: TextTurnEndpointSchedule,
+        source_ids: tuple[str, ...] | None = None,
+    ) -> None:
+        for source_event_id in (
+            source_ids
+            if source_ids is not None
+            else self._endpoint_source_ids_by_task.get(task, ())
+        ):
+            self._endpoint_schedule_by_source_event_id[source_event_id] = schedule
+
+    def _capture_ready_endpoint_schedule(self) -> None:
+        task = self._endpoint_task
+        if task is None or not task.done() or task.cancelled():
+            return
+        try:
+            schedule = task.result()
+        except (asyncio.CancelledError, Exception):
+            return
+        self._record_endpoint_schedule(task, schedule)
+
+    def _endpoint_attention_advisory(
+        self, source_event_ids: tuple[str, ...]
+    ) -> dict[str, object] | None:
+        schedules = tuple(
+            self._endpoint_schedule_by_source_event_id[source_event_id]
+            for source_event_id in source_event_ids
+            if source_event_id in self._endpoint_schedule_by_source_event_id
+        )
+        if not schedules:
+            # A true barge-in probe may intentionally close the hold before
+            # the semantic endpoint call finishes. Preserve the transport
+            # signal so the role can still decide whether to interject; this
+            # fallback carries no semantic completion claim.
+            if self._typing_is_active(now=self._ingress_now()):
+                return {
+                    "continuation_probability_bp": 0,
+                    "confidence_bp": 0,
+                    "typing_active": True,
+                    "status": "fallback",
+                    "model_id": None,
+                    "evidence_summary": "typing_active; endpoint prediction pending",
+                    "reason_codes": ["typing_active", "endpoint_prediction_pending"],
+                    "authority": "advisory_only",
+                }
+            return None
+        # One batch has one endpoint opportunity. If a recovery path retained
+        # an older schedule, use the most recent source-bound one without
+        # inventing a new estimate.
+        schedule = schedules[-1]
+        probability = schedule.semantic_continuation_probability_bp
+        confidence = schedule.semantic_confidence_bp
+        return {
+            "continuation_probability_bp": (
+                probability if probability is not None else 0
+            ),
+            "confidence_bp": confidence if confidence is not None else 0,
+            "typing_active": "typing_active" in schedule.reason_codes,
+            "status": "predicted" if schedule.status == "predicted" else "fallback",
+            "model_id": schedule.model_id,
+            "evidence_summary": (
+                schedule.semantic_evidence_summary
+                or " ; ".join(schedule.reason_codes)
+                or "endpoint evidence unavailable"
+            )[:512],
+            "reason_codes": list(schedule.reason_codes),
+            "authority": "advisory_only",
+        }
 
     def _forget_endpoint_fragments(self, source_event_ids: tuple[str, ...]) -> None:
         consumed = set(source_event_ids)
@@ -840,6 +952,16 @@ class QQC2CHost:
             ),
             maxlen=8,
         )
+        for source_event_id in consumed:
+            self._endpoint_schedule_by_source_event_id.pop(source_event_id, None)
+        for task, task_source_ids in tuple(self._endpoint_source_ids_by_task.items()):
+            if not consumed.intersection(task_source_ids):
+                continue
+            if not task.done():
+                task.cancel()
+            self._endpoint_source_ids_by_task.pop(task, None)
+            if self._endpoint_task is task:
+                self._endpoint_task = None
 
     def _register_content_gap(
         self,
@@ -965,11 +1087,22 @@ class QQC2CHost:
                 # (within the same absolute cap) instead of answering half a
                 # thought.
                 typing_at = self._last_typing_started_at
+                typing_active = typing_at is not None and self._typing_is_active(now=now)
                 if (
-                    typing_at is not None
-                    and typing_at > latest
-                    and self._typing_is_active(now=now)
+                    self._barge_in_enabled
+                    and typing_at is not None
+                    and typing_active
+                    and (now - typing_at).total_seconds() >= self._barge_in_probe_seconds
                 ):
+                    # Industry barge-in implementations use an early
+                    # interruption opportunity, then let the agent decide
+                    # whether to speak; they do not let VAD/typing alone
+                    # author a response. The current endpoint model is
+                    # captured if ready, while a bounded fallback keeps
+                    # this probe from waiting on it.
+                    self._capture_ready_endpoint_schedule()
+                    return
+                if typing_at is not None and typing_at > latest and typing_active:
                     latest = typing_at
                 quiet_for = (now - latest).total_seconds()
                 if quiet_for >= quiet_gap or now >= hard_cap:
@@ -982,20 +1115,43 @@ class QQC2CHost:
                         await asyncio.sleep(0)
                         continue
                     return
-                await self._ingress_sleep(
-                    min(
-                        # The old 50ms floor routinely charged one whole
-                        # scheduler quantum when the durable observation
-                        # window ended a fraction of a millisecond before the
-                        # adaptive quiet edge.  Five milliseconds is enough
-                        # to avoid a busy loop without turning rounding error
-                        # into visible reply latency.
-                        max(quiet_gap - quiet_for, 0.005),
-                        max((hard_cap - now).total_seconds(), 0.005),
-                    )
+                sleep_seconds = min(
+                    # The old 50ms floor routinely charged one whole
+                    # scheduler quantum when the durable observation
+                    # window ended a fraction of a millisecond before the
+                    # adaptive quiet edge.  Five milliseconds is enough
+                    # to avoid a busy loop without turning rounding error
+                    # into visible reply latency.
+                    max(quiet_gap - quiet_for, 0.005),
+                    max((hard_cap - now).total_seconds(), 0.005),
                 )
+                if self._last_typing_started_at is None and not self._typing_signal_event.is_set():
+                    await self._ingress_sleep(sleep_seconds)
+                else:
+                    await self._sleep_for_rhythm_or_typing(sleep_seconds)
         finally:
             self._rhythm_holds -= 1
+
+    async def _sleep_for_rhythm_or_typing(self, delay: float) -> None:
+        """Sleep until the cadence edge, but wake immediately on typing state."""
+
+        sleeper = asyncio.create_task(self._ingress_sleep(delay))
+        typing_signal = asyncio.create_task(self._typing_signal_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                (sleeper, typing_signal),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if sleeper in done:
+                await sleeper
+            if typing_signal in done:
+                await typing_signal
+                self._typing_signal_event.clear()
+        finally:
+            for task in (sleeper, typing_signal):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sleeper, typing_signal, return_exceptions=True)
 
     def submission_state(self, source_event_id: str) -> str | None:
         """Read-only durable dedupe check for restart-window compensation."""
@@ -1113,8 +1269,6 @@ class QQC2CHost:
     async def _process_ingress_batch(self, batch: QQIngressBatch) -> QQC2CIngressResult:
         """Run one claimed batch without serializing another provider phase."""
 
-        self._forget_endpoint_fragments(batch.source_event_ids)
-
         observed_started_ns = min(
             (
                 started_ns
@@ -1152,6 +1306,13 @@ class QQC2CHost:
         # claimed rows fall back to their already-persisted window close, which
         # is conservative for latency but, critically, stable across recovery.
         metadata.setdefault("processing_started_at", metadata.get("window_closed_at"))
+        attention_advisory = self._endpoint_attention_advisory(batch.source_event_ids)
+        if attention_advisory is not None:
+            metadata["turn_attention_advisory"] = attention_advisory
+        # Copy the process-local estimate into this exact trigger before
+        # retiring its endpoint fragments. A restart/recovery batch simply has
+        # no estimate and therefore keeps the optional field absent.
+        self._forget_endpoint_fragments(batch.source_event_ids)
         processing_started_at = _parse_metadata_time(metadata.get("processing_started_at"))
         turn_budget = (
             self._interactive_turn_budget_policy.start(
@@ -2425,6 +2586,8 @@ def build_qq_c2c_host(
         endpoint_controller=semantic_chat.text_endpoint_controller,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
         idle_heartbeat_seconds=settings.qq_c2c_idle_heartbeat_seconds,
+        barge_in_enabled=settings.qq_c2c_barge_in_enabled,
+        barge_in_probe_seconds=settings.qq_c2c_barge_in_probe_ms / 1_000,
     )
 
 

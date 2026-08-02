@@ -463,6 +463,15 @@ class _WorldHost:
         self.closed = True
 
 
+class _BargeInWorldHost(_WorldHost):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_refs: list[str] = []
+
+    async def cancel_superseded_expression_streams(self, trigger_ref: str) -> None:
+        self.cancel_refs.append(trigger_ref)
+
+
 class _FailOnceWorldHost(_WorldHost):
     async def inbound(self, inbound):  # type: ignore[no-untyped-def]
         self.inbounds.append(inbound)
@@ -1256,6 +1265,54 @@ async def test_peer_typing_pulse_extends_the_rhythm_hold_until_bubble_lands() ->
     assert left == right
     assert len(world.inbounds) == 2
     assert world.inbounds[1].text == "跟你说件事\n昨晚做了个特别长的梦"
+    await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_typing_pulse_opens_one_role_owned_barge_in_opportunity() -> None:
+    """Typing can open an early role decision without forcing a reply."""
+
+    clock = {"now": NOW}
+
+    async def idle_sleep(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    world = _BargeInWorldHost()
+    host = QQC2CHost(
+        host=world,  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        ingress_store=MemoryQQIngressStore(catalog=_catalog_with_window(100)),
+        ingress_now=lambda: clock["now"],
+        ingress_sleep=idle_sleep,
+        barge_in_probe_seconds=0.2,
+    )
+    first = asyncio.create_task(
+        host.inbound_fragment(_text("message:barge-in", "我还没说完", observed_at=NOW))
+    )
+    await asyncio.sleep(0)
+    clock["now"] = NOW + timedelta(milliseconds=100)
+    typing = await host.inbound_fragment(
+        QQIngressFragment(
+            source_event_id="qq-input-status:barge-in",
+            recipient_id="10001",
+            observed_at=clock["now"],
+            content_shape="control",
+            control_kind="typing_started",
+        )
+    )
+    assert typing.status == "deferred"
+    clock["now"] = NOW + timedelta(milliseconds=350)
+    result = await asyncio.wait_for(first, timeout=0.5)
+
+    assert result.status == "observed_only"
+    assert len(world.inbounds) == 1
+    advisory = world.inbounds[0].coalescing_metadata["turn_attention_advisory"]
+    assert advisory["typing_active"] is True
+    assert world.cancel_refs == [
+        "qq-inbound-attention:message:barge-in",
+        "qq-barge-in:qq-input-status:barge-in",
+    ]
     await host.aclose()
 
 

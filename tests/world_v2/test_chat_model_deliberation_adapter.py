@@ -508,6 +508,34 @@ async def test_expression_unit_stream_preserves_character_chosen_typing_before_f
 
 
 @pytest.mark.asyncio
+async def test_expression_unit_stream_preserves_role_owned_supersede_lifecycle() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-units.1",
+            "first": {
+                "timing_choice": "silent",
+                "turn_posture": "supersede",
+                "beats": [],
+                "stance": "withdraw",
+                "brief_rationale": "The role withdrew the pending expression.",
+                "world_claims": [],
+                "episode_disposition": "supersede_pending",
+            },
+            "continuation": [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _UnitStreamingModel(raw)
+    model.release_tail.set()
+    adapter = ChatModelDeliberationAdapter(model=model)
+
+    head = await adapter.propose_stream_head(_qq_request())
+    assert head.raw_proposal["turn_posture"] == "supersede"
+    assert head.raw_proposal["episode_disposition"] == "supersede_pending"
+
+
+@pytest.mark.asyncio
 async def test_expression_unit_stream_cancels_provider_when_its_last_waiter_is_superseded() -> None:
     raw = json.dumps(
         {

@@ -209,13 +209,17 @@ class ScenarioVerificationError(AssertionError):
 # decision recovery.  The complete fixed suite keeps all 120 explicit
 # predicates and visible fake-model outputs unchanged; its replay/audit hashes
 # intentionally change because the authenticated projection schema changed.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.42"
+# ``.43`` records the model-owned conversational posture and the bounded
+# endpoint-attention advisory in the verified trigger/prompt contract. The
+# endpoint model remains advisory-only; the baseline moves because prompt and
+# proposal audit identities intentionally include the new decision coordinate.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.43"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "ee2cd0ad73862dc7289b93187af91e70f4d838a536ddbeaddcefe9ba541e4d97"
+    "8c76ea3fa18da10e3d040bc6349c366d6e995edb1d2d4f159b67a02ad210cadc"
 )
 
 

@@ -5,7 +5,12 @@ import json
 
 import pytest
 
-from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, TriggerMessage
+from companion_daemon.world_v2.deliberation import (
+    ModelInput,
+    ModelRoute,
+    TriggerMessage,
+    TurnAttentionAdvisory,
+)
 from companion_daemon.world_v2.expression_draft import (
     ExpressionDraft,
     QQ_NAPCAT_EXPRESSION_CAPABILITIES,
@@ -58,6 +63,81 @@ def _proposal():
         request=request,
         capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
     )
+
+
+def test_role_owned_turn_posture_survives_expression_materialization() -> None:
+    """Posture is a model choice, retained beside timing and episode state."""
+
+    model_input = ModelInput(
+        call_id="model-call:posture:1",
+        attempt_id="attempt:posture:1",
+        route=ModelRoute(tier="flash", reason_code="test", router_version="test.1"),
+        capsule_id="a" * 64,
+        trigger_ref="event:observation:posture:1",
+        evaluated_world_revision=4,
+        model_content_json=json.dumps({"logical_time": NOW.isoformat()}),
+        trigger_message=TriggerMessage(
+            event_ref="event:observation:posture:1",
+            event_payload_hash="sha256:" + "b" * 64,
+            observation_ref="observation:posture:1",
+            source_world_revision=4,
+            actor="user:primary",
+            channel="qq",
+            reply_target="conversation:qq:c2c:10001",
+            platform_message_id="qq-posture-1",
+            text="我还没说完",
+            turn_attention_advisory=TurnAttentionAdvisory(
+                continuation_probability_bp=8_000,
+                confidence_bp=7_000,
+                typing_active=True,
+                status="predicted",
+                model_id="fixture:endpoint",
+                evidence_summary="the peer is still composing",
+                reason_codes=("semantic_endpoint", "typing_active"),
+            ),
+        ),
+    )
+    draft = ExpressionDraft.model_validate(
+        {
+            "timing_choice": "now",
+            "turn_posture": "interject",
+            "beats": ({"modality": "text", "text": "我先插一句。"},),
+            "stance": "direct",
+            "brief_rationale": "The role chose to speak before the next bubble.",
+        }
+    )
+    proposal = materialize_expression_draft(
+        value=draft.model_dump(mode="json"),
+        request=model_input,
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+    assert draft.turn_posture == "interject"
+    assert proposal.turn_posture == "interject"
+
+    continuation = draft.model_copy(update={"turn_posture": "continue"})
+    continuation_proposal = materialize_expression_draft(
+        value=continuation.model_dump(mode="json"),
+        request=model_input,
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+    assert continuation_proposal.turn_posture == "continue"
+    assert continuation_proposal.episode_disposition == "append"
+
+    silent_supersede = ExpressionDraft.model_validate(
+        {
+            "timing_choice": "silent",
+            "turn_posture": "supersede",
+            "beats": (),
+            "stance": "withhold",
+            "brief_rationale": "The role withdrew the pending expression.",
+        }
+    )
+    silent_proposal = materialize_expression_draft(
+        value=silent_supersede.model_dump(mode="json"),
+        request=model_input,
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+    assert silent_proposal.episode_disposition == "supersede_pending"
 
 
 def test_subjective_claim_scope_remains_parseable_for_replay_but_is_not_authorable() -> None:

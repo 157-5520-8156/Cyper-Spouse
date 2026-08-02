@@ -202,6 +202,7 @@ class TextTurnEndpointSchedule:
     reason_codes: tuple[str, ...]
     evaluated_in_ms: float
     failure_code: str | None = None
+    semantic_evidence_summary: str | None = None
 
 
 class TextTurnEndpointController:
@@ -297,6 +298,7 @@ class TextTurnEndpointController:
                 reason_codes=tuple(reason_codes),
                 evaluated_in_ms=max(0.0, (perf_counter() - started) * 1_000),
                 failure_code=failure_code,
+                semantic_evidence_summary=None,
             )
         else:
             self._model_successes += 1
@@ -312,6 +314,7 @@ class TextTurnEndpointController:
                 model_id=prediction.model_id,
                 reason_codes=tuple(reason_codes),
                 evaluated_in_ms=max(0.0, (perf_counter() - started) * 1_000),
+                semantic_evidence_summary=prediction.evidence_summary,
             )
         self._last = schedule
         return schedule
@@ -392,6 +395,7 @@ class TextTurnEndpointController:
                     "reason_codes": last.reason_codes,
                     "evaluated_in_ms": last.evaluated_in_ms,
                     "failure_code": last.failure_code,
+                    "semantic_evidence_summary": last.semantic_evidence_summary,
                 }
             ),
         }
