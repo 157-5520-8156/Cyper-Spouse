@@ -201,6 +201,22 @@ relevant to the companion at one Pinned Turn. It is advisory input to
 attention and may expire without entering the World ledger.
 _Avoid_: Perceived fact, mandatory stimulus
 
+## Perception Channel
+
+A source-bound capability explaining how the companion could plausibly
+encounter an External Signal at one Pinned Turn, such as a public alert,
+available online feed, current-place medium, accepted NPC report, or authorized
+search result. It proves access, not attention, belief, interest, or action.
+_Avoid_: Behavior trigger, invented browsing history, source authority
+
+## Perception Window
+
+A frozen, expiring packet of exact External Signal revisions, correction and
+conflict evidence, and available Perception Channels offered to one
+source-bound character attention attempt. It is not a Context Capsule, a World
+fact, or proof that any candidate was noticed.
+_Avoid_: News digest, character knowledge, behavior menu
+
 ## External Perception
 
 An accepted World Event recording that the companion encountered a particular
