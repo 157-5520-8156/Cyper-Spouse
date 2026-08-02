@@ -2207,9 +2207,47 @@ def _source_closure_evidence(
             context=context,
             request=request,
         )
+        message_set: list[dict[str, object]] = []
+        slices = context.get("slices")
+        recent_dialogue = slices.get("recent_dialogue") if isinstance(slices, dict) else None
+        raw_items = recent_dialogue.get("items") if isinstance(recent_dialogue, dict) else None
+        if isinstance(raw_items, list):
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    continue
+                value = raw_item.get("value")
+                if not isinstance(value, dict):
+                    continue
+                dialogue_ref = value.get("dialogue_id")
+                if (
+                    not isinstance(dialogue_ref, str)
+                    or dialogue_ref not in trigger_refs
+                    or value.get("speaker") not in {"counterpart", "user"}
+                    or value.get("speaker_ref") not in {None, trigger.actor}
+                    or value.get("delivery_state") != "observed"
+                ):
+                    continue
+                reasons = value.get("continuity_reasons")
+                if not (
+                    dialogue_ref == f"dialogue:observation:{trigger.observation_ref}"
+                    or isinstance(reasons, list)
+                    and "pending_interaction" in reasons
+                ):
+                    continue
+                message_set.append(
+                    {
+                        "dialogue_ref": dialogue_ref,
+                        "text": value.get("text"),
+                        "occurred_at": value.get("occurred_at"),
+                        "sequence": value.get("sequence"),
+                        "continuity_reasons": reasons if isinstance(reasons, list) else [],
+                    }
+                )
+        message_set.sort(key=lambda item: (int(item.get("sequence") or 0), str(item["dialogue_ref"])))
         entries.append(
             {
                 "kind": "current_counterpart_report",
+                "packet_contract": "current-counterpart-report-packet.1",
                 "authority": "report_only_not_external_truth",
                 "epistemic_status": (
                     "counterpart_report_only_not_objective_truth_or_companion_experience"
@@ -2225,6 +2263,7 @@ def _source_closure_evidence(
                 ],
                 "source_refs": sorted(trigger_refs),
                 "message": trigger.model_dump(mode="json"),
+                "messages": message_set,
             }
         )
         unresolved.difference_update(trigger_refs)
@@ -2470,7 +2509,8 @@ _SOURCE_CLOSURE_REVIEW_SYSTEM = (
     "complete semantic commitment rather than the mere presence of a concrete scene in the "
     "surrounding conversation. A subjective projection of how a represented condition may feel, "
     "sound, look, or seem likewise does not settle a physical result. A reaction, evaluation, question, direct "
-    "restatement, or semantic paraphrase entailed by the exact current_counterpart_report may "
+    "restatement, or semantic paraphrase entailed by the exact current_counterpart_report or "
+    "an exact counterpart report in typed_recent_dialogue_proof may "
     "be natural visible uptake without a world_claim and does not need an attribution phrase "
     "such as 'you said'. Its exact turn evidence retains report-only epistemic status. This "
     "allowance cannot promote the report to objective truth. When visible prose actually "
@@ -2525,9 +2565,10 @@ _SOURCE_CLOSURE_REVIEW_SYSTEM = (
     "status, but an added descriptive detail remains source-bearing. "
     "source_relation is exactly unclosed, "
     "exact_current_report_discourse_coverage, or declared_world_claim_source_mismatch. "
-    "Use exact_current_report_discourse_coverage only when the cited exact current-report "
-    "source covers a non-factual reaction, evaluation, question, or semantically entailed "
-    "restatement as report-relative conversational uptake; keep the "
+    "Use the backward-compatible exact_current_report_discourse_coverage relation when cited "
+    "exact report sources from either the current report packet or typed_recent_dialogue_proof "
+    "cover a non-factual reaction, evaluation, question, or semantically entailed restatement "
+    "as report-relative conversational uptake; keep the "
     "raw undeclared_external_assertion in v so the host can normalize that narrow discourse "
     "authority deterministically. Never use that relation for an added subject, time, "
     "occurrence, status, detail, motive, objective fact, companion experience, or durable "
@@ -4390,6 +4431,17 @@ async def review_expression_source_closure(
             if isinstance(source_ref, str)
         )
     )
+    if not declared_claims_only:
+        # The V7 wire name predates typed dialogue proof. Extend its verified
+        # report-only authority set with exact dialogue identities so ordinary
+        # continuity does not require a second serial semantic adjudication.
+        # These remain counterpart reports, never objective World truth.
+        exact_current_report_source_refs = frozenset(
+            {
+                *exact_current_report_source_refs,
+                *(proof.dialogue_ref for proof in material.typed_recent_dialogue_proof),
+            }
+        )
     exact_current_report = (
         None
         if declared_claims_only
@@ -4513,7 +4565,8 @@ async def review_expression_source_closure(
                     "exact_current_report_resolution": (
                         "host_may_remove_only_an_undeclared_external_assertion_"
                         "whose_claim_index_is_null_and_whose_nonempty_source_refs_"
-                        "all_belong_to_the_exact_current_report"
+                        "all_belong_to_exact_verified_counterpart_reports_in_the_current_"
+                        "packet_or_typed_recent_dialogue_proof"
                     ),
                     "legacy_omission": (
                         "invalid_wire_reselect_reviewer_once_then_technical_failure"
@@ -6776,10 +6829,11 @@ async def review_expression_with_candidate_external_coverage(
     )
     if inventory_v5_available and not coverage_v5_available:
         # Inventory is non-verdict semantic decomposition, while V7 is the
-        # source verdict.  Start both independent roles together so the normal
-        # source-free path pays the slower RTT rather than their sum.  No
-        # result is released from Inventory alone: a typed source-relevant
-        # locator causes one enriched V7 review before acceptance.
+        # source verdict. Start both independent roles together so the normal
+        # source-free path pays the slower RTT rather than their sum. No result
+        # is released from Inventory alone: if it locates a source-relevant
+        # proposition that the first verdict may have omitted, one enriched V7
+        # pass remains mandatory before acceptance.
         guard_outcome, initial_outcome = await asyncio.gather(
             _inventory_source_declaration_guard(
                 inventory_model=inventory_model,
@@ -7533,7 +7587,7 @@ class _ExpressionStreamGenerationCoordinator:
 
 
 def _stream_first_expression(raw: str) -> str:
-    value = _parse_json_object(raw)
+    value = _normalized_stream_packaging(_parse_json_object(raw))
     if set(value) != {"protocol", "first", "continuation"}:
         raise ValueError("expression unit stream envelope fields are invalid")
     if value["protocol"] != "expression-units.1":
@@ -7580,7 +7634,7 @@ def _stream_first_expression(raw: str) -> str:
 
 
 def _stream_tail_expression(raw: str) -> str:
-    value = _parse_json_object(raw)
+    value = _normalized_stream_packaging(_parse_json_object(raw))
     first_raw = _stream_first_expression(raw)
     first = _parse_json_object(first_raw)
     continuation = value["continuation"]
@@ -7617,6 +7671,33 @@ def _stream_tail_expression(raw: str) -> str:
             else "complete_without_more"
         )
     return json.dumps(tail, ensure_ascii=False, separators=(",", ":"))
+
+
+def _normalized_stream_packaging(
+    value: dict[str, object], *, derive_episode_disposition: bool = True
+) -> dict[str, object]:
+    """Derive only the redundant lifecycle coordinate from the full envelope."""
+
+    first = value.get("first")
+    continuation = value.get("continuation")
+    if not isinstance(first, dict) or not isinstance(continuation, list):
+        return value
+    posture = first.get("turn_posture")
+    if derive_episode_disposition and not (posture == "supersede" and continuation):
+        expected_disposition = (
+            "append"
+            if continuation
+            else "supersede_pending"
+            if posture == "supersede"
+            else "complete_without_more"
+        )
+        if first.get("episode_disposition") != expected_disposition:
+            # This field is transport lifecycle derived entirely from the
+            # role-owned posture and continuation it already returned. Repair
+            # the redundant coordinate without changing speech or behavior.
+            first = {**first, "episode_disposition": expected_disposition}
+            value = {**value, "first": first}
+    return value
 
 
 def _incremental_first_expression(buffer: str) -> str | None:
@@ -7677,7 +7758,15 @@ def _incremental_first_expression(buffer: str) -> str | None:
         return None
     if not isinstance(value, dict):
         raise ValueError("expression stream first unit must be an object")
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    normalized = _normalized_stream_packaging(
+        {"protocol": "expression-units.1", "first": value, "continuation": []},
+        # The head is released before the provider has serialized continuation,
+        # so absence here is not evidence that the role chose no tail.
+        derive_episode_disposition=False,
+    )
+    normalized_first = normalized["first"]
+    assert isinstance(normalized_first, dict)
+    return json.dumps(normalized_first, ensure_ascii=False, separators=(",", ":"))
 
 
 class ChatModelDeliberationAdapter:
@@ -9561,7 +9650,11 @@ class ChatModelDeliberationAdapter:
             "provide task assistance. current_self_state is a compact, source-bound working "
             "perspective: let it affect what becomes salient as part of being this person, but treat "
             "it as neither a behavior script nor a required topic. No context lane or expression "
-            "form is privileged by the host. "
+            "form is privileged by the host. In recent_dialogue, current_turn together with "
+            "pending_interaction forms the bounded current counterpart-message packet: those are "
+            "received reports without a later visible acknowledgement. This is report and attention "
+            "authority, not an instruction to answer every item; choose what matters yourself, but "
+            "do not mistake an earlier packet item for already handled history. "
             + self._identity_instruction()
             + "Return one raw JSON ExpressionDraft with timing_choice, turn_posture, beats, stance, "
             "brief_rationale, confidence, and world_claims. "
@@ -9580,9 +9673,10 @@ class ChatModelDeliberationAdapter:
             "action, current activity, physical occurrence, biography, or settled history in "
             "visible beats must instead be declared in world_claims and directly supported by "
             "matching pinned Context. A reaction, evaluation, question, direct restatement, or "
-            "semantic paraphrase entailed by the exact current counterpart report may be natural "
+            "semantic paraphrase entailed by an exact report in that current counterpart-message "
+            "packet may be natural "
             "visible uptake without a world_claim and does not need an attribution phrase such as "
-            "'you said'. The system keeps the exact turn evidence report-only. Do not add or "
+            "'you said'. The system keeps the exact packet evidence report-only. Do not add or "
             "change its actual subject, time, occurrence, status, detail, or motive, promote it "
             "to objective truth, turn it into your own Experience, or use it for a durable World "
             "mutation. Every other specific World-bound proposition, especially "

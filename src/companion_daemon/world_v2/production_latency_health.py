@@ -14,10 +14,12 @@ from .production_latency_trace import ProductionLatencySample
 
 
 API_EXTERNAL_OVERHEAD_WARNING_MS = 500.0
+USER_VISIBLE_LATENCY_WARNING_MS = 5_000.0
 # Retained for health clients that still label the original first-entry field.
 FIRST_ROLE_PROVIDER_WARNING_MS = API_EXTERNAL_OVERHEAD_WARNING_MS
 _SEGMENT = "ingress_to_first_role_provider"
 _EXTERNAL_OVERHEAD_SEGMENT = "api_external_overhead"
+_VISIBLE_SEGMENT = "ingress_to_visible"
 _ENVIRONMENT = "real_transport"
 
 
@@ -96,6 +98,34 @@ def _external_overhead_summary(
     }
 
 
+def _user_visible_latency_summary(values: tuple[float, ...]) -> dict[str, object]:
+    threshold_ms = USER_VISIBLE_LATENCY_WARNING_MS
+    if not values:
+        return {
+            "status": "not_measured",
+            "segment": _VISIBLE_SEGMENT,
+            "threshold_ms": threshold_ms,
+            "sample_count": 0,
+            "sample_ms_p50": None,
+            "sample_ms_p95": None,
+            "sample_ms_max": None,
+            "over_threshold_count": 0,
+            "over_threshold_rate": None,
+        }
+    over_threshold = sum(value > threshold_ms for value in values)
+    return {
+        "status": "warning" if over_threshold else "ok",
+        "segment": _VISIBLE_SEGMENT,
+        "threshold_ms": threshold_ms,
+        "sample_count": len(values),
+        "sample_ms_p50": _nearest_rank(values, 0.50),
+        "sample_ms_p95": _nearest_rank(values, 0.95),
+        "sample_ms_max": max(values),
+        "over_threshold_count": over_threshold,
+        "over_threshold_rate": round(over_threshold / len(values), 4),
+    }
+
+
 def production_latency_health_snapshot(
     samples: Iterable[ProductionLatencySample],
 ) -> dict[str, object]:
@@ -120,6 +150,12 @@ def production_latency_health_snapshot(
         external_values,
         threshold_ms=threshold_ms,
     )
+    visible_values = tuple(
+        sample.duration_ms
+        for sample in observed_samples
+        if sample.environment == _ENVIRONMENT and sample.segment == _VISIBLE_SEGMENT
+    )
+    user_visible_latency = _user_visible_latency_summary(visible_values)
     role_provider_timing = _provider_timing_summary(
         observed_samples,
         entry_count=len(values),
@@ -139,6 +175,7 @@ def production_latency_health_snapshot(
             "over_threshold_count": 0,
             "over_threshold_rate": None,
             "api_external_overhead": external_overhead,
+            "user_visible_latency": user_visible_latency,
             "role_provider_timing": role_provider_timing,
         }
 
@@ -147,6 +184,15 @@ def production_latency_health_snapshot(
     maximum = max(values)
     over_threshold = sum(value > threshold_ms for value in values)
     warning_reasons: list[str] = []
+    if visible_values:
+        visible_p50 = _nearest_rank(visible_values, 0.50)
+        visible_p95 = _nearest_rank(visible_values, 0.95)
+        if any(value > USER_VISIBLE_LATENCY_WARNING_MS for value in visible_values):
+            warning_reasons.append("ingress_to_visible_single_over_threshold")
+        if visible_p50 > USER_VISIBLE_LATENCY_WARNING_MS:
+            warning_reasons.append("ingress_to_visible_p50_over_threshold")
+        if visible_p95 > USER_VISIBLE_LATENCY_WARNING_MS:
+            warning_reasons.append("ingress_to_visible_p95_over_threshold")
     if external_values:
         external_p50 = _nearest_rank(external_values, 0.50)
         external_p95 = _nearest_rank(external_values, 0.95)
@@ -208,6 +254,7 @@ def production_latency_health_snapshot(
         "over_threshold_count": over_threshold,
         "over_threshold_rate": round(over_threshold / len(values), 4),
         "api_external_overhead": external_overhead,
+        "user_visible_latency": user_visible_latency,
         "role_provider_timing": role_provider_timing,
     }
 
@@ -215,5 +262,6 @@ def production_latency_health_snapshot(
 __all__ = [
     "API_EXTERNAL_OVERHEAD_WARNING_MS",
     "FIRST_ROLE_PROVIDER_WARNING_MS",
+    "USER_VISIBLE_LATENCY_WARNING_MS",
     "production_latency_health_snapshot",
 ]

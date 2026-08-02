@@ -2361,7 +2361,16 @@ class Deliberation:
                 )
                 return None, output, "invalid"
             except asyncio.CancelledError:
-                raise
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    # The caller/deadline owns this cancellation and must be
+                    # allowed to unwind the candidate task.
+                    raise
+                # A provider/session can invalidate one of its own awaited
+                # Futures (for example when an expression stream generation
+                # is superseded).  That is a technical candidate failure, not
+                # cancellation of the inbound request itself.
+                return None, output, "cancelled"
             except Exception as exc:
                 _LOG.warning(
                     "deliberation candidate raised call=%s trigger=%s error=%s: %s",

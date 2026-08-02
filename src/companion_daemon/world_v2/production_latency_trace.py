@@ -142,6 +142,7 @@ class TurnLatencyTrace:
         self._provider_kinds: dict[str, ProviderKind] = {}
         self._first_role_provider_completion_call_id: str | None = None
         self._cognition_finished = False
+        self._provider_accepted_candidate_ns: int | None = None
         self._visible_ns: int | None = None
         self._lock = Lock()
 
@@ -235,6 +236,23 @@ class TurnLatencyTrace:
             # join the trace without rebinding or crashing the ActionPump.
             if self._visible_ns is None:
                 self._visible_ns = observed
+
+    def mark_provider_accepted_candidate(self, *, observed_ns: int | None = None) -> None:
+        """Remember an ACK boundary without claiming that it proves visibility."""
+
+        observed = self._clock_ns() if observed_ns is None else observed_ns
+        if observed < self._ingress_started_ns:
+            raise ValueError("provider acceptance timestamp precedes ingress")
+        with self._lock:
+            if self._provider_accepted_candidate_ns is None:
+                self._provider_accepted_candidate_ns = observed
+
+    def mark_verified_visible(self) -> None:
+        """Confirm visibility at the earlier ACK boundary after strong lookup proof."""
+
+        with self._lock:
+            observed = self._provider_accepted_candidate_ns
+        self.mark_visible(visible_ns=observed)
 
     def mark_first_role_provider(self, *, observed_ns: int | None = None) -> None:
         """Backward-compatible marker for an unattributed provider entry."""

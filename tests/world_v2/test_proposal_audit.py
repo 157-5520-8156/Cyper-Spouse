@@ -15,6 +15,7 @@ from companion_daemon.world_v2.deliberation import (
     ModelResultAudit,
     ModelRoute,
     ModelUsageProvenance,
+    PhysicalProviderInvocationAudit,
     ProviderSubcallAudit,
 )
 from companion_daemon.world_v2.acceptance_manifest import (
@@ -801,6 +802,64 @@ def test_provider_subcalls_follow_the_complete_main_recovery_lineage() -> None:
     committed = ProposalAuditRecorder(ledger=ledger).record(result, _context())
     assert len(committed.event_ids) == 4
     assert ledger.rebuild().semantic_hash == ledger.project().semantic_hash
+
+
+def test_stream_unit_can_record_physical_lineage_when_sibling_is_not_persisted() -> None:
+    """A terminal may bind both units even when only one is in this transaction."""
+
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    base = _result()
+    parent_call_id = "model-call:physical-stream:audit"
+    head_call_id = "model-call:semantic-stream-head:audit"
+    tail_call_id = "model-call:semantic-stream-tail:audit"
+    request_hash = _hash("physical-stream-request")
+    head_result_ref = "model-result:" + _digest(
+        {"model_call_id": head_call_id, "response_hash": base.audit.response_hash}
+    )
+    head = base.audit.model_copy(
+        update={
+            "model_call_id": head_call_id,
+            "model_result_ref": head_result_ref,
+            "parent_model_call_id": parent_call_id,
+            "semantic_stream_part": "tail",
+            "request_hash": request_hash,
+            "physical_provider_audits": (
+                PhysicalProviderInvocationAudit(
+                    model_call_id=parent_call_id,
+                    request_hash=request_hash,
+                    model_id="model:test",
+                    model_version="1",
+                    outcome="completed",
+                    response_hash=_hash("complete-stream-response"),
+                    usage_status="unresolved",
+                    semantic_model_call_ids=(head_call_id, tail_call_id),
+                ),
+            ),
+        }
+    )
+    result = base.model_copy(
+        update={
+            "audit": head,
+            "attempt_audits": (head,),
+            "result_id": "deliberation:" + _digest(
+                {
+                    "capsule_id": base.capsule_id,
+                    "proposal_hash": base.proposal.proposal_hash,
+                    "attempt_audits": [head.model_dump(mode="json")],
+                }
+            ),
+        }
+    )
+
+    committed = ProposalAuditRecorder(ledger=ledger).record(result, _context())
+
+    assert len(committed.event_ids) == 3
+    projection = ledger.project()
+    assert [item.model_call_id for item in projection.model_result_audits] == [
+        head_call_id,
+        parent_call_id,
+    ]
 
 
 def test_recall_query_and_results_are_pinned_through_cold_replay(tmp_path) -> None:

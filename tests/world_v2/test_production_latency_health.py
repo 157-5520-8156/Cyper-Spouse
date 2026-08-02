@@ -48,6 +48,9 @@ def test_first_role_provider_health_warns_for_single_and_statistical_overruns() 
         "status": "warning",
         "warning": True,
         "warning_reasons": [
+            "ingress_to_visible_single_over_threshold",
+            "ingress_to_visible_p50_over_threshold",
+            "ingress_to_visible_p95_over_threshold",
             "first_role_provider_single_over_threshold",
             "first_role_provider_p50_over_threshold",
             "first_role_provider_p95_over_threshold",
@@ -71,6 +74,17 @@ def test_first_role_provider_health_warns_for_single_and_statistical_overruns() 
             "sample_ms_max": None,
             "over_threshold_count": 0,
             "over_threshold_rate": None,
+        },
+        "user_visible_latency": {
+            "status": "warning",
+            "segment": "ingress_to_visible",
+            "threshold_ms": 5_000.0,
+            "sample_count": 1,
+            "sample_ms_p50": 12_000.0,
+            "sample_ms_p95": 12_000.0,
+            "sample_ms_max": 12_000.0,
+            "over_threshold_count": 1,
+            "over_threshold_rate": 1.0,
         },
         "role_provider_timing": {
             "entry": {
@@ -181,6 +195,41 @@ def test_health_warns_on_whole_turn_api_external_overhead_after_fast_first_entry
     }
 
 
+def test_health_reports_actual_ingress_to_visible_receipt_instead_of_stopping_at_model_entry() -> None:
+    snapshot = production_latency_health_snapshot(
+        (
+            _sample("trace:user-visible", 120.0),
+            ProductionLatencySample(
+                trace_id="trace:user-visible",
+                startup="hot",
+                segment="model_completion",
+                duration_ms=4_200.0,
+                environment="real_transport",
+            ),
+            ProductionLatencySample(
+                trace_id="trace:user-visible",
+                startup="hot",
+                segment="ingress_to_visible",
+                duration_ms=8_750.0,
+                environment="real_transport",
+            ),
+        )
+    )
+
+    assert snapshot["user_visible_latency"] == {
+        "status": "warning",
+        "segment": "ingress_to_visible",
+        "threshold_ms": 5_000.0,
+        "sample_count": 1,
+        "sample_ms_p50": 8_750.0,
+        "sample_ms_p95": 8_750.0,
+        "sample_ms_max": 8_750.0,
+        "over_threshold_count": 1,
+        "over_threshold_rate": 1.0,
+    }
+    assert "ingress_to_visible_single_over_threshold" in snapshot["warning_reasons"]
+
+
 def test_health_does_not_hide_unmeasured_slow_trace_behind_closed_fast_trace() -> None:
     snapshot = production_latency_health_snapshot(
         (
@@ -264,6 +313,17 @@ def test_production_health_exposes_latency_warning_without_changing_runtime_stat
             "status": "not_measured",
             "segment": "api_external_overhead",
             "threshold_ms": 500.0,
+            "sample_count": 0,
+            "sample_ms_p50": None,
+            "sample_ms_p95": None,
+            "sample_ms_max": None,
+            "over_threshold_count": 0,
+            "over_threshold_rate": None,
+        },
+        "user_visible_latency": {
+            "status": "not_measured",
+            "segment": "ingress_to_visible",
+            "threshold_ms": 5_000.0,
             "sample_count": 0,
             "sample_ms_p50": None,
             "sample_ms_p95": None,

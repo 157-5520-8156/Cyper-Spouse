@@ -530,14 +530,14 @@ def current_counterpart_report_source_refs(
     context: dict[str, object],
     request: ModelInput,
 ) -> frozenset[str]:
-    """Return refs that identify only the exact report which opened this turn.
+    """Return refs for the bounded current counterpart-message packet.
 
-    The current Observation already forms mandatory proposal evidence.  This
-    helper gives both the author and the source reviewer one shared identity
-    for natural conversational uptake without turning the reported
-    proposition into an objective World fact.  A recent-dialogue alias joins
-    the set only when its typed speaker, actor, text, and Observation identity
-    all match the verified trigger exactly.
+    The packet contains the exact trigger plus the Context compiler's already
+    bounded ``pending_interaction`` records.  These immutable reports were
+    received since the last visible acknowledgement; retaining their report
+    identity prevents a burst fragment from becoming ordinary history merely
+    because newer input superseded its generation.  This neither makes a
+    reported proposition objective truth nor requires the role to answer it.
     """
 
     trigger = request.trigger_message
@@ -562,20 +562,24 @@ def current_counterpart_report_source_refs(
         value = item.get("value")
         if not isinstance(value, dict):
             continue
+        dialogue_id = value.get("dialogue_id")
+        reasons = value.get("continuity_reasons")
+        is_current = dialogue_id == expected_dialogue_id and value.get("text") == trigger.text
+        is_pending = isinstance(reasons, list) and "pending_interaction" in reasons
         if (
-            value.get("dialogue_id") != expected_dialogue_id
+            not isinstance(dialogue_id, str)
+            or not (is_current or is_pending)
             or value.get("speaker") not in {"counterpart", "user"}
-            or value.get("text") != trigger.text
+            or value.get("delivery_state") != "observed"
         ):
             continue
         speaker_ref = value.get("speaker_ref")
         if speaker_ref is not None and speaker_ref != trigger.actor:
             continue
         item_refs = _context_item_source_tokens(item)
-        if expected_dialogue_id not in item_refs:
+        if dialogue_id not in item_refs:
             continue
         refs.update(item_refs)
-        break
     return frozenset(refs)
 
 
@@ -1711,6 +1715,30 @@ def _normalize_later_envelope(value: dict[str, object]) -> dict[str, object]:
 def normalize_expression_draft_wire(value: dict[str, object]) -> dict[str, object]:
     """Normalize only exact, lossless provider wire aliases before parsing."""
 
+    private_state = value.get("private_turn_state")
+    if value.get("contract") == "private-turn-state.1":
+        # ExpressionDraft has no root discriminator. Some schema providers
+        # emit the nested private-state discriminator at the root even when
+        # that optional object is absent; removing this exact known constant
+        # cannot change any authored expression choice.
+        value = {key: item for key, item in value.items() if key != "contract"}
+        if private_state is None and {
+            "inner_state_summary",
+            "attended_source_refs",
+        } <= set(value):
+            # Losslessly re-nest an otherwise complete private-state object;
+            # no expression field or authored value is synthesized.
+            nested = {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": value["inner_state_summary"],
+                "attended_source_refs": value["attended_source_refs"],
+            }
+            value = {
+                key: item
+                for key, item in value.items()
+                if key not in {"inner_state_summary", "attended_source_refs"}
+            }
+            value["private_turn_state"] = nested
     value = _normalize_later_envelope(value)
     value = _normalize_world_claim_aliases(value)
     value = _normalize_cadence_alias(value)

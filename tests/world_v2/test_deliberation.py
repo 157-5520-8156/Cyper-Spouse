@@ -302,6 +302,16 @@ class _ControlledQuick(_Quick):
         return await self.result
 
 
+class _InternallyCancelledMain(_Main):
+    """A provider-owned/session Future was invalidated, not the caller task."""
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        self.requests.append(request)
+        invalidated = asyncio.get_running_loop().create_future()
+        invalidated.cancel()
+        return await invalidated
+
+
 class _HedgeThenLocalQuick(_Quick):
     """Models production: remote hedge hangs, local reserve failsafe is sync."""
 
@@ -461,6 +471,25 @@ async def test_first_completed_invalid_does_not_beat_later_valid_candidate() -> 
     assert result.proposal is not None
     assert result.audit.model_id == "backup"
     assert len(result.attempt_audits) == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_internal_cancellation_becomes_recoverable_failure() -> None:
+    quick = _Quick()
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_InternallyCancelledMain(),
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:provider-internal-cancellation",
+        budget=InteractiveTurnBudgetPolicy().start(),
+    )
+
+    assert result.proposal is not None
+    assert result.audit.model_id == "quick"
+    assert quick.failure_codes == ["main_exception"]
 
 
 @pytest.mark.asyncio

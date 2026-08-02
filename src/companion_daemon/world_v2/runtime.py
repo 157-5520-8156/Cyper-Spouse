@@ -217,6 +217,26 @@ def _matches_outcome_observation_command(
     return event.payload().get("observation") == observation.as_projection().model_dump(mode="json")
 
 
+def _observation_ingress_payload_hash(observation: Observation) -> str:
+    """Recompute the transport digest from the exact persisted ingress fields."""
+
+    if (
+        observation.text is not None
+        and not observation.attachment_refs
+        and not observation.coalescing_metadata
+    ):
+        return hashlib.sha256(observation.text.encode("utf-8")).hexdigest()
+    payload = {
+        "text": observation.text,
+        "attachment_refs": observation.attachment_refs,
+        "coalescing_metadata": observation.coalescing_metadata,
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class WorldRuntime:
     """World v2's only application-facing runtime seam.
 
@@ -2754,12 +2774,50 @@ class WorldRuntime:
                         "committed observation cannot be decoded"
                     ) from exc
                 if persisted != event:
-                    # A locked-head clock rebase is the one permitted
-                    # difference between a retry's client envelope and the
-                    # committed observation. All other content remains a
-                    # genuine idempotency conflict.
+                    # A locked-head clock rebase and the process-local endpoint
+                    # estimate are the only permitted retry differences. The
+                    # estimate is advisory-only and is deliberately forgotten
+                    # after the first ingress claim, so recovery must reuse the
+                    # exact version already frozen in the Observation.
+                    normalized_metadata = dict(observation.coalescing_metadata)
+                    persisted_advisory = persisted_observation.coalescing_metadata.get(
+                        "turn_attention_advisory"
+                    )
+                    if persisted_advisory is None:
+                        normalized_metadata.pop("turn_attention_advisory", None)
+                    else:
+                        normalized_metadata["turn_attention_advisory"] = persisted_advisory
+                    incoming_reply = dict(observation.reply_context or {})
+                    persisted_reply = dict(persisted_observation.reply_context or {})
+                    incoming_reply.pop("platform_message_id", None)
+                    persisted_reply.pop("platform_message_id", None)
+                    if incoming_reply != persisted_reply:
+                        raise IdempotencyConflict(
+                            "observation trigger was already committed with different reply authority"
+                        )
+                    if observation.payload_hash != persisted_observation.payload_hash and (
+                        observation.payload_hash != _observation_ingress_payload_hash(observation)
+                        or persisted_observation.payload_hash
+                        != _observation_ingress_payload_hash(persisted_observation)
+                    ):
+                        raise IdempotencyConflict(
+                            "observation trigger was already committed with different payload proof"
+                        )
                     normalized_observation = observation.model_copy(
-                        update={"logical_time": persisted_observation.logical_time}
+                        update={
+                            "logical_time": persisted_observation.logical_time,
+                            "coalescing_metadata": normalized_metadata,
+                            # The live process may retain the original platform
+                            # fragment id while restart recovery only has the
+                            # durable coalesced batch id. The committed reply
+                            # target is authoritative for this same batch.
+                            "reply_context": persisted_observation.reply_context,
+                            # The transport payload digest historically
+                            # included the process-local attention advisory.
+                            # Once every substantive field above matches, the
+                            # first committed digest remains the batch truth.
+                            "payload_hash": persisted_observation.payload_hash,
+                        }
                     )
                     if (
                         normalized_observation != persisted_observation

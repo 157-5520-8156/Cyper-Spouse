@@ -417,26 +417,26 @@ def _preflight_production_source_review(
             )
         ordinary_reviewer = _ConfiguredReviewAuthority(
             primary=_ConfiguredProviderLane(
-                provider="openrouter",
-                base_url=settings.openrouter_base_url,
-                model=settings.world_v2_source_review_secondary_model,
-            ),
-            secondary=_ConfiguredProviderLane(
                 provider="openai",
                 base_url=settings.openai_base_url,
                 model=settings.world_v2_source_review_fallback_model,
             ),
+            secondary=_ConfiguredProviderLane(
+                provider="openrouter",
+                base_url=settings.openrouter_base_url,
+                model=settings.world_v2_source_review_secondary_model,
+            ),
         )
         recovery_reviewer = _ConfiguredReviewAuthority(
             primary=_ConfiguredProviderLane(
-                provider="openrouter",
-                base_url=settings.openrouter_base_url,
-                model=settings.world_v2_source_review_recovery_model,
-            ),
-            secondary=_ConfiguredProviderLane(
                 provider="openai",
                 base_url=settings.openai_base_url,
                 model=settings.world_v2_source_review_recovery_fallback_model,
+            ),
+            secondary=_ConfiguredProviderLane(
+                provider="openrouter",
+                base_url=settings.openrouter_base_url,
+                model=settings.world_v2_source_review_recovery_model,
             ),
         )
 
@@ -1318,8 +1318,11 @@ def build_semantic_chat_composition(
         if openai_inventory_secondary is not None:
             owned.append(openai_inventory_secondary)
         source_review_authority = SourceReviewAuthority(
-            primary=openrouter_source_reviewer,
-            secondary=openai_source_reviewer,
+            # The official structured-output route is faster and more schema
+            # reliable for the synchronous visible path. Audited Qwen remains
+            # an independent availability fallback.
+            primary=openai_source_reviewer,
+            secondary=openrouter_source_reviewer,
             hedge_after_seconds=settings.world_v2_source_review_hedge_after_seconds,
             deadline_seconds=settings.world_v2_source_review_deadline_seconds,
             caller_timeout_seconds=SOURCE_REVIEW_CALL_TIMEOUT_SECONDS,
@@ -1333,12 +1336,11 @@ def build_semantic_chat_composition(
         )
         resolved_source_closure_model = source_review_authority
         # The ordinary recovery author remains Luna. Its fact review is a
-        # different semantic role: audited Qwen through OpenRouter first, then
-        # audited GPT-4.1 mini through the official OpenAI route as an
-        # availability fallback. The reserve is not a semantic vote or quorum.
+        # different semantic role with the same independent provider ordering.
+        # The reserve is not a semantic vote or quorum.
         recovery_source_closure_model = SourceReviewAuthority(
-            primary=openrouter_recovery_source_reviewer,
-            secondary=openai_recovery_source_reviewer,
+            primary=openai_recovery_source_reviewer,
+            secondary=openrouter_recovery_source_reviewer,
             hedge_after_seconds=settings.world_v2_source_review_hedge_after_seconds,
             deadline_seconds=settings.world_v2_source_review_deadline_seconds,
             caller_timeout_seconds=SOURCE_REVIEW_CALL_TIMEOUT_SECONDS,

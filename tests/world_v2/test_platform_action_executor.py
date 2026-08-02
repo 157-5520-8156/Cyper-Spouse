@@ -179,6 +179,53 @@ async def test_non_delivered_receipt_does_not_fabricate_visibility(status: str) 
 
 
 @pytest.mark.asyncio
+async def test_verified_delivery_closes_the_original_user_visible_latency_trace() -> None:
+    clock = _Clock()
+    recorder = ProductionLatencyRecorder(clock_ns=clock)
+    trace = recorder.start_ingress(
+        trace_id="trace:platform-adapter", environment="real_transport"
+    )
+
+    class AcceptedThenVerifiedTransport(Transport):
+        async def send(self, request):  # type: ignore[no-untyped-def]
+            clock.advance_ms(7)
+            receipt = await super().send(request)
+            return receipt.model_copy(update={"status": "provider_accepted"})
+
+        async def verify_delivery(
+            self, *, idempotency_key: str, target: str, provider_ref: str
+        ) -> PlatformDispatchReceipt:
+            clock.advance_ms(11)
+            return PlatformDispatchReceipt(
+                provider_receipt_id="transport-receipt:verified",
+                provider_ref=f"{provider_ref}:verified",
+                status="delivered",
+                received_at=NOW,
+                raw_payload_hash="sha256:transport:verified",
+                idempotency_key=idempotency_key,
+            )
+
+    executor = PlatformActionExecutor(
+        payloads=Payloads("我在。"),
+        transport=AcceptedThenVerifiedTransport(),
+        latency_recorder=recorder,
+    )
+    current = action()
+    accepted = await executor.dispatch(current)
+    assert accepted is not None and accepted.status == "provider_accepted"
+    assert "ingress_to_visible" not in {sample.segment for sample in trace.samples()}
+
+    verified = await executor.verify_delivery(
+        current, provider_ref=accepted.provider_ref
+    )
+
+    assert verified is not None and verified.status == "delivered"
+    assert {sample.segment: sample.duration_ms for sample in trace.samples()}[
+        "ingress_to_visible"
+    ] == 7.0
+
+
+@pytest.mark.asyncio
 async def test_platform_executor_renders_delayed_followup_as_the_same_message_primitive() -> None:
     transport = Transport()
     executor = PlatformActionExecutor(

@@ -423,11 +423,11 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
     main_authority = composition.source_closure_model
     assert isinstance(main_authority, SourceReviewAuthority)
     assert isinstance(main_authority.primary, StructuredSourceReviewModel)
-    assert main_authority.primary.model == "qwen/qwen-plus"
-    assert main_authority.primary.base_url == "https://openrouter.ai/api/v1"
+    assert main_authority.primary.model == "gpt-4.1-mini"
+    assert main_authority.primary.base_url == "https://api.openai.com/v1"
     assert main_authority.primary.proxy_url == "http://127.0.0.1:7890"
     assert isinstance(main_authority.secondary, OpenAICompatibleChatModel)
-    assert main_authority.secondary.model == "gpt-4.1-mini"
+    assert main_authority.secondary.model == "qwen/qwen-plus"
     assert main_authority.secondary.reasoning_effort == ""
     assert main_authority.hedge_after_seconds == 3.5
     assert main_authority.deadline_seconds == 19.0
@@ -502,10 +502,10 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
     assert isinstance(recovery_authority, SourceReviewAuthority)
     assert recovery_authority is not main_authority
     assert recovery_authority.primary is not main_authority.primary
-    assert recovery_authority.primary.model == "qwen/qwen-plus"
+    assert recovery_authority.primary.model == "gpt-4.1-mini"
+    assert recovery_authority.primary.provider == "openai"
     assert isinstance(recovery_authority.secondary, StructuredSourceReviewModel)
-    assert recovery_authority.secondary.model == "gpt-4.1-mini"
-    assert recovery_authority.secondary.provider == "openai"
+    assert recovery_authority.secondary.model == "qwen/qwen-plus"
     assert (
         recovery_authority.supports_strict_output_contract(
             "candidate-external-proposition-coverage.5"
@@ -577,8 +577,8 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
         "secondary",
     )
     assert health["source_review_authority"]["lane_models"] == {
-        "primary": "qwen/qwen-plus",
-        "secondary": "gpt-4.1-mini",
+        "primary": "gpt-4.1-mini",
+        "secondary": "qwen/qwen-plus",
     }
     await composition.aclose()
 
@@ -1460,9 +1460,9 @@ async def test_production_source_authority_finishes_inside_its_22_second_caller(
 
     main_authority = composition.source_closure_model
     assert isinstance(main_authority, SourceReviewAuthority)
-    assert main_authority.primary.model == "qwen/qwen-plus"
+    assert main_authority.primary.model == "gpt-4.1-mini"
     assert main_authority.primary.reasoning_effort == ""
-    assert main_authority.secondary.model == "gpt-4.1-mini"
+    assert main_authority.secondary.model == "qwen/qwen-plus"
     assert main_authority.secondary.reasoning_effort == ""
     assert main_authority.configured_deadline_seconds == 30.0
     assert main_authority.caller_timeout_seconds == 22.0

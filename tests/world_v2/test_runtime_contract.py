@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from datetime import UTC, datetime
 from threading import Barrier
 
@@ -255,6 +257,86 @@ async def test_same_source_event_with_different_payload_is_an_idempotency_confli
     )
     with pytest.raises(IdempotencyConflict):
         await runtime.ingest(conflicting)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_ingress_reuses_persisted_process_local_attention_advisory() -> None:
+    runtime = WorldRuntime.in_memory(world_id="world-v2-test")
+    original_metadata = {
+        "source_event_ids": ["message-1"],
+        "turn_attention_advisory": {
+            "authority": "advisory_only",
+            "status": "estimated",
+            "continuation_probability_bp": 7200,
+        },
+    }
+    original_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "text": observation().text,
+                "attachment_refs": observation().attachment_refs,
+                "coalescing_metadata": original_metadata,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    original = observation().model_copy(
+        update={
+            "payload_hash": original_hash,
+            "reply_context": {
+                "target": "user:primary",
+                "platform_message_id": "message-1",
+            },
+            "coalescing_metadata": original_metadata,
+        }
+    )
+    first = await runtime.ingest(original)
+    recovered_metadata = {"source_event_ids": ["message-1"]}
+    recovered_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "text": original.text,
+                "attachment_refs": original.attachment_refs,
+                "coalescing_metadata": recovered_metadata,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    recovered_without_process_local_signal = original.model_copy(
+        update={
+            "logical_time": NOW.replace(minute=1),
+            "payload_hash": recovered_hash,
+            "reply_context": {
+                "target": "user:primary",
+                "platform_message_id": "coalesced-batch-1",
+            },
+            "coalescing_metadata": recovered_metadata,
+        }
+    )
+
+    duplicate = await runtime.ingest(recovered_without_process_local_signal)
+
+    assert duplicate == first
+
+
+@pytest.mark.asyncio
+async def test_duplicate_ingress_cannot_rebind_reply_target_during_recovery() -> None:
+    runtime = WorldRuntime.in_memory(world_id="world-v2-test")
+    original = observation().model_copy(
+        update={"reply_context": {"target": "user:primary"}}
+    )
+    await runtime.ingest(original)
+
+    with pytest.raises(IdempotencyConflict, match="reply authority"):
+        await runtime.ingest(
+            original.model_copy(
+                update={"reply_context": {"target": "user:other"}}
+            )
+        )
 
 
 @pytest.mark.asyncio

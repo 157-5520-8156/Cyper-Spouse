@@ -29,6 +29,7 @@ from companion_daemon.world_v2.expression_draft import (
     QQ_NAPCAT_EXPRESSION_CAPABILITIES,
     TEXT_ONLY_EXPRESSION_CAPABILITIES,
     build_source_ref_alias_table,
+    current_counterpart_report_source_refs,
     qq_expression_capabilities,
     world_source_scope_boundary,
 )
@@ -508,6 +509,63 @@ async def test_expression_unit_stream_preserves_character_chosen_typing_before_f
 
 
 @pytest.mark.asyncio
+async def test_expression_draft_drops_only_a_duplicate_top_level_private_state_contract() -> None:
+    draft = {
+        "contract": "private-turn-state.1",
+        "private_turn_state": {
+            "contract": "private-turn-state.1",
+            "inner_state_summary": "我同时注意到她前后两句。",
+            "attended_source_refs": ["observation:qq:1"],
+        },
+        "timing_choice": "now",
+        "cadence": "conversational",
+        "beats": [{"modality": "text", "text": "前后两句我都看到了。"}],
+        "stance": "respond_to_packet",
+        "brief_rationale": "Respond from the whole current packet.",
+        "confidence": 8_000,
+        "world_claims": [],
+    }
+    adapter = ChatModelDeliberationAdapter(
+        model=_SequenceJsonModel([json.dumps(draft, ensure_ascii=False)]),
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
+            update={"private_turn_state_mode": "required"}
+        ),
+    )
+
+    output = await adapter.propose(_qq_request())
+
+    payload = json.loads(
+        output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+    assert payload["beat_drafts"][0]["inline_text"] == "前后两句我都看到了。"
+
+
+@pytest.mark.asyncio
+async def test_expression_draft_drops_stray_root_private_state_contract() -> None:
+    draft = {
+        "contract": "private-turn-state.1",
+        "timing_choice": "now",
+        "cadence": "conversational",
+        "beats": [{"modality": "text", "text": "这样就舒服一点了。"}],
+        "stance": "relieved",
+        "brief_rationale": "React to the current report.",
+        "confidence": 8_000,
+        "world_claims": [],
+    }
+    adapter = ChatModelDeliberationAdapter(
+        model=_SequenceJsonModel([json.dumps(draft, ensure_ascii=False)]),
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+
+    output = await adapter.propose(_qq_request())
+
+    payload = json.loads(
+        output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+    assert payload["beat_drafts"][0]["inline_text"] == "这样就舒服一点了。"
+
+
+@pytest.mark.asyncio
 async def test_expression_unit_stream_preserves_role_owned_supersede_lifecycle() -> None:
     raw = json.dumps(
         {
@@ -533,6 +591,45 @@ async def test_expression_unit_stream_preserves_role_owned_supersede_lifecycle()
     head = await adapter.propose_stream_head(_qq_request())
     assert head.raw_proposal["turn_posture"] == "supersede"
     assert head.raw_proposal["episode_disposition"] == "supersede_pending"
+
+
+@pytest.mark.asyncio
+async def test_expression_stream_derives_redundant_disposition_from_units() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-units.1",
+            "first": {
+                "timing_choice": "now",
+                "beats": [{"modality": "text", "text": "舒服点就好。"}],
+                "stance": "relieved",
+                "brief_rationale": "React naturally.",
+                "confidence": 8_000,
+                "world_claims": [],
+                "episode_disposition": "append",
+            },
+            "continuation": [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _UnitStreamingModel(raw)
+    model.release_tail.set()
+    adapter = ChatModelDeliberationAdapter(
+        model=model,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+
+    request = _qq_request()
+    head = await adapter.propose_stream_head(request)
+    tail = await adapter.propose_stream_tail(
+        request.model_copy(update={"call_id": "call:derived-disposition-tail"})
+    )
+
+    # The early head cannot infer whether continuation bytes are still in
+    # flight. The completed envelope can and yields the lifecycle terminal.
+    assert head.episode_disposition == "append"
+    assert tail.episode_disposition == "complete_without_more"
+    assert tail.raw_proposal["episode_disposition"] == "complete_without_more"
 
 
 @pytest.mark.asyncio
@@ -11260,7 +11357,9 @@ async def test_inventory_guard_rejects_undeclared_companion_life_without_coverag
         if semantic_role == "source_bearing_private_episode":
             assert allowed_decisions == ["retain_unclosed"]
         else:
-            assert "covered_by_first_person_immediate_private_continuity" not in (allowed_decisions)
+            assert "covered_by_first_person_immediate_private_continuity" not in (
+                allowed_decisions
+            )
     correction = json.loads(author.calls[1][0][-1]["content"])
     assert correction["rejected_categories"]["v"] == ["undeclared_external_assertion"]
 
@@ -11373,11 +11472,15 @@ async def test_inventory_guard_rejects_t07_with_unrelated_world_claim() -> None:
     ]
     packet = json.loads(reviewer.calls[1][0][-1]["content"])
     assert (
-        packet["candidate_inventory_decomposition"]["unrelated_world_claim_cannot_cover_locator"]
+        packet["candidate_inventory_decomposition"][
+            "unrelated_world_claim_cannot_cover_locator"
+        ]
         is True
     )
     narrow_packet = json.loads(reviewer.calls[2][0][-1]["content"])
-    assert narrow_packet["disputed_findings"][0]["allowed_decisions"] == ["retain_unclosed"]
+    assert narrow_packet["disputed_findings"][0]["allowed_decisions"] == [
+        "retain_unclosed"
+    ]
 
 
 @pytest.mark.asyncio
@@ -13510,8 +13613,9 @@ async def test_source_closure_expands_current_observation_alias_into_report_only
     evidence = json.loads(reviewer.calls[0][0][1]["content"])["source_evidence"]
     assert evidence["required_source_refs"] == [observation_ref]
     assert evidence["entries"] == [
-        {
-            "kind": "current_counterpart_report",
+            {
+                "kind": "current_counterpart_report",
+                "packet_contract": "current-counterpart-report-packet.1",
             "authority": "report_only_not_external_truth",
             "epistemic_status": (
                 "counterpart_report_only_not_objective_truth_or_companion_experience"
@@ -13526,8 +13630,9 @@ async def test_source_closure_expands_current_observation_alias_into_report_only
                 "durable_world_mutation",
             ],
             "source_refs": sorted([request.trigger_ref, trigger.event_ref, observation_ref]),
-            "message": trigger.model_dump(mode="json"),
-        }
+                "message": trigger.model_dump(mode="json"),
+                "messages": [],
+            }
     ]
 
 
@@ -17294,6 +17399,55 @@ def _qq_request() -> ModelInput:
     )
 
 
+def test_pending_counterpart_report_joins_the_current_report_packet() -> None:
+    request = _qq_request()
+    pending_ref = "dialogue:observation:observation:qq:pending"
+    current_ref = "dialogue:observation:observation:qq:1"
+    context = {
+        "actor_ref": "agent:companion",
+        "slices": {
+            "recent_dialogue": {
+                "availability": "available",
+                "items": [
+                    {
+                        "source_ref": pending_ref,
+                        "value": {
+                            "dialogue_id": pending_ref,
+                            "speaker": "counterpart",
+                            "speaker_ref": "user:primary",
+                            "text": "今天早上陪我妈去做了个推拿。",
+                            "occurred_at": "2026-08-02T04:11:38Z",
+                            "delivery_state": "observed",
+                            "sequence": 10,
+                            "source_claims": [],
+                            "continuity_reasons": ["pending_interaction"],
+                        },
+                    },
+                    {
+                        "source_ref": current_ref,
+                        "value": {
+                            "dialogue_id": current_ref,
+                            "speaker": "counterpart",
+                            "speaker_ref": "user:primary",
+                            "text": request.trigger_message.text,
+                            "occurred_at": "2026-08-02T04:11:49Z",
+                            "delivery_state": "observed",
+                            "sequence": 20,
+                            "source_claims": [],
+                            "continuity_reasons": ["current_turn"],
+                        },
+                    },
+                ],
+            }
+        },
+    }
+
+    refs = current_counterpart_report_source_refs(context=context, request=request)
+
+    assert pending_ref in refs
+    assert current_ref in refs
+
+
 @pytest.mark.asyncio
 async def test_missing_model_owned_audit_metadata_reselects_the_complete_expression() -> None:
     model = _SequenceJsonModel(
@@ -19717,6 +19871,68 @@ async def test_source_closure_resolves_only_structured_exact_current_report_upta
     assert result.review.visible_text_failures == ()
     assert len(result.review.visible_findings) == 1
     assert result.review.discourse_resolved_visible_finding_indexes == (0,)
+
+
+@pytest.mark.asyncio
+async def test_v7_resolves_exact_recent_dialogue_uptake_without_second_adjudication() -> None:
+    dialogue_ref = "dialogue:observation:prior-heat-report"
+    request = _qq_request_with_recent_dialogue(
+        trigger_text="哈哈，已经彻底活过来了。",
+        records=[
+            {
+                "dialogue_ref": dialogue_ref,
+                "speaker": "counterpart",
+                "text": "刚才真有点被晒蔫了。",
+                "occurred_at": "2026-08-02T12:50:00+08:00",
+                "sequence": 101,
+            }
+        ],
+    )
+    visible_span = "刚才晒蔫了"
+    raw = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [{"modality": "text", "text": f"{visible_span}，现在缓过来就好。"}],
+            "stance": "continue_recent_report",
+            "brief_rationale": "React to the exact recent report.",
+            "world_claims": [],
+        },
+        ensure_ascii=False,
+    )
+    reviewer = _SequenceJsonModel(
+        [
+            json.dumps(
+                {
+                    "ci": [],
+                    "v": ["undeclared_external_assertion"],
+                    "p": [],
+                    "visible_findings": [
+                        {
+                            "category": "undeclared_external_assertion",
+                            "visible_span": visible_span,
+                            "claim_index": None,
+                            "source_relation": "exact_current_report_discourse_coverage",
+                            "source_refs": [dialogue_ref],
+                        }
+                    ],
+                    "r": "The exact typed dialogue report entails this uptake.",
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    result = await review_expression_source_closure(
+        reviewer=reviewer,
+        request=request,
+        raw=raw,
+        identity_frame=None,
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "supported"
+    assert result.report_relative_adjudication_used is False
+    assert len(reviewer.calls) == 1
 
 
 @pytest.mark.asyncio

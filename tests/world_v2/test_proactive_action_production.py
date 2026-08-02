@@ -514,6 +514,29 @@ async def test_missing_required_proactive_private_turn_state_reselects_complete_
 
 
 @pytest.mark.asyncio
+async def test_malformed_proactive_expression_gets_one_exact_structural_reselection() -> None:
+    model = _ProactiveReplySequence(
+        [
+            {"timing_choice": "now"},
+            _proactive_draft("忽然想跟你说句话。"),
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+    ).propose(_proactive_model_request())
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert proposal.timing_choice == "now"
+    assert model.calls == 2
+    repair = json.loads(model.messages[1][-1]["content"])
+    assert repair["contract"] == "proactive-expression-structure-reselection.1"
+    assert "valid ExpressionDraft" in repair["validation_failure"]
+    assert "忽然想跟你说句话" not in json.dumps(model.messages[0], ensure_ascii=False)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("choice", "expected_action_kind"),
     (("now", "proactive_message"), ("later", "followup"), ("silent", None)),
@@ -2440,7 +2463,10 @@ async def test_two_unparseable_choices_are_technical_failure_not_character_silen
     assert result.status == "failed_safe"
     assert malformed.calls == 2
     projection = ledger.project()
-    assert len(projection.model_result_audits) == 2
+    # The invalid author wire and its one same-role correction are one
+    # validation attempt with two physical provider calls, not a fabricated
+    # main/backup character decision pair.
+    assert len(projection.model_result_audits) == 1
     assert len(projection.proposal_audits) == 0
     assert projection.actions == ()
     process = projection.trigger_processes[-1]
@@ -3406,7 +3432,9 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         ]
         assert health["initiative_consecutive_technical_failures"] == 1
         assert health["initiative_retry_ordinal"] == 1
-        assert health["initiative_last_failure_code"] == "quick_invalid_output"
+        assert health["initiative_last_failure_code"] == (
+            "authored_expression_reselection_invalid"
+        )
         waiting = await app.drain_background_once()
         assert waiting.status == "retry_wait"
         assert waiting.retry_ordinal == 1

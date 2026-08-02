@@ -2645,8 +2645,14 @@ def _model_result_recorded(state: ReducerState, event: WorldEvent) -> ReducerSta
         )
         if (
             not semantic_children
-            or {child.model_call_id for child in semantic_children}
-            != set(recorded.semantic_model_call_ids)
+            # A completed physical stream can be audited with the visible
+            # head while its already-received semantic tail is still pending.
+            # The terminal binds the complete, immutable set up front; each
+            # subsequently persisted semantic unit is checked against it by
+            # the branch below.
+            or not {child.model_call_id for child in semantic_children}.issubset(
+                set(recorded.semantic_model_call_ids)
+            )
             or any(child.request_hash != recorded.request_hash for child in semantic_children)
             or len({child.semantic_stream_part for child in semantic_children})
             != len(semantic_children)

@@ -217,7 +217,7 @@ class PlatformActionExecutor(ActionExecutor):
             raise ValueError("delivery verification must return terminal evidence or None")
         if result.idempotency_key != action.idempotency_key:
             raise ValueError("delivery verification receipt does not bind the Action")
-        return ProviderReceipt(
+        bound = ProviderReceipt(
             provider_receipt_id=result.provider_receipt_id,
             action_id=action.action_id,
             idempotency_key=action.idempotency_key,
@@ -230,6 +230,10 @@ class PlatformActionExecutor(ActionExecutor):
             received_at=result.received_at,
             raw_payload_hash=result.raw_payload_hash,
         )
+        self._mark_visible_if_observed(
+            trace=self._trace(action), action=action, result=bound
+        )
+        return bound
 
     def _trace(self, action: Action) -> TurnLatencyTrace | None:
         return self._latency.get(action.trace_id) if self._latency is not None else None
@@ -245,12 +249,19 @@ class PlatformActionExecutor(ActionExecutor):
             trace is not None
             and action.kind in USER_VISIBLE_PLATFORM_ACTION_KINDS
             and isinstance(result, ProviderReceipt)
-            and result.status == "delivered"
         ):
+            if result.status == "provider_accepted":
+                # An ACK alone is not visibility proof. Preserve its timing so
+                # a later strong provider lookup can retroactively confirm the
+                # user-visible boundary without charging lookup lease delay.
+                trace.mark_provider_accepted_candidate()
+                return
+            if result.status != "delivered":
+                return
             # Generic provider acceptance does not prove that a user could see
             # the message. Pending/accepted/unknown/failure results therefore
             # cannot close the user-visible SLO without a stronger adapter receipt.
-            trace.mark_visible()
+            trace.mark_verified_visible()
 
     async def _request_for(self, action: Action) -> PlatformDispatchRequest:
         kind = self._kind(action)

@@ -650,12 +650,64 @@ class ProactiveDraftAdapter:
         decision_origin: Literal["model", "local_failsafe"] = "model"
         try:
             draft = self._parse(raw)
-        except ValueError:
-            # A parser/provider failure is infrastructure failure, not evidence
-            # that the character chose silence.  Let the audited deliberation
-            # layer record recovery_failed so the runtime can back it off and
-            # retry the same consideration with a fresh attempt identity.
-            raise
+        except ValueError as exc:
+            # Invalid JSON/shape is not a character decision. Give the same
+            # role model one precise, source-neutral opportunity to reselect a
+            # complete decision before escalating to durable technical retry.
+            if recovery or not begin_validation_reselection_recovery():
+                raise
+            correction_timeout = fit_secondary_call_timeout(
+                _PROACTIVE_GROUNDING_RESELECTION_TIMEOUT_SECONDS
+            )
+            if correction_timeout is None:
+                raise TimeoutError("proactive structure reselection deadline exhausted") from exc
+            structure_reselection = await complete_bounded_validation_reselection(
+                model=self._model,
+                messages=author_messages,
+                raw=raw,
+                instruction=_canonical(
+                    {
+                        "contract": "proactive-expression-structure-reselection.1",
+                        "authority": "wire_shape_only_not_behavior",
+                        "validation_failure": str(exc)[:640],
+                        "task": (
+                            "Return one complete replacement proactive ExpressionDraft JSON "
+                            "object. Choose now, later, or silent, private state, impulse, stance, "
+                            "message count, cadence, questions, modalities, and wording yourself. "
+                            "Fix only the invalid JSON/schema contract; use the same pinned Context "
+                            "and do not copy the rejected candidate as a wording template."
+                        ),
+                        "expression_capabilities": self._expression_capabilities.prompt_value(),
+                    }
+                ),
+                temperature=0.2,
+                timeout_seconds=correction_timeout,
+                allow_after_backup=False,
+                parent_call_id=request.call_id,
+                include_invalid_raw=False,
+            )
+            raw = structure_reselection.raw
+            usage = _combine_usage(usage, structure_reselection.usage, request.call_id)
+            if (
+                structure_reselection.winning_model_call_id is None
+                or structure_reselection.winning_request_hash is None
+            ):
+                raise ValidationTechnicalFailure(
+                    "authored_expression_reselection_invalid"
+                )
+            winning_model_call_id = structure_reselection.winning_model_call_id
+            winning_request_hash = structure_reselection.winning_request_hash
+            try:
+                draft = self._parse(raw)
+            except ValueError as corrected_exc:
+                raise ValidationTechnicalFailure(
+                    "authored_expression_reselection_invalid",
+                    model_call_id=winning_model_call_id,
+                    request_hash=winning_request_hash,
+                    attempted_model_id=self._model_id,
+                    attempted_model_version=self.VERSION,
+                    usage=usage,
+                ) from corrected_exc
         grounding_outcome: Literal["not_required", "accepted", "corrected", "rejected"] = (
             "not_required"
         )
