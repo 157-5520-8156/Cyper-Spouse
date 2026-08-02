@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 import companion_daemon.world_v2.life_development_runtime as life_runtime_module
+from companion_daemon.world_v2.aspiration_events import AspirationPlantedPayload
 from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.batch_invariants import validate_commit_batch
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
@@ -19,6 +20,7 @@ from companion_daemon.world_v2.life_content_store import (
     life_content_payload_hash,
 )
 from companion_daemon.world_v2.life_development_draft import (
+    LifeDevelopmentBiographicalCoordinateCapability,
     LifeDevelopmentCapabilityManifest,
     LifeDevelopmentDraftError,
     LifeDevelopmentLocationCapability,
@@ -56,6 +58,7 @@ from companion_daemon.world_v2.recall_index import (
 )
 from companion_daemon.world_v2.recall_runtime import RecallCoordinator
 from companion_daemon.world_v2.schemas import (
+    AspirationProjection,
     ClockObservation,
     DueWindow,
     EvidenceRef,
@@ -234,6 +237,71 @@ def _projection_cursor(ledger: WorldLedger) -> ProjectionCursor:
     )
 
 
+def _seed_contextual_aspiration(
+    ledger: WorldLedger,
+    *,
+    wake: WorldEvent,
+) -> WorldEvent:
+    event_id = "event:aspiration:planted:open-life"
+    source = next(
+        item
+        for item in ledger.project().committed_world_event_refs
+        if item.event_id == wake.event_id
+    )
+    aspiration = AspirationProjection(
+        aspiration_id="aspiration:open-life:test",
+        entity_revision=1,
+        owner_actor_ref=OWNER,
+        seed_id="contextual:test-open-life",
+        text="想找一天去看看那间偶然听说的旧书店。",
+        privacy_class="shareable",
+        status="active",
+        planted_at=wake.logical_time,
+        planted_event_ref=event_id,
+        source_event_ref=wake.event_id,
+    )
+    payload = AspirationPlantedPayload(
+        change_id="change:aspiration:open-life",
+        transition_id="transition:aspiration:open-life",
+        expected_entity_revision=0,
+        evidence_refs=(
+            EvidenceRef(
+                ref_id=wake.event_id,
+                evidence_type="committed_world_event",
+                claim_purpose="life_transition",
+                source_world_revision=source.world_revision,
+                immutable_hash=source.payload_hash,
+            ),
+        ),
+        policy_refs=("policy:aspiration.1",),
+        aspiration=aspiration,
+    )
+    event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=event_id,
+        world_id=ledger.world_id,
+        event_type="AspirationPlanted",
+        logical_time=wake.logical_time,
+        created_at=wake.created_at,
+        actor="worker:test",
+        source="test",
+        trace_id="trace:aspiration-open-life",
+        causation_id=wake.event_id,
+        correlation_id="correlation:aspiration-open-life",
+        idempotency_key=(
+            domain_idempotency_key(
+                event_type="AspirationPlanted",
+                world_id=ledger.world_id,
+                payload=payload.model_dump(mode="json"),
+            )
+            or "aspiration:open-life:test"
+        ),
+        payload=payload.model_dump(mode="json"),
+    )
+    _commit_at_head(ledger, event)
+    return event
+
+
 def _hash_json(value: object) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -271,6 +339,8 @@ def _location_bound_world_draft(
     causal_authority: str = "world_contingency",
     outcome_resolution_authority: str = "world_contingency",
     visual_evidence: dict[str, object] | None = None,
+    provisional_places: tuple[dict[str, object], ...] = (),
+    objective_transition: dict[str, object] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -304,7 +374,9 @@ def _location_bound_world_draft(
                     "relative_plausibility_weight": 1,
                     "claim_refs": ["local:claim:location-change"],
                     "provisional_npcs": [],
+                    "provisional_places": list(provisional_places),
                     "dynamic_life_direction": dynamic_direction,
+                    "objective_biographical_transition": objective_transition,
                     "visual_evidence": visual_evidence,
                 },
                 {
@@ -314,13 +386,251 @@ def _location_bound_world_draft(
                     "relative_plausibility_weight": 1,
                     "claim_refs": ["local:claim:location-change"],
                     "provisional_npcs": [],
+                    "provisional_places": [],
                     "dynamic_life_direction": None,
+                    "objective_biographical_transition": None,
                     "visual_evidence": None,
                 },
             ],
         },
         ensure_ascii=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_world_author_can_attach_an_open_objective_transition_to_one_outcome() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = _location_bound_world_draft(
+        wake=wake,
+        capability=capability,
+        timing={"mode": "now", "duration_minutes": 30},
+        privacy_class="shareable",
+        objective_transition={
+            "coordinate_ref": "biography:education",
+            "summary": "学校已经正式确认她完成学业并离校。",
+            "context_tags": ["academic:graduated", "calendar:post_graduation"],
+            "replaces_context_tag_prefixes": ["academic:", "calendar:"],
+            "privacy_class": "personal",
+        },
+    )
+
+    draft = parse_world_author_draft(
+        raw=raw,
+        manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger)),
+        logical_time=NOW,
+    )
+
+    transition = draft.outcomes[0].objective_biographical_transition
+    assert transition is not None
+    assert transition.coordinate_ref == "biography:education"
+    assert transition.context_tags == (
+        "academic:graduated",
+        "calendar:post_graduation",
+    )
+    runtime, _store = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(model="world-author", outputs=(raw,)),
+        character_model=_SequenceModel(model="character", outputs=()),
+        location_capability=capability,
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:objective-transition",
+        correlation_id="correlation:objective-transition",
+    )
+
+    assert result.status == "occurrence_committed"
+    candidate = ledger.project().world_occurrences[0].candidate_outcomes[0]
+    assert candidate.objective_biographical_transition is not None
+    assert candidate.objective_biographical_transition.coordinate_ref == (
+        "biography:education"
+    )
+
+
+def test_world_author_objective_transition_cannot_claim_character_direction_coordinate() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = _location_bound_world_draft(
+        wake=wake,
+        capability=capability,
+        timing={"mode": "now", "duration_minutes": 30},
+        privacy_class="shareable",
+        objective_transition={
+            "coordinate_ref": "biography:direction.creative-work",
+            "summary": "她想把创作当作长期方向。",
+            "context_tags": ["work:creative"],
+            "replaces_context_tag_prefixes": ["work:"],
+            "privacy_class": "personal",
+        },
+    )
+
+    with pytest.raises(
+        LifeDevelopmentDraftError,
+        match="character direction namespace",
+    ):
+        parse_world_author_draft(
+            raw=raw,
+            manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger)),
+            logical_time=NOW,
+        )
+
+
+def test_objective_transition_reuses_current_coordinate_identity() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = _location_bound_world_draft(
+        wake=wake,
+        capability=capability,
+        timing={"mode": "now", "duration_minutes": 30},
+        privacy_class="shareable",
+        objective_transition={
+            "coordinate_ref": "biography:new-education-identity",
+            "summary": "学校已经正式确认她完成学业并离校。",
+            "context_tags": ["academic:graduated", "calendar:post_graduation"],
+            "replaces_context_tag_prefixes": ["academic:", "calendar:"],
+            "privacy_class": "personal",
+        },
+    )
+    base = _manifest(wake, pinned_cursor=_projection_cursor(ledger))
+    manifest = base.model_copy(
+        update={
+            "biographical_coordinates": (
+                LifeDevelopmentBiographicalCoordinateCapability(
+                    coordinate_ref="biography:education",
+                    context_tags=("academic:enrolled", "calendar:term"),
+                    replaces_context_tag_prefixes=("academic:", "calendar:"),
+                    privacy_class="personal",
+                    entity_revision=2,
+                    settlement_event_ref="event:previous-education-settlement",
+                ),
+            )
+        }
+    )
+
+    with pytest.raises(
+        LifeDevelopmentDraftError,
+        match="must reuse.*biography:education",
+    ):
+        parse_world_author_draft(raw=raw, manifest=manifest, logical_time=NOW)
+
+
+def test_world_author_effect_privacy_is_rejected_before_materialization() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = _location_bound_world_draft(
+        wake=wake,
+        capability=capability,
+        timing={"mode": "now", "duration_minutes": 30},
+        privacy_class="private",
+        provisional_places=(
+            {
+                "local_ref": "local:place:privacy-leak",
+                "summary": "不能把私密候选里的地点降级成公开能力。",
+                "narrative_tags": ["narrative:privacy_probe"],
+                "timezone_name": "Asia/Shanghai",
+                "privacy_class": "public",
+            },
+        ),
+    )
+
+    with pytest.raises(
+        LifeDevelopmentDraftError,
+        match="outcome effect cannot weaken outcome privacy",
+    ):
+        parse_world_author_draft(
+            raw=raw,
+            manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger)),
+            logical_time=NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_pre_v7_possibility_cannot_carry_objective_transition() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = _location_bound_world_draft(
+        wake=wake,
+        capability=capability,
+        timing={"mode": "now", "duration_minutes": 30},
+        privacy_class="shareable",
+        objective_transition={
+            "coordinate_ref": "biography:education",
+            "summary": "学校已经正式确认她完成学业并离校。",
+            "context_tags": ["academic:graduated", "calendar:post_graduation"],
+            "replaces_context_tag_prefixes": ["academic:", "calendar:"],
+            "privacy_class": "personal",
+        },
+    )
+    runtime, _store = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(model="world-author", outputs=(raw,)),
+        character_model=_SequenceModel(model="character", outputs=()),
+        location_capability=capability,
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:objective-transition-version",
+        correlation_id="correlation:objective-transition-version",
+    )
+    proposal_event = ledger.lookup_event_commit(result.proposal_event_ref or "")[0]
+    occurrence_event = next(
+        ledger.lookup_event_commit(item.event_id)[0]
+        for item in ledger.project().committed_world_event_refs
+        if item.event_type == "WorldOccurrenceCommitted"
+    )
+    for strip_proposal_descriptors in (False, True):
+        downgraded_payload = proposal_event.payload()
+        downgraded_payload["possibility_authority_version"] = (
+            "life-development-possibility.6"
+        )
+        if strip_proposal_descriptors:
+            possibility = downgraded_payload["possibility_authority"]
+            for outcome in possibility["outcomes"]:
+                outcome.pop("descriptor", None)
+            downgraded_payload["possibility_authority_hash"] = _hash_json(possibility)
+        downgraded_proposal = _replace_event_payload(
+            proposal_event,
+            payload=downgraded_payload,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="objective transition requires possibility authority version .7",
+        ):
+            validate_commit_batch(
+                (downgraded_proposal, occurrence_event),
+                expected_world_revision=0,
+                accepted_manifest_v3_authorized=True,
+            )
+
+    rejected_payload = proposal_event.payload()
+    rejected_review = rejected_payload["world_author_novel_origin_review"]
+    rejected_review["unsupported_objective_transitions"] = [
+        {"prose_path": "outcomes.0.objective_biographical_transition.summary"}
+    ]
+    rejected_payload["world_author_novel_origin_review_hash"] = _hash_json(
+        rejected_review
+    )
+    rejected_proposal = _replace_event_payload(
+        proposal_event,
+        payload=rejected_payload,
+    )
+    with pytest.raises(ValueError, match="unsupported novel origin"):
+        validate_commit_batch(
+            (rejected_proposal, occurrence_event),
+            expected_world_revision=0,
+            accepted_manifest_v3_authorized=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -368,6 +678,51 @@ async def test_world_author_optional_visual_evidence_is_claim_closed_and_persist
     assert visual["claim_refs"] == ["local:claim:location-change"]
     assert visual["location"]["location_ref"] == capability.location_ref
     assert visual["environment"]["weather"] == "summer shower"
+
+
+@pytest.mark.asyncio
+async def test_world_author_can_introduce_a_place_without_a_destination_catalogue() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    raw = _location_bound_world_draft(
+        wake=wake,
+        capability=capability,
+        timing={"mode": "now", "duration_minutes": 30},
+        privacy_class="personal",
+        provisional_places=(
+            {
+                "local_ref": "local:place:riverside-book-stall",
+                "summary": "她在绕路时发现一处临河的旧书摊；是否再去由以后情境决定。",
+                "narrative_tags": ["narrative:serendipitous_place"],
+                "timezone_name": "Asia/Shanghai",
+                "privacy_class": "personal",
+            },
+        ),
+    )
+    runtime, store = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=_SequenceModel(model="world-author", outputs=(raw,)),
+        character_model=_SequenceModel(model="character", outputs=()),
+        location_capability=capability,
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:provisional-place",
+        correlation_id="correlation:provisional-place",
+    )
+
+    assert result.status == "occurrence_committed"
+    occurrence = ledger.project().world_occurrences[0]
+    introduced = occurrence.candidate_outcomes[0].provisional_place_introductions[0]
+    assert introduced.provisional_place_ref.startswith("provisional:place:")
+    assert introduced.access_assurance == "attempt_only"
+    stored = store.read_exact(content_ref=introduced.summary_content_ref)
+    assert stored is not None
+    assert stored.content_kind == "provisional_place_introduction"
+    assert "旧书摊" in stored.text
 
 
 @pytest.mark.parametrize(
@@ -874,6 +1229,7 @@ def _manifest(
     *,
     pinned_cursor: ProjectionCursor,
     location_capability: LifeDevelopmentLocationCapability | None = None,
+    biographical_context_tags: tuple[str, ...] = (),
 ) -> LifeDevelopmentCapabilityManifest:
     return LifeDevelopmentCapabilityManifest(
         version="life-development-capability.test.1",
@@ -883,6 +1239,7 @@ def _manifest(
         grounding_refs=(wake.event_id,),
         location_capabilities=(location_capability or _location_capability(),),
         entity_refs=(),
+        biographical_context_tags=biographical_context_tags,
         max_future_days=30,
         max_window_minutes=12 * 60,
     )
@@ -940,7 +1297,7 @@ class _StaticManifestCompiler:
 
     def compile(self, *, projection, wake, capsule):  # type: ignore[no-untyped-def]
         del wake, capsule
-        return _manifest(
+        manifest = _manifest(
             self._wake,
             pinned_cursor=ProjectionCursor(
                 world_revision=projection.world_revision,
@@ -948,6 +1305,17 @@ class _StaticManifestCompiler:
                 ledger_sequence=projection.ledger_sequence,
             ),
             location_capability=self._location_capability,
+        )
+        return manifest.model_copy(
+            update={
+                "active_aspiration_source_refs": tuple(
+                    sorted(
+                        item.planted_event_ref
+                        for item in projection.aspirations
+                        if item.status == "active"
+                    )
+                )
+            }
         )
 
 
@@ -1308,7 +1676,9 @@ def _novel_origin_review(
     decision: str,
     unsupported_claims: tuple[dict[str, object], ...] = (),
     unsupported_provisional_npcs: tuple[dict[str, object], ...] = (),
+    unsupported_provisional_places: tuple[dict[str, object], ...] = (),
     unsupported_outcome_prerequisites: tuple[dict[str, object], ...] = (),
+    unsupported_objective_transitions: tuple[dict[str, object], ...] = (),
     undeclared_premise_fragments: tuple[str, ...] = (),
     reason: str = "Novel origin and imported outcome prerequisites are closed.",
 ) -> str:
@@ -1317,13 +1687,62 @@ def _novel_origin_review(
             "decision": decision,
             "unsupported_claims": list(unsupported_claims),
             "unsupported_provisional_npcs": list(unsupported_provisional_npcs),
+            "unsupported_provisional_places": list(
+                unsupported_provisional_places
+            ),
             "unsupported_outcome_prerequisites": list(
                 unsupported_outcome_prerequisites
+            ),
+            "unsupported_objective_transitions": list(
+                unsupported_objective_transitions
             ),
             "undeclared_premise_fragments": list(undeclared_premise_fragments),
             "reason": reason,
         },
         ensure_ascii=False,
+    )
+
+
+def test_focused_critic_closes_objective_transition_prior_history() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    capability = _location_capability()
+    draft = parse_world_author_draft(
+        raw=_location_bound_world_draft(
+            wake=wake,
+            capability=capability,
+            timing={"mode": "now", "duration_minutes": 30},
+            privacy_class="personal",
+            objective_transition={
+                "coordinate_ref": "biography:education",
+                "summary": "她上个月已经秘密退学，现在正式离校。",
+                "context_tags": ["academic:not_enrolled", "calendar:not_enrolled"],
+                "replaces_context_tag_prefixes": ["academic:", "calendar:"],
+                "privacy_class": "personal",
+            },
+        ),
+        manifest=_manifest(wake, pinned_cursor=_projection_cursor(ledger)),
+        logical_time=NOW,
+    )
+
+    review = parse_life_development_novel_origin_review(
+        raw=_novel_origin_review(
+            decision="unsupported",
+            unsupported_objective_transitions=(
+                {
+                    "prose_path": (
+                        "outcomes.0.objective_biographical_transition.summary"
+                    ),
+                    "violation_kinds": ["imported_current_or_prior_prerequisite"],
+                    "exact_fragments": ["上个月已经秘密退学"],
+                },
+            ),
+        ),
+        draft=draft,
+    )
+
+    assert review.unsupported_objective_transitions[0].exact_fragments == (
+        "上个月已经秘密退学",
     )
 
 
@@ -1482,6 +1901,44 @@ def test_world_author_accepts_schema_conforming_provisional_npc_ref() -> None:
     assert parsed.outcomes[0].provisional_npcs[0].local_ref == (
         "local:npc:book-stall-volunteer"
     )
+
+
+def test_world_author_cannot_author_a_biographical_coordinate_replacement() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    raw = _location_bound_world_draft(
+        wake=wake,
+        capability=_location_capability(),
+        timing={"mode": "now", "duration_minutes": 30},
+        privacy_class="personal",
+        causal_authority="character_choice",
+        outcome_resolution_authority="character_choice",
+        dynamic_direction={
+            "summary": "她重新安排了现阶段生活的重心，但之后仍可以改变方向。",
+            "narrative_tags": ["narrative:self_directed_change"],
+            "context_tags": ["academic:personally_reoriented"],
+            "supersedes_context_tag_prefixes": ["academic:"],
+            "duration_days": None,
+            "privacy_class": "personal",
+        },
+    )
+
+    with pytest.raises(
+        LifeDevelopmentDraftError,
+        match="invalid_shape",
+    ):
+        parse_world_author_draft(
+            raw=raw,
+            manifest=_manifest(
+                wake,
+                pinned_cursor=_projection_cursor(ledger),
+                biographical_context_tags=(
+                    "academic:enrolled",
+                    "calendar:summer_break",
+                ),
+            ),
+            logical_time=NOW,
+        )
 
 
 def test_world_author_still_rejects_unscoped_provisional_npc_ref() -> None:
@@ -1862,6 +2319,48 @@ def test_novel_origin_parser_accepts_strict_transport_envelope_and_legacy_flat_w
     assert enveloped.decision == "supported"
 
 
+def test_focused_critic_closes_provisional_place_prior_history() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    manifest = _manifest(wake, pinned_cursor=_projection_cursor(ledger))
+    value = _novel_book_exchange_draft(wake=wake)
+    value["outcomes"][0]["provisional_places"] = [  # type: ignore[index]
+        {
+            "local_ref": "local:place:old-stall",
+            "summary": "她和用户上个月常去的旧书摊。",
+            "narrative_tags": [],
+            "timezone_name": "Asia/Shanghai",
+            "privacy_class": "personal",
+        }
+    ]
+    draft = parse_world_author_draft(
+        raw=json.dumps(value, ensure_ascii=False),
+        manifest=manifest,
+        logical_time=NOW,
+    )
+    assert isinstance(draft, LifeDevelopmentPossibilityDraft)
+
+    review = parse_life_development_novel_origin_review(
+        raw=_novel_origin_review(
+            decision="unsupported",
+            unsupported_provisional_places=(
+                {
+                    "local_ref": "local:place:old-stall",
+                    "violation_kinds": [
+                        "retroactive_relationship_or_shared_history"
+                    ],
+                    "exact_fragments": ["和用户上个月常去"],
+                },
+            ),
+        ),
+        draft=draft,
+    )
+
+    assert review.unsupported_provisional_places[0].local_ref == (
+        "local:place:old-stall"
+    )
+
+
 @pytest.mark.asyncio
 async def test_branch_internal_candidate_false_veto_never_reaches_world_author_rewrite() -> None:
     ledger = WorldLedger.in_memory(world_id=WORLD_ID)
@@ -2229,7 +2728,7 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
         ),
     }
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
-    assert proposal["possibility_authority_version"] == "life-development-possibility.6"
+    assert proposal["possibility_authority_version"] == "life-development-possibility.7"
     assert proposal["world_author_source_closure_model"] == "independent-source-reviewer"
     assert proposal["world_author_source_closure_review"]["decision"] == "supported"
     assert (
@@ -2254,6 +2753,76 @@ async def test_source_closure_rejects_clock_backstory_then_preserves_free_novel_
         "independent-source-reviewer",
         "character-role",
     ]
+
+
+@pytest.mark.asyncio
+async def test_character_can_crystallize_active_aspiration_into_open_plan_atomically() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    aspiration_event = _seed_contextual_aspiration(ledger, wake=wake)
+    world_author = _SequenceModel(
+        model="world-author-role",
+        outputs=(
+            json.dumps(_novel_book_exchange_draft(wake=wake), ensure_ascii=False),
+        ),
+    )
+    character = _SequenceModel(
+        model="character-role",
+        outputs=(
+            json.dumps(
+                {
+                    "decision": "accept",
+                    "intention_summary": "我现在确实想把这个念头变成一次具体安排。",
+                    "importance_bp": 4600,
+                    "participant_refs": [],
+                    "crystallized_aspiration_source_ref": aspiration_event.event_id,
+                },
+                ensure_ascii=False,
+            ),
+        ),
+    )
+    runtime, _ = _runtime(
+        ledger=ledger,
+        wake=wake,
+        world_author=world_author,
+        character_model=character,
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:open-aspiration-crystallization",
+        correlation_id="correlation:open-aspiration-crystallization",
+    )
+
+    assert result.status == "plan_committed"
+    projection = ledger.project()
+    aspiration = projection.aspirations[0]
+    assert aspiration.status == "crystallized"
+    assert aspiration.crystallized_plan_ref == "plan:" + result.plan_id
+    located = ledger.lookup_event_commit(result.proposal_event_ref or "")
+    assert located is not None
+    committed_types = {
+        ledger.lookup_event_commit(event_id)[0].event_type
+        for event_id in located[1].event_ids
+    }
+    assert {"ProposalRecorded", "ActivityPlanned", "AspirationCrystallized"} <= (
+        committed_types
+    )
+    committed_events = tuple(
+        ledger.lookup_event_commit(event_id)[0]
+        for event_id in located[1].event_ids
+    )
+    without_aspiration = tuple(
+        event
+        for event in committed_events
+        if event.event_type != "AspirationCrystallized"
+    )
+    with pytest.raises(ValueError, match="one adjacent effect"):
+        validate_commit_batch(
+            without_aspiration,
+            expected_world_revision=2,
+            accepted_manifest_v3_authorized=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -2958,7 +3527,7 @@ async def test_focused_novel_origin_critic_rejects_d10_history_then_accepts_firs
         }
     ]
     proposal = ledger.lookup_event_commit(result.proposal_event_ref or "")[0].payload()
-    assert proposal["possibility_authority_version"] == "life-development-possibility.6"
+    assert proposal["possibility_authority_version"] == "life-development-possibility.7"
     assert proposal["world_author_novel_origin_review"]["decision"] == "supported"
     assert (
         proposal["world_author_novel_origin_deliberation"]["role"]
@@ -3719,7 +4288,7 @@ async def test_current_reader_and_batch_bind_every_review_request_hash() -> None
     ):
         LifeDevelopmentProposalReader._validate_active_source_closure(  # noqa: SLF001
             proposal=reader_tamper,
-            possibility_version="life-development-possibility.6",
+            possibility_version="life-development-possibility.7",
             proposal_event=proposal_event,
         )
 
@@ -4811,7 +5380,7 @@ async def test_world_author_can_commit_a_free_adverse_world_contingency() -> Non
     location_capability = _location_capability()
     assert proposal_payload["causal_authority"] == "world_contingency"
     assert proposal_payload["model_role"] == "world_author"
-    assert proposal_payload["possibility_authority_version"] == "life-development-possibility.6"
+    assert proposal_payload["possibility_authority_version"] == "life-development-possibility.7"
     assert possibility_authority["authored_subject_ref"] == OWNER
     assert {item["experienced_by_ref"] for item in possibility_authority["outcomes"]} == {OWNER}
     assert possibility_authority["location_capability_ref"] == location_capability.capability_ref
@@ -5096,12 +5665,7 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
                 "relative_plausibility_weight": 1,
                 "claim_refs": ["local:claim:screening"],
                 "provisional_npcs": [],
-                "dynamic_life_direction": {
-                    "summary": "她开始留意这座城市偶尔出现的小型露天放映。",
-                    "narrative_tags": ["narrative:outdoor-film"],
-                    "duration_days": 14,
-                    "privacy_class": "personal",
-                },
+                "dynamic_life_direction": None,
                 "visual_evidence": {
                     "claim_refs": ["local:claim:screening"],
                     "activity_description": "在校外院子里看临时露天电影",
@@ -5124,12 +5688,7 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
                 "relative_plausibility_weight": 1,
                 "claim_refs": ["local:claim:screening"],
                 "provisional_npcs": [],
-                "dynamic_life_direction": {
-                    "summary": "她想继续找一些不太正式的小型放映。",
-                    "narrative_tags": ["narrative:small-screenings"],
-                    "duration_days": 10,
-                    "privacy_class": "personal",
-                },
+                "dynamic_life_direction": None,
                 "visual_evidence": None,
             },
         ],
@@ -5233,7 +5792,10 @@ async def test_character_model_freely_accepts_an_external_opportunity_into_a_pla
     assert material.outcomes[0].visual_evidence.activity_description == "在校外院子里看临时露天电影"
     assert material.outcomes[1].visual_evidence is None
     assert {item.descriptor.causal_authority for item in material.outcomes} == {"character_choice"}
-    assert all(item.descriptor.dynamic_life_arc_context is not None for item in material.outcomes)
+    assert all(
+        item.descriptor.dynamic_life_arc_context is None
+        for item in material.outcomes
+    )
 
     plan_event, plan_commit = next(
         ledger.lookup_event_commit(item.event_id)
@@ -6133,13 +6695,15 @@ async def test_world_author_reselection_does_not_anchor_invalid_dynamic_draft() 
     correction = json.loads(correction_messages[-1]["content"])
     assert correction["rejected_draft_hash"] == _hash_json(invalid_raw)
     assert correction["validation_failure"]["code"] == "invalid_shape"
-    assert "dynamic life direction requires character-controlled outcome resolution" in (
-        correction["validation_failure"]["detail"]
-    )
+    assert "dynamic_life_direction" in correction["validation_failure"]["detail"]
     assert correction["content_authority"] == {
         "event_and_outcomes": "world_author",
         "provisional_npcs": "world_author",
-        "dynamic_life_direction": "world_author",
+        "provisional_places": "world_author",
+        "objective_biographical_transition": (
+            "world_author_objective_candidate_consequence"
+        ),
+        "dynamic_life_direction": "retired_character_model_at_settlement",
         "system_supplied_story_content": "none",
     }
     assert correction["replacement_contract"]["allowed_decisions"] == [
@@ -6292,7 +6856,7 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
         == "propose"
     )
     assert primary_request["cross_field_authority"] == {
-        "contract_version": "life-development-world-author-authority.3",
+            "contract_version": "life-development-world-author-authority.4",
         "canonical_reference_arrays": {
             "duplicates": "discarded_as_set_equivalent",
             "normal_form": "lexicographic_ascending",
@@ -6426,17 +6990,37 @@ async def test_invalid_world_draft_gets_one_source_bound_reselection() -> None:
                 "when_incompatible": "omit_visual_evidence",
             },
         },
-        "dynamic_life_direction": {
-            "status": "optional",
-            "permitted_outcome_resolution_authority": "character_choice",
-            "when_present": {
-                "narrative_tags": {
-                    "cardinality": "1..16",
-                    "duplicates": "discarded_as_set_equivalent",
-                    "pattern": "^narrative:[a-z0-9][a-z0-9._-]{0,63}$",
+                "dynamic_life_direction": {
+                    "status": "retired_must_be_null",
+                    "authority": "character_model_at_outcome_settlement",
                 },
+                "objective_biographical_transition": {
+                    "status": "optional_per_outcome",
+                    "authority": "world_author_objective_candidate_consequence",
+                    "applied_when": "that_exact_candidate_is_accepted_and_settled",
+                    "must_be": "present_objective_state_entailed_by_candidate_branch",
+                    "must_not_be": [
+                        "character_motive",
+                        "desire",
+                        "plan",
+                        "hoped_future",
+                        "predetermined_plot_type",
+                    ],
+                    "direction_namespace": "reserved_for_character_model",
+                },
+            "provisional_places": {
+                "status": "optional_per_outcome",
+                "identity_before_settlement": "proposal_scoped_only",
+                "identity_after_selected_outcome_settlement": "stable_world_place",
+                "future_authority": "attempt_only",
+                "does_not_prove": [
+                    "opening_hours",
+                    "presence",
+                    "entry",
+                    "visit_success",
+                ],
+                "story_candidate_catalog": "none",
             },
-        },
         "outcome_text": {
             "authority_status": "unsettled_alternative",
             "does_not_establish_completed_experience": True,
@@ -6589,12 +7173,7 @@ async def test_world_author_location_reselection_exposes_empty_capability_space(
                         "privacy_class": "personal",
                     }
                 ],
-                "dynamic_life_direction": {
-                    "summary": "她也许会继续探索这项协作，方向仍取决于后续选择。",
-                    "narrative_tags": ["narrative:open-collaboration"],
-                    "duration_days": 21,
-                    "privacy_class": "personal",
-                },
+                "dynamic_life_direction": None,
             },
             {
                 "experienced_by_ref": OWNER,
@@ -6708,7 +7287,11 @@ async def test_world_author_location_reselection_exposes_empty_capability_space(
     assert repair["content_authority"] == {
         "event_and_outcomes": "world_author",
         "provisional_npcs": "world_author",
-        "dynamic_life_direction": "world_author",
+        "provisional_places": "world_author",
+        "objective_biographical_transition": (
+            "world_author_objective_candidate_consequence"
+        ),
+        "dynamic_life_direction": "retired_character_model_at_settlement",
         "system_supplied_story_content": "none",
     }
     assert "location-independent possibility" in repair["instruction"]
@@ -6721,9 +7304,7 @@ async def test_world_author_location_reselection_exposes_empty_capability_space(
     )
     assert isinstance(corrected_draft, LifeDevelopmentPossibilityDraft)
     assert corrected_draft.outcomes[0].provisional_npcs[0].local_ref == "local:npc:acheng"
-    assert list(corrected_draft.outcomes[0].dynamic_life_direction.narrative_tags) == [
-        "narrative:open-collaboration"
-    ]
+    assert corrected_draft.outcomes[0].dynamic_life_direction is None
 
 
 @pytest.mark.asyncio
@@ -6844,15 +7425,8 @@ async def test_world_author_reselection_receives_exact_optional_annex_capabiliti
         },
     }
     assert boundaries["dynamic_life_direction"] == {
-        "status": "optional",
-        "permitted_outcome_resolution_authority": "character_choice",
-        "when_present": {
-            "narrative_tags": {
-                "cardinality": "1..16",
-                "duplicates": "discarded_as_set_equivalent",
-                "pattern": "^narrative:[a-z0-9][a-z0-9._-]{0,63}$",
-            },
-        },
+        "status": "retired_must_be_null",
+        "authority": "character_model_at_outcome_settlement",
     }
     assert boundaries["visual_evidence"] == {
         "status": "optional",

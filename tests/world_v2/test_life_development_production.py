@@ -11,6 +11,11 @@ from companion_daemon.world_v2.life_author_seed import ReviewedLifeSeedCatalog
 from companion_daemon.world_v2.life_development_capability import (
     ProjectionLifeCapabilityManifestCompiler,
 )
+from companion_daemon.world_v2.life_content_store import (
+    InMemoryImmutableLifeContentStore,
+    StoredLifeContent,
+    life_content_payload_hash,
+)
 from companion_daemon.world_v2.local_chronology import LocalChronology
 from companion_daemon.world_v2.production_turn_application import (
     LifeEcologyComposition,
@@ -19,7 +24,9 @@ from companion_daemon.world_v2.production_turn_application import (
 )
 from companion_daemon.world_v2.schemas import (
     CommittedWorldEventRef,
+    DueWindow,
     ProjectionCursor,
+    WorldPlaceProjection,
     WorldEvent,
 )
 
@@ -322,6 +329,17 @@ def test_projection_manifest_compiler_exposes_facts_and_affordances_without_stor
         path=_open_life_seed(tmp_path / "open-life.yaml"),
         chronology=LocalChronology("Asia/Shanghai"),
     )
+    place_summary = "她在一次已结算经历里发现的临河旧书摊。"
+    place_summary_hash = life_content_payload_hash(place_summary)
+    content_store = InMemoryImmutableLifeContentStore()
+    content_store.put_if_absent(
+        StoredLifeContent(
+            content_ref="content:place:user-mentioned-shop",
+            content_kind="provisional_place_introduction",
+            content_payload_hash=place_summary_hash,
+            text=place_summary,
+        )
+    )
     projection = SimpleNamespace(
         world_revision=7,
         deliberation_revision=3,
@@ -337,6 +355,20 @@ def test_projection_manifest_compiler_exposes_facts_and_affordances_without_stor
             ),
         ),
         life_arcs=(),
+        world_places=(
+            WorldPlaceProjection(
+                location_ref="location:open-life:" + "a" * 64,
+                stable_identity_ref="content:place:user-mentioned-shop",
+                summary_payload_hash=place_summary_hash,
+                narrative_tags=("narrative:user_influence",),
+                timezone_name="Asia/Shanghai",
+                privacy_class="personal",
+                access_assurance="attempt_only",
+                source_event_ref=wake.event_id,
+                effect_descriptor_hash="b" * 64,
+                accepted_at=NOW,
+            ),
+        ),
         npcs=(SimpleNamespace(npc_id="friend", status="active"),),
         plans=(
             SimpleNamespace(
@@ -374,6 +406,7 @@ def test_projection_manifest_compiler_exposes_facts_and_affordances_without_stor
     compiler = ProjectionLifeCapabilityManifestCompiler(
         owner_actor_ref="actor:companion",
         catalog=catalog,
+        content_store=content_store,
     )
 
     manifest = compiler.compile(
@@ -391,6 +424,7 @@ def test_projection_manifest_compiler_exposes_facts_and_affordances_without_stor
     assert manifest.grounding_refs == (wake.event_id,)
     assert manifest.location_refs == (
         "location:current-cafe",
+        "location:open-life:" + "a" * 64,
         "location:public-park",
     )
     current_presence = next(
@@ -405,7 +439,34 @@ def test_projection_manifest_compiler_exposes_facts_and_affordances_without_stor
         "event:clock:open-life",
         "event:location:current-cafe",
     )
+    dynamic_place = next(
+        item
+        for item in manifest.location_capabilities
+        if item.location_ref == "location:open-life:" + "a" * 64
+    )
+    assert dynamic_place.availability_kind == "settled_place"
+    assert dynamic_place.identity_content_ref == "content:place:user-mentioned-shop"
+    assert dynamic_place.identity_summary == place_summary
+    assert dynamic_place.identity_payload_hash == place_summary_hash
+    assert dynamic_place.authorizes(
+        timing_mode="later",
+        window=DueWindow(
+            opens_at=NOW + timedelta(days=2),
+            closes_at=NOW + timedelta(days=2, hours=1),
+        ),
+    )
     assert manifest.entity_refs == ("npc:friend",)
+
+    without_identity = ProjectionLifeCapabilityManifestCompiler(
+        owner_actor_ref="actor:companion",
+        catalog=catalog,
+        content_store=InMemoryImmutableLifeContentStore(),
+    ).compile(
+        projection=projection,
+        wake=wake,
+        capsule=capsule,
+    )
+    assert "location:open-life:" + "a" * 64 not in without_identity.location_refs
 
 
 @pytest.mark.asyncio

@@ -46,6 +46,22 @@ ends through an explicit event; daily activities remain separate Plans and
 Experiences.
 _Avoid_: Daily activity, unsourced backstory, permanent persona rewrite
 
+## Major Biographical Transition
+
+An accepted, durable change to a foundational life coordinate such as
+education status, work status, or primary residence, which changes the future
+possibilities available in the World. A Life Arc may express the chapter that
+follows, but cannot replace a foundational coordinate. An accepted occurrence
+settlement may carry either an objective coordinate consequence already made
+true by its exact selected branch, or a separate Character-Model-authored
+subjective direction. Objective and subjective namespaces are disjoint. Prose,
+unselected World-Author options, or ordinary Life Arc tags cannot substitute
+for the transition or silently override it. Active aspirations are sourced
+inner context, not catalog-to-plot mappings: only a Character-accepted open
+Plan may explicitly bind the aspiration's planting event and atomically
+crystallize it.
+_Avoid_: Prose-only Life Arc, daily Plan, retroactive backstory, predetermined life path
+
 ## Context Pack
 
 A source-bound bundle of capabilities and environmental coordinates attached
@@ -119,10 +135,12 @@ background failure suppressing visible review, unqualified route reported ready
 
 A model-authored person that exists only inside a Proposal or unsettled
 occurrence. It becomes a referencable World NPC only after the introducing
-occurrence settles with sufficient evidence. Novel places may currently appear
-as scoped environmental claims, but only manifest-listed locations can become
-typed, reusable Plan coordinates; provisional-location materialization is not
-part of this version.
+occurrence settles with sufficient evidence. A proposal-scoped novel place is
+likewise not reusable before settlement. After the introducing outcome settles,
+its exact source-reviewed descriptor may materialize as a typed `attempt_only`
+place capability; missing or hash-invalid descriptor bytes fail closed. This
+proves only stable place identity and permission to attempt a later visit, never
+opening hours, access, or a completed visit.
 _Avoid_: Pre-registered future acquaintance, invented historical fact
 
 ## Outcome Resolution Envelope
@@ -133,10 +151,13 @@ stores a small set of possibilities authored afresh by the World Author for
 that exact context, including their relative plausibility and effect bounds.
 This is not an operator-authored plot catalog, but it is intentionally frozen
 before settlement so replay cannot silently change the past. A subjective
-long-term direction may only live in a character-resolved outcome; the
-Character Model sees it separately from the objective result and explicitly
-decides whether to adopt it. Objective world-contingency resolution cannot
-install one. The validated model audit, exact choice, direction decision,
+long-term direction may only be authored freely by the Character Model while
+resolving an objective result; World Author does not offer direction choices or
+motives. The character may author one structurally closed subjective-direction
+coordinate replacement or none. A candidate may separately declare an open,
+objective biographical consequence only when the independent source review
+finds it entailed by that exact branch; any resolution authority can install it
+only by selecting and settling that branch. The validated model audit, exact choice, optional direction,
 Outcome Proposal, Acceptance, Settlement, and appraisal trigger share one
 pinned CAS transaction; old Context is never carried across a later Clock.
 _Avoid_: Operator-authored ending list, predetermined selected result

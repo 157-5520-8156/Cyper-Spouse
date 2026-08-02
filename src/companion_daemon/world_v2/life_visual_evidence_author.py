@@ -710,6 +710,9 @@ class LifeVisualEvidenceAuthor:
         biography = self._catalog.biographical_context_at(
             instant=logical_time,
             life_arcs=tuple(getattr(projection, "life_arcs", ())),
+            biographical_coordinates=tuple(
+                getattr(projection, "biographical_coordinates", ())
+            ),
         )
         tags = biography.context_tags
         season = next(

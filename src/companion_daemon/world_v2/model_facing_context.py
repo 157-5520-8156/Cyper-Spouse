@@ -629,6 +629,7 @@ def _build_current_self_state(
                     "calendar_context_tags",
                     "current_residence_context_tags",
                     "active_life_arcs",
+                    "settled_biographical_coordinates",
                 ),
             ),
         )

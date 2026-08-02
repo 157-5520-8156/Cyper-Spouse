@@ -5,6 +5,7 @@ from enum import StrEnum
 import hashlib
 import json
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
     Field,
@@ -2425,6 +2426,9 @@ class LifeArcProjection(FrozenModel):
     ]
     context_pack_ref: str = Field(min_length=1)
     context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    supersedes_context_tag_prefixes: tuple[str, ...] = Field(
+        default=(), max_length=8, exclude_if=lambda value: not value
+    )
     effect_descriptor_hash: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
@@ -2444,6 +2448,14 @@ class LifeArcProjection(FrozenModel):
     def lifecycle_is_consistent(self) -> "LifeArcProjection":
         if self.context_tags != tuple(sorted(set(self.context_tags))):
             raise ValueError("Life Arc context tags must be sorted and unique")
+        if self.supersedes_context_tag_prefixes:
+            _validate_biographical_coordinate_replacement(
+                context_tags=tuple(
+                    item for item in self.context_tags if not item.startswith("narrative:")
+                ),
+                supersedes_context_tag_prefixes=self.supersedes_context_tag_prefixes,
+                label="Life Arc",
+            )
         if self.ends_at is not None and self.ends_at <= self.started_at:
             raise ValueError("Life Arc end must follow its start")
         terminal = self.status in {"completed", "abandoned"}
@@ -2620,9 +2632,11 @@ class OutcomeProposalProjection(FrozenModel):
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
     adopt_proposed_life_direction: bool | None = None
+    character_life_direction: BiographicalCoordinateReplacement | None = None
     context_identity_version: Literal[
         "life-aftermath-context.1",
         "life-aftermath-context.2",
+        "life-aftermath-context.3",
     ] | None = None
     context_capsule_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     context_model_content_hash: str | None = Field(
@@ -2764,6 +2778,25 @@ def open_life_arc_id(
     )
 
 
+def open_life_place_ref(
+    *,
+    world_id: str,
+    settlement_event_ref: str,
+    provisional_place_ref: str,
+    descriptor_hash: str,
+) -> str:
+    """Return the stable reusable location ref established by one settlement."""
+
+    return "location:open-life:" + _open_life_descriptor_hash(
+        {
+            "world_id": world_id,
+            "settlement_event_ref": settlement_event_ref,
+            "provisional_place_ref": provisional_place_ref,
+            "descriptor_hash": descriptor_hash,
+        }
+    )
+
+
 def _validate_narrative_tags(
     tags: tuple[str, ...],
     *,
@@ -2783,6 +2816,45 @@ def _validate_narrative_tags(
         raise ValueError(
             f"{label} tags must use the lowercase narrative namespace"
         )
+
+
+def _validate_biographical_coordinate_replacement(
+    *,
+    context_tags: tuple[str, ...],
+    supersedes_context_tag_prefixes: tuple[str, ...],
+    label: str,
+) -> None:
+    forbidden = {"narrative:", "season:", "relationship:", "privacy:", "safety:"}
+    if context_tags != tuple(sorted(set(context_tags))):
+        raise ValueError(f"{label} context tags must be sorted and unique")
+    if supersedes_context_tag_prefixes != tuple(
+        sorted(set(supersedes_context_tag_prefixes))
+    ):
+        raise ValueError(f"{label} replacement prefixes must be sorted and unique")
+    for tag in context_tags:
+        namespace, separator, value = tag.partition(":")
+        if (
+            not separator
+            or not namespace
+            or not value
+            or not namespace[0].isalpha()
+            or not all(char in "abcdefghijklmnopqrstuvwxyz0123456789._-" for char in namespace)
+            or not all(char in "abcdefghijklmnopqrstuvwxyz0123456789._-" for char in value)
+        ):
+            raise ValueError(f"{label} context tag is not a canonical namespaced value")
+    for prefix in supersedes_context_tag_prefixes:
+        namespace = prefix.removesuffix(":")
+        if (
+            not prefix.endswith(":")
+            or prefix in forbidden
+            or not namespace
+            or not namespace[0].isalpha()
+            or not all(char in "abcdefghijklmnopqrstuvwxyz0123456789._-" for char in namespace)
+            or sum(item.startswith(prefix) for item in context_tags) != 1
+        ):
+            raise ValueError(
+                f"{label} replacement requires one safe current coordinate value"
+            )
 
 
 class ProvisionalNpcIntroductionDescriptor(FrozenModel):
@@ -2832,15 +2904,201 @@ class ProvisionalNpcIntroductionDescriptor(FrozenModel):
         return self
 
 
+class ProvisionalPlaceIntroductionDescriptor(FrozenModel):
+    """A place that gains reusable World identity only after its outcome settles.
+
+    ``attempt_only`` authorizes later plans to try reaching the place.  It
+    deliberately proves neither opening hours nor successful entry, which
+    remain unsettled outcome facts of each future attempt.
+    """
+
+    provisional_place_ref: str = Field(min_length=1, max_length=256)
+    summary_content_ref: str = Field(min_length=1, max_length=512)
+    summary_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    narrative_tags: tuple[str, ...] = Field(default=(), max_length=16)
+    timezone_name: str = Field(min_length=1, max_length=128)
+    privacy_class: PrivacyClass = "personal"
+    access_assurance: Literal["attempt_only"] = "attempt_only"
+    descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        provisional_place_ref: str,
+        summary_content_ref: str,
+        summary_payload_hash: str,
+        narrative_tags: tuple[str, ...],
+        timezone_name: str,
+        privacy_class: PrivacyClass,
+    ) -> "ProvisionalPlaceIntroductionDescriptor":
+        values = {
+            "provisional_place_ref": provisional_place_ref,
+            "summary_content_ref": summary_content_ref,
+            "summary_payload_hash": summary_payload_hash,
+            "narrative_tags": narrative_tags,
+            "timezone_name": timezone_name,
+            "privacy_class": privacy_class,
+            "access_assurance": "attempt_only",
+        }
+        return cls(**values, descriptor_hash=_open_life_descriptor_hash(values))
+
+    def canonical_hash(self) -> str:
+        return _open_life_descriptor_hash(
+            self.model_dump(mode="json", exclude={"descriptor_hash"})
+        )
+
+    @model_validator(mode="after")
+    def descriptor_is_canonical(self) -> "ProvisionalPlaceIntroductionDescriptor":
+        if not self.provisional_place_ref.startswith("provisional:place:"):
+            raise ValueError("provisional place ref must use provisional:place namespace")
+        _validate_narrative_tags(self.narrative_tags, label="provisional place")
+        try:
+            ZoneInfo(self.timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("provisional place timezone is unknown") from exc
+        if self.descriptor_hash != self.canonical_hash():
+            raise ValueError("provisional place descriptor hash does not match descriptor")
+        return self
+
+
+class WorldPlaceProjection(FrozenModel):
+    """One reusable place established by an exact settled World outcome."""
+
+    location_ref: str = Field(pattern=r"^location:open-life:[0-9a-f]{64}$")
+    stable_identity_ref: str = Field(min_length=1, max_length=512)
+    summary_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    narrative_tags: tuple[str, ...] = Field(default=(), max_length=16)
+    timezone_name: str = Field(min_length=1, max_length=128)
+    privacy_class: PrivacyClass
+    access_assurance: Literal["attempt_only"]
+    source_event_ref: str = Field(min_length=1)
+    effect_descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    accepted_at: datetime
+
+    @model_validator(mode="after")
+    def source_shape_is_canonical(self) -> "WorldPlaceProjection":
+        _validate_narrative_tags(self.narrative_tags, label="World place")
+        try:
+            ZoneInfo(self.timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("World place timezone is unknown") from exc
+        return self
+
+
+class BiographicalCoordinateReplacement(FrozenModel):
+    """One open replacement for a durable life coordinate.
+
+    The value is deliberately open-ended. Authority is carried separately by
+    either an objective candidate consequence or a Character-owned subjective
+    direction; deterministic code verifies closure and protected namespaces.
+    """
+
+    coordinate_ref: str = Field(pattern=r"^biography:[a-z][a-z0-9._-]{0,63}$")
+    summary: str = Field(min_length=1, max_length=12_000)
+    context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    replaces_context_tag_prefixes: tuple[str, ...] = Field(min_length=1, max_length=8)
+    privacy_class: PrivacyClass = "personal"
+    descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        coordinate_ref: str,
+        summary: str,
+        context_tags: tuple[str, ...],
+        replaces_context_tag_prefixes: tuple[str, ...],
+        privacy_class: PrivacyClass,
+    ) -> "BiographicalCoordinateReplacement":
+        values = {
+            "coordinate_ref": coordinate_ref,
+            "summary": summary,
+            "context_tags": context_tags,
+            "replaces_context_tag_prefixes": replaces_context_tag_prefixes,
+            "privacy_class": privacy_class,
+        }
+        return cls(**values, descriptor_hash=_open_life_descriptor_hash(values))
+
+    @model_validator(mode="after")
+    def replacement_is_closed(self) -> "BiographicalCoordinateReplacement":
+        _validate_biographical_coordinate_replacement(
+            context_tags=self.context_tags,
+            supersedes_context_tag_prefixes=self.replaces_context_tag_prefixes,
+            label="biographical coordinate",
+        )
+        prefixes = set(self.replaces_context_tag_prefixes)
+        if ("academic:" in prefixes) != ("calendar:" in prefixes):
+            raise ValueError(
+                "academic and calendar coordinates must be replaced together"
+            )
+        expected = _open_life_descriptor_hash(
+            self.model_dump(mode="json", exclude={"descriptor_hash"})
+        )
+        if self.descriptor_hash != expected:
+            raise ValueError("biographical coordinate hash does not match descriptor")
+        return self
+
+
+class BiographicalCoordinateProjection(FrozenModel):
+    """Current head and immutable provenance of a settled life coordinate."""
+
+    coordinate_ref: str = Field(pattern=r"^biography:[a-z][a-z0-9._-]{0,63}$")
+    entity_revision: int = Field(ge=1)
+    summary: str = Field(min_length=1, max_length=12_000)
+    context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    replaces_context_tag_prefixes: tuple[str, ...] = Field(min_length=1, max_length=8)
+    privacy_class: PrivacyClass
+    descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authority_kind: Literal["character_direction", "objective_transition"]
+    outcome_proposal_id: str = Field(min_length=1)
+    settlement_event_ref: str = Field(min_length=1)
+    settlement_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    settled_at: datetime
+
+    @model_validator(mode="after")
+    def projected_descriptor_is_valid(self) -> "BiographicalCoordinateProjection":
+        descriptor = BiographicalCoordinateReplacement.create(
+            coordinate_ref=self.coordinate_ref,
+            summary=self.summary,
+            context_tags=self.context_tags,
+            replaces_context_tag_prefixes=self.replaces_context_tag_prefixes,
+            privacy_class=self.privacy_class,
+        )
+        if descriptor.descriptor_hash != self.descriptor_hash:
+            raise ValueError("biographical coordinate projection changed descriptor")
+        return self
+
+
 class DynamicLifeArcContextDescriptor(FrozenModel):
-    """Free long-range context frozen as prose, without executable capabilities."""
+    """Free long-range context plus optional settled coordinate replacement."""
 
     summary_content_ref: str = Field(min_length=1, max_length=512)
     summary_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     narrative_tags: tuple[str, ...] = Field(default=(), max_length=16)
+    context_tags: tuple[str, ...] = Field(
+        default=(), max_length=16, exclude_if=lambda value: not value
+    )
+    supersedes_context_tag_prefixes: tuple[str, ...] = Field(
+        default=(), max_length=8, exclude_if=lambda value: not value
+    )
     duration_days: int | None = Field(default=None, ge=1, le=730)
     privacy_class: PrivacyClass = "personal"
     descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator(
+        "narrative_tags",
+        "context_tags",
+        "supersedes_context_tag_prefixes",
+        mode="before",
+    )
+    @classmethod
+    def canonicalize_tag_sets(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)) and all(
+            isinstance(item, str) for item in value
+        ):
+            return tuple(value)
+        return value
 
     @classmethod
     def create(
@@ -2851,14 +3109,20 @@ class DynamicLifeArcContextDescriptor(FrozenModel):
         narrative_tags: tuple[str, ...],
         duration_days: int | None,
         privacy_class: PrivacyClass,
+        context_tags: tuple[str, ...] = (),
+        supersedes_context_tag_prefixes: tuple[str, ...] = (),
     ) -> "DynamicLifeArcContextDescriptor":
-        values = {
+        values: dict[str, object] = {
             "summary_content_ref": summary_content_ref,
             "summary_payload_hash": summary_payload_hash,
             "narrative_tags": narrative_tags,
             "duration_days": duration_days,
             "privacy_class": privacy_class,
         }
+        if context_tags:
+            values["context_tags"] = context_tags
+        if supersedes_context_tag_prefixes:
+            values["supersedes_context_tag_prefixes"] = supersedes_context_tag_prefixes
         return cls(**values, descriptor_hash=_open_life_descriptor_hash(values))
 
     def canonical_hash(self) -> str:
@@ -2869,6 +3133,12 @@ class DynamicLifeArcContextDescriptor(FrozenModel):
     @model_validator(mode="after")
     def descriptor_is_canonical(self) -> "DynamicLifeArcContextDescriptor":
         _validate_narrative_tags(self.narrative_tags, label="dynamic Life Arc")
+        if self.supersedes_context_tag_prefixes:
+            _validate_biographical_coordinate_replacement(
+                context_tags=self.context_tags,
+                supersedes_context_tag_prefixes=self.supersedes_context_tag_prefixes,
+                label="dynamic Life Arc",
+            )
         if self.descriptor_hash != self.canonical_hash():
             raise ValueError("dynamic Life Arc descriptor hash does not match descriptor")
         return self
@@ -3053,6 +3323,12 @@ class OutcomeCandidateDescriptor(FrozenModel):
     provisional_npc_introductions: tuple[
         ProvisionalNpcIntroductionDescriptor, ...
     ] = ()
+    provisional_place_introductions: tuple[
+        ProvisionalPlaceIntroductionDescriptor, ...
+    ] = Field(default=(), exclude_if=lambda value: not value)
+    objective_biographical_transition: BiographicalCoordinateReplacement | None = (
+        None
+    )
     dynamic_life_arc_context: DynamicLifeArcContextDescriptor | None = None
 
     @model_validator(mode="after")
@@ -3070,6 +3346,16 @@ class OutcomeCandidateDescriptor(FrozenModel):
         )
         if len(descriptor_hashes) != len(set(descriptor_hashes)):
             raise ValueError("outcome candidate provisional entity descriptors must be unique")
+        provisional_place_refs = tuple(
+            item.provisional_place_ref for item in self.provisional_place_introductions
+        )
+        if len(provisional_place_refs) != len(set(provisional_place_refs)):
+            raise ValueError("outcome candidate provisional place refs must be unique")
+        place_descriptor_hashes = tuple(
+            item.descriptor_hash for item in self.provisional_place_introductions
+        )
+        if len(place_descriptor_hashes) != len(set(place_descriptor_hashes)):
+            raise ValueError("outcome candidate provisional place descriptors must be unique")
         if (
             self.life_arc_effect is not None
             and self.dynamic_life_arc_context is not None
@@ -3077,6 +3363,21 @@ class OutcomeCandidateDescriptor(FrozenModel):
             raise ValueError(
                 "outcome candidate cannot carry reviewed and dynamic Life Arc effects together"
             )
+        if self.objective_biographical_transition is not None:
+            transition = self.objective_biographical_transition
+            if (
+                transition.coordinate_ref.startswith("biography:direction.")
+                or any(
+                    item.startswith("direction.") for item in transition.context_tags
+                )
+                or any(
+                    item.startswith("direction.")
+                    for item in transition.replaces_context_tag_prefixes
+                )
+            ):
+                raise ValueError(
+                    "objective transition cannot author character direction state"
+                )
         privacy_rank = {
             "public": 0,
             "shareable": 1,
@@ -3084,9 +3385,22 @@ class OutcomeCandidateDescriptor(FrozenModel):
             "private": 3,
             "withhold": 4,
         }
+        if (
+            self.objective_biographical_transition is not None
+            and privacy_rank[
+                self.objective_biographical_transition.privacy_class
+            ]
+            < privacy_rank[self.privacy_class]
+        ):
+            raise ValueError(
+                "objective transition cannot weaken outcome privacy"
+            )
         if any(
             privacy_rank[item.privacy_class] < privacy_rank[self.privacy_class]
             for item in self.provisional_npc_introductions
+        ) or any(
+            privacy_rank[item.privacy_class] < privacy_rank[self.privacy_class]
+            for item in self.provisional_place_introductions
         ) or (
             self.dynamic_life_arc_context is not None
             and privacy_rank[self.dynamic_life_arc_context.privacy_class]
@@ -5380,7 +5694,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.47"
+    reducer_bundle_version: str = "world-v2-reducers.48"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -5457,6 +5771,12 @@ class LedgerProjection(FrozenModel):
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
     npcs: tuple[NpcProjection, ...] = ()
+    world_places: tuple[WorldPlaceProjection, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    biographical_coordinates: tuple[BiographicalCoordinateProjection, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     life_arcs: tuple[LifeArcProjection, ...] = ()
     aspirations: tuple[AspirationProjection, ...] = ()
     plans: tuple[PlanStateProjection, ...] = ()
@@ -5578,4 +5898,137 @@ class LedgerProjection(FrozenModel):
             self.committed_world_event_refs,
             logical_time=self.logical_time,
         )
+        for place in self.world_places:
+            occurrence = next(
+                (
+                    item
+                    for item in self.world_occurrences
+                    if item.status == "settled"
+                    and item.settlement_event_ref == place.source_event_ref
+                    and item.settled_at == place.accepted_at
+                ),
+                None,
+            )
+            candidate = (
+                next(
+                    (
+                        item
+                        for item in occurrence.candidate_outcomes
+                        if item.candidate_result_ref == occurrence.settled_outcome_ref
+                    ),
+                    None,
+                )
+                if occurrence is not None
+                else None
+            )
+            descriptor = (
+                next(
+                    (
+                        item
+                        for item in candidate.provisional_place_introductions
+                        if item.descriptor_hash == place.effect_descriptor_hash
+                    ),
+                    None,
+                )
+                if candidate is not None
+                else None
+            )
+            if (
+                descriptor is None
+                or place.stable_identity_ref != descriptor.summary_content_ref
+                or place.summary_payload_hash != descriptor.summary_payload_hash
+                or place.location_ref
+                != open_life_place_ref(
+                    world_id=self.world_id,
+                    settlement_event_ref=place.source_event_ref,
+                    provisional_place_ref=descriptor.provisional_place_ref,
+                    descriptor_hash=descriptor.descriptor_hash,
+                )
+            ):
+                raise ValueError("World place ref lacks exact settlement identity")
+        committed_by_ref = {
+            item.event_id: item for item in self.committed_world_event_refs
+        }
+        for coordinate in self.biographical_coordinates:
+            source = committed_by_ref.get(coordinate.settlement_event_ref)
+            occurrence = next(
+                (
+                    item
+                    for item in self.world_occurrences
+                    if item.status == "settled"
+                    and item.settlement_event_ref
+                    == coordinate.settlement_event_ref
+                    and item.settled_at == coordinate.settled_at
+                ),
+                None,
+            )
+            proposal = next(
+                (
+                    item
+                    for item in self.outcome_proposals
+                    if item.outcome_proposal_id == coordinate.outcome_proposal_id
+                ),
+                None,
+            )
+            candidate = (
+                next(
+                    (
+                        item
+                        for item in occurrence.candidate_outcomes
+                        if item.candidate_result_ref
+                        == occurrence.settled_outcome_ref
+                    ),
+                    None,
+                )
+                if occurrence is not None
+                else None
+            )
+            descriptor = BiographicalCoordinateReplacement.create(
+                coordinate_ref=coordinate.coordinate_ref,
+                summary=coordinate.summary,
+                context_tags=coordinate.context_tags,
+                replaces_context_tag_prefixes=(
+                    coordinate.replaces_context_tag_prefixes
+                ),
+                privacy_class=coordinate.privacy_class,
+            )
+            expected_descriptor = (
+                proposal.character_life_direction
+                if proposal is not None
+                and coordinate.authority_kind == "character_direction"
+                else candidate.objective_biographical_transition
+                if candidate is not None
+                and coordinate.authority_kind == "objective_transition"
+                else None
+            )
+            if (
+                expected_descriptor is not None
+                and expected_descriptor.coordinate_ref
+                != coordinate.coordinate_ref
+                and expected_descriptor.replaces_context_tag_prefixes
+                == coordinate.replaces_context_tag_prefixes
+            ):
+                expected_descriptor = BiographicalCoordinateReplacement.create(
+                    coordinate_ref=coordinate.coordinate_ref,
+                    summary=expected_descriptor.summary,
+                    context_tags=expected_descriptor.context_tags,
+                    replaces_context_tag_prefixes=(
+                        expected_descriptor.replaces_context_tag_prefixes
+                    ),
+                    privacy_class=expected_descriptor.privacy_class,
+                )
+            if (
+                source is None
+                or source.event_type != "WorldOccurrenceSettled"
+                or occurrence is None
+                or proposal is None
+                or proposal.occurrence_id != occurrence.occurrence_id
+                or proposal.candidate_result_ref
+                != occurrence.settled_outcome_ref
+                or source.payload_hash != coordinate.settlement_payload_hash
+                or descriptor != expected_descriptor
+            ):
+                raise ValueError(
+                    "biographical coordinate lacks exact settlement authority"
+                )
         return self

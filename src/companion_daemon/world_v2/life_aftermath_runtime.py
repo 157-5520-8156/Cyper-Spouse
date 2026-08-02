@@ -64,7 +64,6 @@ from .outcome_selection_draft import (
     OutcomeSelectionFailure,
     OutcomeSelectionModel,
     OutcomeSelectionOption,
-    ProposedLifeDirectionOption,
     outcome_selection_audit_text,
 )
 from .plan_evidence import canonical_plan_evidence_hash
@@ -81,6 +80,7 @@ from .proposal_envelope import MinimalProposal
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
 from .schemas import (
+    BiographicalCoordinateReplacement,
     DueWindow,
     EvidenceRef,
     ExperienceOccurrenceSettlementBinding,
@@ -1320,11 +1320,23 @@ class LifeAftermathRuntime:
             )
 
         final = audits[-1]
+        character_direction = (
+            BiographicalCoordinateReplacement.create(
+                coordinate_ref=selected.character_life_direction.coordinate_ref,
+                summary=selected.character_life_direction.summary,
+                context_tags=selected.character_life_direction.context_tags,
+                replaces_context_tag_prefixes=(
+                    selected.character_life_direction.replaces_context_tag_prefixes
+                ),
+                privacy_class=selected.character_life_direction.privacy_class,
+            )
+            if selected.character_life_direction is not None
+            else None
+        )
         audit_response_text = outcome_selection_audit_text(
             candidate_result_ref=selected.candidate_result_ref,
-            adopt_proposed_life_direction=(
-                selected.adopt_proposed_life_direction
-            ),
+            adopt_proposed_life_direction=False,
+            character_life_direction=selected.character_life_direction,
             candidate_matrix_hash=matrix_hash,
             response_hash=str(final.response_hash),
         )
@@ -1438,9 +1450,7 @@ class LifeAftermathRuntime:
             result_payload_ref=chosen.result_payload_ref,
             result_payload_hash=chosen.result_payload_hash,
             observation_refs=(observation_id,),
-            adopt_proposed_life_direction=(
-                selected.adopt_proposed_life_direction
-            ),
+            character_life_direction=character_direction,
         )
         outcome_proposal = OutcomeProposalRecordedPayload(
             outcome_proposal_id=(
@@ -1478,10 +1488,8 @@ class LifeAftermathRuntime:
                 audit_proposal_event.payload_hash
             ),
             decision_candidate_matrix_hash=matrix_hash,
-            adopt_proposed_life_direction=(
-                selected.adopt_proposed_life_direction
-            ),
-            context_identity_version="life-aftermath-context.2",
+            character_life_direction=character_direction,
+            context_identity_version="life-aftermath-context.3",
             context_capsule_id=capsule.capsule_id,
             context_model_content_hash=context_material[
                 "context_model_content_hash"
@@ -1541,9 +1549,7 @@ class LifeAftermathRuntime:
             result_payload_hash=chosen.result_payload_hash,
             settled_at=logical_time,
             appraisal_trigger_ref=appraisal_trigger_ref,
-            adopt_proposed_life_direction=(
-                selected.adopt_proposed_life_direction
-            ),
+            character_life_direction=character_direction,
         )
         settlement_event = self._event(
             event_id="event:life-aftermath:settlement:" + suffix,
@@ -1827,6 +1833,9 @@ class LifeAftermathRuntime:
                 options=options,
                 mood_summary=mood_summary_prose(projection.affect_episodes) or None,
                 decision_context=decision_context,
+                current_coordinates=tuple(
+                    getattr(projection, "biographical_coordinates", ())
+                ),
             )
         except OutcomeSelectionFailure:
             raise
@@ -1853,22 +1862,10 @@ class LifeAftermathRuntime:
         self,
         occurrence,
     ) -> tuple[OutcomeSelectionOption, ...]:
-        """Expose objective alternatives and subjective direction effects separately."""
+        """Expose objective alternatives only; the character authors her own direction."""
 
         options: list[OutcomeSelectionOption] = []
         for item in occurrence.candidate_outcomes:
-            direction = item.dynamic_life_arc_context
-            direction_option = None
-            if direction is not None:
-                direction_option = ProposedLifeDirectionOption(
-                    summary=self._candidate_text(
-                        direction.summary_content_ref,
-                        direction.summary_payload_hash,
-                    ),
-                    narrative_tags=direction.narrative_tags,
-                    duration_days=direction.duration_days,
-                    privacy_class=direction.privacy_class,
-                )
             options.append(
                 OutcomeSelectionOption(
                     candidate_result_ref=item.candidate_result_ref,
@@ -1876,7 +1873,6 @@ class LifeAftermathRuntime:
                         item.content_ref,
                         item.content_payload_hash,
                     ),
-                    proposed_life_direction=direction_option,
                 )
             )
         return tuple(options)

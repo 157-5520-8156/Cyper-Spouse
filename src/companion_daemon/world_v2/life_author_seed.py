@@ -1245,9 +1245,17 @@ class ReviewedLifeSeedCatalog:
         return self._document.npcs
 
     def biographical_context_at(
-        self, *, instant: datetime, life_arcs: tuple[object, ...]
+        self,
+        *,
+        instant: datetime,
+        life_arcs: tuple[object, ...],
+        biographical_coordinates: tuple[object, ...] = (),
     ) -> BiographicalContext:
-        context = self._biography.context_at(instant, life_arcs=life_arcs)
+        context = self._biography.context_at(
+            instant,
+            life_arcs=life_arcs,
+            biographical_coordinates=biographical_coordinates,
+        )
         continuities = {
             item.source_context_pack_ref: item.completion_context_tags
             for item in self._document.completed_life_arc_continuities

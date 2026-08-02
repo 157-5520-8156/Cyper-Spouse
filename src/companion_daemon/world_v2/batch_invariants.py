@@ -79,6 +79,7 @@ from .life_events import (
     WorldOccurrenceCommittedPayload,
     WorldOccurrenceSettledPayload,
 )
+from .aspiration_events import AspirationCrystallizedPayload
 from .life_development_draft import (
     LifeDevelopmentCapabilityManifest,
     LifeDevelopmentLocationCapability,
@@ -144,6 +145,7 @@ from .schemas import (
     BudgetReservation,
     DueWindow,
     ExperienceOccurrenceSettlementBinding,
+    OutcomeCandidateDescriptor,
     TriggerProcess,
     WorldEvent,
 )
@@ -722,7 +724,8 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         )
         acceptance = acceptance_event.payload()
         if (
-            outcome.context_identity_version != "life-aftermath-context.2"
+            outcome.context_identity_version
+            not in {"life-aftermath-context.2", "life-aftermath-context.3"}
             or outcome.decision_authority != "character_model"
             or outcome.decision_model_result_ref != final.model_result_ref
             or outcome.decision_model_result_event_ref != events[first.attempt_count - 1].event_id
@@ -741,6 +744,7 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
             or settlement.outcome_proposal_id != outcome.outcome_proposal_id
             or settlement.accepted_change_hash != outcome.proposed_change_hash
             or settlement.adopt_proposed_life_direction != outcome.adopt_proposed_life_direction
+            or settlement.character_life_direction != outcome.character_life_direction
             or trigger_event.causation_id != settlement_event.event_id
         ):
             raise ValueError("atomic character outcome transaction is not fully pinned")
@@ -753,6 +757,23 @@ _LIFE_DEVELOPMENT_PRIVACY_RANK = {
     "private": 3,
     "withhold": 4,
 }
+
+
+def _possibility_carries_objective_transition(
+    possibility: dict[str, object],
+) -> bool:
+    outcomes = possibility.get("outcomes")
+    return isinstance(outcomes, list) and any(
+        isinstance(outcome, dict)
+        and (
+            outcome.get("objective_biographical_transition") is not None
+            or (
+                isinstance(descriptor := outcome.get("descriptor"), dict)
+                and descriptor.get("objective_biographical_transition") is not None
+            )
+        )
+        for outcome in outcomes
+    )
 
 
 def _validate_life_development_location_authority_batch(
@@ -778,13 +799,22 @@ def _validate_life_development_location_authority_batch(
             "life-development-possibility.4",
             "life-development-possibility.5",
             "life-development-possibility.6",
+            "life-development-possibility.7",
         }:
             raise ValueError("life-development possibility authority version is unknown")
+        if (
+            possibility_version != "life-development-possibility.7"
+            and _possibility_carries_objective_transition(possibility)
+        ):
+            raise ValueError(
+                "objective transition requires possibility authority version .7"
+            )
         if possibility_version in {
             "life-development-possibility.3",
             "life-development-possibility.4",
             "life-development-possibility.5",
             "life-development-possibility.6",
+            "life-development-possibility.7",
         }:
             expected_possibility_hash = hashlib.sha256(
                 json.dumps(
@@ -862,11 +892,13 @@ def _validate_life_development_location_authority_batch(
                 proposal=proposal,
                 possibility=possibility,
                 authored_subject_ref=authored_subject_ref,
+                possibility_version=str(possibility_version),
             )
             if possibility_version in {
                 "life-development-possibility.4",
                 "life-development-possibility.5",
                 "life-development-possibility.6",
+                "life-development-possibility.7",
             }:
                 review = proposal.get("world_author_source_closure_review")
                 review_deliberation = proposal.get(
@@ -940,7 +972,10 @@ def _validate_life_development_location_authority_batch(
                 request_hashes = review_deliberation.get("request_hashes")
                 review_cursor = review_deliberation.get("context_cursor")
                 trigger_id = proposal.get("trigger_id")
-                if possibility_version == "life-development-possibility.6":
+                if possibility_version in {
+                    "life-development-possibility.6",
+                    "life-development-possibility.7",
+                }:
                     if not (
                         isinstance(request_hashes, list)
                         and request_hashes
@@ -974,6 +1009,7 @@ def _validate_life_development_location_authority_batch(
             if possibility_version in {
                 "life-development-possibility.5",
                 "life-development-possibility.6",
+                "life-development-possibility.7",
             }:
                 novel_review = proposal.get("world_author_novel_origin_review")
                 novel_deliberation = proposal.get(
@@ -990,6 +1026,8 @@ def _validate_life_development_location_authority_batch(
                     novel_review.get("decision") != "supported"
                     or novel_review.get("unsupported_claims") != []
                     or novel_review.get("unsupported_provisional_npcs") != []
+                    or novel_review.get("unsupported_provisional_places") != []
+                    or novel_review.get("unsupported_objective_transitions") != []
                     or novel_review.get(
                         "unsupported_outcome_prerequisites",
                         [],
@@ -1039,7 +1077,10 @@ def _validate_life_development_location_authority_batch(
                     )
                 novel_request_hashes = novel_deliberation.get("request_hashes")
                 novel_cursor = novel_deliberation.get("context_cursor")
-                if possibility_version == "life-development-possibility.6":
+                if possibility_version in {
+                    "life-development-possibility.6",
+                    "life-development-possibility.7",
+                }:
                     if not (
                         isinstance(novel_request_hashes, list)
                         and novel_request_hashes
@@ -1108,6 +1149,7 @@ def _validate_life_development_location_authority_batch(
                 "life-development-possibility.4",
                 "life-development-possibility.5",
                 "life-development-possibility.6",
+                "life-development-possibility.7",
             }
             or not isinstance(location_ref, str)
             or not isinstance(capability_ref, str)
@@ -1284,6 +1326,7 @@ def _validate_life_development_subject_effect(
     proposal: dict[str, object],
     possibility: dict[str, object],
     authored_subject_ref: str,
+    possibility_version: str,
 ) -> None:
     """Close `.3` subject authority through the adjacent executable effect."""
 
@@ -1330,6 +1373,60 @@ def _validate_life_development_subject_effect(
             raise ValueError(
                 "life-development Plan participants exceed character choice authority"
             )
+        aspiration_source_ref = (
+            character_choice.get("crystallized_aspiration_source_ref")
+            if isinstance(character_choice, dict)
+            else None
+        )
+        deliberation = proposal.get("world_author_deliberation")
+        capability_manifest = (
+            deliberation.get("capability_manifest")
+            if isinstance(deliberation, dict)
+            else None
+        )
+        active_aspiration_refs = (
+            capability_manifest.get("active_aspiration_source_refs", [])
+            if isinstance(capability_manifest, dict)
+            else []
+        )
+        if (
+            aspiration_source_ref is not None
+            and (
+                not isinstance(aspiration_source_ref, str)
+                or not isinstance(active_aspiration_refs, list)
+                or aspiration_source_ref not in active_aspiration_refs
+            )
+        ):
+            raise ValueError(
+                "life-development aspiration choice exceeds pinned authority"
+            )
+        aspiration_events = [
+            event
+            for event in events
+            if event.event_type == "AspirationCrystallized"
+            and event.causation_id == proposal_event.event_id
+        ]
+        if aspiration_source_ref is None:
+            if aspiration_events:
+                raise ValueError(
+                    "life-development Plan has an undeclared aspiration effect"
+                )
+        elif len(aspiration_events) != 1:
+            raise ValueError(
+                "life-development aspiration choice requires one adjacent effect"
+            )
+        else:
+            aspiration_effect = AspirationCrystallizedPayload.model_validate_json(
+                aspiration_events[0].payload_json
+            )
+            if (
+                aspiration_effect.plan_ref != "plan:" + effect.plan.plan_id
+                or aspiration_source_ref
+                not in {item.ref_id for item in aspiration_effect.evidence_refs}
+            ):
+                raise ValueError(
+                    "life-development aspiration effect changed its chosen source or Plan"
+                )
         return
     if effect_kind == "world_occurrence":
         matching = [
@@ -1358,6 +1455,41 @@ def _validate_life_development_subject_effect(
             raise ValueError(
                 "life-development occurrence participants exceed authored subject authority"
             )
+        candidates = effect.occurrence.candidate_outcomes
+        if (
+            possibility_version != "life-development-possibility.7"
+            and any(
+                candidate.objective_biographical_transition is not None
+                for candidate in candidates
+            )
+        ):
+            raise ValueError(
+                "objective transition requires possibility authority version .7"
+            )
+        if possibility_version == "life-development-possibility.7":
+            outcomes = possibility.get("outcomes")
+            if not isinstance(outcomes, list) or len(outcomes) != len(candidates):
+                raise ValueError(
+                    "life-development objective transition matrix changed shape"
+                )
+            for outcome, candidate in zip(outcomes, candidates, strict=True):
+                if not isinstance(outcome, dict):
+                    raise ValueError(
+                        "life-development objective transition outcome is invalid"
+                    )
+                descriptor_value = outcome.get("descriptor")
+                expected = OutcomeCandidateDescriptor.model_validate_json(
+                    json.dumps(
+                        descriptor_value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                if candidate != expected:
+                    raise ValueError(
+                        "life-development outcome descriptor changed after review"
+                    )
         return
     raise ValueError("life-development subject effect kind is invalid")
 

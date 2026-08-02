@@ -213,13 +213,19 @@ class ScenarioVerificationError(AssertionError):
 # endpoint-attention advisory in the verified trigger/prompt contract. The
 # endpoint model remains advisory-only; the baseline moves because prompt and
 # proposal audit identities intentionally include the new decision coordinate.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.43"
+# ``.44`` records reducer .48 and the retirement of World-Author-owned life
+# directions. The fixed suite has no such transition, so this is an audit and
+# projection-version baseline change rather than a changed visible scenario.
+# ``.45`` separates subjective Character direction from source-reviewed
+# objective biographical consequence and advances open-life proposal authority
+# to `.7`; the fixed suite still has no visible life-transition branch.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.45"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "8c76ea3fa18da10e3d040bc6349c366d6e995edb1d2d4f159b67a02ad210cadc"
+    "c09f3ceff2a941b9d0ce255901e077159ec8c3775bbab786cf4d9beb519f1d71"
 )
 
 

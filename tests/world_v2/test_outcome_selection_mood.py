@@ -6,8 +6,8 @@ import pytest
 
 from companion_daemon.world_v2.outcome_selection_draft import (
     OutcomeSelectionDraftAdapter,
+    OutcomeSelectionFailure,
     OutcomeSelectionOption,
-    ProposedLifeDirectionOption,
 )
 
 
@@ -138,7 +138,7 @@ async def test_invalid_outcome_selection_gets_one_same_model_constrained_reselec
 
 
 @pytest.mark.asyncio
-async def test_character_sees_and_independently_adopts_a_proposed_life_direction() -> None:
+async def test_character_freely_forms_a_life_direction_without_a_world_author_menu() -> None:
     class _DirectionModel:
         model = "test-direction-choice"
 
@@ -151,27 +151,122 @@ async def test_character_sees_and_independently_adopts_a_proposed_life_direction
             return json.dumps(
                 {
                     "candidate_result_ref": "candidate:bookshop",
-                    "adopt_proposed_life_direction": True,
+                    "character_life_direction": {
+                        "coordinate_ref": "biography:direction.work",
+                        "summary": "她想认真试试把修书和旧书经营变成自己的工作。",
+                        "context_tags": ["direction.work:independent_bookseller"],
+                        "replaces_context_tag_prefixes": ["direction.work:"],
+                        "privacy_class": "personal",
+                    },
                 }
             )
 
     model = _DirectionModel()
-    direction = ProposedLifeDirectionOption(
-        summary="她也许会把旧书店的偶遇发展成接下来几周持续参与的方向。",
-        narrative_tags=("narrative:bookshop",),
-        duration_days=21,
-        privacy_class="personal",
-    )
     draft = await OutcomeSelectionDraftAdapter(model=model).deliberate(
         options=(
             OutcomeSelectionOption(
                 candidate_result_ref="candidate:bookshop",
                 summary="这次在旧书店的帮忙告一段落。",
-                proposed_life_direction=direction,
             ),
         )
     )
 
-    assert draft.adopt_proposed_life_direction is True
+    assert draft.character_life_direction is not None
+    assert draft.character_life_direction.coordinate_ref == "biography:direction.work"
     candidate = model.material["candidates"][0]  # type: ignore[index]
-    assert candidate["proposed_life_direction"]["summary"] == direction.summary  # type: ignore[index]
+    assert "proposed_life_direction" not in candidate  # type: ignore[operator]
+
+
+@pytest.mark.asyncio
+async def test_character_direction_cannot_claim_an_objective_biographical_fact() -> None:
+    class _ObjectiveFactModel:
+        model = "test-direction-objective-fact"
+
+        async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+            del messages, temperature
+            return json.dumps(
+                {
+                    "candidate_result_ref": "candidate:bookshop",
+                    "character_life_direction": {
+                        "coordinate_ref": "biography:work",
+                        "summary": "她已经成为独立书店店主。",
+                        "context_tags": ["occupation:independent_bookseller"],
+                        "replaces_context_tag_prefixes": ["occupation:"],
+                        "privacy_class": "personal",
+                    },
+                }
+            )
+
+    with pytest.raises(OutcomeSelectionFailure) as exc_info:
+        await OutcomeSelectionDraftAdapter(model=_ObjectiveFactModel()).deliberate(
+            options=(
+                OutcomeSelectionOption(
+                    candidate_result_ref="candidate:bookshop",
+                    summary="这次在旧书店的帮忙告一段落。",
+                ),
+            )
+        )
+
+    assert "corrective_invalid" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_existing_coordinate_identity_is_visible_and_must_be_reused() -> None:
+    class _CoordinateRepairModel:
+        model = "test-coordinate-repair"
+
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, str]]] = []
+
+        async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+            del temperature
+            self.calls.append(messages)
+            coordinate_ref = (
+                "biography:direction.new-work"
+                if len(self.calls) == 1
+                else "biography:direction.work"
+            )
+            return json.dumps(
+                {
+                    "candidate_result_ref": "candidate:bookshop",
+                    "character_life_direction": {
+                        "coordinate_ref": coordinate_ref,
+                        "summary": "她想继续沿着独立书店这条路试一阵。",
+                        "context_tags": ["direction.work:independent_bookseller"],
+                        "replaces_context_tag_prefixes": ["direction.work:"],
+                        "privacy_class": "personal",
+                    },
+                }
+            )
+
+    model = _CoordinateRepairModel()
+    current = type(
+        "Coordinate",
+        (),
+        {
+            "coordinate_ref": "biography:direction.work",
+            "entity_revision": 2,
+            "summary": "她还在摸索把旧书经营变成长期方向。",
+            "context_tags": ("direction.work:exploring",),
+            "replaces_context_tag_prefixes": ("direction.work:",),
+            "settlement_event_ref": "event:settlement:earlier",
+        },
+    )()
+
+    draft = await OutcomeSelectionDraftAdapter(model=model).deliberate(
+        options=(
+            OutcomeSelectionOption(
+                candidate_result_ref="candidate:bookshop",
+                summary="这次在旧书店的帮忙告一段落。",
+            ),
+        ),
+        current_coordinates=(current,),
+    )
+
+    material = json.loads(model.calls[0][-1]["content"])
+    assert material["current_biographical_coordinates"][0]["coordinate_ref"] == (
+        "biography:direction.work"
+    )
+    assert len(model.calls) == 2
+    assert draft.character_life_direction is not None
+    assert draft.character_life_direction.coordinate_ref == "biography:direction.work"

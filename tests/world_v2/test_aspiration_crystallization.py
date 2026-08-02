@@ -175,7 +175,7 @@ def _crystallize_checks(app):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.asyncio
-async def test_supported_wish_crystallizes_into_an_evidence_bound_future_plan(
+async def test_catalog_target_cannot_crystallize_a_wish_in_production(
     tmp_path: Path,
 ) -> None:
     model = _LifeModel()
@@ -188,39 +188,21 @@ async def test_supported_wish_crystallizes_into_an_evidence_bound_future_plan(
         assert projection.aspirations[0].status == "active"
         planted_ref = projection.aspirations[0].planted_event_ref
 
-        # Day 2: the daily crystallization check draws (certain), the model
-        # confirms, and one atomic batch lands snapshot + plan + crystallized.
+        # Even an old catalog target and a 100% compatibility chance cannot
+        # bypass open Life Development or preselect a story slot.
         day2 = NOW + timedelta(days=1)
         await _tick(app, tick_id="c:day2", frm=NOW + timedelta(minutes=5), to=day2)
         projection = app._ledger.project()  # noqa: SLF001
         aspiration = projection.aspirations[0]
-        assert aspiration.status == "crystallized"
-        assert aspiration.crystallized_plan_ref is not None
-        plan_id = aspiration.crystallized_plan_ref.removeprefix("plan:")
-        plan = next(item for item in projection.plans if item.plan_id == plan_id)
-        assert plan.status == "planned"
-        assert plan.activity_kind == "commute.lakeside_walk"
-        assert plan.owner_actor_ref == "agent:companion"
-        assert projection.logical_time is not None
-        assert plan.scheduled_window.opens_at > projection.logical_time
-        # The plan's evidence chain points back at the wish's planting event.
-        assert planted_ref in {ref.ref_id for ref in plan.evidence_refs}
-        crystallized_event = app._ledger.lookup_event_commit(  # noqa: SLF001
-            next(
-                item.event_id
-                for item in projection.committed_world_event_refs
-                if item.event_type == "AspirationCrystallized"
-            )
-        )
-        assert crystallized_event is not None
-        assert crystallized_event[0].payload()["plan_ref"] == aspiration.crystallized_plan_ref
-        assert model.crystallize_calls == 1
-        assert model.last_crystallize_payload is not None
-        eligibility = model.last_crystallize_payload["authoritative_eligibility"]
-        assert eligibility["planted_event_ref"] == planted_ref
+        assert aspiration.status == "active"
+        assert aspiration.planted_event_ref == planted_ref
+        assert aspiration.crystallized_plan_ref is None
+        assert projection.plans == ()
+        assert model.crystallize_calls == 0
+        assert model.last_crystallize_payload is None
 
-        # Later wakes of the same day (and later days) converge: the wish is
-        # terminal, so no second check, draw, model call, or plan appears.
+        # Later wakes keep the same open wish available as context; they do not
+        # resurrect the retired catalog-to-plan lane.
         await _tick(
             app, tick_id="c:day2b", frm=day2, to=day2 + timedelta(hours=2)
         )
@@ -229,19 +211,19 @@ async def test_supported_wish_crystallizes_into_an_evidence_bound_future_plan(
             frm=day2 + timedelta(hours=2), to=day2 + timedelta(days=1),
         )
         projection = app._ledger.project()  # noqa: SLF001
-        assert model.crystallize_calls == 1
-        assert len(_crystallize_checks(app)) == 1
-        assert len([
-            item for item in projection.committed_world_event_refs
-            if item.event_type == "AspirationCrystallized"
-        ]) == 1
-        assert len(projection.plans) == 1
+        assert model.crystallize_calls == 0
+        assert _crystallize_checks(app) == []
+        assert not any(
+            item.event_type == "AspirationCrystallized"
+            for item in projection.committed_world_event_refs
+        )
+        assert projection.plans == ()
     finally:
         app.close()
 
 
 @pytest.mark.asyncio
-async def test_model_no_op_keeps_the_wish_and_consumes_the_daily_check(
+async def test_compatibility_chance_and_model_choice_cannot_reenable_catalog_lane(
     tmp_path: Path,
 ) -> None:
     model = _LifeModel(crystallize_decision="no_op")
@@ -254,12 +236,10 @@ async def test_model_no_op_keeps_the_wish_and_consumes_the_daily_check(
         assert projection.aspirations[0].status == "active"
         assert projection.plans == ()
         checks = _crystallize_checks(app)
-        assert len(checks) == 1
-        assert checks[0].payload()["decision"] == "no_op"
-        # The consumed daily check never re-asks the model within the day.
+        assert checks == []
         await _tick(app, tick_id="d:day2b", frm=day2, to=day2 + timedelta(hours=3))
-        assert model.crystallize_calls == 1
-        assert len(_crystallize_checks(app)) == 1
+        assert model.crystallize_calls == 0
+        assert _crystallize_checks(app) == []
     finally:
         app.close()
 

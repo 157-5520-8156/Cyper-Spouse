@@ -623,9 +623,9 @@ class WorldV2TurnApplicationConfig:
     # fade-eligible; each daily check then rolls the recorded fade chance.
     aspiration_fade_idle_days: int = 14
     aspiration_fade_chance_bp: int = 1_000
-    # A supported active wish whose seed names a reviewed crystallization
-    # target rolls this recorded per-day chance to become a concrete future
-    # plan (then still needs the bounded model's confirmation).
+    # Deprecated replay/config compatibility only. Production no longer maps
+    # a wish to a catalog-authored future opening; open Life Development lets
+    # the Character Model decide whether an accepted Plan concretizes it.
     aspiration_crystallize_chance_bp: int = 1_500
     # shared_private invitations: enabled only when the catalog reviews a
     # shared_private future opening AND the composition names the counterpart
@@ -4225,14 +4225,12 @@ def build_sqlite_world_v2_turn_application(
         contextual_life_inspiration = (
             ContextualLifeInspirationRuntime(
                 ledger=ledger,
-                catalog=life_seed_catalog,
                 model=activity_lifecycle_model,
                 capsule_compiler=capsules,
                 source_material_compiler=ContextualLifeSourceMaterialCompiler(
                     ledger=ledger,
                     life_content_store=life_content_store,
                 ),
-                plan_committer=aspiration,
                 reviewed_followup=aspiration,
                 owner_actor_ref=config.companion_actor_ref,
                 actor=config.life_ecology.worker_actor,
@@ -4296,6 +4294,7 @@ def build_sqlite_world_v2_turn_application(
                 capability_manifest_compiler=ProjectionLifeCapabilityManifestCompiler(
                     owner_actor_ref=config.companion_actor_ref,
                     catalog=life_seed_catalog,
+                    content_store=life_content_store,
                 ),
                 owner_actor_ref=config.companion_actor_ref,
                 actor=config.life_ecology.worker_actor,
@@ -4606,6 +4605,9 @@ def _bootstrap(
         life_seed_catalog.biographical_context_at(
             instant=projection.logical_time or now,
             life_arcs=projection.life_arcs,
+            biographical_coordinates=getattr(
+                projection, "biographical_coordinates", ()
+            ),
         )
         if life_seed_catalog is not None
         else None

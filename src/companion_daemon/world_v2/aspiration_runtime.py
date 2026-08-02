@@ -205,14 +205,13 @@ class AspirationRuntime:
                 status="blocked", reason_code="aspiration.wake_not_exact_clock"
             )
         local_date_iso = self._catalog.localize(wake.logical_time).date().isoformat()
-        # Crystallization runs on every wake of the day before the planting
-        # slot dedupe: its own per-aspiration daily check event converges
-        # repeated wakes, and a model outage on the first wake may retry on a
-        # later one even after the planting slot was consumed.
-        crystallized = await self._maintain_crystallization(
-            wake=wake, local_date_iso=local_date_iso,
-            trace_id=trace_id, correlation_id=correlation_id,
-        )
+        # The former catalog-target crystallization lane is intentionally not
+        # called.  It mapped a wish onto a reviewed future-opening slot before
+        # the Character Model had freely formed a concrete intention. Active
+        # wishes now enter open Life Development as sourced context; only an
+        # accepted Character-authored Plan may bind and crystallize one.
+        # Historical crystallization events and helpers remain replayable.
+        crystallized: tuple[str, ...] = ()
         check_event_id = "event:aspiration:check:" + _digest({
             "world_id": self._ledger.world_id, "local_date": local_date_iso,
         })

@@ -143,6 +143,18 @@ class ActiveLifeArcContext(FrozenModel):
         return self
 
 
+class SettledBiographicalCoordinateContext(FrozenModel):
+    """One model-visible coordinate head with its exact settlement source."""
+
+    coordinate_ref: str = Field(min_length=1)
+    authority_kind: Literal["character_direction", "objective_transition"]
+    summary: str = Field(min_length=1, max_length=12_000)
+    context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    replaces_context_tag_prefixes: tuple[str, ...] = Field(min_length=1, max_length=8)
+    privacy_class: PrivacyClass
+    settlement_event_ref: str = Field(min_length=1)
+
+
 class BiographicalWorldContextItem(FrozenModel):
     """One source-bound reading of biography at the pinned Logical Time.
 
@@ -164,6 +176,9 @@ class BiographicalWorldContextItem(FrozenModel):
     calendar_context_tags: tuple[str, ...]
     current_residence_context_tags: tuple[str, ...]
     active_life_arcs: tuple[ActiveLifeArcContext, ...]
+    settled_biographical_coordinates: tuple[
+        SettledBiographicalCoordinateContext, ...
+    ] = ()
     confidence_bp: Literal[10000] = 10_000
     privacy_class: PrivacyClass = "personal"
     source_bindings: tuple[WorldLifeSourceBinding, ...] = Field(min_length=1)
@@ -341,6 +356,9 @@ class WorldLifeContextCompiler:
         reading = self._biography.context_at(
             projection.logical_time,
             life_arcs=projection.life_arcs,
+            biographical_coordinates=getattr(
+                projection, "biographical_coordinates", ()
+            ),
         )
         active_ids = set(reading.active_life_arc_ids)
         active_arcs = tuple(
@@ -386,7 +404,22 @@ class WorldLifeContextCompiler:
             )
         ):
             return None
-        source_refs = {clock.event_id, *arc_refs, *accepted_arc_refs}
+        coordinate_refs = {
+            item.settlement_event_ref
+            for item in getattr(projection, "biographical_coordinates", ())
+        }
+        if any(
+            ref not in committed
+            or committed[ref].event_type != "WorldOccurrenceSettled"
+            for ref in coordinate_refs
+        ):
+            return None
+        source_refs = {
+            clock.event_id,
+            *arc_refs,
+            *accepted_arc_refs,
+            *coordinate_refs,
+        }
         bindings = (timeline_source,) + tuple(
             WorldLifeSourceBinding(
                 authority_event_ref=committed[ref].event_id,
@@ -445,6 +478,20 @@ class WorldLifeContextCompiler:
                 )
                 for item in active_arcs
                 if item.accepted_event_ref is not None
+            ),
+            settled_biographical_coordinates=tuple(
+                SettledBiographicalCoordinateContext(
+                    coordinate_ref=item.coordinate_ref,
+                    authority_kind=item.authority_kind,
+                    summary=item.summary,
+                    context_tags=item.context_tags,
+                    replaces_context_tag_prefixes=(
+                        item.replaces_context_tag_prefixes
+                    ),
+                    privacy_class=item.privacy_class,
+                    settlement_event_ref=item.settlement_event_ref,
+                )
+                for item in getattr(projection, "biographical_coordinates", ())
             ),
             source_bindings=bindings,
         )
@@ -515,6 +562,7 @@ __all__ = [
     "ActiveWorldOccurrenceProposalBinding",
     "ActiveWorldOccurrenceReader",
     "BiographicalWorldContextItem",
+    "SettledBiographicalCoordinateContext",
     "WorldLifeContextCompiler",
     "WorldLifeContextItem",
     "WorldLifeModelContextItem",

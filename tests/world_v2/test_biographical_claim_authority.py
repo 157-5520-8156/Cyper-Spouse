@@ -74,6 +74,26 @@ def _context() -> dict[str, object]:
                                     "context_summary": "在出版社做暑期实习",
                                 }
                             ],
+                            "settled_biographical_coordinates": [
+                                {
+                                    "coordinate_ref": "biography:occupation",
+                                    "authority_kind": "objective_transition",
+                                    "summary": "已经开始一份编辑工作",
+                                    "context_tags": ["occupation:editor"],
+                                    "replaces_context_tag_prefixes": ["occupation:"],
+                                    "privacy_class": "shareable",
+                                    "settlement_event_ref": "event:occupation-settled",
+                                },
+                                {
+                                    "coordinate_ref": "biography:direction.private",
+                                    "authority_kind": "character_direction",
+                                    "summary": "还没想告诉别人的长期打算",
+                                    "context_tags": ["direction.work:uncertain"],
+                                    "replaces_context_tag_prefixes": ["direction.work:"],
+                                    "privacy_class": "private",
+                                    "settlement_event_ref": "event:direction-settled",
+                                },
+                            ],
                             "source_bindings": [
                                 {
                                     "authority_event_ref": "event:clock",
@@ -107,6 +127,8 @@ def test_biographical_coordinate_refs_survive_all_provider_compactions() -> None
 
     assert full == ordinary == chat == recovery
     assert "/active_life_arcs/arc:internship" in full
+    assert "/settled_biographical_coordinates/biography:occupation" in full
+    assert not any("direction.private" in path for path in full)
 
 
 def test_biography_parent_is_attention_only_while_exact_coordinates_are_current() -> None:

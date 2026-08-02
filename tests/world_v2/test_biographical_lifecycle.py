@@ -43,16 +43,19 @@ from companion_daemon.world_v2.life_events import (
     outcome_mutation_hash,
 )
 from companion_daemon.world_v2.schemas import (
+    BiographicalCoordinateReplacement,
     CommittedWorldEventRef,
     DynamicLifeArcContextDescriptor,
     DueWindow,
     EvidenceRef,
     FrozenLifeArcEffectDescriptor,
     LifeArcProjection,
+    LedgerProjection,
     OutcomeCandidateDescriptor,
     OutcomeObservationProjection,
     PendingBiographicalSettlementProjection,
     ProvisionalNpcIntroductionDescriptor,
+    ProvisionalPlaceIntroductionDescriptor,
     ProjectionCursor,
     TriggerProcess,
     WorldEvent,
@@ -113,6 +116,182 @@ def test_biography_derives_age_and_academic_phase_from_logical_time() -> None:
     assert "season:summer" in after_graduation.context_tags
     assert "academic:enrolled" not in after_graduation.context_tags
     assert "residence:campus_dorm" not in after_graduation.context_tags
+
+
+def test_active_life_arc_cannot_replace_a_foundational_biographical_coordinate() -> None:
+    lifecycle = BiographicalLifecycleCatalog.from_yaml(
+        path=Path("configs/world_seed.yaml"),
+        timezone_name="Asia/Shanghai",
+    )
+    logical_at = datetime(2026, 7, 28, 10, 30, tzinfo=SHANGHAI)
+    transition = LifeArcProjection(
+        arc_id="life-arc:open-transition",
+        entity_revision=1,
+        owner_actor_ref="actor:companion",
+        arc_kind="dynamic",
+        context_pack_ref="content:freely-authored-transition",
+        context_tags=(
+            "academic:personally_reoriented",
+            "narrative:uncertain_new_direction",
+        ),
+        supersedes_context_tag_prefixes=("academic:",),
+        status="active",
+        started_at=logical_at - timedelta(minutes=1),
+        source_event_ref="event:settlement:open-transition",
+        privacy_class="personal",
+    )
+
+    reading = lifecycle.context_at(logical_at, life_arcs=(transition,))
+
+    assert "academic:enrolled" in reading.context_tags
+    assert "academic:personally_reoriented" not in reading.context_tags
+    assert reading.academic_phase == "summer_break"
+    assert reading.academic_year == 2
+
+
+def test_selected_objective_outcome_atomically_replaces_the_coordinate_head(
+    tmp_path: Path,
+) -> None:
+    world_id = "world:biography:objective-transition"
+    logical_at = datetime(2026, 7, 28, 4, 0, tzinfo=UTC)
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "objective-transition.sqlite",
+        world_id=world_id,
+    )
+    clock = _clock_advance(
+        world_id=world_id,
+        event_id="clock:objective-transition",
+        origin=logical_at - timedelta(minutes=10),
+        target=logical_at,
+    )
+    _commit_event(ledger, clock)
+    descriptor = BiographicalCoordinateReplacement.create(
+        coordinate_ref="biography:education",
+        summary="学校已经正式确认她完成学业并离校。",
+        context_tags=("academic:graduated", "calendar:post_graduation"),
+        replaces_context_tag_prefixes=("academic:", "calendar:"),
+        privacy_class="personal",
+    )
+
+    settlement, _effect = _commit_settled_effect_occurrence(
+        ledger=ledger,
+        clock=clock,
+        occurrence_id="objective-transition",
+        context_pack_ref="life-context:objective-transition",
+        context_tags=("role:alumna",),
+        duration_days=30,
+        include_reviewed_life_arc_effect=False,
+        adopt_dynamic_life_direction=False,
+        objective_biographical_transition=descriptor,
+    )
+
+    projection = ledger.project()
+    assert len(projection.biographical_coordinates) == 1
+    coordinate = projection.biographical_coordinates[0]
+    assert coordinate.authority_kind == "objective_transition"
+    assert coordinate.descriptor_hash == descriptor.descriptor_hash
+    assert coordinate.settlement_event_ref == settlement.event_id
+    assert coordinate.settlement_payload_hash == settlement.payload_hash
+    assert coordinate.outcome_proposal_id == "proposal:objective-transition"
+    lifecycle = BiographicalLifecycleCatalog.from_yaml(
+        path=Path("configs/world_seed.yaml"),
+        timezone_name="Asia/Shanghai",
+    )
+    reading = lifecycle.context_at(
+        logical_at,
+        life_arcs=projection.life_arcs,
+        biographical_coordinates=projection.biographical_coordinates,
+    )
+    assert "academic:enrolled" not in reading.context_tags
+    assert "academic:graduated" in reading.context_tags
+    assert reading.academic_phase is None
+
+    reopened = SQLiteWorldLedger(
+        path=tmp_path / "objective-transition.sqlite",
+        world_id=world_id,
+    )
+    assert reopened.project().biographical_coordinates == (
+        coordinate,
+    )
+    tampered = projection.model_dump(mode="python")
+    changed = BiographicalCoordinateReplacement.create(
+        coordinate_ref="biography:education",
+        summary="被篡改成了另一项客观结果。",
+        context_tags=("academic:not_enrolled", "calendar:not_enrolled"),
+        replaces_context_tag_prefixes=("academic:", "calendar:"),
+        privacy_class="personal",
+    )
+    coordinate_value = dict(tampered["biographical_coordinates"][0])
+    coordinate_value.update(changed.model_dump(mode="python"))
+    tampered["biographical_coordinates"] = (coordinate_value,)
+    with pytest.raises(ValueError, match="exact settlement authority"):
+        LedgerProjection.model_validate(tampered)
+
+
+def test_later_settlement_rebases_new_identity_onto_existing_coordinate_head(
+    tmp_path: Path,
+) -> None:
+    world_id = "world:biography:coordinate-rebase"
+    logical_at = datetime(2026, 7, 28, 4, 0, tzinfo=UTC)
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "coordinate-rebase.sqlite",
+        world_id=world_id,
+    )
+    clock = _clock_advance(
+        world_id=world_id,
+        event_id="clock:coordinate-rebase",
+        origin=logical_at - timedelta(minutes=10),
+        target=logical_at,
+    )
+    _commit_event(ledger, clock)
+    first = BiographicalCoordinateReplacement.create(
+        coordinate_ref="biography:occupation-first",
+        summary="第一项客观结果建立了当前职业坐标。",
+        context_tags=("occupation:first",),
+        replaces_context_tag_prefixes=("occupation:",),
+        privacy_class="private",
+    )
+    second = BiographicalCoordinateReplacement.create(
+        coordinate_ref="biography:occupation-stale-candidate",
+        summary="稍后结算的另一结果改变了同一职业坐标。",
+        context_tags=("occupation:second",),
+        replaces_context_tag_prefixes=("occupation:",),
+        privacy_class="personal",
+    )
+    _commit_settled_effect_occurrence(
+        ledger=ledger,
+        clock=clock,
+        occurrence_id="coordinate-first",
+        context_pack_ref="life-context:coordinate-first",
+        context_tags=("role:first",),
+        duration_days=30,
+        include_reviewed_life_arc_effect=False,
+        adopt_dynamic_life_direction=False,
+        objective_biographical_transition=first,
+    )
+    _commit_settled_effect_occurrence(
+        ledger=ledger,
+        clock=clock,
+        occurrence_id="coordinate-second",
+        context_pack_ref="life-context:coordinate-second",
+        context_tags=("role:second",),
+        duration_days=30,
+        include_reviewed_life_arc_effect=False,
+        adopt_dynamic_life_direction=False,
+        objective_biographical_transition=second,
+    )
+
+    coordinate = ledger.project().biographical_coordinates[0]
+    assert len(ledger.project().biographical_coordinates) == 1
+    assert coordinate.coordinate_ref == first.coordinate_ref
+    assert coordinate.context_tags == second.context_tags
+    assert coordinate.privacy_class == "personal"
+    assert coordinate.entity_revision == 2
+    reopened = SQLiteWorldLedger(
+        path=tmp_path / "coordinate-rebase.sqlite",
+        world_id=world_id,
+    )
+    assert reopened.project().biographical_coordinates == (coordinate,)
 
 
 def test_biography_derives_one_continuous_residence_and_active_arc_overrides_it() -> None:
@@ -315,7 +494,7 @@ def test_life_arc_is_event_sourced_and_cold_replays(tmp_path: Path) -> None:
 
     migrated = SQLiteWorldLedger(path=path, world_id=world_id)
     reopened = migrated.project()
-    assert reopened.reducer_bundle_version == "world-v2-reducers.47"
+    assert reopened.reducer_bundle_version == "world-v2-reducers.48"
     assert reopened.life_arcs == projected.life_arcs
     assert migrated.rebuild() == reopened
     migrated.close()
@@ -751,6 +930,13 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
     model = _CapturingLongLivedOutcomeModel(
         selected_ref=occurrence.candidate_outcomes[0].candidate_result_ref,
         invalid_first=True,
+        life_direction={
+            "coordinate_ref": "biography:direction.work",
+            "summary": "她决定认真试试把这类工作变成接下来真实的生活方向。",
+            "context_tags": ["direction.work:independent_editor"],
+            "replaces_context_tag_prefixes": ["direction.work:"],
+            "privacy_class": "personal",
+        },
     )
     capsules = _PinnedCapsuleCompiler(ledger=ledger)
     runtime = LifeAftermathRuntime(
@@ -842,7 +1028,7 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
     assert proposal.context_cursor is not None
     assert proposal.context_cursor.world_revision == proposal.evaluated_world_revision
     assert proposal.context_capsule_id == capsules.last_capsule.capsule_id
-    assert proposal.context_identity_version == "life-aftermath-context.2"
+    assert proposal.context_identity_version == "life-aftermath-context.3"
     assert proposal.decision_model_result_ref is not None
     assert proposal.decision_model_result_event_ref is not None
     assert proposal.decision_audit_proposal_event_ref is not None
@@ -855,6 +1041,14 @@ async def test_long_lived_outcome_is_atomic_and_restart_does_not_repeat_the_mode
     bound_choice = json.loads(semantic_audit["response_text"])
     assert bound_choice["candidate_result_ref"] == proposal.candidate_result_ref
     assert bound_choice["adopt_proposed_life_direction"] is False
+    assert bound_choice["character_life_direction"]["coordinate_ref"] == (
+        "biography:direction.work"
+    )
+    assert len(settled.biographical_coordinates) == 1
+    assert settled.biographical_coordinates[0].settlement_event_ref == (
+        settlement_ref.event_id
+    )
+    assert settled.biographical_coordinates[0].entity_revision == 1
 
 
 @pytest.mark.parametrize(
@@ -1393,6 +1587,8 @@ def test_selected_open_outcome_registers_npc_and_only_adopted_dynamic_arc_once(
         summary_content_ref=arc_ref,
         summary_payload_hash=life_content_payload_hash(arc_text),
         narrative_tags=("narrative:bookshop", "narrative:volunteering"),
+        context_tags=("occupation:independent_book_work",),
+        supersedes_context_tag_prefixes=("occupation:",),
         duration_days=21,
         privacy_class="personal",
     )
@@ -1454,8 +1650,65 @@ def test_selected_open_outcome_registers_npc_and_only_adopted_dynamic_arc_once(
     if adopt_direction:
         assert projection.life_arcs[0].arc_kind == "dynamic"
         assert projection.life_arcs[0].context_pack_ref == arc.summary_content_ref
-        assert projection.life_arcs[0].context_tags == arc.narrative_tags
+        assert projection.life_arcs[0].context_tags == tuple(
+            sorted({*arc.narrative_tags, *arc.context_tags})
+        )
+        assert projection.life_arcs[0].supersedes_context_tag_prefixes == (
+            "occupation:",
+        )
     assert not projection.pending_biographical_settlements
+
+
+def test_settled_open_outcome_materializes_a_replayable_attempt_only_place(
+    tmp_path: Path,
+) -> None:
+    world_id = "world:biography:open-place"
+    logical_at = datetime(2026, 8, 2, 5, 0, tzinfo=UTC)
+    path = tmp_path / "open-place.sqlite"
+    ledger = SQLiteWorldLedger(path=path, world_id=world_id)
+    clock = _clock_advance(
+        world_id=world_id,
+        event_id="clock:open-place",
+        origin=logical_at - timedelta(minutes=10),
+        target=logical_at,
+    )
+    _commit_event(ledger, clock)
+    place = ProvisionalPlaceIntroductionDescriptor.create(
+        provisional_place_ref="provisional:place:user-mentioned-shop",
+        summary_content_ref="content:open-life:place:user-mentioned-shop",
+        summary_payload_hash=life_content_payload_hash(
+            "用户曾提到的一家店；这次结算只建立可尝试到访的地点，不证明营业或到访。"
+        ),
+        narrative_tags=("narrative:user_influence",),
+        timezone_name="Asia/Shanghai",
+        privacy_class="personal",
+    )
+
+    settlement, _ = _commit_settled_effect_occurrence(
+        ledger=ledger,
+        clock=clock,
+        occurrence_id="occurrence:open-place",
+        context_pack_ref="unused:open-place",
+        context_tags=("unused:open-place",),
+        duration_days=1,
+        provisional_place_introductions=(place,),
+        include_reviewed_life_arc_effect=False,
+    )
+
+    projected = ledger.project()
+    assert len(projected.world_places) == 1
+    materialized = projected.world_places[0]
+    assert materialized.location_ref.startswith("location:open-life:")
+    assert materialized.source_event_ref == settlement.event_id
+    assert materialized.effect_descriptor_hash == place.descriptor_hash
+    assert materialized.access_assurance == "attempt_only"
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=world_id)
+    try:
+        assert reopened.project().world_places == projected.world_places
+    finally:
+        reopened.close()
 
 
 class _NoNpcCatalog:
@@ -1488,6 +1741,7 @@ class _CapturingLongLivedOutcomeModel:
         fail_calls: int = 0,
         invalid_first: bool = False,
         invalid_responses: int = 0,
+        life_direction: dict[str, object] | None = None,
     ) -> None:
         self._selected_ref = selected_ref
         self._fail_first = fail_first
@@ -1497,6 +1751,7 @@ class _CapturingLongLivedOutcomeModel:
             invalid_responses,
             1 if invalid_first else 0,
         )
+        self._life_direction = life_direction
         self.calls = 0
         self.last_material: dict[str, object] = {}
 
@@ -1516,7 +1771,7 @@ class _CapturingLongLivedOutcomeModel:
         return json.dumps(
             {
                 "candidate_result_ref": self._selected_ref,
-                "adopt_proposed_life_direction": False,
+                "character_life_direction": self._life_direction,
             }
         )
 
@@ -1710,8 +1965,12 @@ def _commit_settled_effect_occurrence(
     provisional_npc_introductions: tuple[
         ProvisionalNpcIntroductionDescriptor, ...
     ] = (),
+    provisional_place_introductions: tuple[
+        ProvisionalPlaceIntroductionDescriptor, ...
+    ] = (),
     include_reviewed_life_arc_effect: bool = True,
     adopt_dynamic_life_direction: bool | None = None,
+    objective_biographical_transition: BiographicalCoordinateReplacement | None = None,
 ) -> tuple[WorldEvent, FrozenLifeArcEffectDescriptor | None]:
     logical_at = clock.logical_time
     clock_ref = next(
@@ -1762,6 +2021,10 @@ def _commit_settled_effect_occurrence(
                 ),
                 dynamic_life_arc_context=dynamic_life_arc_context,
                 provisional_npc_introductions=provisional_npc_introductions,
+                provisional_place_introductions=provisional_place_introductions,
+                objective_biographical_transition=(
+                    objective_biographical_transition
+                ),
             ),
         ),
         visibility="personal",

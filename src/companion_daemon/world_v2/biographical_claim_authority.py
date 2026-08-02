@@ -172,26 +172,65 @@ def biographical_coordinate_authorities(
                 )
             )
         active_life_arcs = value.get("active_life_arcs")
-        if not isinstance(active_life_arcs, list):
+        if isinstance(active_life_arcs, list):
+            for arc in active_life_arcs:
+                if not isinstance(arc, dict):
+                    continue
+                arc_id = arc.get("arc_id")
+                if not isinstance(arc_id, str) or not arc_id:
+                    continue
+                semantic_arc = {
+                    field: arc[field]
+                    for field in _ACTIVE_ARC_SEMANTIC_FIELDS
+                    if field in arc and arc[field] is not None
+                }
+                authorities.append(
+                    _coordinate(
+                        parent_item_ref=parent_item_ref,
+                        scope="current_world",
+                        field_path=f"/active_life_arcs/{arc_id}",
+                        logical_at=logical_at,
+                        value=semantic_arc,
+                    )
+                )
+        settled = value.get("settled_biographical_coordinates")
+        if not isinstance(settled, list):
             continue
-        for arc in active_life_arcs:
-            if not isinstance(arc, dict):
+        for coordinate in settled:
+            if not isinstance(coordinate, dict):
                 continue
-            arc_id = arc.get("arc_id")
-            if not isinstance(arc_id, str) or not arc_id:
+            coordinate_ref = coordinate.get("coordinate_ref")
+            privacy_class = coordinate.get("privacy_class")
+            # A private self-state may guide deliberation, but only explicitly
+            # shareable coordinates grant an expression claim capability.
+            if (
+                not isinstance(coordinate_ref, str)
+                or not coordinate_ref
+                or privacy_class not in {"public", "shareable", "personal"}
+            ):
                 continue
-            semantic_arc = {
-                field: arc[field]
-                for field in _ACTIVE_ARC_SEMANTIC_FIELDS
-                if field in arc and arc[field] is not None
+            semantic_coordinate = {
+                field: coordinate[field]
+                for field in (
+                    "coordinate_ref",
+                    "authority_kind",
+                    "summary",
+                    "context_tags",
+                    "replaces_context_tag_prefixes",
+                    "privacy_class",
+                    "settlement_event_ref",
+                )
+                if field in coordinate and coordinate[field] is not None
             }
             authorities.append(
                 _coordinate(
                     parent_item_ref=parent_item_ref,
                     scope="current_world",
-                    field_path=f"/active_life_arcs/{arc_id}",
+                    field_path=(
+                        "/settled_biographical_coordinates/" + coordinate_ref
+                    ),
                     logical_at=logical_at,
-                    value=semantic_arc,
+                    value=semantic_coordinate,
                 )
             )
     return tuple(

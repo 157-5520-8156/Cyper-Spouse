@@ -320,7 +320,12 @@ class BiographicalLifecycleRuntime:
                 effect.summary_content_ref if dynamic else effect.context_pack_ref
             ),
             context_tags=(
-                effect.narrative_tags if dynamic else effect.context_tags
+                tuple(sorted({*effect.narrative_tags, *effect.context_tags}))
+                if dynamic
+                else effect.context_tags
+            ),
+            supersedes_context_tag_prefixes=(
+                effect.supersedes_context_tag_prefixes if dynamic else ()
             ),
             effect_descriptor_hash=effect.descriptor_hash,
             status="active",
@@ -521,10 +526,24 @@ class BiographicalLifecycleRuntime:
         trace_id: str,
         correlation_id: str,
     ) -> tuple[tuple[WorldEvent, ...], tuple[str, ...]]:
-        context = self._catalog.biographical_context_at(
-            instant=logical_time,
-            life_arcs=life_arcs,
-        )
+        try:
+            context = self._catalog.biographical_context_at(
+                instant=logical_time,
+                life_arcs=life_arcs,
+                biographical_coordinates=getattr(
+                    projection, "biographical_coordinates", ()
+                ),
+            )
+        except TypeError as exc:
+            # Narrow compatibility for fixture/plugin catalogs implementing
+            # the pre-coordinate read protocol. The production catalog accepts
+            # the new argument and never enters this branch.
+            if "biographical_coordinates" not in str(exc):
+                raise
+            context = self._catalog.biographical_context_at(
+                instant=logical_time,
+                life_arcs=life_arcs,
+            )
         desired = {
             item.npc_id: item for item in self._catalog.contextual_npcs(context)
         }

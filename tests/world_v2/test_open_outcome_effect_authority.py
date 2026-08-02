@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from companion_daemon.world_v2.schemas import (
+    BiographicalCoordinateReplacement,
     CommittedWorldEventRef,
     DynamicLifeArcContextDescriptor,
     EvidenceRef,
@@ -14,6 +15,7 @@ from companion_daemon.world_v2.schemas import (
     OutcomeProposalProjection,
     ProjectionCursor,
     ProvisionalNpcIntroductionDescriptor,
+    ProvisionalPlaceIntroductionDescriptor,
     RecordedWorldDrawBinding,
     WorldEvent,
     WorldOccurrenceProjection,
@@ -94,6 +96,19 @@ def test_open_outcome_effect_hash_detects_descriptor_tampering() -> None:
         DynamicLifeArcContextDescriptor.model_validate(raw)
 
 
+def test_dynamic_life_arc_cannot_replace_non_biographical_authority() -> None:
+    with pytest.raises(ValidationError, match="safe current coordinate"):
+        DynamicLifeArcContextDescriptor.create(
+            summary_content_ref="content:arc:unsafe-coordinate",
+            summary_payload_hash="a" * 64,
+            narrative_tags=("narrative:unsafe_coordinate",),
+            context_tags=("relationship:rewritten",),
+            supersedes_context_tag_prefixes=("relationship:",),
+            duration_days=None,
+            privacy_class="personal",
+        )
+
+
 def test_open_outcome_candidate_rejects_duplicate_provisional_entity_refs() -> None:
     npc = ProvisionalNpcIntroductionDescriptor.create(
         provisional_entity_ref="provisional:npc:one",
@@ -112,6 +127,27 @@ def test_open_outcome_candidate_rejects_duplicate_provisional_entity_refs() -> N
             privacy_class="personal",
             causal_authority="world_contingency",
             provisional_npc_introductions=(npc, npc),
+        )
+
+
+def test_immutable_objective_transition_cannot_claim_character_direction_coordinate() -> None:
+    transition = BiographicalCoordinateReplacement.create(
+        coordinate_ref="biography:direction.creative-work",
+        summary="她想把创作当作长期方向。",
+        context_tags=("work:creative",),
+        replaces_context_tag_prefixes=("work:",),
+        privacy_class="personal",
+    )
+
+    with pytest.raises(ValidationError, match="character direction state"):
+        OutcomeCandidateDescriptor(
+            candidate_result_ref="candidate:objective-direction",
+            result_id="result:objective-direction",
+            result_payload_ref="content:objective-direction",
+            result_payload_hash="a" * 64,
+            privacy_class="personal",
+            causal_authority="world_contingency",
+            objective_biographical_transition=transition,
         )
 
 
@@ -163,6 +199,138 @@ def test_occurrence_candidate_matrix_has_one_resolution_authority() -> None:
             visibility="personal",
             status="committed",
         )
+
+
+def test_character_choice_with_only_provisional_place_requires_model_authority() -> None:
+    now = datetime(2026, 7, 29, tzinfo=UTC)
+    source = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:place-choice-observed",
+        world_id="world:place-choice",
+        event_type="ClockAdvanced",
+        logical_time=now,
+        created_at=now,
+        actor="worker:test",
+        source="test",
+        trace_id="trace:place-choice",
+        causation_id="cause:place-choice",
+        correlation_id="correlation:place-choice",
+        idempotency_key="place-choice:clock",
+        payload={"advanced_to": now.isoformat()},
+    )
+    place = ProvisionalPlaceIntroductionDescriptor.create(
+        provisional_place_ref="provisional:place:quiet-cafe",
+        summary_content_ref="content:place:quiet-cafe",
+        summary_payload_hash="a" * 64,
+        narrative_tags=("narrative:quiet_cafe",),
+        timezone_name="Asia/Shanghai",
+        privacy_class="personal",
+    )
+    candidate = OutcomeCandidateDescriptor(
+        candidate_result_ref="candidate:place-choice",
+        result_id="result:place-choice",
+        result_payload_ref="content:place-choice",
+        result_payload_hash="b" * 64,
+        privacy_class="personal",
+        causal_authority="character_choice",
+        provisional_place_introductions=(place,),
+    )
+    occurrence = WorldOccurrenceProjection(
+        occurrence_id="occurrence:place-choice",
+        entity_revision=2,
+        trigger_ref="plan:place-choice",
+        participant_refs=("actor:companion",),
+        time_window={
+            "opens_at": now - timedelta(minutes=5),
+            "closes_at": now + timedelta(hours=1),
+        },
+        candidate_outcome_refs=(candidate.candidate_result_ref,),
+        candidate_outcomes=(candidate,),
+        observation_refs=("observation:place-choice",),
+        visibility="personal",
+        status="active",
+        activated_at=now - timedelta(minutes=1),
+    )
+    state = ReducerState(
+        logical_time=now,
+        committed_world_event_refs=(
+            CommittedWorldEventRef(
+                event_id=source.event_id,
+                event_type=source.event_type,
+                world_revision=1,
+                payload_hash=source.payload_hash,
+                logical_time=now,
+            ),
+        ),
+        world_occurrences=(occurrence,),
+        outcome_observations=(
+            OutcomeObservationProjection(
+                observation_id="observation:place-choice",
+                occurrence_id=occurrence.occurrence_id,
+                source_kind="committed_world_event",
+                source_refs=(source.event_id,),
+                observed_payload_ref=source.event_id,
+                observed_payload_hash=source.payload_hash,
+                observed_at=now,
+                confidence_bp=10_000,
+            ),
+        ),
+    )
+    change_id = "change:place-choice"
+    payload = OutcomeProposalRecordedPayload(
+        outcome_proposal_id="proposal:place-choice",
+        decision_proposal_id="proposal:place-choice",
+        change_id=change_id,
+        occurrence_id=occurrence.occurrence_id,
+        evaluated_entity_revision=occurrence.entity_revision,
+        evaluated_world_revision=1,
+        trigger_ref=occurrence.trigger_ref,
+        candidate_result_ref=candidate.candidate_result_ref,
+        proposed_result_id=candidate.result_id,
+        proposed_result_payload_ref=candidate.result_payload_ref,
+        proposed_result_payload_hash=candidate.result_payload_hash,
+        proposed_change_hash=outcome_mutation_hash(
+            change_id=change_id,
+            occurrence_id=occurrence.occurrence_id,
+            evaluated_entity_revision=occurrence.entity_revision,
+            evaluated_world_revision=1,
+            candidate_result_ref=candidate.candidate_result_ref,
+            result_id=candidate.result_id,
+            result_payload_ref=candidate.result_payload_ref,
+            result_payload_hash=candidate.result_payload_hash,
+            observation_refs=("observation:place-choice",),
+        ),
+        observation_refs=("observation:place-choice",),
+        evidence_refs=(
+            EvidenceRef(
+                ref_id=source.event_id,
+                evidence_type="committed_world_event",
+                claim_purpose="life_transition",
+                source_world_revision=1,
+                immutable_hash=source.payload_hash,
+            ),
+        ),
+        confidence_bp=10_000,
+        expires_at=now + timedelta(hours=1),
+    )
+    proposal_event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:proposal:place-choice",
+        world_id="world:place-choice",
+        event_type="OutcomeProposalRecorded",
+        logical_time=now,
+        created_at=now,
+        actor="worker:test",
+        source="test",
+        trace_id="trace:place-choice",
+        causation_id=source.event_id,
+        correlation_id="correlation:place-choice",
+        idempotency_key="proposal:place-choice",
+        payload=payload.model_dump(mode="json"),
+    )
+
+    with pytest.raises(ValueError, match="causal authority"):
+        reduce_event(state, proposal_event)
 
 
 def test_world_contingency_proposal_requires_exact_recorded_weighted_draw() -> None:

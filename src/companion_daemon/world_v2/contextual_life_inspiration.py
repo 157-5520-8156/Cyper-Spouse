@@ -3,11 +3,11 @@
 This lane does not look for place words, requests, or any other semantic
 category in deterministic code.  A recent user observation, committed fact,
 or accepted memory merely opens one consideration.  The character model may
-form a free-text aspiration or decline it.  A later consideration lets the
-same character choose among *reviewed and currently feasible* future
-openings.  Consequently an arbitrary place name can influence her intentions,
-but cannot become a visited-place fact without an executable reviewed opening
-and the ordinary activity settlement pipeline.
+form a free-text aspiration or decline it.  The aspiration remains open input
+to ordinary Life Development; this lane no longer converts it through a fixed
+future-opening catalogue.  Consequently an arbitrary place name can influence
+her intentions, but cannot become a visited-place fact without a freely chosen
+plan and the ordinary occurrence settlement pipeline.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ from .life_author_runtime import (
     LifeContextCapsuleCompiler,
     compile_life_decision_context,
 )
-from .life_author_seed import ReviewedLifeSeedCatalog, ReviewedLifeSeedFutureCandidate
 from .schema_core import FrozenModel, PrivacyClass
 from .schemas import (
     AspirationProjection,
@@ -106,17 +105,6 @@ class _FormationDecision(FrozenModel):
         return self
 
 
-class _PlanDecision(FrozenModel):
-    decision: Literal["select", "no_op"]
-    candidate_token: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-
-    @model_validator(mode="after")
-    def shape_matches_decision(self) -> "_PlanDecision":
-        if (self.decision == "select") != (self.candidate_token is not None):
-            raise ValueError("plan selection must bind exactly one candidate")
-        return self
-
-
 class ContextualLifeInspirationRuntime:
     """Turn interaction evidence into character-owned, executable influence."""
 
@@ -124,11 +112,9 @@ class ContextualLifeInspirationRuntime:
         self,
         *,
         ledger,
-        catalog: ReviewedLifeSeedCatalog,
         model: LifeAuthorModel,
         capsule_compiler: LifeContextCapsuleCompiler,
         source_material_compiler: ContextualLifeSourceMaterialCompiler,
-        plan_committer: AspirationRuntime,
         owner_actor_ref: str,
         reviewed_followup: AspirationRuntime | None = None,
         actor: str = "worker:world-v2:contextual-life-inspiration",
@@ -136,11 +122,9 @@ class ContextualLifeInspirationRuntime:
         if not owner_actor_ref or not actor:
             raise ValueError("contextual life inspiration requires owner and actor")
         self._ledger = ledger
-        self._catalog = catalog
         self._model = model
         self._capsules = capsule_compiler
         self._source_material = source_material_compiler
-        self._plan_committer = plan_committer
         self._reviewed_followup = reviewed_followup
         self._owner = owner_actor_ref
         self._actor = actor
@@ -183,13 +167,14 @@ class ContextualLifeInspirationRuntime:
             logical_time=wake_event.logical_time,
         )
 
-        # Existing inspirations get their character-owned planning chance
-        # before a new source is considered.  This prevents a stream of user
-        # messages from starving older intentions.
-        planned = await self._plan_one(wake=wake, trace_id=trace_id, correlation_id=correlation_id)
-        if planned is not None and planned.status == "planned":
-            return planned
-
+        # Contextual sources may become character-authored inspirations, but
+        # production must not translate those inspirations through the legacy
+        # reviewed future-opening catalogue.  Active inspirations remain
+        # visible to the ordinary open Life Development deliberation, where a
+        # World Author may describe external feasibility and the Character
+        # Model remains free to ignore, revisit, reshape, or act.  Historical
+        # contextual_life_plan Proposals remain replayable; this runtime simply
+        # no longer produces new ones.
         formed = await self._form_one(wake=wake, trace_id=trace_id, correlation_id=correlation_id)
         if formed.status in {"formed", "deferred"}:
             return formed
@@ -203,7 +188,7 @@ class ContextualLifeInspirationRuntime:
             reviewed_status = getattr(reviewed, "status", None)
             if isinstance(reviewed_status, str) and reviewed_status:
                 return formed.model_copy(update={"reviewed_followup_status": reviewed_status})
-        return planned or formed
+        return formed
 
     async def _form_one(
         self, *, wake, trace_id: str, correlation_id: str
@@ -446,264 +431,6 @@ class ContextualLifeInspirationRuntime:
             aspiration_id=aspiration_id,
         )
 
-    async def _plan_one(
-        self, *, wake, trace_id: str, correlation_id: str
-    ) -> ContextualLifeInspirationResult | None:
-        projection = self._ledger.project()
-        aspirations = tuple(
-            item
-            for item in projection.aspirations
-            if item.owner_actor_ref == self._owner
-            and item.status == "active"
-            and item.seed_id.startswith("contextual:")
-        )
-        for aspiration in sorted(aspirations, key=lambda item: item.planted_at):
-            local_date = self._catalog.localize(wake.logical_time).date().isoformat()
-            check_id = "event:contextual-life-plan-check:" + _digest(
-                {
-                    "world_id": self._ledger.world_id,
-                    "aspiration_id": aspiration.aspiration_id,
-                    "local_date": local_date,
-                    "catalog_version": self._catalog.version,
-                    "catalog_hash": self._catalog.catalog_hash,
-                }
-            )
-            existing_check = self._ledger.lookup_event_commit(check_id)
-            if existing_check is None:
-                # Replay compatibility for decisions written before catalog
-                # identity joined the consideration epoch.  A legacy decision
-                # is reusable only under its exact catalog; after a reviewed
-                # catalog upgrade the character gets a fresh bounded choice
-                # instead of being stuck in deferred for the rest of the day.
-                legacy_check_id = "event:contextual-life-plan-check:" + _digest(
-                    {
-                        "world_id": self._ledger.world_id,
-                        "aspiration_id": aspiration.aspiration_id,
-                        "local_date": local_date,
-                    }
-                )
-                legacy = self._ledger.lookup_event_commit(legacy_check_id)
-                if legacy is not None:
-                    legacy_payload = legacy[0].payload()
-                    if (
-                        legacy_payload.get("catalog_version") == self._catalog.version
-                        and legacy_payload.get("catalog_hash") == self._catalog.catalog_hash
-                    ):
-                        existing_check = legacy
-            if existing_check is not None:
-                existing_payload = existing_check[0].payload()
-                if existing_payload.get("decision") != "select":
-                    continue
-                if (
-                    existing_payload.get("catalog_version") != self._catalog.version
-                    or existing_payload.get("catalog_hash") != self._catalog.catalog_hash
-                ):
-                    return ContextualLifeInspirationResult(
-                        status="deferred",
-                        reason_code="contextual_life_inspiration.recorded_catalog_changed",
-                        aspiration_id=aspiration.aspiration_id,
-                    )
-                slot = existing_payload.get("slot")
-                if not isinstance(slot, dict):
-                    return ContextualLifeInspirationResult(
-                        status="deferred",
-                        reason_code="contextual_life_inspiration.recorded_plan_is_incomplete",
-                        aspiration_id=aspiration.aspiration_id,
-                    )
-                try:
-                    committed = self._plan_committer.commit_reviewed_crystallization(
-                        aspiration_id=aspiration.aspiration_id,
-                        slot=slot,
-                        wake=wake,
-                        check_event_ref=existing_check[0].event_id,
-                        trace_id=trace_id,
-                        correlation_id=correlation_id,
-                    )
-                except ConcurrencyConflict:
-                    committed = False
-                if not committed:
-                    return ContextualLifeInspirationResult(
-                        status="deferred",
-                        reason_code="contextual_life_inspiration.plan_commit_deferred",
-                        aspiration_id=aspiration.aspiration_id,
-                    )
-                crystallized = next(
-                    item
-                    for item in self._ledger.project().aspirations
-                    if item.aspiration_id == aspiration.aspiration_id
-                )
-                return ContextualLifeInspirationResult(
-                    status="planned",
-                    reason_code="contextual_life_inspiration.recorded_plan_recovered",
-                    aspiration_id=aspiration.aspiration_id,
-                    plan_event_ref=crystallized.crystallized_plan_ref,
-                )
-            planted = self._ledger.lookup_event_commit(aspiration.planted_event_ref)
-            if planted is None or planted[0].event_type != "AspirationPlanted":
-                return ContextualLifeInspirationResult(
-                    status="deferred",
-                    reason_code="contextual_life_inspiration.plan_source_unavailable",
-                    aspiration_id=aspiration.aspiration_id,
-                )
-            if not retry_is_due(
-                projection,
-                lane="planning",
-                source_event_ref=aspiration.planted_event_ref,
-            ):
-                return ContextualLifeInspirationResult(
-                    status="deferred",
-                    reason_code="contextual_life_inspiration.plan_retry_wait",
-                    aspiration_id=aspiration.aspiration_id,
-                )
-            candidates = self._catalog.future_candidates_at(
-                instant=wake.logical_time,
-                plans=tuple(
-                    item for item in projection.plans if item.owner_actor_ref == self._owner
-                ),
-                npcs=projection.npcs,
-                life_arcs=projection.life_arcs,
-            )
-            if not candidates:
-                return ContextualLifeInspirationResult(
-                    status="no_opening",
-                    reason_code="contextual_life_inspiration.no_reviewed_future_opening",
-                    aspiration_id=aspiration.aspiration_id,
-                )
-            query = query_from_projection(
-                projection,
-                actor_ref=self._owner,
-                trigger_ref=aspiration.planted_event_ref,
-            )
-            capsule = self._capsules.compile_for_deliberation(query).capsule
-            context_cursor = ProjectionCursor(
-                world_revision=capsule.world_revision,
-                deliberation_revision=capsule.deliberation_revision,
-                ledger_sequence=capsule.ledger_sequence,
-            )
-            try:
-                decision, raw = await self._deliberate_plan(
-                    aspiration=aspiration,
-                    candidates=candidates,
-                    context=compile_life_decision_context(capsule),
-                )
-            except LifeAuthorModelFailure:
-                try:
-                    record_technical_failure(
-                        ledger=self._ledger,
-                        projection=projection,
-                        lane="planning",
-                        source_event_ref=aspiration.planted_event_ref,
-                        source_payload_hash=planted[0].payload_hash,
-                        context_cursor=context_cursor,
-                        failure_code="planning_model_unavailable",
-                        actor=self._actor,
-                        trace_id=trace_id,
-                        correlation_id=correlation_id,
-                    )
-                except ConcurrencyConflict:
-                    return ContextualLifeInspirationResult(
-                        status="deferred",
-                        reason_code=(
-                            "contextual_life_inspiration.plan_context_cursor_stale"
-                        ),
-                        aspiration_id=aspiration.aspiration_id,
-                    )
-                return ContextualLifeInspirationResult(
-                    status="deferred",
-                    reason_code="contextual_life_inspiration.plan_model_unavailable",
-                    aspiration_id=aspiration.aspiration_id,
-                )
-            selected = next(
-                (item for item in candidates if item.token == decision.candidate_token),
-                None,
-            )
-            payload = {
-                "proposal_id": check_id.removeprefix("event:"),
-                "proposal_kind": "contextual_life_plan",
-                "decision": decision.decision,
-                "trigger_id": aspiration.planted_event_ref,
-                "evaluated_world_revision": context_cursor.world_revision,
-                "aspiration_id": aspiration.aspiration_id,
-                "aspiration_source_event_ref": aspiration.source_event_ref,
-                "candidate_token": decision.candidate_token,
-                "reviewed_opening_id": selected.opening.id if selected else None,
-                "slot": self._slot(selected) if selected else None,
-                "catalog_version": self._catalog.version,
-                "catalog_hash": self._catalog.catalog_hash,
-                "context_identity_version": "contextual-life-plan-context.1",
-                "context_capsule_id": capsule.capsule_id,
-                "context_model_content_hash": hashlib.sha256(
-                    capsule.model_content_json.encode()
-                ).hexdigest(),
-                "context_snapshot_hash": capsule.snapshot_hash,
-                "context_cursor": context_cursor.model_dump(mode="json"),
-                "model": self._model_id,
-                "raw_output_hash": _digest(raw),
-            }
-            event = WorldEvent.from_payload(
-                schema_version="world-v2.1",
-                event_id=check_id,
-                world_id=self._ledger.world_id,
-                event_type="ProposalRecorded",
-                logical_time=projection.logical_time,
-                created_at=projection.logical_time,
-                actor=self._actor,
-                source="world-v2:contextual-life-inspiration",
-                trace_id=trace_id,
-                causation_id=aspiration.planted_event_ref,
-                correlation_id=correlation_id,
-                idempotency_key="contextual-life-plan:" + _digest(check_id),
-                payload=payload,
-            )
-            try:
-                self._ledger.commit_at_cursor(
-                    (event,),
-                    expected_cursor=context_cursor,
-                    commit_id="commit:" + check_id,
-                )
-            except ConcurrencyConflict:
-                return ContextualLifeInspirationResult(
-                    status="deferred",
-                    reason_code="contextual_life_inspiration.plan_context_cursor_stale",
-                    aspiration_id=aspiration.aspiration_id,
-                )
-            if selected is None:
-                return ContextualLifeInspirationResult(
-                    status="declined",
-                    reason_code="contextual_life_inspiration.plan_declined",
-                    aspiration_id=aspiration.aspiration_id,
-                )
-            slot = self._slot(selected)
-            try:
-                committed = self._plan_committer.commit_reviewed_crystallization(
-                    aspiration_id=aspiration.aspiration_id,
-                    slot=slot,
-                    wake=wake,
-                    check_event_ref=event.event_id,
-                    trace_id=trace_id,
-                    correlation_id=correlation_id,
-                )
-            except ConcurrencyConflict:
-                committed = False
-            if not committed:
-                return ContextualLifeInspirationResult(
-                    status="deferred",
-                    reason_code="contextual_life_inspiration.plan_commit_deferred",
-                    aspiration_id=aspiration.aspiration_id,
-                )
-            crystallized = next(
-                item
-                for item in self._ledger.project().aspirations
-                if item.aspiration_id == aspiration.aspiration_id
-            )
-            return ContextualLifeInspirationResult(
-                status="planned",
-                reason_code="contextual_life_inspiration.reviewed_plan_accepted",
-                aspiration_id=aspiration.aspiration_id,
-                plan_event_ref=crystallized.crystallized_plan_ref,
-            )
-        return None
-
     def _next_source(self, projection) -> tuple[WorldEvent, object] | None:
         # Oldest-unconsidered is deliberate: new traffic cannot starve an
         # already-open source. Reducers maintain this compact ledger-ordered
@@ -787,73 +514,6 @@ class ContextualLifeInspirationRuntime:
             raise LifeAuthorModelFailure("contextual inspiration selected an unoffered source")
         return decision, raw
 
-    async def _deliberate_plan(
-        self,
-        *,
-        aspiration: AspirationProjection,
-        candidates: tuple[ReviewedLifeSeedFutureCandidate, ...],
-        context: dict[str, object],
-    ) -> tuple[_PlanDecision, str]:
-        raw = await self._complete(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Decide as the character whether one source-bound inspiration should now "
-                        "become one concrete future plan. Every offered opening and location is "
-                        "reviewed and currently feasible; anything not offered is not executable "
-                        "yet. You may select any one offered token or no_op. Do not substitute a "
-                        "place, claim a visit, or invent an outcome. Return exactly "
-                        '{"decision":"no_op"} or '
-                        '{"decision":"select","candidate_token":"offered token"}.'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "contextual_life_inspiration": {
-                                "aspiration_id": aspiration.aspiration_id,
-                                "text": aspiration.text,
-                                "source_event_ref": aspiration.source_event_ref,
-                                "held_since": aspiration.planted_at.isoformat(),
-                            },
-                            "reviewed_future_candidates": [
-                                {
-                                    "token": item.token,
-                                    "opening_id": item.opening.id,
-                                    "activity_kind": item.opening.activity_kind,
-                                    "location_ref": item.location_ref,
-                                    "target_local_date": item.target_local_date.isoformat(),
-                                    "local_window": item.local_window,
-                                    "privacy": item.opening.privacy,
-                                }
-                                for item in candidates
-                            ],
-                            "current_character_context": context,
-                        },
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                },
-            ]
-        )
-        try:
-            parsed = json.loads(raw)
-            decision = _PlanDecision.model_validate(parsed)
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise LifeAuthorModelFailure(
-                "contextual inspiration planning returned an invalid decision"
-            ) from exc
-        if decision.candidate_token not in {
-            None,
-            *(item.token for item in candidates),
-        }:
-            raise LifeAuthorModelFailure(
-                "contextual inspiration selected an unoffered future opening"
-            )
-        return decision, raw
-
     async def _complete(self, messages: list[dict[str, str]]) -> str:
         try:
             raw = await self._model.complete(messages, temperature=0.3)
@@ -878,26 +538,6 @@ class ContextualLifeInspirationRuntime:
             source_world_revision=source.source_world_revision,
             immutable_hash=source.source_payload_hash,
         )
-
-    def _slot(self, candidate: ReviewedLifeSeedFutureCandidate) -> dict[str, object]:
-        return {
-            "opening_id": candidate.opening.id,
-            "activity_kind": candidate.opening.activity_kind,
-            "candidate_token": candidate.token,
-            "target_local_date": candidate.target_local_date.isoformat(),
-            "local_window": candidate.local_window,
-            "opens_at": candidate.opens_at.isoformat(),
-            "closes_at": candidate.closes_at.isoformat(),
-            "location_ref": candidate.location_ref,
-            "participant_ref": candidate.participant_ref,
-            "availability_hash": candidate.availability_hash,
-            "importance_bp": candidate.opening.importance_bp,
-            "duration_minutes": candidate.opening.duration_minutes,
-            "privacy": candidate.opening.privacy,
-            "policy_refs": list(
-                candidate.opening.policy_refs(catalog_version=self._catalog.version)
-            ),
-        }
 
 
 __all__ = [

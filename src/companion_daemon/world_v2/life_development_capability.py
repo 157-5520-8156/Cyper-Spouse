@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import timedelta
 
 from .life_author_seed import ReviewedLifeSeedCatalog
+from .life_content_store import ImmutableLifeContentStore
 from .life_development_draft import (
+    LifeDevelopmentBiographicalCoordinateCapability,
     LifeDevelopmentCapabilityManifest,
     LifeDevelopmentLocationCapability,
 )
@@ -44,6 +46,7 @@ class ProjectionLifeCapabilityManifestCompiler:
         catalog: ReviewedLifeSeedCatalog,
         max_future_days: int = 30,
         max_window_minutes: int = 12 * 60,
+        content_store: ImmutableLifeContentStore | None = None,
     ) -> None:
         if not owner_actor_ref:
             raise ValueError("life capability compiler requires an owner")
@@ -51,6 +54,7 @@ class ProjectionLifeCapabilityManifestCompiler:
         self._catalog = catalog
         self._max_future_days = max_future_days
         self._max_window_minutes = max_window_minutes
+        self._content_store = content_store
 
     def compile(
         self,
@@ -116,9 +120,47 @@ class ProjectionLifeCapabilityManifestCompiler:
                 str,
             )
         ]
+        for item in getattr(projection, "world_places", ()):
+            if (
+                getattr(item, "access_assurance", None) != "attempt_only"
+                or item.source_event_ref not in committed_ids
+            ):
+                continue
+            stored = (
+                self._content_store.read_exact(content_ref=item.stable_identity_ref)
+                if self._content_store is not None
+                else None
+            )
+            identity_is_exact = (
+                stored is not None
+                and stored.content_kind == "provisional_place_introduction"
+                and stored.content_payload_hash == item.summary_payload_hash
+            )
+            if not identity_is_exact:
+                # The settled event proves that a place identity exists, but
+                # planning must not use an opaque place whose descriptive
+                # bytes are unavailable or fail their immutable hash.
+                continue
+            assert stored is not None
+            location_capabilities.append(LifeDevelopmentLocationCapability(
+                location_ref=item.location_ref,
+                privacy_class=item.privacy_class,
+                availability_kind="settled_place",
+                timezone_name=item.timezone_name,
+                available_from=item.accepted_at,
+                now_allowed=True,
+                authority_refs=(item.source_event_ref,),
+                identity_content_ref=item.stable_identity_ref,
+                identity_summary=stored.text,
+                identity_payload_hash=stored.content_payload_hash,
+                narrative_tags=item.narrative_tags,
+            ))
         biography = self._catalog.biographical_context_at(
             instant=wake.logical_time,
             life_arcs=tuple(getattr(projection, "life_arcs", ())),
+            biographical_coordinates=tuple(
+                getattr(projection, "biographical_coordinates", ())
+            ),
         )
         location_capabilities.extend(
             LifeDevelopmentLocationCapability(
@@ -138,7 +180,6 @@ class ProjectionLifeCapabilityManifestCompiler:
             )
             for item in self._catalog.reviewed_locations
             if item.eligible_in_context(biography)
-            or item.future_entry_authorized
         )
         location_capabilities.extend(
             LifeDevelopmentLocationCapability(
@@ -219,6 +260,30 @@ class ProjectionLifeCapabilityManifestCompiler:
                 )
             ),
             entity_refs=tuple(sorted(entity_refs)),
+            biographical_context_tags=biography.context_tags,
+            biographical_coordinates=tuple(
+                LifeDevelopmentBiographicalCoordinateCapability(
+                    coordinate_ref=item.coordinate_ref,
+                    context_tags=item.context_tags,
+                    replaces_context_tag_prefixes=(
+                        item.replaces_context_tag_prefixes
+                    ),
+                    privacy_class=item.privacy_class,
+                    entity_revision=item.entity_revision,
+                    settlement_event_ref=item.settlement_event_ref,
+                )
+                for item in sorted(
+                    getattr(projection, "biographical_coordinates", ()),
+                    key=lambda value: value.coordinate_ref,
+                )
+            ),
+            active_aspiration_source_refs=tuple(
+                sorted(
+                    item.planted_event_ref
+                    for item in getattr(projection, "aspirations", ())
+                    if item.status == "active"
+                )
+            ),
             max_future_days=self._max_future_days,
             max_window_minutes=self._max_window_minutes,
         )

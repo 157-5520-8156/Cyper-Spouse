@@ -17,12 +17,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, ValidationError, computed_field, field_validator, model_validator
 
 from .schema_core import FrozenModel, PrivacyClass
-from .schemas import DueWindow, ProjectionCursor
+from .schemas import BiographicalCoordinateReplacement, DueWindow, ProjectionCursor
 
 
 _NARRATIVE_TAG = re.compile(r"^narrative:[a-z0-9][a-z0-9._-]{0,63}$")
 _LOCAL_NPC_REF_PATTERN = r"^local:npc:[a-z0-9][a-z0-9._-]{0,63}$"
 _LOCAL_NPC_REF = re.compile(_LOCAL_NPC_REF_PATTERN)
+_LOCAL_PLACE_REF_PATTERN = r"^local:place:[a-z0-9][a-z0-9._-]{0,63}$"
+_LOCAL_PLACE_REF = re.compile(_LOCAL_PLACE_REF_PATTERN)
 _LOCAL_WINDOW = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$")
 LIFE_DEVELOPMENT_PRIVACY_ORDER = (
     "public",
@@ -69,6 +71,7 @@ class LifeDevelopmentLocationCapability(FrozenModel):
         "reviewed_schedule",
         "current_presence",
         "accepted_plan",
+        "settled_place",
     ]
     timezone_name: str = Field(min_length=1, max_length=128)
     local_windows: tuple[str, ...] = ()
@@ -77,6 +80,26 @@ class LifeDevelopmentLocationCapability(FrozenModel):
     available_to: datetime | None = None
     now_allowed: bool = True
     authority_refs: tuple[str, ...] = Field(min_length=1, max_length=8)
+    identity_content_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        exclude_if=lambda value: value is None,
+    )
+    identity_summary: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1_000,
+        exclude_if=lambda value: value is None,
+    )
+    identity_payload_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
+    narrative_tags: tuple[str, ...] = Field(
+        default=(), max_length=16, exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def availability_shape_is_closed(self) -> "LifeDevelopmentLocationCapability":
@@ -107,7 +130,7 @@ class LifeDevelopmentLocationCapability(FrozenModel):
                 raise ValueError("current presence requires one ordered, finite authority interval")
             if not self.now_allowed:
                 raise ValueError("current presence must authorize the present")
-        else:
+        elif self.availability_kind == "accepted_plan":
             if (
                 self.local_windows
                 or self.weekdays
@@ -118,6 +141,30 @@ class LifeDevelopmentLocationCapability(FrozenModel):
                 raise ValueError("accepted plan requires one ordered absolute interval")
             if self.now_allowed:
                 raise ValueError("accepted plan authority is limited to its bound interval")
+        else:
+            if (
+                self.local_windows
+                or self.weekdays
+                or self.available_from is None
+                or self.available_to is not None
+                or not self.now_allowed
+            ):
+                raise ValueError(
+                    "settled place requires one open-ended attempt authority"
+                )
+        identity_values = (
+            self.identity_content_ref,
+            self.identity_summary,
+            self.identity_payload_hash,
+        )
+        if any(item is None for item in identity_values) and any(
+            item is not None for item in identity_values
+        ):
+            raise ValueError("location identity content binding must be complete")
+        if self.identity_summary is not None and self.availability_kind != "settled_place":
+            raise ValueError("only a settled place may expose model-visible identity content")
+        if self.narrative_tags != tuple(sorted(set(self.narrative_tags))):
+            raise ValueError("location narrative tags must be sorted and unique")
         if self.authority_refs != tuple(sorted(set(self.authority_refs))):
             raise ValueError("location capability authority refs must be sorted and unique")
         for value in (self.available_from, self.available_to):
@@ -128,24 +175,29 @@ class LifeDevelopmentLocationCapability(FrozenModel):
     @computed_field
     @property
     def capability_ref(self) -> str:
-        return "location-capability:" + _digest(
-            {
-                "availability_kind": self.availability_kind,
-                "available_from": (
-                    self.available_from.isoformat() if self.available_from is not None else None
-                ),
-                "available_to": (
-                    self.available_to.isoformat() if self.available_to is not None else None
-                ),
-                "authority_refs": self.authority_refs,
-                "local_windows": self.local_windows,
-                "location_ref": self.location_ref,
-                "now_allowed": self.now_allowed,
-                "privacy_class": self.privacy_class,
-                "timezone_name": self.timezone_name,
-                "weekdays": self.weekdays,
-            }
-        )
+        material: dict[str, object] = {
+            "availability_kind": self.availability_kind,
+            "available_from": (
+                self.available_from.isoformat() if self.available_from is not None else None
+            ),
+            "available_to": (
+                self.available_to.isoformat() if self.available_to is not None else None
+            ),
+            "authority_refs": self.authority_refs,
+            "local_windows": self.local_windows,
+            "location_ref": self.location_ref,
+            "now_allowed": self.now_allowed,
+            "privacy_class": self.privacy_class,
+            "timezone_name": self.timezone_name,
+            "weekdays": self.weekdays,
+        }
+        if self.identity_content_ref is not None:
+            material["identity_content_ref"] = self.identity_content_ref
+            material["identity_summary"] = self.identity_summary
+            material["identity_payload_hash"] = self.identity_payload_hash
+        if self.narrative_tags:
+            material["narrative_tags"] = self.narrative_tags
+        return "location-capability:" + _digest(material)
 
     def authorizes(self, *, timing_mode: str, window: DueWindow) -> bool:
         if self.availability_kind == "current_presence":
@@ -163,6 +215,11 @@ class LifeDevelopmentLocationCapability(FrozenModel):
                 and window.opens_at >= self.available_from
                 and window.closes_at <= self.available_to
             )
+        if self.availability_kind == "settled_place":
+            return (
+                self.available_from is not None
+                and window.opens_at >= self.available_from
+            )
         if timing_mode == "now" and not self.now_allowed:
             return False
         return _window_fits_local_schedule(
@@ -171,6 +228,23 @@ class LifeDevelopmentLocationCapability(FrozenModel):
             local_windows=self.local_windows,
             weekdays=self.weekdays,
         )
+
+
+class LifeDevelopmentBiographicalCoordinateCapability(FrozenModel):
+    """One current coordinate identity exposed for conflict-safe replacement.
+
+    It is not a menu of life directions.  It only lets an open model-authored
+    consequence reuse the stable identity of state that already owns a tag
+    namespace, so a later settlement can rebase instead of inventing a rival
+    coordinate.
+    """
+
+    coordinate_ref: str = Field(pattern=r"^biography:[a-z][a-z0-9._-]{0,63}$")
+    context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    replaces_context_tag_prefixes: tuple[str, ...] = Field(min_length=1, max_length=8)
+    privacy_class: PrivacyClass
+    entity_revision: int = Field(ge=1)
+    settlement_event_ref: str = Field(min_length=1)
 
 
 class LifeDevelopmentCapabilityManifest(FrozenModel):
@@ -187,6 +261,15 @@ class LifeDevelopmentCapabilityManifest(FrozenModel):
     grounding_refs: tuple[str, ...] = ()
     location_capabilities: tuple[LifeDevelopmentLocationCapability, ...] = ()
     entity_refs: tuple[str, ...] = ()
+    biographical_context_tags: tuple[str, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    biographical_coordinates: tuple[
+        LifeDevelopmentBiographicalCoordinateCapability, ...
+    ] = Field(default=(), exclude_if=lambda value: not value)
+    active_aspiration_source_refs: tuple[str, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     allow_external_observation_outcomes: bool = False
     max_future_days: int = Field(ge=1, le=366)
     max_window_minutes: int = Field(ge=5, le=7 * 24 * 60)
@@ -197,6 +280,8 @@ class LifeDevelopmentCapabilityManifest(FrozenModel):
             self.anchor_refs,
             self.grounding_refs,
             self.entity_refs,
+            self.biographical_context_tags,
+            self.active_aspiration_source_refs,
         ):
             if refs != tuple(sorted(set(refs))):
                 raise ValueError("life development capability refs must be sorted and unique")
@@ -211,6 +296,16 @@ class LifeDevelopmentCapabilityManifest(FrozenModel):
             )
         ):
             raise ValueError("life development location capabilities must be sorted and unique")
+        if self.biographical_coordinates != tuple(
+            sorted(
+                self.biographical_coordinates,
+                key=lambda item: item.coordinate_ref,
+            )
+        ):
+            raise ValueError("biographical coordinate capabilities must be sorted")
+        refs = tuple(item.coordinate_ref for item in self.biographical_coordinates)
+        if len(refs) != len(set(refs)):
+            raise ValueError("biographical coordinate capability refs must be unique")
         return self
 
     @property
@@ -301,10 +396,22 @@ class ProvisionalNpcDraft(FrozenModel):
         return self
 
 
-class DynamicLifeDirectionDraft(FrozenModel):
-    summary: str = Field(min_length=1, max_length=2_000)
-    narrative_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
-    duration_days: int = Field(ge=1, le=730)
+class ProvisionalPlaceDraft(FrozenModel):
+    """A model-authored place identity that becomes reusable only if settled.
+
+    This is not a destination catalogue or proof that the character visited.
+    The surrounding outcome supplies that meaning; settlement merely gives the
+    described place a stable identity and attempt-only future capability.
+    """
+
+    local_ref: str = Field(
+        min_length=1,
+        max_length=88,
+        pattern=_LOCAL_PLACE_REF_PATTERN,
+    )
+    summary: str = Field(min_length=1, max_length=1_000)
+    narrative_tags: tuple[str, ...] = Field(default=(), max_length=16)
+    timezone_name: str = Field(min_length=1, max_length=128)
     privacy_class: PrivacyClass
 
     @field_validator("narrative_tags", mode="before")
@@ -313,12 +420,19 @@ class DynamicLifeDirectionDraft(FrozenModel):
         return _canonicalize_string_set(value)
 
     @model_validator(mode="after")
-    def tags_are_open_narrative_refs(self) -> "DynamicLifeDirectionDraft":
+    def is_local_and_open_ended(self) -> "ProvisionalPlaceDraft":
+        if _LOCAL_PLACE_REF.fullmatch(self.local_ref) is None:
+            raise ValueError("provisional place ref must use local:place:<token>")
         if self.narrative_tags != tuple(sorted(set(self.narrative_tags))) or any(
             _NARRATIVE_TAG.fullmatch(item) is None for item in self.narrative_tags
         ):
-            raise ValueError("dynamic direction tags must be canonical narrative:* refs")
+            raise ValueError("provisional place tags must be canonical narrative:* refs")
+        try:
+            ZoneInfo(self.timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("provisional place timezone is unknown") from exc
         return self
+
 
 
 class LifeDevelopmentVisualLocationDraft(FrozenModel):
@@ -382,6 +496,52 @@ class LifeDevelopmentVisualEvidenceDraft(FrozenModel):
         return self
 
 
+class ObjectiveBiographicalTransitionDraft(FrozenModel):
+    """An objective coordinate consequence belonging to one candidate result.
+
+    The fields are open-ended. World Author may describe only a state made true
+    by that exact candidate branch; it cannot use this slot for a motive, plan,
+    or desired future.
+    """
+
+    coordinate_ref: str = Field(pattern=r"^biography:[a-z][a-z0-9._-]{0,63}$")
+    summary: str = Field(min_length=1, max_length=12_000)
+    context_tags: tuple[str, ...] = Field(min_length=1, max_length=16)
+    replaces_context_tag_prefixes: tuple[str, ...] = Field(min_length=1, max_length=8)
+    privacy_class: PrivacyClass = "personal"
+
+    @field_validator(
+        "context_tags", "replaces_context_tag_prefixes", mode="before"
+    )
+    @classmethod
+    def canonicalize_coordinates(cls, value: object) -> object:
+        return _canonicalize_string_set(value)
+
+    @model_validator(mode="after")
+    def objective_coordinate_is_structurally_closed(
+        self,
+    ) -> "ObjectiveBiographicalTransitionDraft":
+        if (
+            self.coordinate_ref.startswith("biography:direction.")
+            or any(item.startswith("direction.") for item in self.context_tags)
+            or any(
+                item.startswith("direction.")
+                for item in self.replaces_context_tag_prefixes
+            )
+        ):
+            raise ValueError(
+                "objective transition cannot author the character direction namespace"
+            )
+        BiographicalCoordinateReplacement.create(
+            coordinate_ref=self.coordinate_ref,
+            summary=self.summary,
+            context_tags=self.context_tags,
+            replaces_context_tag_prefixes=self.replaces_context_tag_prefixes,
+            privacy_class=self.privacy_class,
+        )
+        return self
+
+
 class LifeDevelopmentOutcomeDraft(FrozenModel):
     experienced_by_ref: str = Field(min_length=1, max_length=512)
     text: str = Field(min_length=1, max_length=12_000)
@@ -389,7 +549,9 @@ class LifeDevelopmentOutcomeDraft(FrozenModel):
     relative_plausibility_weight: int = Field(ge=1, le=1_000_000)
     claim_refs: tuple[str, ...] = Field(min_length=1, max_length=16)
     provisional_npcs: tuple[ProvisionalNpcDraft, ...] = Field(default=(), max_length=4)
-    dynamic_life_direction: DynamicLifeDirectionDraft | None = None
+    provisional_places: tuple[ProvisionalPlaceDraft, ...] = Field(default=(), max_length=4)
+    objective_biographical_transition: "ObjectiveBiographicalTransitionDraft | None" = None
+    dynamic_life_direction: None = None
     visual_evidence: LifeDevelopmentVisualEvidenceDraft | None = None
 
     @field_validator("claim_refs", mode="before")
@@ -404,6 +566,20 @@ class LifeDevelopmentOutcomeDraft(FrozenModel):
         refs = tuple(item.local_ref for item in self.provisional_npcs)
         if len(refs) != len(set(refs)):
             raise ValueError("outcome provisional NPC refs must be unique")
+        place_refs = tuple(item.local_ref for item in self.provisional_places)
+        if len(place_refs) != len(set(place_refs)):
+            raise ValueError("outcome provisional place refs must be unique")
+        if any(
+            _PRIVACY_RANK[item.privacy_class] < _PRIVACY_RANK[self.privacy_class]
+            for item in (*self.provisional_npcs, *self.provisional_places)
+        ) or (
+            self.objective_biographical_transition is not None
+            and _PRIVACY_RANK[
+                self.objective_biographical_transition.privacy_class
+            ]
+            < _PRIVACY_RANK[self.privacy_class]
+        ):
+            raise ValueError("outcome effect cannot weaken outcome privacy")
         if self.visual_evidence is not None:
             if not set(self.visual_evidence.claim_refs) <= set(self.claim_refs):
                 raise ValueError("outcome visual evidence must close over outcome claim refs")
@@ -566,12 +742,6 @@ class LifeDevelopmentPossibilityDraft(FrozenModel):
             and self.outcome_resolution_authority == "character_choice"
         ):
             raise ValueError("external contingency outcomes cannot be selected by the character")
-        if self.outcome_resolution_authority != "character_choice" and any(
-            item.dynamic_life_direction is not None for item in self.outcomes
-        ):
-            raise ValueError(
-                "dynamic life direction requires character-controlled outcome resolution"
-            )
         return self
 
 
@@ -593,6 +763,15 @@ class CharacterChoiceAcceptDraft(FrozenModel):
     opens_at: datetime | None = None
     closes_at: datetime | None = None
     participant_refs: tuple[str, ...] = Field(default=(), max_length=8)
+    crystallized_aspiration_source_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        description=(
+            "Exact planted_event_ref of an active pinned aspiration when this "
+            "accepted Plan concretizes it; null when it does not."
+        ),
+    )
 
     @model_validator(mode="after")
     def optional_window_is_complete(self) -> "CharacterChoiceAcceptDraft":
@@ -876,6 +1055,46 @@ def parse_world_author_draft(
                 "unsupported_claim_source",
                 "existing-world claim cites a ref absent from pinned grounding refs",
             )
+    visible_prefixes = {
+        item.split(":", 1)[0] + ":"
+        for item in manifest.biographical_context_tags
+        if ":" in item
+    }
+    for outcome in draft.outcomes:
+        for direction in (
+            outcome.dynamic_life_direction,
+            outcome.objective_biographical_transition,
+        ):
+            if direction is None:
+                continue
+            introduced_prefixes = {
+                item.split(":", 1)[0] + ":" for item in direction.context_tags
+            }
+            if not set(direction.replaces_context_tag_prefixes if isinstance(
+                direction, ObjectiveBiographicalTransitionDraft
+            ) else direction.supersedes_context_tag_prefixes) <= (
+                visible_prefixes | introduced_prefixes
+            ):
+                raise LifeDevelopmentDraftError(
+                    "unsupported_biographical_coordinate",
+                    "a replaced coordinate must be currently visible or established by the same outcome",
+                )
+        transition = outcome.objective_biographical_transition
+        if transition is None:
+            continue
+        overlapping = tuple(
+            item
+            for item in manifest.biographical_coordinates
+            if set(item.replaces_context_tag_prefixes)
+            & set(transition.replaces_context_tag_prefixes)
+        )
+        if any(item.coordinate_ref != transition.coordinate_ref for item in overlapping):
+            expected = tuple(sorted(item.coordinate_ref for item in overlapping))
+            raise LifeDevelopmentDraftError(
+                "stale_biographical_coordinate_identity",
+                "an objective transition overlaps current state and must reuse "
+                f"one of these coordinate_ref values: {expected}",
+            )
     return draft
 
 
@@ -987,6 +1206,7 @@ def parse_character_choice(
     raw: str,
     offered: LifeDevelopmentPossibilityDraft,
     offered_window: DueWindow,
+    active_aspiration_source_refs: tuple[str, ...] = (),
 ) -> CharacterChoiceDraft:
     if not isinstance(raw, str) or len(raw.encode("utf-8")) > 8_192:
         raise LifeDevelopmentDraftError(
@@ -1043,6 +1263,16 @@ def parse_character_choice(
             "character_timing_outside_envelope",
             "Character Model timing must stay within the offered window",
         )
+    if (
+        draft.crystallized_aspiration_source_ref is not None
+        and draft.crystallized_aspiration_source_ref
+        not in active_aspiration_source_refs
+    ):
+        raise LifeDevelopmentDraftError(
+            "unsupported_aspiration_source_ref",
+            "Character Model may crystallize only an active aspiration source "
+            "offered in the pinned capability manifest",
+        )
     return draft
 
 
@@ -1050,14 +1280,16 @@ __all__ = [
     "CharacterChoiceAcceptDraft",
     "CharacterChoiceDraft",
     "CharacterChoiceNoOpDraft",
-    "DynamicLifeDirectionDraft",
     "LifeDevelopmentCapabilityManifest",
+    "LifeDevelopmentBiographicalCoordinateCapability",
     "LifeDevelopmentCapabilityManifestCompiler",
     "LifeDevelopmentLocationCapability",
     "LifeDevelopmentClaimDeclaration",
     "LifeDevelopmentDraftError",
     "LifeDevelopmentNoOpDraft",
+    "ObjectiveBiographicalTransitionDraft",
     "LifeDevelopmentOutcomeDraft",
+    "ProvisionalPlaceDraft",
     "LifeDevelopmentVisualEnvironmentDraft",
     "LifeDevelopmentVisualEvidenceDraft",
     "LifeDevelopmentVisualLocationDraft",

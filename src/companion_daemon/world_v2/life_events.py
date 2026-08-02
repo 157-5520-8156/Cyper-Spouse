@@ -11,6 +11,7 @@ from pydantic import Field, model_validator
 
 from .activity_lifecycle_contract import ActivityLifecycleProposalRecordedPayload
 from .schemas import (
+    BiographicalCoordinateReplacement,
     EvidenceRef,
     FrozenModel,
     NpcProjection,
@@ -188,9 +189,11 @@ class OutcomeProposalRecordedPayload(FrozenModel):
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
     adopt_proposed_life_direction: bool | None = None
+    character_life_direction: BiographicalCoordinateReplacement | None = None
     context_identity_version: Literal[
         "life-aftermath-context.1",
         "life-aftermath-context.2",
+        "life-aftermath-context.3",
     ] | None = None
     context_capsule_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     context_model_content_hash: str | None = Field(
@@ -241,6 +244,7 @@ class OutcomeProposalRecordedPayload(FrozenModel):
                 and (
                     any(item is None for item in durable_audit_identity)
                     or self.adopt_proposed_life_direction is None
+                    or self.character_life_direction is not None
                 )
             ):
                 raise ValueError(
@@ -248,8 +252,22 @@ class OutcomeProposalRecordedPayload(FrozenModel):
                     "and an explicit direction-adoption decision"
                 )
             if (
+                self.context_identity_version == "life-aftermath-context.3"
+                and (
+                    any(item is None for item in durable_audit_identity)
+                    or self.adopt_proposed_life_direction is not None
+                )
+            ):
+                raise ValueError(
+                    "Context v3 character outcome requires a durable model audit "
+                    "and forbids World-authored direction adoption"
+                )
+            if (
                 self.context_identity_version == "life-aftermath-context.1"
-                and any(item is not None for item in durable_audit_identity)
+                and (
+                    any(item is not None for item in durable_audit_identity)
+                    or self.character_life_direction is not None
+                )
             ):
                 raise ValueError(
                     "legacy Context v1 cannot claim a durable model audit"
@@ -259,14 +277,14 @@ class OutcomeProposalRecordedPayload(FrozenModel):
                 raise ValueError("world contingency requires a recorded world draw")
             if any(item is not None for item in context_identity) or any(
                 item is not None for item in durable_audit_identity
-            ) or self.adopt_proposed_life_direction is not None:
+            ) or self.adopt_proposed_life_direction is not None or self.character_life_direction is not None:
                 raise ValueError("world draw cannot carry character-model identity")
         elif self.decision_authority == "external_observation":
             if self.recorded_world_draw is not None or any(
                 item is not None for item in context_identity
             ) or any(
                 item is not None for item in durable_audit_identity
-            ) or self.adopt_proposed_life_direction is not None:
+            ) or self.adopt_proposed_life_direction is not None or self.character_life_direction is not None:
                 raise ValueError(
                     "external outcome cannot carry model or random authority"
                 )
@@ -275,6 +293,7 @@ class OutcomeProposalRecordedPayload(FrozenModel):
             or any(item is not None for item in context_identity)
             or any(item is not None for item in durable_audit_identity)
             or self.adopt_proposed_life_direction is not None
+            or self.character_life_direction is not None
         ):
             raise ValueError(
                 "legacy outcome proposal cannot carry resolution authority"
@@ -297,6 +316,7 @@ class OutcomeProposalRecordedPayload(FrozenModel):
             result_payload_hash=self.proposed_result_payload_hash,
             observation_refs=self.observation_refs,
             adopt_proposed_life_direction=self.adopt_proposed_life_direction,
+            character_life_direction=self.character_life_direction,
         )
         if self.proposed_change_hash != expected:
             raise ValueError("outcome proposal change hash does not match proposed mutation")
@@ -317,6 +337,7 @@ class WorldOccurrenceSettledPayload(DomainMutationPayload):
     settled_at: datetime
     appraisal_trigger_ref: str = Field(min_length=1)
     adopt_proposed_life_direction: bool | None = None
+    character_life_direction: BiographicalCoordinateReplacement | None = None
 
     @model_validator(mode="after")
     def accepted_change_hash_matches_fields(self) -> WorldOccurrenceSettledPayload:
@@ -331,6 +352,7 @@ class WorldOccurrenceSettledPayload(DomainMutationPayload):
             result_payload_hash=self.result_payload_hash,
             observation_refs=self.observation_refs,
             adopt_proposed_life_direction=self.adopt_proposed_life_direction,
+            character_life_direction=self.character_life_direction,
         )
         if self.accepted_change_hash != expected:
             raise ValueError("settlement change hash does not match accepted mutation")
@@ -349,6 +371,7 @@ def outcome_mutation_hash(
     result_payload_hash: str,
     observation_refs: tuple[str, ...] | list[str],
     adopt_proposed_life_direction: bool | None = None,
+    character_life_direction: BiographicalCoordinateReplacement | None = None,
 ) -> str:
     material: dict[str, object] = {
             "candidate_result_ref": candidate_result_ref,
@@ -365,6 +388,10 @@ def outcome_mutation_hash(
     # the field only for those legacy records so cold replay stays byte exact.
     if adopt_proposed_life_direction is not None:
         material["adopt_proposed_life_direction"] = adopt_proposed_life_direction
+    if character_life_direction is not None:
+        material["character_life_direction"] = character_life_direction.model_dump(
+            mode="json"
+        )
     encoded = json.dumps(
         material,
         ensure_ascii=False,

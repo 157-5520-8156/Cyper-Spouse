@@ -161,6 +161,8 @@ _SEMANTIC_CONDITIONAL_FIELDS = frozenset(
         "visible_physical_states",
         "aspirations",
         "life_arcs",
+        "world_places",
+        "biographical_coordinates",
         "expression_payload_descriptors",
         "life_ecology_schedule",
     }
@@ -1221,10 +1223,24 @@ class SQLiteWorldLedger:
         """
 
         dumped = state.model_dump(mode="json")
+        if state.life_arcs:
+            dumped["life_arcs"] = [
+                {
+                    key: value
+                    for key, value in item.model_dump(mode="json").items()
+                    if key != "supersedes_context_tag_prefixes"
+                    or item.supersedes_context_tag_prefixes
+                }
+                for item in state.life_arcs
+            ]
         if not state.aspirations:
             dumped.pop("aspirations", None)
         if not state.life_arcs:
             dumped.pop("life_arcs", None)
+        if not state.world_places:
+            dumped.pop("world_places", None)
+        if not state.biographical_coordinates:
+            dumped.pop("biographical_coordinates", None)
         if not state.pending_contextual_life_sources:
             dumped.pop("pending_contextual_life_sources", None)
         if not state.contextual_life_retries:
@@ -1731,6 +1747,8 @@ class SQLiteWorldLedger:
                 "pending_contextual_life_sources",
                 "contextual_life_retries",
                 "pending_biographical_settlements",
+                "world_places",
+                "biographical_coordinates",
             } and not getattr(state, field_name):
                 # `_state_dump` keeps current-generation empty tuple fields
                 # out of durable bytes for old-head hash compatibility.
@@ -2975,6 +2993,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.42",
                 "world-v2-reducers.43",
                 "world-v2-reducers.44",
+                "world-v2-reducers.47",
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2995,6 +3014,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.42",
                     "world-v2-reducers.43",
                     "world-v2-reducers.44",
+                    "world-v2-reducers.47",
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     canonical_legacy_state = json.dumps(
@@ -3315,6 +3335,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.41",
                 "world-v2-reducers.43",
                 "world-v2-reducers.44",
+                "world-v2-reducers.47",
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
             }:
                 state = ReducerState.model_validate_json(
@@ -3767,6 +3788,8 @@ class SQLiteWorldLedger:
             reconciliations=projection.reconciliations,
             completed_trigger_ids=projection.completed_trigger_ids,
             npcs=projection.npcs,
+            world_places=projection.world_places,
+            biographical_coordinates=projection.biographical_coordinates,
             life_arcs=projection.life_arcs,
             aspirations=projection.aspirations,
             plans=projection.plans,

@@ -100,6 +100,12 @@ def crystallize_aspiration(
     _expect_revision(current.entity_revision, payload.expected_entity_revision)
     if current.status != "active":
         raise ValueError("only an active aspiration can crystallize")
+    if current.planted_event_ref not in {
+        item.ref_id for item in payload.evidence_refs
+    }:
+        raise ValueError(
+            "aspiration crystallization must bind its exact planting event"
+        )
     if payload.crystallized_at != logical_time:
         raise ValueError("aspiration crystallization must be pinned to authoritative logical time")
     plan_id = payload.plan_ref.removeprefix("plan:")

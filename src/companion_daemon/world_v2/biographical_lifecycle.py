@@ -112,6 +112,7 @@ class BiographicalContext(FrozenModel):
     academic_year: int | None = Field(default=None, ge=1, le=12)
     context_tags: tuple[str, ...]
     active_life_arc_ids: tuple[str, ...] = ()
+    coordinate_summaries: tuple[str, ...] = ()
 
 
 class LifeArcChangedPayload(DomainMutationPayload):
@@ -154,6 +155,7 @@ class LifeArcChangedPayload(DomainMutationPayload):
                 "ends_at",
                 "source_event_ref",
                 "privacy_class",
+                "supersedes_context_tag_prefixes",
             )
             if any(getattr(after, field) != getattr(before, field) for field in immutable):
                 raise ValueError("Life Arc terminal transition changed immutable context")
@@ -263,6 +265,7 @@ class BiographicalLifecycleCatalog:
         logical_at: datetime,
         *,
         life_arcs: tuple[object, ...],
+        biographical_coordinates: tuple[object, ...] = (),
     ) -> BiographicalContext:
         if logical_at.tzinfo is None or logical_at.utcoffset() is None:
             raise ValueError("biographical context requires timezone-aware logical time")
@@ -308,9 +311,19 @@ class BiographicalLifecycleCatalog:
                 tags.add("calendar:classes_open")
         active_arc_ids: list[str] = []
         active_residences: list[tuple[datetime, str, str]] = []
-        for arc in life_arcs:
-            if getattr(arc, "status", None) != "active":
-                continue
+        active_arcs = sorted(
+            (
+                arc
+                for arc in life_arcs
+                if getattr(arc, "status", None) == "active"
+            ),
+            key=lambda arc: (
+                getattr(arc, "started_at", logical_at),
+                str(getattr(arc, "arc_id", "")),
+            ),
+        )
+        superseded_prefixes: set[str] = set()
+        for arc in active_arcs:
             starts_at = getattr(arc, "started_at", None)
             ends_at = getattr(arc, "ends_at", None)
             if isinstance(starts_at, datetime) and logical_at < starts_at:
@@ -324,13 +337,26 @@ class BiographicalLifecycleCatalog:
             arc_tags = tuple(
                 str(item) for item in getattr(arc, "context_tags", ()) if item
             )
+            retired_replacement_prefixes = tuple(
+                str(item)
+                for item in getattr(
+                    arc, "supersedes_context_tag_prefixes", ()
+                )
+                if item
+            )
             residence_tags = tuple(
                 item for item in arc_tags if item.startswith("residence:")
             )
             if len(residence_tags) > 1:
                 raise ValueError("one active Life Arc cannot assert two residences")
             tags.update(
-                item for item in arc_tags if not item.startswith("residence:")
+                item
+                for item in arc_tags
+                if not item.startswith("residence:")
+                and not any(
+                    item.startswith(prefix)
+                    for prefix in retired_replacement_prefixes
+                )
             )
             if residence_tags:
                 assert isinstance(starts_at, datetime)
@@ -343,13 +369,38 @@ class BiographicalLifecycleCatalog:
                 2
             ]
         tags.add(residence_tag)
+        coordinate_summaries: list[str] = []
+        for coordinate in sorted(
+            biographical_coordinates,
+            key=lambda item: str(getattr(item, "coordinate_ref", "")),
+        ):
+            for prefix in getattr(
+                coordinate, "replaces_context_tag_prefixes", ()
+            ):
+                tags = {item for item in tags if not item.startswith(str(prefix))}
+                superseded_prefixes.add(str(prefix))
+            tags.update(
+                str(item) for item in getattr(coordinate, "context_tags", ())
+            )
+            summary = str(getattr(coordinate, "summary", "")).strip()
+            if summary:
+                coordinate_summaries.append(summary)
         return BiographicalContext(
             logical_at=logical_at,
             age=age,
-            academic_phase=phase,
-            academic_year=academic_year,
+            academic_phase=(
+                None
+                if {"academic:", "calendar:"} & superseded_prefixes
+                else phase
+            ),
+            academic_year=(
+                None
+                if {"academic:", "calendar:"} & superseded_prefixes
+                else academic_year
+            ),
             context_tags=tuple(sorted(tags)),
             active_life_arc_ids=tuple(sorted(active_arc_ids)),
+            coordinate_summaries=tuple(coordinate_summaries),
         )
 
     def _academic_reading(self, value: date) -> tuple[AcademicPhase, int | None]:

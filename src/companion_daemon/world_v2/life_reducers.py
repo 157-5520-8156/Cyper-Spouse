@@ -392,6 +392,10 @@ def settle_occurrence(
         raise ValueError(
             "settlement direction adoption does not match outcome proposal"
         )
+    if proposal.character_life_direction != payload.character_life_direction:
+        raise ValueError(
+            "settlement character life direction does not match outcome proposal"
+        )
     if proposal.candidate_result_ref not in occurrence.candidate_outcome_refs:
         raise ValueError("outcome proposal is outside committed candidates")
     if proposal.candidate_result_ref != payload.candidate_result_ref:

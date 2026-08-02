@@ -198,7 +198,7 @@ def _replay_as_legacy_without_source_closure(ledger: WorldLedger) -> WorldLedger
             if (
                 event.event_type == "ProposalRecorded"
                 and payload.get("possibility_authority_version")
-                == "life-development-possibility.6"
+                == "life-development-possibility.7"
             ):
                 payload["possibility_authority_version"] = (
                     "life-development-possibility.3"

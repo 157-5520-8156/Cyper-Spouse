@@ -17,12 +17,10 @@ from companion_daemon.world_v2.aspiration_reducers import (
 )
 from companion_daemon.world_v2.aspiration_runtime import (
     NOTHING_CANDIDATE_REF,
-    AspirationRuntime,
     AspirationWeightPolicy,
 )
 from companion_daemon.world_v2.aspiration_view import active_aspiration_advisories
 from companion_daemon.world_v2.context_resolver import query_from_projection
-from companion_daemon.world_v2.errors import ConcurrencyConflict
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger_context_resolver import (
     context_capsule_compiler_from_ledger,
@@ -302,7 +300,7 @@ def _record_user_observation(app, *, event_id: str, text: str, at: datetime) -> 
 
 
 @pytest.mark.asyncio
-async def test_user_place_can_become_source_bound_inspiration_then_reviewed_plan(
+async def test_user_place_can_become_source_bound_inspiration_without_fixed_plan(
     tmp_path: Path,
 ) -> None:
     seed = _seed(
@@ -359,57 +357,72 @@ async def test_user_place_can_become_source_bound_inspiration_then_reviewed_plan
             to=NOW + timedelta(days=1, minutes=5),
         )
         projection = app._ledger.project()  # noqa: SLF001
-        crystallized = next(
+        retained = next(
             item
             for item in projection.aspirations
             if item.aspiration_id == inspiration.aspiration_id
         )
-        assert crystallized.status == "crystallized"
-        plan = next(
-            item
-            for item in projection.plans
-            if item.plan_id == crystallized.crystallized_plan_ref.removeprefix("plan:")
-        )
-        assert plan.activity_kind == "travel.destination_research"
-        assert plan.location_ref == "location:dorm-room"
-        assert inspiration.planted_event_ref in {evidence.ref_id for evidence in plan.evidence_refs}
+        assert retained.status == "active"
         assert model.contextual_calls == 1
-        assert model.planning_calls == 1
+        assert model.planning_calls == 0
+        assert not any(
+            item.event.payload().get("proposal_kind") == "contextual_life_plan"
+            for item in app._ledger.export_replay_evidence().events  # noqa: SLF001
+            if item.event.event_type == "ProposalRecorded"
+        )
+    finally:
+        app.close()
 
-        assert plan.scheduled_window is not None
-        opens_wake = plan.scheduled_window.opens_at + timedelta(minutes=5)
+
+@pytest.mark.asyncio
+async def test_contextual_inspiration_does_not_offer_a_fixed_story_candidate(
+    tmp_path: Path,
+) -> None:
+    seed = _seed(
+        tmp_path / "contextual-open-life-seed.yaml",
+        _CERTAIN_SEED + _CONTEXTUAL_FUTURE,
+    )
+    model = _ContextualLifeModel()
+    app = _build(tmp_path, seed, model, name="contextual-open-life")
+    source_ref = "event:observation:contextual-open-life"
+    try:
+        _record_user_observation(
+            app,
+            event_id=source_ref,
+            text="前阵子提到的那家店，我今天又路过了。",
+            at=NOW,
+        )
         await _tick(
             app,
-            tick_id="contextual:start",
-            frm=NOW + timedelta(days=1, minutes=5),
-            to=opens_wake,
+            tick_id="contextual:open-life:form",
+            frm=NOW,
+            to=NOW + timedelta(minutes=5),
         )
-        assert (
-            next(
-                item
-                for item in app._ledger.project().plans  # noqa: SLF001
-                if item.plan_id == plan.plan_id
-            ).status
-            == "active"
+        inspiration = next(
+            item
+            for item in app._ledger.project().aspirations  # noqa: SLF001
+            if item.seed_id.startswith("contextual:")
         )
 
-        settle_wake = plan.scheduled_window.closes_at + timedelta(minutes=5)
         await _tick(
             app,
-            tick_id="contextual:settle",
-            frm=opens_wake,
-            to=settle_wake,
+            tick_id="contextual:open-life:later",
+            frm=NOW + timedelta(minutes=5),
+            to=NOW + timedelta(days=1, minutes=5),
         )
-        settled = app._ledger.project()  # noqa: SLF001
-        assert (
-            next(item for item in settled.plans if item.plan_id == plan.plan_id).status
-            == "completed"
+
+        projection = app._ledger.project()  # noqa: SLF001
+        retained = next(
+            item
+            for item in projection.aspirations
+            if item.aspiration_id == inspiration.aspiration_id
         )
-        occurrence = next(item for item in settled.world_occurrences if item.status == "settled")
-        assert occurrence.status == "settled"
-        assert any(
-            item.values.source_bindings[0].authority_event_ref == occurrence.settlement_event_ref
-            for item in settled.experiences
+        assert retained.status == "active"
+        assert model.planning_calls == 0
+        assert not any(
+            item.event.payload().get("proposal_kind") == "contextual_life_plan"
+            for item in app._ledger.export_replay_evidence().events  # noqa: SLF001
+            if item.event.event_type == "ProposalRecorded"
         )
     finally:
         app.close()
@@ -602,26 +615,11 @@ async def test_contextual_inspiration_considers_oldest_open_source_without_starv
 
 
 @pytest.mark.asyncio
-async def test_recorded_contextual_plan_recovers_after_commit_conflict_and_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_contextual_inspiration_remains_open_across_restart(
+    tmp_path: Path,
 ) -> None:
     seed = _seed(tmp_path / "contextual-recovery-seed.yaml", _CONTEXTUAL_FUTURE)
     model = _ContextualLifeModel()
-    original = AspirationRuntime.commit_reviewed_crystallization
-    attempts = 0
-
-    def fail_first_commit(self, **kwargs):  # type: ignore[no-untyped-def]
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise ConcurrencyConflict("simulated stale plan acceptance cursor")
-        return original(self, **kwargs)
-
-    monkeypatch.setattr(
-        AspirationRuntime,
-        "commit_reviewed_crystallization",
-        fail_first_commit,
-    )
     app = _build(tmp_path, seed, model, name="contextual-recovery")
     source_ref = "event:observation:contextual-plan-recovery"
     try:
@@ -648,16 +646,7 @@ async def test_recorded_contextual_plan_recovers_after_commit_conflict_and_resta
             item for item in before.aspirations if item.seed_id.startswith("contextual:")
         )
         assert inspiration.status == "active"
-        checks = [
-            item.event
-            for item in app._ledger.export_replay_evidence().events  # noqa: SLF001
-            if item.event.event_type == "ProposalRecorded"
-            and item.event.payload().get("proposal_kind") == "contextual_life_plan"
-        ]
-        assert len(checks) == 1
-        assert checks[0].payload()["decision"] == "select"
-        recorded_slot = checks[0].payload()["slot"]
-        assert recorded_slot["activity_kind"] == "travel.destination_research"
+        assert model.planning_calls == 0
     finally:
         app.close()
 
@@ -681,16 +670,8 @@ async def test_recorded_contextual_plan_recovers_after_commit_conflict_and_resta
             for item in projection.aspirations
             if item.aspiration_id == inspiration.aspiration_id
         )
-        assert recovered.status == "crystallized"
-        plan = next(
-            item
-            for item in projection.plans
-            if item.plan_id == recovered.crystallized_plan_ref.removeprefix("plan:")
-        )
-        assert plan.activity_kind == recorded_slot["activity_kind"]
-        assert plan.location_ref == recorded_slot["location_ref"]
-        assert model.planning_calls == 1
-        assert attempts == 2
+        assert recovered.status == "active"
+        assert model.planning_calls == 0
     finally:
         restarted.close()
 
@@ -1053,7 +1034,10 @@ def test_crystallization_interface_requires_an_existing_plan() -> None:
         change_id="change:c1",
         transition_id="transition:c1",
         expected_entity_revision=1,
-        evidence_refs=(_evidence("event:plan-accept"),),
+        evidence_refs=(
+            _evidence("event:plan-accept"),
+            _evidence("event:aspiration:planted:test"),
+        ),
         aspiration_id="aspiration:test",
         crystallized_at=later,
         plan_ref="plan:japan-trip",
@@ -1067,3 +1051,13 @@ def test_crystallization_interface_requires_an_existing_plan() -> None:
     updated = crystallize_aspiration((_active(planted),), (_Plan(),), payload, logical_time=later)
     assert updated[0].status == "crystallized"
     assert updated[0].crystallized_plan_ref == "plan:japan-trip"
+
+    mismatched = _active(
+        planted,
+        aspiration_id="aspiration:other",
+        planted_event_ref="event:aspiration:planted:other",
+    )
+    with pytest.raises(ValueError, match="exact planting event"):
+        crystallize_aspiration((mismatched,), (_Plan(),), payload.model_copy(
+            update={"aspiration_id": "aspiration:other"}
+        ), logical_time=later)

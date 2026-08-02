@@ -25,6 +25,7 @@ LifeContentKind = Literal[
     "occurrence_result",
     "experience_summary",
     "provisional_npc_introduction",
+    "provisional_place_introduction",
     "dynamic_life_arc_context",
     "raw_model_result",
 ]
@@ -61,6 +62,7 @@ class StoredLifeContent:
             "occurrence_result",
             "experience_summary",
             "provisional_npc_introduction",
+            "provisional_place_introduction",
             "dynamic_life_arc_context",
             "raw_model_result",
         }:

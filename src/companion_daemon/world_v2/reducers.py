@@ -499,6 +499,7 @@ from .schemas import (
     PendingBiographicalSettlementProjection,
     PendingContextualLifeSourceProjection,
     open_life_npc_id,
+    open_life_place_ref,
     PrivacyPolicyProjection,
     PrivacyTransitionProjection,
     ProjectionCursor,
@@ -522,6 +523,9 @@ from .schemas import (
     TriggerProcess,
     LifeEcologyScheduleProjection,
     ToolResultProjection,
+    BiographicalCoordinateReplacement,
+    BiographicalCoordinateProjection,
+    WorldPlaceProjection,
     WorldOccurrenceProjection,
     WorldEvent,
     validate_actor_authority_event_bindings,
@@ -531,8 +535,9 @@ from .schemas import (
 
 _V43_REDUCER_BUNDLE_VERSION = "world-v2-reducers.43"
 _V44_REDUCER_BUNDLE_VERSION = "world-v2-reducers.44"
+_V47_REDUCER_BUNDLE_VERSION = "world-v2-reducers.47"
 PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.46"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.47"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -581,6 +586,7 @@ def _experience_semantic_dump(
         "world-v2-reducers.24",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
@@ -604,6 +610,7 @@ def _actor_authority_transition_semantic_dump(
         "world-v2-reducers.21",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -619,10 +626,15 @@ def _life_arc_semantic_dump(
     reducer_bundle_version: str,
 ) -> dict[str, Any]:
     dumped = arc.model_dump(mode="json")
+    if not arc.supersedes_context_tag_prefixes:
+        # Preserve every pre-coordinate-transition replay hash.  The field is
+        # semantically absent until an arc actually replaces a coordinate.
+        dumped.pop("supersedes_context_tag_prefixes", None)
     if reducer_bundle_version not in {
         "world-v2-reducers.42",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -639,6 +651,7 @@ def _npc_semantic_dump(
     if reducer_bundle_version not in {
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -662,6 +675,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         "world-v2-reducers.30",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -676,6 +690,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         "world-v2-reducers.30",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -683,6 +698,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
     if reducer_bundle_version not in {
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -706,6 +722,7 @@ def _expression_plan_semantic_dump(
         "world-v2-reducers.27",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -730,6 +747,7 @@ def _expression_beat_semantic_dump(
         "world-v2-reducers.27",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -835,6 +853,8 @@ class ReducerState(FrozenModel):
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
     npcs: tuple[NpcProjection, ...] = ()
+    world_places: tuple[WorldPlaceProjection, ...] = ()
+    biographical_coordinates: tuple[BiographicalCoordinateProjection, ...] = ()
     life_arcs: tuple[LifeArcProjection, ...] = ()
     aspirations: tuple[AspirationProjection, ...] = ()
     plans: tuple[PlanStateProjection, ...] = ()
@@ -1417,6 +1437,63 @@ class ReducerState(FrozenModel):
             for item in self.character_core_proposals
         ):
             raise ValueError("pending character core proposal is absent from durable index")
+        place_refs = tuple(item.location_ref for item in self.world_places)
+        if len(place_refs) != len(set(place_refs)):
+            raise ValueError("World place refs must be unique")
+        coordinate_refs = tuple(
+            item.coordinate_ref for item in self.biographical_coordinates
+        )
+        if len(coordinate_refs) != len(set(coordinate_refs)):
+            raise ValueError("biographical coordinate refs must be unique")
+        for place in self.world_places:
+            occurrence = next(
+                (
+                    item
+                    for item in self.world_occurrences
+                    if item.status == "settled"
+                    and item.settlement_event_ref == place.source_event_ref
+                    and item.settled_at == place.accepted_at
+                ),
+                None,
+            )
+            candidate = (
+                next(
+                    (
+                        item
+                        for item in occurrence.candidate_outcomes
+                        if item.candidate_result_ref == occurrence.settled_outcome_ref
+                    ),
+                    None,
+                )
+                if occurrence is not None
+                else None
+            )
+            descriptor = (
+                next(
+                    (
+                        item
+                        for item in candidate.provisional_place_introductions
+                        if item.descriptor_hash == place.effect_descriptor_hash
+                    ),
+                    None,
+                )
+                if candidate is not None
+                else None
+            )
+            # ``world_id`` is unavailable inside ReducerState, so the exact
+            # derived ref is rechecked by LedgerProjection below.  Here we
+            # still close every descriptor/source coordinate so a split-state
+            # fragment cannot invent a place head.
+            if (
+                descriptor is None
+                or place.stable_identity_ref != descriptor.summary_content_ref
+                or place.summary_payload_hash != descriptor.summary_payload_hash
+                or place.narrative_tags != descriptor.narrative_tags
+                or place.timezone_name != descriptor.timezone_name
+                or place.privacy_class != descriptor.privacy_class
+                or place.access_assurance != descriptor.access_assurance
+            ):
+                raise ValueError("World place lacks its exact settled descriptor")
         return self
 
     def semantic_payload(
@@ -1446,6 +1523,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.42",
             _V43_REDUCER_BUNDLE_VERSION,
             _V44_REDUCER_BUNDLE_VERSION,
+            _V47_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
@@ -1575,6 +1653,7 @@ class ReducerState(FrozenModel):
                                 "world-v2-reducers.41",
                                 _V43_REDUCER_BUNDLE_VERSION,
                                 _V44_REDUCER_BUNDLE_VERSION,
+                                _V47_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1591,6 +1670,25 @@ class ReducerState(FrozenModel):
                     reducer_bundle_version=declared_reducer_bundle_version,
                 )
                 for npc in self.npcs
+            ),
+            **(
+                {
+                    "world_places": tuple(
+                        item.model_dump(mode="json") for item in self.world_places
+                    )
+                }
+                if self.world_places
+                else {}
+            ),
+            **(
+                {
+                    "biographical_coordinates": tuple(
+                        item.model_dump(mode="json")
+                        for item in self.biographical_coordinates
+                    )
+                }
+                if self.biographical_coordinates
+                else {}
             ),
             **(
                 {
@@ -1642,6 +1740,7 @@ class ReducerState(FrozenModel):
                                 in {
                                     _V43_REDUCER_BUNDLE_VERSION,
                                     _V44_REDUCER_BUNDLE_VERSION,
+                                    _V47_REDUCER_BUNDLE_VERSION,
                                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     REDUCER_BUNDLE_VERSION,
                                 }
@@ -1754,6 +1853,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.41",
             _V43_REDUCER_BUNDLE_VERSION,
             _V44_REDUCER_BUNDLE_VERSION,
+            _V47_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -1780,6 +1880,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.41",
                 _V43_REDUCER_BUNDLE_VERSION,
                 _V44_REDUCER_BUNDLE_VERSION,
+                _V47_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -1803,6 +1904,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.41",
             _V43_REDUCER_BUNDLE_VERSION,
             _V44_REDUCER_BUNDLE_VERSION,
+            _V47_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -1825,6 +1927,7 @@ class ReducerState(FrozenModel):
                     "world-v2-reducers.41",
                     _V43_REDUCER_BUNDLE_VERSION,
                     _V44_REDUCER_BUNDLE_VERSION,
+                    _V47_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
@@ -1849,6 +1952,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.41",
             _V43_REDUCER_BUNDLE_VERSION,
             _V44_REDUCER_BUNDLE_VERSION,
+            _V47_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -1874,6 +1978,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.41",
                 _V43_REDUCER_BUNDLE_VERSION,
                 _V44_REDUCER_BUNDLE_VERSION,
+                _V47_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2061,6 +2166,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.41",
                 _V43_REDUCER_BUNDLE_VERSION,
                 _V44_REDUCER_BUNDLE_VERSION,
+                _V47_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2077,6 +2183,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.41",
                 _V43_REDUCER_BUNDLE_VERSION,
                 _V44_REDUCER_BUNDLE_VERSION,
+                _V47_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -10265,6 +10372,7 @@ def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
                     or arc.arc_kind != effect.arc_kind
                     or arc.context_pack_ref != effect.context_pack_ref
                     or arc.context_tags != effect.context_tags
+                    or arc.supersedes_context_tag_prefixes
                     or arc.privacy_class != effect.privacy_class
                 )
             )
@@ -10275,7 +10383,17 @@ def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
                     or arc.arc_kind != "dynamic"
                     or arc.context_pack_ref
                     != dynamic_effect.summary_content_ref
-                    or arc.context_tags != dynamic_effect.narrative_tags
+                    or arc.context_tags
+                    != tuple(
+                        sorted(
+                            {
+                                *dynamic_effect.narrative_tags,
+                                *dynamic_effect.context_tags,
+                            }
+                        )
+                    )
+                    or arc.supersedes_context_tag_prefixes
+                    != dynamic_effect.supersedes_context_tag_prefixes
                     or arc.privacy_class != dynamic_effect.privacy_class
                 )
             )
@@ -10710,6 +10828,140 @@ def _world_occurrence_settled(state: ReducerState, event: WorldEvent) -> Reducer
         ),
         None,
     )
+    world_places = state.world_places
+    if candidate is not None and candidate.provisional_place_introductions:
+        additions: list[WorldPlaceProjection] = []
+        existing_by_ref = {item.location_ref: item for item in world_places}
+        for descriptor in candidate.provisional_place_introductions:
+            location_ref = open_life_place_ref(
+                world_id=event.world_id,
+                settlement_event_ref=event.event_id,
+                provisional_place_ref=descriptor.provisional_place_ref,
+                descriptor_hash=descriptor.descriptor_hash,
+            )
+            materialized = WorldPlaceProjection(
+                location_ref=location_ref,
+                stable_identity_ref=descriptor.summary_content_ref,
+                summary_payload_hash=descriptor.summary_payload_hash,
+                narrative_tags=descriptor.narrative_tags,
+                timezone_name=descriptor.timezone_name,
+                privacy_class=descriptor.privacy_class,
+                access_assurance=descriptor.access_assurance,
+                source_event_ref=event.event_id,
+                effect_descriptor_hash=descriptor.descriptor_hash,
+                accepted_at=payload.settled_at,
+            )
+            existing = existing_by_ref.get(location_ref)
+            if existing is not None and existing != materialized:
+                raise ValueError("settled open place identity is already bound differently")
+            if existing is None:
+                additions.append(materialized)
+                existing_by_ref[location_ref] = materialized
+        world_places = tuple(
+            sorted((*world_places, *additions), key=lambda item: item.location_ref)
+        )
+    biographical_coordinates = state.biographical_coordinates
+    coordinate_updates = tuple(
+        item
+        for item in (
+            (
+                "objective_transition",
+                candidate.objective_biographical_transition,
+            )
+            if candidate is not None
+            else None,
+            (
+                "character_direction",
+                payload.character_life_direction,
+            ),
+        )
+        if item is not None and item[1] is not None
+    )
+    if len(
+        {
+            prefix
+            for _authority_kind, descriptor in coordinate_updates
+            for prefix in descriptor.replaces_context_tag_prefixes
+        }
+    ) != sum(
+        len(descriptor.replaces_context_tag_prefixes)
+        for _authority_kind, descriptor in coordinate_updates
+    ):
+        raise ValueError(
+            "objective transition and character direction cannot replace one coordinate"
+        )
+    for authority_kind, direction in coordinate_updates:
+        overlapping = tuple(
+            item
+            for item in biographical_coordinates
+            if set(item.replaces_context_tag_prefixes)
+            & set(direction.replaces_context_tag_prefixes)
+        )
+        if any(item.coordinate_ref != direction.coordinate_ref for item in overlapping):
+            if (
+                len(overlapping) != 1
+                or overlapping[0].replaces_context_tag_prefixes
+                != direction.replaces_context_tag_prefixes
+            ):
+                raise ValueError(
+                    "one biographical coordinate cannot be replaced under a new identity"
+                )
+            # Concurrent occurrences can freeze candidates while this
+            # namespace is still empty. The first successful settlement owns
+            # its identity; later settlements inherit only that identity and
+            # retain their own exact candidate value and provenance.
+            direction = BiographicalCoordinateReplacement.create(
+                coordinate_ref=overlapping[0].coordinate_ref,
+                summary=direction.summary,
+                context_tags=direction.context_tags,
+                replaces_context_tag_prefixes=(
+                    direction.replaces_context_tag_prefixes
+                ),
+                privacy_class=direction.privacy_class,
+            )
+        previous = next(
+            (
+                item
+                for item in biographical_coordinates
+                if item.coordinate_ref == direction.coordinate_ref
+            ),
+            None,
+        )
+        if (
+            previous is not None
+            and previous.replaces_context_tag_prefixes
+            != direction.replaces_context_tag_prefixes
+        ):
+            raise ValueError(
+                "a biographical coordinate cannot change its replacement namespace"
+            )
+        projected_direction = BiographicalCoordinateProjection(
+            coordinate_ref=direction.coordinate_ref,
+            entity_revision=(previous.entity_revision + 1 if previous else 1),
+            summary=direction.summary,
+            context_tags=direction.context_tags,
+            replaces_context_tag_prefixes=direction.replaces_context_tag_prefixes,
+            privacy_class=direction.privacy_class,
+            descriptor_hash=direction.descriptor_hash,
+            authority_kind=authority_kind,
+            outcome_proposal_id=payload.outcome_proposal_id,
+            settlement_event_ref=event.event_id,
+            settlement_payload_hash=event.payload_hash,
+            settled_at=payload.settled_at,
+        )
+        biographical_coordinates = tuple(
+            sorted(
+                (
+                    *(
+                        item
+                        for item in biographical_coordinates
+                        if item.coordinate_ref != direction.coordinate_ref
+                    ),
+                    projected_direction,
+                ),
+                key=lambda item: item.coordinate_ref,
+            )
+        )
     pending = state.pending_biographical_settlements
     if candidate is not None and (
         candidate.life_arc_effect is not None
@@ -10742,6 +10994,8 @@ def _world_occurrence_settled(state: ReducerState, event: WorldEvent) -> Reducer
     return state.model_copy(
         update={
             "world_occurrences": occurrences,
+            "world_places": world_places,
+            "biographical_coordinates": biographical_coordinates,
             "pending_biographical_settlements": pending,
         }
     )
@@ -10804,13 +11058,30 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
         has_open_effect = bool(
             candidate.life_arc_effect is not None
             or candidate.dynamic_life_arc_context is not None
+            or candidate.objective_biographical_transition is not None
             or candidate.provisional_npc_introductions
+            or candidate.provisional_place_introductions
         )
         expected_authority = {
             "character_choice": "character_model",
             "world_contingency": "recorded_world_draw",
             "external_observation": "external_observation",
         }[candidate.causal_authority]
+        if payload.character_life_direction is not None:
+            privacy_rank = {
+                "public": 0,
+                "shareable": 1,
+                "personal": 2,
+                "private": 3,
+                "withhold": 4,
+            }
+            if (
+                privacy_rank[payload.character_life_direction.privacy_class]
+                < privacy_rank[candidate.privacy_class]
+            ):
+                raise ValueError(
+                    "character life direction cannot weaken outcome privacy"
+                )
         if (
             payload.decision_authority is not None
             and payload.decision_authority != expected_authority
@@ -10826,7 +11097,8 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
             )
         if (
             payload.decision_authority == "character_model"
-            and payload.context_identity_version == "life-aftermath-context.2"
+            and payload.context_identity_version
+            in {"life-aftermath-context.2", "life-aftermath-context.3"}
         ):
             matrix_hash = sha256(
                 canonical_json(
@@ -10876,6 +11148,7 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
                 adopt_proposed_life_direction=bool(
                     payload.adopt_proposed_life_direction
                 ),
+                character_life_direction=payload.character_life_direction,
                 candidate_matrix_hash=matrix_hash,
                 response_hash=str(payload.decision_raw_output_hash),
             )
@@ -13400,6 +13673,8 @@ def make_projection(
         reconciliations=state.reconciliations,
         completed_trigger_ids=state.completed_trigger_ids,
         npcs=state.npcs,
+        world_places=state.world_places,
+        biographical_coordinates=state.biographical_coordinates,
         life_arcs=state.life_arcs,
         aspirations=state.aspirations,
         plans=state.plans,

@@ -133,6 +133,7 @@ NovelOriginViolationKind = Literal[
     "completed_character_experience",
     "existing_entity_or_fact_masquerading_as_novel",
     "imported_current_or_prior_prerequisite",
+    "objective_transition_not_entailed_by_candidate",
 ]
 
 
@@ -180,6 +181,27 @@ class LifeDevelopmentNovelOriginNpcFinding(FrozenModel):
         return self
 
 
+class LifeDevelopmentNovelOriginPlaceFinding(FrozenModel):
+    """One exact provisional-place coordinate rejected by the focused critic."""
+
+    local_ref: str = Field(min_length=1, max_length=80)
+    violation_kinds: tuple[NovelOriginViolationKind, ...] = Field(
+        min_length=1, max_length=4
+    )
+    exact_fragments: tuple[str, ...] = Field(min_length=1, max_length=8)
+
+    @field_validator("violation_kinds", "exact_fragments", mode="before")
+    @classmethod
+    def canonicalize_coordinates(cls, value: object) -> object:
+        return _canonicalize_unique_string_set(value)
+
+    @model_validator(mode="after")
+    def coordinates_are_nonempty(self) -> "LifeDevelopmentNovelOriginPlaceFinding":
+        if any(not item.strip() for item in self.exact_fragments):
+            raise ValueError("novel-origin place fragments cannot be blank")
+        return self
+
+
 class LifeDevelopmentOutcomePrerequisiteFinding(FrozenModel):
     """One exact outcome fragment that imports truth from before its branch."""
 
@@ -217,6 +239,36 @@ class LifeDevelopmentOutcomePrerequisiteFinding(FrozenModel):
         return self
 
 
+class LifeDevelopmentObjectiveTransitionFinding(FrozenModel):
+    """One exact objective-transition summary rejected as imported history."""
+
+    prose_path: str = Field(
+        pattern=(
+            r"^outcomes\.(0|[1-9][0-9]*)\."
+            r"objective_biographical_transition\.summary$"
+        ),
+        max_length=256,
+    )
+    violation_kinds: tuple[NovelOriginViolationKind, ...] = Field(
+        min_length=1,
+        max_length=4,
+    )
+    exact_fragments: tuple[str, ...] = Field(min_length=1, max_length=8)
+
+    @field_validator("violation_kinds", "exact_fragments", mode="before")
+    @classmethod
+    def canonicalize_coordinates(cls, value: object) -> object:
+        return _canonicalize_unique_string_set(value)
+
+    @model_validator(mode="after")
+    def coordinates_are_nonempty(
+        self,
+    ) -> "LifeDevelopmentObjectiveTransitionFinding":
+        if any(not item.strip() for item in self.exact_fragments):
+            raise ValueError("objective-transition fragments cannot be blank")
+        return self
+
+
 class LifeDevelopmentNovelOriginReview(FrozenModel):
     """Independent model verdict over novel fact origin, not story quality."""
 
@@ -229,8 +281,16 @@ class LifeDevelopmentNovelOriginReview(FrozenModel):
         LifeDevelopmentNovelOriginNpcFinding,
         ...,
     ] = Field(default=(), max_length=16)
+    unsupported_provisional_places: tuple[
+        LifeDevelopmentNovelOriginPlaceFinding,
+        ...,
+    ] = Field(default=(), max_length=16)
     unsupported_outcome_prerequisites: tuple[
         LifeDevelopmentOutcomePrerequisiteFinding,
+        ...,
+    ] = Field(default=(), max_length=8)
+    unsupported_objective_transitions: tuple[
+        LifeDevelopmentObjectiveTransitionFinding,
         ...,
     ] = Field(default=(), max_length=8)
     # Kept as an explicit empty legacy slot so committed `.1` supported reviews
@@ -242,7 +302,9 @@ class LifeDevelopmentNovelOriginReview(FrozenModel):
     @field_validator(
         "unsupported_claims",
         "unsupported_provisional_npcs",
+        "unsupported_provisional_places",
         "unsupported_outcome_prerequisites",
+        "unsupported_objective_transitions",
         mode="before",
     )
     @classmethod
@@ -258,19 +320,31 @@ class LifeDevelopmentNovelOriginReview(FrozenModel):
     def decision_matches_coordinates(self) -> "LifeDevelopmentNovelOriginReview":
         claim_ids = tuple(item.claim_id for item in self.unsupported_claims)
         npc_refs = tuple(item.local_ref for item in self.unsupported_provisional_npcs)
+        place_refs = tuple(
+            item.local_ref for item in self.unsupported_provisional_places
+        )
         outcome_paths = tuple(
             item.prose_path for item in self.unsupported_outcome_prerequisites
+        )
+        transition_paths = tuple(
+            item.prose_path for item in self.unsupported_objective_transitions
         )
         if len(claim_ids) != len(set(claim_ids)):
             raise ValueError("novel-origin claim findings must be unique")
         if len(npc_refs) != len(set(npc_refs)):
             raise ValueError("novel-origin NPC findings must be unique")
+        if len(place_refs) != len(set(place_refs)):
+            raise ValueError("novel-origin place findings must be unique")
         if len(outcome_paths) != len(set(outcome_paths)):
             raise ValueError("outcome-prerequisite findings must use unique paths")
+        if len(transition_paths) != len(set(transition_paths)):
+            raise ValueError("objective-transition findings must use unique paths")
         coordinates = (
             self.unsupported_claims,
             self.unsupported_provisional_npcs,
+            self.unsupported_provisional_places,
             self.unsupported_outcome_prerequisites,
+            self.unsupported_objective_transitions,
         )
         if self.decision == "supported" and any(coordinates):
             raise ValueError("supported novel-origin review cannot carry coordinates")
@@ -584,6 +658,25 @@ def parse_life_development_novel_origin_review(
                 "unknown_novel_origin_npc_fragment",
                 "focused critic NPC fragment is absent from the exact NPC summaries",
             )
+    place_summaries: dict[str, list[str]] = {}
+    for outcome in draft.outcomes:
+        for place in outcome.provisional_places:
+            place_summaries.setdefault(place.local_ref, []).append(place.summary)
+    for finding in review.unsupported_provisional_places:
+        summaries = place_summaries.get(finding.local_ref)
+        if summaries is None:
+            raise LifeDevelopmentSourceClosureError(
+                "unknown_novel_origin_place",
+                "focused critic place finding is absent from provisional places",
+            )
+        if any(
+            not any(fragment in summary for summary in summaries)
+            for fragment in finding.exact_fragments
+        ):
+            raise LifeDevelopmentSourceClosureError(
+                "unknown_novel_origin_place_fragment",
+                "focused critic place fragment is absent from exact place summaries",
+            )
     outcome_text = {
         f"outcomes.{index}.text": outcome.text
         for index, outcome in enumerate(draft.outcomes)
@@ -600,6 +693,25 @@ def parse_life_development_novel_origin_review(
                 "unknown_novel_origin_outcome_fragment",
                 "focused critic outcome fragment is absent from the exact outcome text",
             )
+    transition_summaries = {
+        f"outcomes.{index}.objective_biographical_transition.summary": (
+            outcome.objective_biographical_transition.summary
+        )
+        for index, outcome in enumerate(draft.outcomes)
+        if outcome.objective_biographical_transition is not None
+    }
+    for finding in review.unsupported_objective_transitions:
+        summary = transition_summaries.get(finding.prose_path)
+        if summary is None:
+            raise LifeDevelopmentSourceClosureError(
+                "unknown_objective_transition_path",
+                "focused critic transition path is absent from the reviewed draft",
+            )
+        if any(fragment not in summary for fragment in finding.exact_fragments):
+            raise LifeDevelopmentSourceClosureError(
+                "unknown_objective_transition_fragment",
+                "focused critic transition fragment is absent from the exact summary",
+            )
     return review
 
 
@@ -613,6 +725,12 @@ def _general_source_prose_coordinates(
         prefix = f"outcomes.{outcome_index}"
         for npc_index, npc in enumerate(outcome.provisional_npcs):
             values[f"{prefix}.provisional_npcs.{npc_index}.summary"] = npc.summary
+        for place_index, place in enumerate(outcome.provisional_places):
+            values[f"{prefix}.provisional_places.{place_index}.summary"] = place.summary
+        if outcome.objective_biographical_transition is not None:
+            values[f"{prefix}.objective_biographical_transition.summary"] = (
+                outcome.objective_biographical_transition.summary
+            )
         visual = outcome.visual_evidence
         if visual is None:
             continue
@@ -1097,6 +1215,15 @@ def _general_reviewed_surface(
                 "provisional_npcs": [
                     npc.model_dump(mode="json") for npc in outcome.provisional_npcs
                 ],
+                "provisional_places": [
+                    place.model_dump(mode="json")
+                    for place in outcome.provisional_places
+                ],
+                "objective_biographical_transition": (
+                    outcome.objective_biographical_transition.model_dump(mode="json")
+                    if outcome.objective_biographical_transition is not None
+                    else None
+                ),
                 "visual_evidence": (
                     outcome.visual_evidence.model_dump(mode="json")
                     if outcome.visual_evidence is not None
@@ -1129,6 +1256,15 @@ def _novel_origin_reviewed_surface(
                     }
                     for npc in outcome.provisional_npcs
                 ],
+                "provisional_places": [
+                    {"local_ref": place.local_ref, "summary": place.summary}
+                    for place in outcome.provisional_places
+                ],
+                "objective_biographical_transition": (
+                    outcome.objective_biographical_transition.model_dump(mode="json")
+                    if outcome.objective_biographical_transition is not None
+                    else None
+                ),
             }
             for outcome in draft.outcomes
         ],
@@ -1253,8 +1389,8 @@ def life_development_source_closure_messages(
         "an existing_world claim or, by itself, justify an unsupported verdict. A newly "
         "authored weather or environmental condition must be covered by its own "
         "novel_world_generation claim, not inferred from calendar context. Identify "
-        "undeclared current facts only in premise, visual evidence, and provisional-NPC "
-        "summaries. Outcome text has no negative coordinate in this general review lane: "
+        "undeclared current facts only in premise, visual evidence, provisional-NPC, "
+        "and provisional-place summaries. Outcome text has no negative coordinate in this general review lane: "
         "do not return an outcome text path or copy an outcome-only fragment into "
         "undeclared_fact_fragments. A separate focused critic reviews only imported "
         "current/prior prerequisites and retroactive history in outcome text. "
@@ -1300,7 +1436,10 @@ def life_development_source_closure_messages(
         ),
         "review_dimensions": {
             "existing_world_entailment": "exact_cited_sources_only",
-            "undeclared_factual_prose": "premise,provisional_npcs,visual_evidence",
+            "undeclared_factual_prose": (
+                "premise,provisional_npcs,provisional_places,"
+                "objective_biographical_transition,visual_evidence"
+            ),
             "outcome_text_authority": {
                 "general_reviewer": "no_negative_coordinate_authority",
                 "focused_novel_origin_critic": (
@@ -1423,7 +1562,11 @@ def life_development_novel_origin_messages(
         "relationship starting point. It cannot retroactively create a prior "
         "friendship, classmate relationship, period of no contact, shared history, "
         "known person, recurring habit, or completed character experience. The same "
-        "boundary applies to provisional-NPC summaries. Opaque entity/location refs "
+        "boundary applies to provisional-NPC, provisional-place, and objective "
+        "biographical-transition summaries. An objective transition may state only "
+        "a present coordinate made true by that exact candidate branch; it cannot "
+        "smuggle in prior history, a character motive, a plan, or a hoped-for future. "
+        "Opaque entity/location refs "
         "prove identity coordinates only, not unstated names, "
         "aliases or place semantics. The supplied existing-world view is non-exhaustive: "
         "Manifest entity descriptor entries in this lane are exact pointers into the "
@@ -1438,12 +1581,13 @@ def life_development_novel_origin_messages(
         "already-completed character experience, or an existing entity/fact relabelled "
         "as novel. Ordinary events created inside the candidate branch—including "
         "actions, dialogue, invitations, replies, feelings, and subjective responses—"
-        "remain unsettled and must not be rejected. Current premise, visual, NPC "
+        "remain unsettled and must not be rejected. Current premise and visual "
         "declaration coverage and typed location belong to the general reviewer, not "
         "this lane. Return only parser-verifiable "
         "coordinates: each unsupported novel claim uses its exact claim_id and "
-        "verbatim fragments from that claim summary; each provisional NPC uses its "
-        "exact local_ref and verbatim fragments from its summary; each imported "
+        "verbatim fragments from that claim summary; each provisional NPC or place uses its "
+        "exact local_ref and verbatim fragments from its summary; each objective "
+        "transition uses its exact supplied summary path and verbatim fragments; each imported "
         "outcome prerequisite uses an exact supplied outcomes.N.text prose_path and "
         "verbatim fragments from that one outcome. Return exactly one JSON object "
         "matching the supplied contract, with the complete verdict inside its required "
@@ -1475,6 +1619,11 @@ def life_development_novel_origin_messages(
                 "no_prior_relationship_shared_history_or_completed_experience"
             ),
             "provisional_npc_origin": "new_person_or_new_relationship_start_only",
+            "provisional_place_origin": "new_place_without_invented_prior_history_only",
+            "objective_biographical_transition": (
+                "present_objective_coordinate_semantically_entailed_by_exact_"
+                "candidate_text_and_branch_only"
+            ),
             "outcome_prerequisites": {
                 "reject": (
                     "imported_current_or_prior_fact_or_retroactive_history_outside_branch"
@@ -1562,19 +1711,34 @@ def _novel_origin_coordinate_catalog(
                 for npc in outcome.provisional_npcs
             }
         ),
+        "provisional_place_refs": sorted(
+            {
+                place.local_ref
+                for outcome in draft.outcomes
+                for place in outcome.provisional_places
+            }
+        ),
         "outcome_prerequisite_paths": [
             f"outcomes.{index}.text"
             for index, _outcome in enumerate(draft.outcomes)
         ],
+        "objective_transition_paths": [
+            f"outcomes.{index}.objective_biographical_transition.summary"
+            for index, outcome in enumerate(draft.outcomes)
+            if outcome.objective_biographical_transition is not None
+        ],
         "fragment_rule": (
-            "copy_verbatim_substrings_from_the_matching_claim_npc_or_outcome_path"
+            "copy_verbatim_substrings_from_the_matching_claim_npc_place_transition_"
+            "or_outcome_path"
         ),
     }
 
 
 __all__ = [
+    "LifeDevelopmentObjectiveTransitionFinding",
     "LifeDevelopmentOutcomePrerequisiteFinding",
     "LifeDevelopmentNovelOriginReview",
+    "LifeDevelopmentNovelOriginPlaceFinding",
     "LifeDevelopmentSourceClosureError",
     "LifeDevelopmentSourceClosureReview",
     "life_development_novel_origin_correction_message",

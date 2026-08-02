@@ -15,6 +15,8 @@ import httpx
 from pydantic import Field, ValidationError
 
 from .context_resolver import query_from_projection
+from .aspiration_view import active_aspiration_advisories
+from .aspiration_events import AspirationCrystallizedPayload
 from .deliberation import ModelUsageProvenance, ProviderSubcallAudit
 from .errors import ConcurrencyConflict
 from .event_identity import domain_idempotency_key
@@ -97,13 +99,14 @@ from .recall_runtime import (
 )
 from .schema_core import FrozenModel, PrivacyClass
 from .schemas import (
+    BiographicalCoordinateReplacement,
     DueWindow,
-    DynamicLifeArcContextDescriptor,
     EvidenceRef,
     OutcomeCandidateDescriptor,
     PlanStateProjection,
     ProjectionCursor,
     ProvisionalNpcIntroductionDescriptor,
+    ProvisionalPlaceIntroductionDescriptor,
     WorldEvent,
     WorldOccurrenceProjection,
 )
@@ -531,6 +534,7 @@ class LifeDevelopmentProposalReader:
                 "life-development-possibility.4",
                 "life-development-possibility.5",
                 "life-development-possibility.6",
+                "life-development-possibility.7",
             }
             or not isinstance(possibility, dict)
             or proposal.get("possibility_authority_hash") != _digest(possibility)
@@ -761,7 +765,10 @@ class LifeDevelopmentProposalReader:
             )
         expected_source_subject = (
             current_subject
-            if possibility_version == "life-development-possibility.6"
+            if possibility_version in {
+                "life-development-possibility.6",
+                "life-development-possibility.7",
+            }
             else legacy_subject
         )
         if (
@@ -773,6 +780,7 @@ class LifeDevelopmentProposalReader:
         if possibility_version not in {
             "life-development-possibility.5",
             "life-development-possibility.6",
+            "life-development-possibility.7",
         }:
             return
         novel_review = proposal.get("world_author_novel_origin_review")
@@ -791,7 +799,9 @@ class LifeDevelopmentProposalReader:
             parsed_novel.decision != "supported"
             or parsed_novel.unsupported_claims
             or parsed_novel.unsupported_provisional_npcs
+            or parsed_novel.unsupported_provisional_places
             or parsed_novel.unsupported_outcome_prerequisites
+            or parsed_novel.unsupported_objective_transitions
             or parsed_novel.undeclared_premise_fragments
             or proposal.get("world_author_novel_origin_review_hash")
             != _digest(novel_review)
@@ -824,7 +834,10 @@ class LifeDevelopmentProposalReader:
             )
         expected_novel_subjects = (
             {current_novel_subject}
-            if possibility_version == "life-development-possibility.6"
+            if possibility_version in {
+                "life-development-possibility.6",
+                "life-development-possibility.7",
+            }
             and current_novel_subject is not None
             else legacy_novel_subjects
         )
@@ -1199,6 +1212,9 @@ class LifeDevelopmentRuntime:
                 raw=character_raw,
                 offered=draft,
                 offered_window=offered_window,
+                active_aspiration_source_refs=(
+                    world_manifest.active_aspiration_source_refs
+                ),
             )
         else:
             recovered_recall_request = self._recover_successful_model_run(
@@ -1274,6 +1290,9 @@ class LifeDevelopmentRuntime:
                     context=character_context,
                     draft=draft,
                     offered_window=offered_window,
+                    active_aspiration_source_refs=(
+                        _character_manifest.active_aspiration_source_refs
+                    ),
                 )
                 initial_role: _LifeDevelopmentRole = (
                     "character_recall_request"
@@ -1415,6 +1434,9 @@ class LifeDevelopmentRuntime:
                     recall_request=recall_request,
                     recall_trace=recall_trace,
                     recall_failure_code=recall_failure_code,
+                    active_aspiration_source_refs=(
+                        world_manifest.active_aspiration_source_refs
+                    ),
                 )
                 try:
                     character_audit = self._record_model_run(
@@ -1688,9 +1710,92 @@ class LifeDevelopmentRuntime:
             ),
             payload=plan_payload,
         )
+        aspiration_event: WorldEvent | None = None
+        aspiration_source_ref = (
+            character_choice.crystallized_aspiration_source_ref
+        )
+        if aspiration_source_ref is not None:
+            aspiration = next(
+                (
+                    item
+                    for item in projection.aspirations
+                    if item.status == "active"
+                    and item.planted_event_ref == aspiration_source_ref
+                ),
+                None,
+            )
+            authority = next(
+                (
+                    item
+                    for item in projection.committed_world_event_refs
+                    if item.event_id == aspiration_source_ref
+                ),
+                None,
+            )
+            if aspiration is None or authority is None:
+                raise ValueError(
+                    "accepted Character choice lost its active aspiration authority"
+                )
+            aspiration_suffix = _digest(
+                {
+                    "aspiration_id": aspiration.aspiration_id,
+                    "plan_id": plan.plan_id,
+                    "proposal_id": proposal_id,
+                }
+            )
+            aspiration_payload = AspirationCrystallizedPayload(
+                change_id=(
+                    "change:life-development:aspiration:" + aspiration_suffix
+                ),
+                transition_id=(
+                    "transition:life-development:aspiration:" + aspiration_suffix
+                ),
+                expected_entity_revision=aspiration.entity_revision,
+                evidence_refs=(
+                    EvidenceRef(
+                        ref_id=authority.event_id,
+                        evidence_type="committed_world_event",
+                        claim_purpose="life_transition",
+                        source_world_revision=authority.world_revision,
+                        immutable_hash=authority.payload_hash,
+                    ),
+                ),
+                policy_refs=("policy:open-life-aspiration-crystallization.1",),
+                aspiration_id=aspiration.aspiration_id,
+                crystallized_at=wake.logical_time,
+                plan_ref="plan:" + plan.plan_id,
+            ).model_dump(mode="json")
+            aspiration_event = WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id=(
+                    "event:life-development:aspiration:" + aspiration_suffix
+                ),
+                world_id=self._ledger.world_id,
+                event_type="AspirationCrystallized",
+                logical_time=wake.logical_time,
+                created_at=wake.created_at,
+                actor=self._actor,
+                source="world-v2:life-development",
+                trace_id=trace_id or wake.trace_id,
+                causation_id=proposal.event_id,
+                correlation_id=correlation_id or wake.correlation_id,
+                idempotency_key=(
+                    domain_idempotency_key(
+                        event_type="AspirationCrystallized",
+                        world_id=self._ledger.world_id,
+                        payload=aspiration_payload,
+                    )
+                    or "life-development-aspiration:" + aspiration_suffix
+                ),
+                payload=aspiration_payload,
+            )
         try:
             self._ledger.commit_at_cursor(
-                (proposal, plan_event),
+                (
+                    proposal,
+                    plan_event,
+                    *((aspiration_event,) if aspiration_event is not None else ()),
+                ),
                 expected_cursor=expected_cursor,
                 commit_id="commit:life-development:" + _digest(proposal_id),
             )
@@ -1908,6 +2013,15 @@ class LifeDevelopmentRuntime:
             if context_cursor != _cursor(projection):
                 raise ConcurrencyConflict("Life Development Context prefix changed")
             context = compile_life_decision_context(capsule)
+            aspiration_advisories = active_aspiration_advisories(projection)
+            if aspiration_advisories:
+                context = {
+                    **context,
+                    "active_aspirations": [
+                        item.model_dump(mode="json")
+                        for item in aspiration_advisories
+                    ],
+                }
             manifest = self._manifest_compiler.compile(
                 projection=projection,
                 wake=wake,
@@ -3133,23 +3247,36 @@ class LifeDevelopmentRuntime:
                         privacy_class=npc.privacy_class,
                     )
                 )
-            dynamic = None
-            if outcome.dynamic_life_direction is not None:
-                direction = outcome.dynamic_life_direction
-                summary_ref = f"content:life-development:dynamic-direction:{suffix}:{index}"
-                summary_hash = life_content_payload_hash(direction.summary)
-                store_binding(
-                    role=f"outcome:{index}:dynamic_life_direction",
-                    ref=summary_ref,
-                    text=direction.summary,
-                    content_kind="dynamic_life_arc_context",
+            provisional_places: list[ProvisionalPlaceIntroductionDescriptor] = []
+            for place_index, place in enumerate(outcome.provisional_places, start=1):
+                summary_ref = (
+                    f"content:life-development:provisional-place:{suffix}:"
+                    f"{index}:{place_index}"
                 )
-                dynamic = DynamicLifeArcContextDescriptor.create(
-                    summary_content_ref=summary_ref,
-                    summary_payload_hash=summary_hash,
-                    narrative_tags=direction.narrative_tags,
-                    duration_days=direction.duration_days,
-                    privacy_class=direction.privacy_class,
+                summary_hash = life_content_payload_hash(place.summary)
+                store_binding(
+                    role=f"outcome:{index}:provisional_place:{place_index}",
+                    ref=summary_ref,
+                    text=place.summary,
+                    content_kind="provisional_place_introduction",
+                )
+                provisional_places.append(
+                    ProvisionalPlaceIntroductionDescriptor.create(
+                        provisional_place_ref="provisional:place:"
+                        + _digest(
+                            {
+                                "world_id": self._ledger.world_id,
+                                "proposal_id": proposal_id,
+                                "candidate_index": index,
+                                "local_ref": place.local_ref,
+                            }
+                        ),
+                        summary_content_ref=summary_ref,
+                        summary_payload_hash=summary_hash,
+                        narrative_tags=place.narrative_tags,
+                        timezone_name=place.timezone_name,
+                        privacy_class=place.privacy_class,
+                    )
                 )
             candidates.append(
                 OutcomeCandidateDescriptor(
@@ -3163,7 +3290,26 @@ class LifeDevelopmentRuntime:
                     causal_authority=draft.outcome_resolution_authority,
                     relative_plausibility_weight=outcome.relative_plausibility_weight,
                     provisional_npc_introductions=tuple(provisional),
-                    dynamic_life_arc_context=dynamic,
+                    provisional_place_introductions=tuple(provisional_places),
+                    objective_biographical_transition=(
+                        BiographicalCoordinateReplacement.create(
+                            coordinate_ref=(
+                                outcome.objective_biographical_transition.coordinate_ref
+                            ),
+                            summary=outcome.objective_biographical_transition.summary,
+                            context_tags=(
+                                outcome.objective_biographical_transition.context_tags
+                            ),
+                            replaces_context_tag_prefixes=(
+                                outcome.objective_biographical_transition.replaces_context_tag_prefixes
+                            ),
+                            privacy_class=(
+                                outcome.objective_biographical_transition.privacy_class
+                            ),
+                        )
+                        if outcome.objective_biographical_transition is not None
+                        else None
+                    ),
                 )
             )
         return tuple(records), tuple(bindings), tuple(candidates)
@@ -4632,7 +4778,13 @@ class LifeDevelopmentRuntime:
                                 "content_authority": {
                                     "event_and_outcomes": "world_author",
                                     "provisional_npcs": "world_author",
-                                    "dynamic_life_direction": "world_author",
+                                    "provisional_places": "world_author",
+                                    "objective_biographical_transition": (
+                                        "world_author_objective_candidate_consequence"
+                                    ),
+                                    "dynamic_life_direction": (
+                                        "retired_character_model_at_settlement"
+                                    ),
                                     "system_supplied_story_content": "none",
                                 },
                                 "replacement_contract": {
@@ -4746,6 +4898,7 @@ class LifeDevelopmentRuntime:
         context: dict[str, object],
         draft: LifeDevelopmentPossibilityDraft,
         offered_window: DueWindow,
+        active_aspiration_source_refs: tuple[str, ...],
     ) -> _LifeDevelopmentModelRun:
         messages, output_contract, hard_boundary_contract = (
             self._character_choice_messages(
@@ -4763,6 +4916,7 @@ class LifeDevelopmentRuntime:
             offered_window=offered_window,
             allow_recall=self._recall is not None,
             recall_trace=None,
+            active_aspiration_source_refs=active_aspiration_source_refs,
         )
 
     async def _character_choice_after_recall(
@@ -4775,6 +4929,7 @@ class LifeDevelopmentRuntime:
         recall_request: CharacterRecallRequest,
         recall_trace: RecallAuditTrace | None,
         recall_failure_code: str | None,
+        active_aspiration_source_refs: tuple[str, ...],
     ) -> _LifeDevelopmentModelRun:
         messages, output_contract, hard_boundary_contract = (
             self._character_choice_messages(
@@ -4837,6 +4992,7 @@ class LifeDevelopmentRuntime:
             offered_window=offered_window,
             allow_recall=False,
             recall_trace=recall_trace,
+            active_aspiration_source_refs=active_aspiration_source_refs,
         )
 
     async def _run_character_choice_phase(
@@ -4849,6 +5005,7 @@ class LifeDevelopmentRuntime:
         offered_window: DueWindow,
         allow_recall: bool,
         recall_trace: RecallAuditTrace | None,
+        active_aspiration_source_refs: tuple[str, ...],
     ) -> _LifeDevelopmentModelRun:
         attempts: list[_LifeDevelopmentAttempt] = []
         for ordinal in range(2):
@@ -4930,6 +5087,7 @@ class LifeDevelopmentRuntime:
                     raw=raw,
                     offered=draft,
                     offered_window=offered_window,
+                    active_aspiration_source_refs=active_aspiration_source_refs,
                 )
                 attempts.append(
                     _LifeDevelopmentAttempt(
@@ -5068,7 +5226,20 @@ class LifeDevelopmentRuntime:
                     "authorized location_ref exactly. Omit visual_evidence when the "
                     "outcome has no defensible visual slice; never infer one merely "
                     "because a picture might be appealing. Provisional NPC local refs "
-                    "are allowed. Classify claims by authority, not by whether their "
+                    "and provisional_places are allowed inside outcomes; a selected "
+                    "settlement gives a provisional place attempt-only future identity, "
+                    "not proof of opening, entry, or visit success. "
+                    "An outcome may also carry one open objective_biographical_transition "
+                    "only when that exact candidate branch itself makes a present, "
+                    "objective life coordinate true. This is not a plot type menu: use "
+                    "no fixed career, school, residence, or milestone list. Never put a "
+                    "motive, desire, intention, plan, or hoped-for future in this slot; "
+                    "those belong to the Character Model. Omit it when the candidate "
+                    "does not itself establish an objective durable change. "
+                    "dynamic_life_direction is a retired transport slot and must be null; "
+                    "only the Character Model may freely form a durable life direction "
+                    "after observing an objective result. Classify "
+                    "claims by authority, not by whether their "
                     "content sounds realistic or familiar. Existing-world means the "
                     "material was already true before this proposal and therefore "
                     "needs exact semantically entailing pinned source refs. A novel "
@@ -5219,7 +5390,9 @@ class LifeDevelopmentRuntime:
                 or novel_origin_review.decision != "supported"
                 or novel_origin_review.unsupported_claims
                 or novel_origin_review.unsupported_provisional_npcs
+                or novel_origin_review.unsupported_provisional_places
                 or novel_origin_review.unsupported_outcome_prerequisites
+                or novel_origin_review.unsupported_objective_transitions
                 or novel_origin_review.undeclared_premise_fragments
             ):
                 raise ValueError(
@@ -5374,7 +5547,7 @@ class LifeDevelopmentRuntime:
             "capability_manifest_hash": manifest.manifest_hash,
             "possibility_authority_version": (
                 (
-                    "life-development-possibility.6"
+                    "life-development-possibility.7"
                     if novel_origin_deliberation is not None
                     else "life-development-possibility.3"
                 )
@@ -5537,6 +5710,9 @@ class LifeDevelopmentRuntime:
             "opens_at": (choice.opens_at or offered.opens_at).isoformat(),
             "closes_at": (choice.closes_at or offered.closes_at).isoformat(),
             "participant_refs": list(choice.participant_refs),
+            "crystallized_aspiration_source_ref": (
+                choice.crystallized_aspiration_source_ref
+            ),
         }
 
     def _validate_content_bindings(
@@ -5978,7 +6154,7 @@ def _world_author_hard_boundary_contract(
         for capability in manifest.location_capabilities
     ]
     return {
-        "contract_version": "life-development-world-author-authority.3",
+        "contract_version": "life-development-world-author-authority.4",
         "canonical_reference_arrays": {
             "duplicates": "discarded_as_set_equivalent",
             "normal_form": "lexicographic_ascending",
@@ -6084,15 +6260,30 @@ def _world_author_hard_boundary_contract(
             },
         },
         "dynamic_life_direction": {
-            "status": "optional",
-            "permitted_outcome_resolution_authority": "character_choice",
-            "when_present": {
-                "narrative_tags": {
-                    "cardinality": "1..16",
-                    "duplicates": "discarded_as_set_equivalent",
-                    "pattern": r"^narrative:[a-z0-9][a-z0-9._-]{0,63}$",
-                },
-            },
+            "status": "retired_must_be_null",
+            "authority": "character_model_at_outcome_settlement",
+        },
+        "objective_biographical_transition": {
+            "status": "optional_per_outcome",
+            "authority": "world_author_objective_candidate_consequence",
+            "applied_when": "that_exact_candidate_is_accepted_and_settled",
+            "must_be": "present_objective_state_entailed_by_candidate_branch",
+            "must_not_be": [
+                "character_motive",
+                "desire",
+                "plan",
+                "hoped_future",
+                "predetermined_plot_type",
+            ],
+            "direction_namespace": "reserved_for_character_model",
+        },
+        "provisional_places": {
+            "status": "optional_per_outcome",
+            "identity_before_settlement": "proposal_scoped_only",
+            "identity_after_selected_outcome_settlement": "stable_world_place",
+            "future_authority": "attempt_only",
+            "does_not_prove": ["opening_hours", "presence", "entry", "visit_success"],
+            "story_candidate_catalog": "none",
         },
         "outcome_text": {
             "authority_status": "unsettled_alternative",
@@ -6601,9 +6792,17 @@ def _world_author_rejection_coordinates(
             item.model_dump(mode="json")
             for item in review.unsupported_provisional_npcs
         ],
+        "unsupported_provisional_places": [
+            item.model_dump(mode="json")
+            for item in review.unsupported_provisional_places
+        ],
         "unsupported_outcome_prerequisites": [
             item.model_dump(mode="json")
             for item in review.unsupported_outcome_prerequisites
+        ],
+        "unsupported_objective_transitions": [
+            item.model_dump(mode="json")
+            for item in review.unsupported_objective_transitions
         ],
         "undeclared_premise_fragments": list(
             review.undeclared_premise_fragments
