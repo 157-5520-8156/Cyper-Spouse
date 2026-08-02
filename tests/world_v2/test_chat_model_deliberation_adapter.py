@@ -345,6 +345,58 @@ class _UnitStreamingModel(_Model):
         )
 
 
+class _EventFrameStreamingModel(_UnitStreamingModel):
+    """Release one complete expression event before the remaining event array."""
+
+    boundary_marker = ',{"type":"beat"'
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ) -> tuple[str, ModelUsageProvenance]:
+        self.calls.append((messages, temperature))
+        boundary = self._reply.index(self.boundary_marker)
+        if on_text_delta is not None:
+            on_text_delta(self._reply[:boundary])
+        try:
+            await self.release_tail.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        if on_text_delta is not None:
+            on_text_delta(self._reply[boundary:])
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 12,
+            "output_tokens": 8,
+            "thinking_tokens": 0,
+            "token_provenance": "provider_reported",
+            "transport": "provider_api",
+            "provider": "fake-provider",
+            "provider_usage_ref": "usage:fake:event-stream:1",
+        }
+        digest = sha256(
+            json.dumps(
+                material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return self._reply, ModelUsageProvenance(
+            **material,
+            provider_usage_hash=digest,
+        )
+
+
+class _HeadOnlyEventFrameStreamingModel(_EventFrameStreamingModel):
+    boundary_marker = ',{"type":"end"'
+
+
 class _BlockingStreamPrefetch:
     """Hold one old route before its stream operation can be entered."""
 
@@ -471,6 +523,158 @@ async def test_expression_unit_stream_reuses_one_author_call_and_releases_head_e
     assert tail.winning_model_call_id != head.winning_model_call_id
     assert tail.raw_proposal["episode_disposition"] == "append"
     assert len(tail.raw_proposal["action_intents"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_expression_event_stream_releases_one_singular_beat_frame_before_tail() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-events.1",
+            "events": [
+                {
+                    "type": "head",
+                    "timing_choice": "now",
+                    "beat": {"modality": "text", "text": "第一帧先到。"},
+                    "stance": "speak_in_two_bubbles",
+                    "brief_rationale": "I chose two messages.",
+                    "world_claims": [],
+                },
+                {
+                    "type": "beat",
+                    "beat": {"modality": "text", "text": "第二帧随后到。"},
+                    "world_claims": [],
+                },
+                {"type": "end"},
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _EventFrameStreamingModel(raw)
+    adapter = ChatModelDeliberationAdapter(
+        model=model,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+    request = _qq_request()
+    head_task = asyncio.create_task(adapter.propose_stream_head(request))
+    tail_task = asyncio.create_task(
+        adapter.propose_stream_tail(request.model_copy(update={"call_id": "call:event-tail"}))
+    )
+
+    head = await asyncio.wait_for(head_task, timeout=0.5)
+    assert "protocol=expression-events.1" in model.calls[0][0][0]["content"]
+    assert "singular beat" in model.calls[0][0][0]["content"]
+    assert head.raw_proposal["episode_disposition"] == "append"
+    head_payload = json.loads(
+        head.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+    assert [beat["inline_text"] for beat in head_payload["beat_drafts"]] == ["第一帧先到。"]
+    assert not tail_task.done()
+
+    model.release_tail.set()
+    tail = await asyncio.wait_for(tail_task, timeout=0.5)
+    assert len(model.calls) == 1
+    tail_payload = json.loads(
+        tail.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+    assert [beat["inline_text"] for beat in tail_payload["beat_drafts"]] == ["第二帧随后到。"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("timing_choice", "head_fields"),
+    [
+        ("silent", {}),
+        (
+            "later",
+            {
+                "beat": {"modality": "text", "text": "晚点我再接着说。"},
+                "delay_seconds": 60,
+                "expires_after_seconds": 600,
+            },
+        ),
+    ],
+)
+async def test_expression_event_stream_does_not_invent_a_tail_for_silent_or_later(
+    timing_choice: str,
+    head_fields: dict[str, object],
+) -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-events.1",
+            "events": [
+                {
+                    "type": "head",
+                    "timing_choice": timing_choice,
+                    "stance": "role_owned_choice",
+                    "brief_rationale": "The role chose this timing.",
+                    "world_claims": [],
+                    **head_fields,
+                },
+                {"type": "end"},
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _HeadOnlyEventFrameStreamingModel(raw)
+    adapter = ChatModelDeliberationAdapter(model=model)
+    request = _qq_request()
+    if timing_choice == "later":
+        request = request.model_copy(
+            update={
+                "model_content_json": json.dumps(
+                    {
+                        "capsule": "authoritative",
+                        "logical_time": "2026-08-02T12:00:00+00:00",
+                    }
+                )
+            }
+        )
+
+    head = await asyncio.wait_for(adapter.propose_stream_head(request), timeout=0.5)
+    model.release_tail.set()
+
+    assert head.episode_disposition == "complete_without_more"
+    assert head.raw_proposal["episode_disposition"] == "complete_without_more"
+
+
+@pytest.mark.asyncio
+async def test_expression_event_stream_rejects_a_false_protocol_before_releasing_head() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "not-expression-events",
+            "note": "expression-events.1",
+            "events": [
+                {
+                    "type": "head",
+                    "timing_choice": "now",
+                    "beat": {"modality": "text", "text": "这条不能提前发送。"},
+                    "stance": "invalid_transport",
+                    "brief_rationale": "The outer protocol is invalid.",
+                    "world_claims": [],
+                },
+                {
+                    "type": "beat",
+                    "beat": {"modality": "text", "text": "尾部。"},
+                    "world_claims": [],
+                },
+                {"type": "end"},
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _EventFrameStreamingModel(raw)
+    adapter = ChatModelDeliberationAdapter(model=model)
+
+    result = await asyncio.gather(
+        adapter.propose_stream_head(_qq_request()),
+        return_exceptions=True,
+    )
+    adapter.cancel_expression_unit_streams()
+
+    assert isinstance(result[0], BaseException)
 
 
 @pytest.mark.asyncio

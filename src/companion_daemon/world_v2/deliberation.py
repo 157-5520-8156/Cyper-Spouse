@@ -95,6 +95,14 @@ _VALIDATION_ATTEMPT: ContextVar["_ValidationAttemptState | None"] = ContextVar(
 )
 
 
+def mark_interactive_turn_milestone(event: str) -> None:
+    """Expose a presentation-neutral milestone through the current turn budget."""
+
+    budget = _INTERACTIVE_TURN_BUDGET.get()
+    if budget is not None:
+        budget.mark(event)
+
+
 class _ProviderSlotCoordinator:
     """Process-local bounded provider-call lease shared with cognition adapters."""
 

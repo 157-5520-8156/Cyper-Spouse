@@ -1447,32 +1447,29 @@ class _StreamingExpressionModel(_OneExpressionModel):
         self.calls += 1
         self.prompt_kinds.append("stream")
         first = {
+            "type": "head",
             "private_turn_state": {
                 "inner_state_summary": "I want to answer in two separate bubbles.",
                 "attended_source_refs": [],
             },
             "timing_choice": "now",
-            "beats": [
-                {
-                    "modality": "text",
-                    "text": (
-                        "第一条先发。" if ordinal == 1 else f"第{ordinal}轮先发。"
-                    ),
-                }
-            ],
+            "beat": {
+                "modality": "text",
+                "text": "第一条先发。" if ordinal == 1 else f"第{ordinal}轮先发。",
+            },
             "cadence": "conversational",
             "stance": "two_bubble_reply",
             "brief_rationale": "I chose two separate messages.",
             "confidence": 7000,
             "world_claims": [],
-            "episode_disposition": "append",
         }
         raw = json.dumps(
             {
-                "protocol": "expression-units.1",
-                "first": first,
-                "continuation": [
+                "protocol": "expression-events.1",
+                "events": [
+                    first,
                     {
+                        "type": "beat",
                         "beat": {
                             "modality": "text",
                             "text": (
@@ -1482,13 +1479,14 @@ class _StreamingExpressionModel(_OneExpressionModel):
                             ),
                         },
                         "world_claims": [],
-                    }
+                    },
+                    {"type": "end"},
                 ],
             },
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        boundary = raw.index('"continuation"')
+        boundary = raw.index(',{"type":"beat"')
         if on_text_delta is not None:
             on_text_delta(raw[:boundary])
             try:
@@ -1998,6 +1996,7 @@ async def test_qq_stream_mode_sends_two_units_from_one_role_author_request(
         ]
         pending_tails = host._host._application._turns._runtime._pinned_turn._deliberation._episode_tail_tasks  # type: ignore[attr-defined]
         rebuilt = host._host._application._ledger.rebuild()  # type: ignore[attr-defined]
+        latency_segments = {sample.segment for sample in host.latency_samples()}
     finally:
         model.tail_release.set()
         if inbound_task is not None and not inbound_task.done():
@@ -2019,6 +2018,8 @@ async def test_qq_stream_mode_sends_two_units_from_one_role_author_request(
     assert physical_audits[0]["usage"]["token_provenance"] == "provider_reported"
     assert rebuilt.semantic_hash == projection.semantic_hash
     assert pending_tails == {}
+    assert "ingress_to_first_expression_frame" in latency_segments
+    assert "ingress_to_first_candidate_validated" in latency_segments
     assert _visible(delivery) == [
         ("10001", "第一条先发。"),
         ("10001", "第二条再跟上。"),

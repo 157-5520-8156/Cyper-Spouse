@@ -48,6 +48,9 @@ TraceSegment = Literal[
     "dispatch",
     "receipt",
     "ingress_to_first_role_provider",
+    "ingress_to_first_expression_frame",
+    "ingress_to_first_source_closure_completed",
+    "ingress_to_first_candidate_validated",
     "ingress_to_visible",
 ]
 
@@ -81,6 +84,9 @@ TRACE_SEGMENTS: frozenset[str] = frozenset(
         "dispatch",
         "receipt",
         "ingress_to_first_role_provider",
+        "ingress_to_first_expression_frame",
+        "ingress_to_first_source_closure_completed",
+        "ingress_to_first_candidate_validated",
         "ingress_to_visible",
     }
 )
@@ -143,6 +149,9 @@ class TurnLatencyTrace:
         self._first_role_provider_completion_call_id: str | None = None
         self._cognition_finished = False
         self._provider_accepted_candidate_ns: int | None = None
+        self._first_expression_frame_ns: int | None = None
+        self._first_source_closure_completed_ns: int | None = None
+        self._first_candidate_validated_ns: int | None = None
         self._visible_ns: int | None = None
         self._lock = Lock()
 
@@ -169,6 +178,9 @@ class TurnLatencyTrace:
     def record_span(self, segment: TraceSegment, *, started_ns: int, ended_ns: int) -> None:
         if segment not in TRACE_SEGMENTS or segment in {
             "ingress_to_first_role_provider",
+            "ingress_to_first_expression_frame",
+            "ingress_to_first_source_closure_completed",
+            "ingress_to_first_candidate_validated",
             "ingress_to_visible",
             "model_completion",
             "model_ttft",
@@ -196,6 +208,9 @@ class TurnLatencyTrace:
 
         if segment not in TRACE_SEGMENTS or segment in {
             "ingress_to_first_role_provider",
+            "ingress_to_first_expression_frame",
+            "ingress_to_first_source_closure_completed",
+            "ingress_to_first_candidate_validated",
             "ingress_to_visible",
             "model_completion",
             "model_ttft",
@@ -246,6 +261,28 @@ class TurnLatencyTrace:
         with self._lock:
             if self._provider_accepted_candidate_ns is None:
                 self._provider_accepted_candidate_ns = observed
+
+    def mark_interactive_milestone(
+        self, event: str, *, observed_ns: int | None = None
+    ) -> None:
+        """Record the first completed frame and its first full validation boundary."""
+
+        observed = self._clock_ns() if observed_ns is None else observed_ns
+        if observed < self._ingress_started_ns:
+            raise ValueError("interactive milestone timestamp precedes ingress")
+        with self._lock:
+            if event == "first_expression_frame":
+                if self._first_expression_frame_ns is None:
+                    self._first_expression_frame_ns = observed
+                return
+            if event == "candidate_validated":
+                if self._first_candidate_validated_ns is None:
+                    self._first_candidate_validated_ns = observed
+                return
+            if event == "source_closure_completed":
+                if self._first_source_closure_completed_ns is None:
+                    self._first_source_closure_completed_ns = observed
+                return
 
     def mark_verified_visible(self) -> None:
         """Confirm visibility at the earlier ACK boundary after strong lookup proof."""
@@ -485,6 +522,19 @@ class TurnLatencyTrace:
             if self._first_role_provider_ns is not None:
                 durations["ingress_to_first_role_provider"] = (
                     self._first_role_provider_ns - self._ingress_started_ns
+                )
+            if self._first_expression_frame_ns is not None:
+                durations["ingress_to_first_expression_frame"] = (
+                    self._first_expression_frame_ns - self._ingress_started_ns
+                )
+            if self._first_source_closure_completed_ns is not None:
+                durations["ingress_to_first_source_closure_completed"] = (
+                    self._first_source_closure_completed_ns
+                    - self._ingress_started_ns
+                )
+            if self._first_candidate_validated_ns is not None:
+                durations["ingress_to_first_candidate_validated"] = (
+                    self._first_candidate_validated_ns - self._ingress_started_ns
                 )
             if self._visible_ns is not None:
                 durations["ingress_to_visible"] = self._visible_ns - self._ingress_started_ns

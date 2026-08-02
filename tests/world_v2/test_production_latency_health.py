@@ -44,6 +44,9 @@ def test_first_role_provider_health_warns_for_single_and_statistical_overruns() 
         )
     )
 
+    stream_pipeline = snapshot.pop("stream_pipeline")
+    assert stream_pipeline["qq_ack"]["sample_ms_p50"] == 12_000.0
+    assert stream_pipeline["first_expression_frame"]["status"] == "not_measured"
     assert snapshot == {
         "status": "warning",
         "warning": True,
@@ -118,6 +121,12 @@ def test_first_role_provider_health_is_read_only_and_not_measured_without_sample
     assert empty["warning"] is False
     assert empty["sample_count"] == 0
     assert empty["sample_ms_p50"] is None
+    assert empty["role_provider_timing"]["ttft"] == {
+        "status": "not_measured",
+        "segment": "model_ttft",
+        "sample_count": 0,
+        "reason": "no_role_provider_sample",
+    }
     assert at_boundary["status"] == "ok"
     assert at_boundary["warning"] is False
     assert at_boundary["over_threshold_count"] == 0
@@ -230,6 +239,92 @@ def test_health_reports_actual_ingress_to_visible_receipt_instead_of_stopping_at
     assert "ingress_to_visible_single_over_threshold" in snapshot["warning_reasons"]
 
 
+def test_health_exposes_stream_ttft_frame_validation_and_qq_ack_as_distinct_stages() -> None:
+    snapshot = production_latency_health_snapshot(
+        (
+            _sample("trace:stream-stages", 180.0),
+            ProductionLatencySample(
+                trace_id="trace:stream-stages",
+                startup="hot",
+                segment="model_ttft",
+                duration_ms=420.0,
+                environment="real_transport",
+            ),
+            ProductionLatencySample(
+                trace_id="trace:stream-stages",
+                startup="hot",
+                segment="ingress_to_first_expression_frame",
+                duration_ms=1_350.0,
+                environment="real_transport",
+            ),
+            ProductionLatencySample(
+                trace_id="trace:stream-stages",
+                startup="hot",
+                segment="ingress_to_first_source_closure_completed",
+                duration_ms=1_780.0,
+                environment="real_transport",
+            ),
+            ProductionLatencySample(
+                trace_id="trace:stream-stages",
+                startup="hot",
+                segment="ingress_to_first_candidate_validated",
+                duration_ms=1_900.0,
+                environment="real_transport",
+            ),
+            ProductionLatencySample(
+                trace_id="trace:stream-stages",
+                startup="hot",
+                segment="ingress_to_visible",
+                duration_ms=2_150.0,
+                environment="real_transport",
+            ),
+        )
+    )
+
+    assert snapshot["stream_pipeline"] == {
+        "provider_ttft": {
+            "status": "observed",
+            "segment": "model_ttft",
+            "sample_count": 1,
+            "sample_ms_p50": 420.0,
+            "sample_ms_p95": 420.0,
+            "sample_ms_max": 420.0,
+        },
+        "first_expression_frame": {
+            "status": "observed",
+            "segment": "ingress_to_first_expression_frame",
+            "sample_count": 1,
+            "sample_ms_p50": 1_350.0,
+            "sample_ms_p95": 1_350.0,
+            "sample_ms_max": 1_350.0,
+        },
+        "first_candidate_validated": {
+            "status": "observed",
+            "segment": "ingress_to_first_candidate_validated",
+            "sample_count": 1,
+            "sample_ms_p50": 1_900.0,
+            "sample_ms_p95": 1_900.0,
+            "sample_ms_max": 1_900.0,
+        },
+        "source_closure_completed": {
+            "status": "observed",
+            "segment": "ingress_to_first_source_closure_completed",
+            "sample_count": 1,
+            "sample_ms_p50": 1_780.0,
+            "sample_ms_p95": 1_780.0,
+            "sample_ms_max": 1_780.0,
+        },
+        "qq_ack": {
+            "status": "observed",
+            "segment": "ingress_to_visible",
+            "sample_count": 1,
+            "sample_ms_p50": 2_150.0,
+            "sample_ms_p95": 2_150.0,
+            "sample_ms_max": 2_150.0,
+        },
+    }
+
+
 def test_health_does_not_hide_unmeasured_slow_trace_behind_closed_fast_trace() -> None:
     snapshot = production_latency_health_snapshot(
         (
@@ -292,7 +387,11 @@ def test_production_health_exposes_latency_warning_without_changing_runtime_stat
     body = response.json()
     assert body["status"] == "running"
     assert body["scheduler"]["status"] == "running"
-    assert body["scheduler"]["performance"] == {
+    performance = body["scheduler"]["performance"]
+    stream_pipeline = performance.pop("stream_pipeline")
+    assert stream_pipeline["provider_ttft"]["status"] == "not_measured"
+    assert stream_pipeline["qq_ack"]["status"] == "not_measured"
+    assert performance == {
         "status": "warning",
         "warning": True,
         "warning_reasons": [

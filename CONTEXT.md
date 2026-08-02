@@ -465,11 +465,19 @@ _Avoid_: Turn-taking policy, punctuation rule, reply classifier
 
 ## Expression Unit Stream
 
-One role-author provider response whose transport envelope exposes a complete,
-independently valid first Expression Beat before any additional model-chosen
-Beats finish arriving. Every unit still passes the normal source, permission,
-Action, receipt and latest-cursor gates. A tail cannot win independently or be
-regenerated after restart merely because its already delivered head survived.
+One role-author provider response whose append-only `expression-events.1`
+transport exposes a singular, complete, independently valid first Expression
+Beat before any additional model-chosen Beats finish arriving. The head frame
+carries the role-owned decision coordinates and exactly one visible Beat
+(optionally preceded by one role-chosen typing Beat); later Beat frames and the
+terminal frame remain part of the same provider result. The historical
+`expression-units.1` envelope remains readable for replay but is not requested
+from new production calls. Every frame still passes the normal source,
+permission, Action, receipt and latest-cursor gates. A tail cannot win
+independently or be regenerated after restart merely because its already
+delivered head survived. Process health reports provider TTFT, first complete
+frame, completed source closure, first fully validated candidate and
+platform-visible ACK separately.
 _Avoid_: Two-author provisional reply, token-by-token QQ output
 
 ## Internal World Snapshot

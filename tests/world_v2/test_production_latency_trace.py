@@ -169,6 +169,30 @@ def test_streaming_role_provider_records_real_ttft_separately_from_completion() 
     }
 
 
+def test_stream_pipeline_records_first_frame_and_validated_frame_from_ingress() -> None:
+    clock = _Clock()
+    trace = ProductionLatencyRecorder(clock_ns=clock).start_ingress(
+        trace_id="trace:stream-pipeline",
+        environment="real_transport",
+    )
+    clock.advance_ms(100)
+    trace.mark_role_provider_entry("model-call:stream")
+    clock.advance_ms(350)
+    trace.mark_role_provider_first_token("model-call:stream")
+    clock.advance_ms(650)
+    trace.mark_interactive_milestone("first_expression_frame")
+    clock.advance_ms(500)
+    trace.mark_interactive_milestone("source_closure_completed")
+    clock.advance_ms(100)
+    trace.mark_interactive_milestone("candidate_validated")
+
+    samples = {sample.segment: sample.duration_ms for sample in trace.samples()}
+    assert samples["model_ttft"] == 350.0
+    assert samples["ingress_to_first_expression_frame"] == 1_100.0
+    assert samples["ingress_to_first_source_closure_completed"] == 1_600.0
+    assert samples["ingress_to_first_candidate_validated"] == 1_700.0
+
+
 def test_failover_intervals_are_independent_and_external_overhead_uses_their_union() -> None:
     clock = _Clock()
     trace = ProductionLatencyRecorder(clock_ns=clock).start_ingress(

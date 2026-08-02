@@ -44,6 +44,14 @@ def _provider_timing_summary(
         if sample.environment == _ENVIRONMENT
         and sample.segment == "model_completion"
     )
+    ttft_status = "observed" if ttft else "unavailable" if entry_count else "not_measured"
+    ttft_reason = (
+        None
+        if ttft
+        else "non_streaming_completion_api"
+        if entry_count
+        else "no_role_provider_sample"
+    )
     return {
         "entry": {
             "status": "observed" if entry_count else "not_measured",
@@ -51,10 +59,10 @@ def _provider_timing_summary(
             "sample_count": entry_count,
         },
         "ttft": {
-            "status": "observed" if ttft else "unavailable",
+            "status": ttft_status,
             "segment": "model_ttft",
             "sample_count": len(ttft),
-            "reason": None if ttft else "non_streaming_completion_api",
+            "reason": ttft_reason,
         },
         "completion": {
             "status": "observed" if completions else "not_measured",
@@ -126,6 +134,42 @@ def _user_visible_latency_summary(values: tuple[float, ...]) -> dict[str, object
     }
 
 
+def _pipeline_stage_summary(
+    samples: tuple[ProductionLatencySample, ...], *, segment: str
+) -> dict[str, object]:
+    values = tuple(
+        sample.duration_ms
+        for sample in samples
+        if sample.environment == _ENVIRONMENT and sample.segment == segment
+    )
+    return {
+        "status": "observed" if values else "not_measured",
+        "segment": segment,
+        "sample_count": len(values),
+        "sample_ms_p50": _nearest_rank(values, 0.50) if values else None,
+        "sample_ms_p95": _nearest_rank(values, 0.95) if values else None,
+        "sample_ms_max": max(values) if values else None,
+    }
+
+
+def _stream_pipeline_summary(
+    samples: tuple[ProductionLatencySample, ...],
+) -> dict[str, object]:
+    return {
+        "provider_ttft": _pipeline_stage_summary(samples, segment="model_ttft"),
+        "first_expression_frame": _pipeline_stage_summary(
+            samples, segment="ingress_to_first_expression_frame"
+        ),
+        "first_candidate_validated": _pipeline_stage_summary(
+            samples, segment="ingress_to_first_candidate_validated"
+        ),
+        "source_closure_completed": _pipeline_stage_summary(
+            samples, segment="ingress_to_first_source_closure_completed"
+        ),
+        "qq_ack": _pipeline_stage_summary(samples, segment="ingress_to_visible"),
+    }
+
+
 def production_latency_health_snapshot(
     samples: Iterable[ProductionLatencySample],
 ) -> dict[str, object]:
@@ -160,6 +204,7 @@ def production_latency_health_snapshot(
         observed_samples,
         entry_count=len(values),
     )
+    stream_pipeline = _stream_pipeline_summary(observed_samples)
     if not values:
         return {
             "status": "not_measured",
@@ -177,6 +222,7 @@ def production_latency_health_snapshot(
             "api_external_overhead": external_overhead,
             "user_visible_latency": user_visible_latency,
             "role_provider_timing": role_provider_timing,
+            "stream_pipeline": stream_pipeline,
         }
 
     p50 = _nearest_rank(values, 0.50)
@@ -256,6 +302,7 @@ def production_latency_health_snapshot(
         "api_external_overhead": external_overhead,
         "user_visible_latency": user_visible_latency,
         "role_provider_timing": role_provider_timing,
+        "stream_pipeline": stream_pipeline,
     }
 
 

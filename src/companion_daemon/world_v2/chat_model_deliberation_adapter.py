@@ -45,6 +45,7 @@ from .deliberation import (
     fit_secondary_call_timeout,
     mark_first_role_provider_completion,
     mark_first_role_provider_entry,
+    mark_interactive_turn_milestone,
     run_validation_review,
 )
 from .expression_draft import (
@@ -7587,7 +7588,13 @@ class _ExpressionStreamGenerationCoordinator:
 
 
 def _stream_first_expression(raw: str) -> str:
-    value = _normalized_stream_packaging(_parse_json_object(raw))
+    parsed = _parse_json_object(raw)
+    if parsed.get("protocol") == "expression-events.1":
+        value = _expression_event_envelope(parsed)
+        events = value["events"]
+        assert isinstance(events, list)
+        return _expression_event_head(events[0], continuation=bool(events[1:-1]))
+    value = _normalized_stream_packaging(parsed)
     if set(value) != {"protocol", "first", "continuation"}:
         raise ValueError("expression unit stream envelope fields are invalid")
     if value["protocol"] != "expression-units.1":
@@ -7634,7 +7641,43 @@ def _stream_first_expression(raw: str) -> str:
 
 
 def _stream_tail_expression(raw: str) -> str:
-    value = _normalized_stream_packaging(_parse_json_object(raw))
+    parsed = _parse_json_object(raw)
+    if parsed.get("protocol") == "expression-events.1":
+        value = _expression_event_envelope(parsed)
+        events = value["events"]
+        assert isinstance(events, list)
+        first = _parse_json_object(
+            _expression_event_head(events[0], continuation=bool(events[1:-1]))
+        )
+        tail_beats: list[object] = []
+        tail_claims: list[object] = []
+        for event in events[1:-1]:
+            assert isinstance(event, dict)
+            tail_beats.append(event["beat"])
+            claims = event["world_claims"]
+            assert isinstance(claims, list)
+            tail_claims.extend(claims)
+        tail = dict(first)
+        tail.pop("delay_seconds", None)
+        tail.pop("expires_after_seconds", None)
+        tail.pop("response_expectation", None)
+        tail.pop("response_expectation_assessment", None)
+        if tail_beats:
+            tail["timing_choice"] = "now"
+            tail["beats"] = tail_beats
+            tail["world_claims"] = tail_claims
+            tail["episode_disposition"] = "append"
+        else:
+            tail["timing_choice"] = "silent"
+            tail["beats"] = []
+            tail["world_claims"] = []
+            tail["episode_disposition"] = (
+                "supersede_pending"
+                if first.get("turn_posture") == "supersede"
+                else "complete_without_more"
+            )
+        return json.dumps(tail, ensure_ascii=False, separators=(",", ":"))
+    value = _normalized_stream_packaging(parsed)
     first_raw = _stream_first_expression(raw)
     first = _parse_json_object(first_raw)
     continuation = value["continuation"]
@@ -7673,6 +7716,85 @@ def _stream_tail_expression(raw: str) -> str:
     return json.dumps(tail, ensure_ascii=False, separators=(",", ":"))
 
 
+def _expression_event_envelope(value: dict[str, object]) -> dict[str, object]:
+    """Validate the completed append-only expression event transport."""
+
+    if set(value) != {"protocol", "events"}:
+        raise ValueError("expression event stream envelope fields are invalid")
+    if value["protocol"] != "expression-events.1":
+        raise ValueError("expression event stream protocol is invalid")
+    events = value["events"]
+    if not isinstance(events, list) or len(events) < 2:
+        raise ValueError("expression event stream requires a head and end frame")
+    head = events[0]
+    end = events[-1]
+    if not isinstance(head, dict) or head.get("type") != "head":
+        raise ValueError("expression event stream must begin with a head frame")
+    if end != {"type": "end"}:
+        raise ValueError("expression event stream must finish with an exact end frame")
+    for event in events[1:-1]:
+        if (
+            not isinstance(event, dict)
+            or set(event) != {"type", "beat", "world_claims"}
+            or event.get("type") != "beat"
+            or not isinstance(event.get("beat"), dict)
+            or not isinstance(event.get("world_claims"), list)
+        ):
+            raise ValueError("expression event continuation frame is invalid")
+    timing = head.get("timing_choice", "now")
+    continuation = events[1:-1]
+    if timing in {"later", "silent"} and continuation:
+        raise ValueError("deferred or silent event stream cannot carry beat frames")
+    if head.get("turn_posture") == "supersede" and continuation:
+        raise ValueError("supersede posture cannot carry event continuation")
+    return value
+
+
+def _expression_event_head(event: object, *, continuation: bool | None) -> str:
+    """Translate one role-authored singular head frame to ExpressionDraft wire."""
+
+    if not isinstance(event, dict) or event.get("type") != "head":
+        raise ValueError("expression event head frame is invalid")
+    if "beats" in event or "episode_disposition" in event:
+        raise ValueError("expression event head must use singular beat transport fields")
+    beat = event.get("beat")
+    leading_typing = event.get("leading_typing_beat")
+    timing = event.get("timing_choice", "now")
+    if leading_typing is not None and (
+        not isinstance(leading_typing, dict)
+        or leading_typing.get("modality") != "typing"
+    ):
+        raise ValueError("expression event leading typing frame is invalid")
+    if timing == "now" and not isinstance(beat, dict):
+        raise ValueError("immediate expression event head requires one visible beat")
+    if timing in {"later", "silent"} and leading_typing is not None:
+        raise ValueError("deferred or silent event head cannot carry leading typing")
+    if timing == "silent" and beat is not None:
+        raise ValueError("silent expression event head cannot carry a beat")
+    if beat is not None and not isinstance(beat, dict):
+        raise ValueError("expression event head beat is invalid")
+    if isinstance(beat, dict) and beat.get("modality") == "typing":
+        raise ValueError("expression event head beat must be independently visible")
+    draft = {
+        key: value
+        for key, value in event.items()
+        if key not in {"type", "beat", "leading_typing_beat"}
+    }
+    draft["beats"] = [
+        item for item in (leading_typing, beat) if isinstance(item, dict)
+    ]
+    draft["episode_disposition"] = (
+        "supersede_pending"
+        if draft.get("turn_posture") == "supersede"
+        else "complete_without_more"
+        if timing in {"later", "silent"}
+        else "append"
+        if continuation is None or continuation
+        else "complete_without_more"
+    )
+    return json.dumps(draft, ensure_ascii=False, separators=(",", ":"))
+
+
 def _normalized_stream_packaging(
     value: dict[str, object], *, derive_episode_disposition: bool = True
 ) -> dict[str, object]:
@@ -7701,6 +7823,67 @@ def _normalized_stream_packaging(
 
 
 def _incremental_first_expression(buffer: str) -> str | None:
+    object_start = next(
+        (index for index, character in enumerate(buffer) if not character.isspace()),
+        -1,
+    )
+    if object_start < 0:
+        return None
+    if buffer[object_start] != "{":
+        raise ValueError("expression stream must begin with an object")
+    decoder = json.JSONDecoder()
+    key_start = object_start + 1
+    while key_start < len(buffer) and buffer[key_start].isspace():
+        key_start += 1
+    try:
+        protocol_key, protocol_key_end = decoder.raw_decode(buffer, key_start)
+    except json.JSONDecodeError:
+        return None
+    if protocol_key != "protocol":
+        raise ValueError("expression stream must serialize protocol first")
+    protocol_colon = buffer.find(":", protocol_key_end)
+    if protocol_colon < 0:
+        return None
+    protocol_value_start = protocol_colon + 1
+    while protocol_value_start < len(buffer) and buffer[protocol_value_start].isspace():
+        protocol_value_start += 1
+    try:
+        protocol, protocol_end = decoder.raw_decode(buffer, protocol_value_start)
+    except json.JSONDecodeError:
+        return None
+    if protocol == "expression-events.1":
+        second_key_start = protocol_end
+        while second_key_start < len(buffer) and buffer[second_key_start].isspace():
+            second_key_start += 1
+        if second_key_start >= len(buffer) or buffer[second_key_start] != ",":
+            return None
+        second_key_start += 1
+        while second_key_start < len(buffer) and buffer[second_key_start].isspace():
+            second_key_start += 1
+        try:
+            second_key, second_key_end = decoder.raw_decode(buffer, second_key_start)
+        except json.JSONDecodeError:
+            return None
+        if second_key != "events":
+            raise ValueError("expression event stream must serialize events second")
+        events_colon = buffer.find(":", second_key_end)
+        if events_colon < 0:
+            return None
+        array_start = events_colon + 1
+        while array_start < len(buffer) and buffer[array_start].isspace():
+            array_start += 1
+        if array_start >= len(buffer) or buffer[array_start] != "[":
+            return None
+        value_start = array_start + 1
+        while value_start < len(buffer) and buffer[value_start].isspace():
+            value_start += 1
+        try:
+            event, _ = json.JSONDecoder().raw_decode(buffer, value_start)
+        except json.JSONDecodeError:
+            return None
+        return _expression_event_head(event, continuation=None)
+    if protocol != "expression-units.1":
+        raise ValueError("expression stream protocol is invalid")
     marker = '"first"'
     start = buffer.find(marker)
     if start < 0:
@@ -8013,6 +8196,7 @@ class ChatModelDeliberationAdapter:
                         # The final append/complete relationship cannot be
                         # known until continuation arrives, but the first
                         # ExpressionDraft itself is already structurally whole.
+                        mark_interactive_turn_milestone("first_expression_frame")
                         head_future.set_result(first)
 
                 try:
@@ -8358,20 +8542,21 @@ class ChatModelDeliberationAdapter:
                     **messages[0],
                     "content": messages[0]["content"]
                     + "\n\nSTREAM PACKAGING CONTRACT (transport shape only; it does not choose your "
-                    "behavior): Return exactly one JSON object with protocol=expression-units.1, "
-                    "first, and continuation. Serialize protocol first, first second, and "
-                    "continuation last so a validated first unit can be delivered while the same "
-                    "request continues. first is one complete ExpressionDraft and includes "
-                    "episode_disposition. If timing_choice is now, first contains the first "
-                    "visible beat you choose and may also contain one leading typing beat you "
-                    "choose; put each additional chosen visible beat in continuation as "
-                    '{"beat":<one beat>,"world_claims":[<claims for only that beat>]}. '
-                    "If continuation is non-empty, first.episode_disposition is append. If "
-                    "turn_posture is supersede, continuation must be empty and the disposition "
-                    "is supersede_pending; otherwise an empty continuation uses "
-                    "complete_without_more. For later or silent, continuation is empty and first "
-                    "contains the complete decision. Do not shorten, add, or split beats "
-                    "merely because of this wire format; message count and content remain yours.",
+                    "behavior): Return exactly one JSON object with protocol=expression-events.1 "
+                    "and events. Serialize protocol first and events second. events is an "
+                    "append-only array whose first item is a head frame, whose optional middle "
+                    "items are beat frames, and whose final item is exactly {\"type\":\"end\"}. "
+                    "The head frame contains type=head and the complete ExpressionDraft fields "
+                    "except beats and episode_disposition. Use the singular beat field for the "
+                    "first visible beat you choose; if you choose a leading typing beat, put that "
+                    "single typing object in leading_typing_beat. Put every additional chosen "
+                    "beat in its own "
+                    '{"type":"beat","beat":<one beat>,"world_claims":[<claims for only that beat>]} '
+                    "frame. For later, the head singular beat carries the deferred expression and "
+                    "there are no middle beat frames. For silent, omit the head beat and emit no "
+                    "middle beat frames. Do not emit beats or episode_disposition in the head. "
+                    "Do not shorten, add, reorder, or split messages merely because of this wire "
+                    "format; message count, content, timing, posture, and silence remain yours.",
                 },
                 *messages[1:],
             ]
@@ -8896,6 +9081,7 @@ class ChatModelDeliberationAdapter:
         source_corrective_spent = private_state_corrective_spent
         source_corrected_preflight: dict[str, object] | None = None
         report_relative_adjudication_used = False
+        source_closure_completed = False
         if (
             not provisional
             and not expression_episode_provider_slots_active()
@@ -8924,6 +9110,8 @@ class ChatModelDeliberationAdapter:
                     request.call_id,
                 )
             review = review_result.review
+            if review is None or review.decision != "unsupported":
+                source_closure_completed = True
             source_reselection_failure_stage: _SourceClosureReselectionFailureStage | None = (
                 "candidate_inventory_incomplete"
                 if review_result.visible_authority_terminal_rejection
@@ -9082,6 +9270,7 @@ class ChatModelDeliberationAdapter:
                     raise terminal_authored_expression_reselection() from ValueError(
                         source_closure_violation(corrected_review)
                     )
+                source_closure_completed = True
         try:
             raw_proposal = source_corrected_preflight
             if raw_proposal is None:
@@ -9212,11 +9401,14 @@ class ChatModelDeliberationAdapter:
                     raise terminal_authored_expression_reselection() from ValueError(
                         source_closure_violation(final_review)
                     )
+                source_closure_completed = True
             if episode_disposition is not None:
                 raw_proposal = {
                     **raw_proposal,
                     "episode_disposition": episode_disposition,
                 }
+        if source_closure_completed:
+            mark_interactive_turn_milestone("source_closure_completed")
         if usage is not None:
             if quick_recovery:
                 usage = _usage_for_route_class(usage, route_class="quick_recovery")

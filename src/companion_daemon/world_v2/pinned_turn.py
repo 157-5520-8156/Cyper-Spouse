@@ -9,6 +9,7 @@ separate modules; this module never materializes an accepted world effect.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 import hashlib
 import json
@@ -628,6 +629,22 @@ class PinnedTurnCompiler:
             ),
             recorded_cadence_draws=recorded_cadence_draws,
         )
+        if latency_trace is not None and turn_budget is not None:
+            prior_marker = turn_budget.marker
+
+            def latency_milestone(event: str) -> None:
+                # These are ingress-relative streaming markers; older budget
+                # observers only understand the historical duration-segment
+                # vocabulary.
+                if prior_marker is not None and event not in {
+                    "first_expression_frame",
+                    "source_closure_completed",
+                }:
+                    prior_marker(event)
+                latency_trace.mark_interactive_milestone(event)
+
+            turn_budget = replace(turn_budget, marker=latency_milestone)
+            deliberate_kwargs["budget"] = turn_budget
         if latency_trace is not None:
             deliberate_kwargs["first_role_provider_marker"] = (
                 latency_trace.mark_role_provider_entry
