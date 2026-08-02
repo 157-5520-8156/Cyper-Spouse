@@ -126,6 +126,72 @@ _WORLD_AUTHOR_SOURCE_REWRITE_PROPOSE_REPAIR_CONTRACT = (
 )
 
 
+def compile_recent_life_texture(context: dict[str, object]) -> dict[str, object]:
+    """Make recent lived history legible without classifying or steering it.
+
+    The World Author receives exact source-bound samples and remains the only
+    semantic judge of resemblance, repetition, novelty, or departure. This
+    compiler neither labels topics nor changes candidate probability.
+    """
+
+    collected: list[dict[str, object]] = []
+    seen_refs: set[str] = set()
+
+    def include(raw: object, *, lane: str) -> None:
+        if not isinstance(raw, dict):
+            return
+        source_ref = raw.get("source_ref") or raw.get("item_ref")
+        if not isinstance(source_ref, str) or not source_ref or source_ref in seen_refs:
+            return
+        value = raw.get("value")
+        if not isinstance(value, (dict, list, str, int, float, bool)):
+            value = {
+                key: item
+                for key, item in raw.items()
+                if key
+                not in {
+                    "source_ref",
+                    "item_ref",
+                    "source_bindings",
+                    "source_hash",
+                    "value_hash",
+                    "rank_score_bp",
+                }
+            }
+        seen_refs.add(source_ref)
+        collected.append({"source_ref": source_ref, "lane": lane, "value": value})
+
+    recent_world_life = context.get("recent_world_life")
+    if isinstance(recent_world_life, list):
+        for item in recent_world_life:
+            include(item, lane="recent_world_life")
+
+    current_self = context.get("current_self_state")
+    if isinstance(current_self, dict):
+        recent = current_self.get("recent_self_experiences")
+        if isinstance(recent, dict) and isinstance(recent.get("items"), list):
+            for item in recent["items"]:
+                include(item, lane="current_self_state.recent_self_experiences")
+
+    slices = context.get("slices")
+    if isinstance(slices, dict):
+        for lane in ("world_life", "recent_experiences"):
+            source_slice = slices.get(lane)
+            if not isinstance(source_slice, dict) or not isinstance(
+                source_slice.get("items"), list
+            ):
+                continue
+            for item in source_slice["items"]:
+                include(item, lane=lane)
+
+    return {
+        "contract": "recent-life-texture.1",
+        "authority": "source_bound_history_advisory",
+        "host_semantic_classification": False,
+        "items": collected[:8],
+    }
+
+
 class LifeDevelopmentModel(Protocol):
     model: str
 
@@ -5213,7 +5279,12 @@ class LifeDevelopmentRuntime:
                     "the Character Model; use a recorded world contingency or an "
                     "external observation. You may "
                     "write an ordinary, long-running, pleasant, difficult, or adverse "
-                    "premise and 2-4 free outcome texts. Use only manifest-listed "
+                    "premise and 2-4 free outcome texts. recent_life_texture presents a bounded "
+                    "source-bound sample "
+                    "of lived history so its semantic texture is visible rather than buried in "
+                    "proof material. It is not a novelty target or a repetition veto. Repetition "
+                    "and departure are both available; judge resemblance, continuity, contrast, "
+                    "and surprise yourself from the whole current life. Use only manifest-listed "
                     "existing refs. When using a location, copy both its location_ref "
                     "and the exact capability_ref whose privacy and complete time "
                     "window cover the proposal. Location binding is optional; an empty "
@@ -5292,6 +5363,7 @@ class LifeDevelopmentRuntime:
                     {
                         "logical_time": logical_time.isoformat(),
                         "pinned_world_context": context,
+                        "recent_life_texture": compile_recent_life_texture(context),
                         "authored_subject": {
                             "owner_actor_ref": self._owner,
                             "user_authority": "context_only",
@@ -6833,4 +6905,5 @@ __all__ = [
     "LifeDevelopmentReadableOutcome",
     "LifeDevelopmentResult",
     "LifeDevelopmentRuntime",
+    "compile_recent_life_texture",
 ]

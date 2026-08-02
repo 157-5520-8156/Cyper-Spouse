@@ -3066,6 +3066,7 @@ def build_sqlite_world_v2_turn_application(
     proactive_identity_frame: CompanionIdentityFrame | None = None,
     proactive_source_closure_model: ChatCompletionModel | None = None,
     proactive_candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
+    proactive_claim_binder_model: ChatCompletionModel | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
     quick_reaction_model: ChatCompletionModel | None = None,
     semantic_recall_embedding: RecallEmbedding | None = None,
@@ -3368,6 +3369,7 @@ def build_sqlite_world_v2_turn_application(
                 candidate_external_proposition_inventory_model=(
                     proactive_candidate_external_proposition_inventory_model
                 ),
+                proactive_claim_binder_model=proactive_claim_binder_model,
             )
             proactive_adapter.install_recall_coordinator(recall_coordinator)
             proactive_runtime = ProactiveActionRuntime(

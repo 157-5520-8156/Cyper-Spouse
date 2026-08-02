@@ -222,6 +222,471 @@ def _supporting_source_reviewer() -> _ProactiveReplySequence:
     return _ProactiveReplySequence([_source_closure_review()])
 
 
+@pytest.mark.asyncio
+async def test_proactive_role_receives_lived_context_without_audit_request_duplication() -> None:
+    model = _ProactiveReplySequence([_proactive_draft("刚看见个诗集名字，莫名有点喜欢。")])
+
+    output = await ProactiveDraftAdapter(
+        model=model,
+        target="user:primary",
+        source_closure_reviewer=_supporting_source_reviewer(),
+    ).propose(_proactive_model_request())
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert isinstance(proposal, DecisionProposal)
+    assert proposal.proactive_opportunity_decision.disposition == "engage_now"
+
+    system = model.messages[0][0]["content"]
+    assert "not a message outline" in system
+    assert "Always return private_turn_state" not in system
+    assert "Always return" not in system
+    assert "world_claims" not in system
+
+    supplied = json.loads(model.messages[0][1]["content"])
+    assert set(supplied) == {
+        "current_self_state",
+        "expression_capabilities",
+        "failure_code",
+        "lived_context",
+        "proactive_opportunity",
+    }
+    assert (
+        supplied["lived_context"]["slices"]["recent_dialogue"]["items"][0]["value"]["text"]
+        == "深圳说实话不是很好玩哈哈哈哈"
+    )
+    assert supplied["current_self_state"]["contract"] == "current-self-state.1"
+    assert "request" not in supplied
+    assert "proactive_fact_authority" not in supplied
+
+
+@pytest.mark.asyncio
+async def test_proactive_claim_binding_is_post_authorship_and_uses_only_visible_lived_evidence() -> (
+    None
+):
+    visible_binding_ref = "event:life-content:experience:visible"
+    hidden_binding_ref = "event:life-content:experience:hidden"
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["recent_experiences"] = {
+        "availability": "available",
+        "source_refs": [visible_binding_ref, hidden_binding_ref],
+        "items": [
+            {
+                "item_ref": "experience:visible",
+                "source_bindings": [{"ref": visible_binding_ref}],
+                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
+            },
+            *(
+                {
+                    "item_ref": f"experience:filler:{index}",
+                    "source_bindings": [{"ref": f"event:life-content:filler:{index}"}],
+                    "value": {"summary": f"较低排序的经历 {index}"},
+                }
+                for index in range(1, 3)
+            ),
+            {
+                "item_ref": "experience:hidden",
+                "source_bindings": [{"ref": hidden_binding_ref}],
+                "value": {"summary": "不应进入角色工作记忆的隐藏经历。"},
+            },
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    role = _ProactiveReplySequence(
+        [_proactive_draft("刚翻到一本《小王子》，突然有点想跟你说句话。")]
+    )
+    binder = _ProactiveReplySequence(
+        [
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [
+                    {
+                        "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
+                        "scope": "past_world",
+                        "source_refs": [visible_binding_ref],
+                    }
+                ],
+            }
+        ]
+    )
+    reviewer = _supporting_source_reviewer()
+
+    output = await ProactiveDraftAdapter(
+        model=role,
+        target="user:primary",
+        proactive_claim_binder_model=binder,
+        source_closure_reviewer=reviewer,
+    ).propose(request)
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert proposal.action_intents
+    assert role.calls == 1
+    assert binder.calls == 1
+    binder_audit = next(
+        audit
+        for audit in output.provider_subcall_audits
+        if audit.purpose.startswith("proactive_claim_binding")
+    )
+    assert binder_audit.parent_model_call_id == output.winning_model_call_id
+    assert binder_audit.request_hash
+    assert binder_audit.response_hash
+    binder_packet = json.loads(binder.messages[0][1]["content"])
+    assert visible_binding_ref in json.dumps(binder_packet, ensure_ascii=False)
+    assert hidden_binding_ref not in json.dumps(binder_packet, ensure_ascii=False)
+    assert (
+        binder_packet["exact_selected_evidence"]["pinned_time"]["authority_transport_availability"]
+        == "semantic_only_no_world_claim_authority"
+    )
+    review_packet = json.loads(reviewer.messages[0][1]["content"])
+    assert visible_binding_ref in json.dumps(review_packet, ensure_ascii=False)
+    assert hidden_binding_ref not in json.dumps(review_packet, ensure_ascii=False)
+    expression_change = proposal.proposed_changes[0].payload.value()
+    assert expression_change["world_claims"] == [
+        {
+            "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
+            "scope": "past_world",
+            "source_refs": [visible_binding_ref],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_proactive_claim_binding_retries_invalid_wire_once_without_reauthoring() -> None:
+    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
+    binder = _ProactiveReplySequence(
+        [
+            {"not_the_contract": True},
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [],
+            },
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=role,
+        target="user:primary",
+        proactive_claim_binder_model=binder,
+        source_closure_reviewer=_supporting_source_reviewer(),
+    ).propose(_proactive_model_request())
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert proposal.action_intents
+    assert role.calls == 1
+    assert binder.calls == 2
+    correction = json.loads(binder.messages[1][-1]["content"])
+    assert correction["contract"] == "proactive-world-claim-binding-correction.1"
+
+
+@pytest.mark.asyncio
+async def test_proactive_claim_binding_fails_technically_after_one_invalid_retry() -> None:
+    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
+    binder = _ProactiveReplySequence(["{}", "{}"])
+    reviewer = _supporting_source_reviewer()
+
+    with pytest.raises(
+        ValidationTechnicalFailure,
+        match="proactive_claim_binding_invalid",
+    ):
+        await ProactiveDraftAdapter(
+            model=role,
+            target="user:primary",
+            proactive_claim_binder_model=binder,
+            source_closure_reviewer=reviewer,
+        ).propose(_proactive_model_request())
+
+    assert role.calls == 1
+    assert binder.calls == 2
+    assert reviewer.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_claim_binding_bogus_ref_is_technical_not_role_reselection() -> None:
+    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
+    invalid_binding = {
+        "contract": "proactive-world-claim-binding.1",
+        "world_claims": [
+            {
+                "claim_text": "沈知栀刚刚去了火星",
+                "scope": "current_world",
+                "source_refs": ["event:not-visible:anywhere"],
+            }
+        ],
+    }
+    binder = _ProactiveReplySequence([invalid_binding, invalid_binding])
+    reviewer = _supporting_source_reviewer()
+
+    with pytest.raises(
+        ValidationTechnicalFailure,
+        match="proactive_claim_binding_invalid",
+    ):
+        await ProactiveDraftAdapter(
+            model=role,
+            target="user:primary",
+            proactive_claim_binder_model=binder,
+            source_closure_reviewer=reviewer,
+        ).propose(_proactive_model_request())
+
+    assert role.calls == 1
+    assert binder.calls == 2
+    assert reviewer.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_only_semantic_rejection_retries_binder_not_character() -> None:
+    source_ref = "event:life-content:experience:visible"
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["recent_experiences"] = {
+        "availability": "available",
+        "items": [
+            {
+                "item_ref": "experience:visible",
+                "source_bindings": [{"ref": source_ref}],
+                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
+            }
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
+    binder = _ProactiveReplySequence(
+        [
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [
+                    {
+                        "claim_text": "沈知栀刚去了火星",
+                        "scope": "past_world",
+                        "source_refs": [source_ref],
+                    }
+                ],
+            },
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [],
+            },
+        ]
+    )
+    reviewer = _ProactiveReplySequence(
+        [
+            _source_closure_review(claim_indexes=(0,)),
+            _source_closure_review(),
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=role,
+        target="user:primary",
+        proactive_claim_binder_model=binder,
+        source_closure_reviewer=reviewer,
+    ).propose(request)
+
+    assert validate_proposal_envelope(output.raw_proposal).action_intents
+    assert role.calls == 1
+    assert binder.calls == 2
+    assert reviewer.calls == 2
+    correction_packet = json.loads(binder.messages[1][1]["content"])
+    assert correction_packet["previous_binding_failure"]
+
+
+@pytest.mark.asyncio
+async def test_undeclared_visible_fact_retries_binder_not_character() -> None:
+    source_ref = "event:life-content:experience:visible"
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["recent_experiences"] = {
+        "availability": "available",
+        "items": [
+            {
+                "item_ref": "experience:visible",
+                "source_bindings": [{"ref": source_ref}],
+                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
+            }
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    role = _ProactiveReplySequence([_proactive_draft("刚翻到一本《小王子》，突然想跟你说句话。")])
+    binder = _ProactiveReplySequence(
+        [
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [],
+                "unbound_claim_locators": [],
+            },
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [
+                    {
+                        "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
+                        "scope": "past_world",
+                        "source_refs": [source_ref],
+                    }
+                ],
+                "unbound_claim_locators": [],
+            },
+        ]
+    )
+    reviewer = _ProactiveReplySequence(
+        [
+            _source_closure_review(
+                visible_failures=("undeclared_external_assertion",),
+                visible_findings=(
+                    {
+                        "category": "undeclared_external_assertion",
+                        "visible_span": "刚翻到一本《小王子》",
+                        "claim_index": None,
+                        "source_relation": "unclosed",
+                        "source_refs": [],
+                    },
+                ),
+            ),
+            _source_closure_review(),
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=role,
+        target="user:primary",
+        proactive_claim_binder_model=binder,
+        source_closure_reviewer=reviewer,
+    ).propose(request)
+
+    assert validate_proposal_envelope(output.raw_proposal).action_intents
+    assert role.calls == 1
+    assert binder.calls == 2
+    assert reviewer.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_proactive_binder_preserves_provider_subcall_audit() -> None:
+    class _BlockingBinder:
+        model = "test-blocking-binder"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def complete(self, _messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+            del temperature
+            self.started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
+    binder = _BlockingBinder()
+    adapter = ProactiveDraftAdapter(
+        model=role,
+        target="user:primary",
+        proactive_claim_binder_model=binder,
+        source_closure_reviewer=_supporting_source_reviewer(),
+    )
+    task = asyncio.create_task(adapter.propose(_proactive_model_request()))
+    await binder.started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await task
+
+    failure = captured.value.world_v2_validation_technical_failure
+    assert failure.failure_code == "source_review_timeout"
+    binder_audit = next(
+        audit
+        for audit in failure.provider_subcall_audits
+        if audit.purpose.startswith("proactive_claim_binding")
+    )
+    assert binder_audit.outcome == "timeout"
+    assert binder_audit.parent_model_call_id
+    assert binder_audit.request_hash
+
+
+@pytest.mark.asyncio
+async def test_unbound_claim_locator_must_match_visible_expression_exactly() -> None:
+    role = _ProactiveReplySequence([_proactive_draft("刚刚忽然有点想和你说句话。")])
+    invalid = {
+        "contract": "proactive-world-claim-binding.1",
+        "world_claims": [],
+        "unbound_claim_locators": [
+            {
+                "beat_index": 0,
+                "char_start": 0,
+                "char_end": 2,
+                "text": "火星",
+            }
+        ],
+    }
+    binder = _ProactiveReplySequence([invalid, invalid])
+
+    with pytest.raises(
+        ValidationTechnicalFailure,
+        match="proactive_claim_binding_invalid",
+    ):
+        await ProactiveDraftAdapter(
+            model=role,
+            target="user:primary",
+            proactive_claim_binder_model=binder,
+            source_closure_reviewer=_supporting_source_reviewer(),
+        ).propose(_proactive_model_request())
+
+    assert role.calls == 1
+    assert binder.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_malformed_role_reselection_is_not_misattributed_to_prior_reviewer() -> None:
+    text = "我刚刚去了一个没有来源的地方。"
+    role = _ProactiveReplySequence([_proactive_draft(text), "{}"])
+    binder = _ProactiveReplySequence(
+        [
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [],
+                "unbound_claim_locators": [
+                    {
+                        "beat_index": 0,
+                        "char_start": 0,
+                        "char_end": len(text),
+                        "text": text,
+                    }
+                ],
+            }
+        ]
+    )
+    reviewer = _ProactiveReplySequence(
+        [
+            _source_closure_review(
+                visible_failures=("undeclared_external_assertion",),
+                visible_findings=(
+                    {
+                        "category": "undeclared_external_assertion",
+                        "visible_span": text,
+                        "claim_index": None,
+                        "source_relation": "unclosed",
+                        "source_refs": [],
+                    },
+                ),
+            )
+        ]
+    )
+
+    with pytest.raises(ValidationTechnicalFailure) as captured:
+        await ProactiveDraftAdapter(
+            model=role,
+            target="user:primary",
+            proactive_claim_binder_model=binder,
+            source_closure_reviewer=reviewer,
+        ).propose(_proactive_model_request())
+
+    assert captured.value.failure_code == "authored_expression_reselection_invalid"
+    assert role.calls == 2
+    assert binder.calls == 1
+    assert reviewer.calls == 1
+
+
 def _candidate_inventory(
     text: str,
     *,
@@ -508,9 +973,7 @@ async def test_missing_required_proactive_private_turn_state_reselects_complete_
     proposal = validate_proposal_envelope(output.raw_proposal)
     assert model.calls == 2
     assert "private_turn_state.missing" in model.messages[1][-1]["content"]
-    assert "这份草稿缺少私人状态" not in json.dumps(
-        model.messages[1], ensure_ascii=False
-    )
+    assert "这份草稿缺少私人状态" not in json.dumps(model.messages[1], ensure_ascii=False)
     assert proposal.private_turn_state is not None
 
 
@@ -609,9 +1072,7 @@ async def test_unpinned_proactive_private_state_is_reselected_before_source_revi
     if expected_action_kind is None:
         assert proposal.action_intents == ()
     else:
-        assert tuple(intent.kind for intent in proposal.action_intents) == (
-            expected_action_kind,
-        )
+        assert tuple(intent.kind for intent in proposal.action_intents) == (expected_action_kind,)
     correction_messages = model.messages[1]
     rendered_correction = json.dumps(correction_messages, ensure_ascii=False)
     assert forged_ref not in rendered_correction
@@ -704,18 +1165,16 @@ async def test_proactive_private_state_changes_audit_not_effect_identity() -> No
     request = _proactive_model_request()
     context = json.loads(request.model_content_json)
     attention_refs = ("attention:context-only:first", "attention:context-only:second")
-    context["slices"]["recent_dialogue"]["items"][0]["attention_source_refs"] = list(
-        attention_refs
-    )
+    context["slices"]["recent_dialogue"]["items"][0]["attention_source_refs"] = list(attention_refs)
     request = request.model_copy(
         update={"model_content_json": json.dumps(context, ensure_ascii=False)}
     )
     first_output = await ProactiveDraftAdapter(
         model=_ProactiveReplySequence(
             [
-                    _private_proactive_draft(
-                        "now",
-                        attended_source_ref=attention_refs[0],
+                _private_proactive_draft(
+                    "now",
+                    attended_source_ref=attention_refs[0],
                     inner_state_summary="想起这段关系，愿意现在开口。",
                 )
             ]
@@ -726,9 +1185,9 @@ async def test_proactive_private_state_changes_audit_not_effect_identity() -> No
     second_output = await ProactiveDraftAdapter(
         model=_ProactiveReplySequence(
             [
-                    _private_proactive_draft(
-                        "now",
-                        attended_source_ref=attention_refs[1],
+                _private_proactive_draft(
+                    "now",
+                    attended_source_ref=attention_refs[1],
                     inner_state_summary="注意到旧对话，仍然愿意现在开口。",
                 )
             ]
@@ -844,10 +1303,10 @@ async def test_proactive_biography_parent_cannot_authorize_an_occurrence() -> No
     assert proposal.proactive_grounding_outcome == "rejected"
     assert not proposal.action_intents
     first_request = json.loads(model.messages[0][1]["content"])
-    authority = first_request["proactive_fact_authority"]
-    assert authority["biographical_parent_attention_only"] == ["biography:summer-home"]
-    assert "biography:summer-home" not in authority["world_claim_source_refs"]["current_world"]
-    assert "biography:summer-home" not in authority["world_claim_source_refs"]["past_world"]
+    biography = first_request["lived_context"]["slices"]["world_life"]["items"][0]
+    assert biography["source_ref"] == "biography:summer-home"
+    assert biography["value"]["academic_phase"] == "summer_break"
+    assert "proactive_fact_authority" not in first_request
     correction_messages = model.messages[1]
     assert unsupported["beats"][0]["text"] not in json.dumps(
         correction_messages, ensure_ascii=False
@@ -943,10 +1402,7 @@ async def test_proactive_source_review_resolves_the_same_full_pinned_context_see
     assert proposal.proactive_grounding_outcome == "not_required"
     assert reviewer.calls == 1
     review = json.loads(reviewer.messages[0][1]["content"])
-    assert any(
-        source_ref in entry["source_refs"]
-        for entry in review["source_evidence"]["entries"]
-    )
+    assert any(source_ref in entry["source_refs"] for entry in review["source_evidence"]["entries"])
 
 
 @pytest.mark.asyncio
@@ -1602,6 +2058,51 @@ async def test_proactive_character_chosen_recall_reuses_prefetch_then_forms_fina
 
 
 @pytest.mark.asyncio
+async def test_proactive_recall_is_in_the_post_authorship_binding_closure() -> None:
+    request, recall = _proactive_recall_fixture()
+    role = _ProactiveReplySequence(
+        [
+            {"recall_request": {"query_text": "雨夜 听雨", "limit": 4}},
+            _proactive_draft("上次雨夜回宿舍，我在便利店买了热乌龙。"),
+        ]
+    )
+    binder = _ProactiveReplySequence(
+        [
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [
+                    {
+                        "claim_text": "沈知栀上次雨夜回宿舍时在便利店买了热乌龙",
+                        "scope": "past_world",
+                        "source_refs": ["event:experience:rain"],
+                    }
+                ],
+            }
+        ]
+    )
+    reviewer = _supporting_source_reviewer()
+    adapter = ProactiveDraftAdapter(
+        model=role,
+        target="user:primary",
+        proactive_claim_binder_model=binder,
+        source_closure_reviewer=reviewer,
+    )
+    adapter.install_recall_coordinator(recall)
+
+    output = await adapter.propose(request)
+
+    assert validate_proposal_envelope(output.raw_proposal).action_intents
+    assert role.calls == 2
+    assert binder.calls == 1
+    binder_packet = json.loads(binder.messages[0][1]["content"])
+    rendered_binding = json.dumps(binder_packet, ensure_ascii=False)
+    assert "上次雨夜回宿舍" in rendered_binding
+    assert "event:experience:rain" in rendered_binding
+    review_packet = json.loads(reviewer.messages[0][1]["content"])
+    assert "event:experience:rain" in json.dumps(review_packet, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
 async def test_valid_grounded_proactive_claim_runs_one_source_review() -> None:
     model = _ProactiveReplySequence(
         [
@@ -1649,10 +2150,11 @@ async def test_malformed_grounding_correction_remains_a_technical_failure() -> N
         ]
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationTechnicalFailure) as captured:
         await ProactiveDraftAdapter(model=model, target="user:primary").propose(
             _proactive_model_request()
         )
+    assert captured.value.failure_code == "authored_expression_reselection_invalid"
     assert model.calls == 2
 
 
@@ -1948,7 +2450,7 @@ class _DraftModel:
     def captured_capsule(self) -> dict[str, object]:
         assert len(self.messages) == 1
         envelope = json.loads(self.messages[0][1]["content"])
-        return json.loads(envelope["request"]["model_content_json"])
+        return envelope["lived_context"]
 
 
 class _SequenceDraftModel(_DraftModel):
@@ -2576,10 +3078,11 @@ async def test_two_unparseable_choices_are_technical_failure_not_character_silen
     assert result.status == "failed_safe"
     assert malformed.calls == 2
     projection = ledger.project()
-    # The invalid author wire and its one same-role correction are one
-    # validation attempt with two physical provider calls, not a fabricated
-    # main/backup character decision pair.
-    assert len(projection.model_result_audits) == 1
+    # The invalid author wire and its one same-role correction remain one
+    # validation attempt, but each physical provider invocation now has its
+    # own child audit beside the terminal orchestration result. They are not a
+    # fabricated main/backup character decision pair.
+    assert len(projection.model_result_audits) == 3
     assert len(projection.proposal_audits) == 0
     assert projection.actions == ()
     process = projection.trigger_processes[-1]
@@ -2675,6 +3178,35 @@ async def test_technical_backoff_does_not_starve_a_later_due_opportunity(
 
     assert result.status == "opened"
     assert opened == [second]
+
+
+@pytest.mark.asyncio
+async def test_terminal_social_candidate_without_retry_authority_is_skipped() -> None:
+    ledger, _model, runtime, _turn = _runtime(choice="silent")
+    stale = await runtime._next_opportunity(ledger.project())  # noqa: SLF001
+    assert stale is not None
+    assert (await runtime.drain_one()).status == "opened"
+    assert (await runtime.drain_one()).status == "silent"
+    alternate = stale.model_copy(
+        update={
+            "source_id": "ambient-after-recovered-failure",
+            "consideration_id": "consideration:ambient-after-recovered-failure",
+        }
+    )
+
+    class _StaleRetryThenAmbient:
+        async def next_opportunity(  # type: ignore[no-untyped-def]
+            self, _projection, *, excluded_consideration_ids=frozenset()
+        ):
+            if runtime._consideration_id(stale) not in excluded_consideration_ids:  # noqa: SLF001
+                return stale
+            return alternate
+
+    runtime._social_initiative = _StaleRetryThenAmbient()  # type: ignore[assignment]  # noqa: SLF001
+
+    selected = await runtime._next_opportunity(ledger.project())  # noqa: SLF001
+
+    assert selected == alternate
 
 
 @pytest.mark.asyncio
@@ -3115,9 +3647,11 @@ async def test_production_application_opens_one_grounded_spontaneous_contact_aft
             await app.drain_background_once()
         assert proactive.calls == 1
         capsule = proactive.captured_capsule()
-        assert {"relationship_slice", "affect_episodes", "world_life"} <= set(capsule["slices"])
         assert "我先去忙一会儿" in json.dumps(capsule, ensure_ascii=False)
-        assert "spontaneous_contact" in json.dumps(capsule, ensure_ascii=False)
+        supplied = json.loads(proactive.messages[0][1]["content"])
+        assert supplied["current_self_state"]["contract"] == "current-self-state.1"
+        assert supplied["current_self_state"]["availability"] == "available"
+        assert supplied["proactive_opportunity"]["source_kind"] == "spontaneous_contact"
         assert transport.bodies == ["好，你先忙。", "刚才那件事我又想了一下。"]
     finally:
         app.close()
@@ -3607,14 +4141,10 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         health = await app.world_health_diagnostics()
         assert health["initiative_state"] == "retry_wait"
         assert health["initiative_next_consideration_at"] == retry_due.isoformat()
-        assert health["initiative_cadence_reason_codes"] == [
-            "technical_failure:retry"
-        ]
+        assert health["initiative_cadence_reason_codes"] == ["technical_failure:retry"]
         assert health["initiative_consecutive_technical_failures"] == 1
         assert health["initiative_retry_ordinal"] == 1
-        assert health["initiative_last_failure_code"] == (
-            "authored_expression_reselection_invalid"
-        )
+        assert health["initiative_last_failure_code"] == ("authored_expression_reselection_invalid")
         waiting = await app.drain_background_once()
         assert waiting.status == "retry_wait"
         assert waiting.retry_ordinal == 1
@@ -3658,9 +4188,7 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
 
         assert repeated_failure["initiative_consecutive_technical_failures"] == 3
         assert repeated_failure["initiative_warning"] is True
-        assert repeated_failure["initiative_warning_reasons"] == [
-            "repeated_technical_failures"
-        ]
+        assert repeated_failure["initiative_warning_reasons"] == ["repeated_technical_failures"]
     finally:
         app.close()
 
@@ -3747,9 +4275,7 @@ async def test_newer_semantic_consideration_resets_older_technical_retry(
             if item.process_kind == ProactiveActionRuntime.PROCESS_KIND
         )
         assert len({item.trigger_ref for item in proactive_processes}) == 2
-        assert str(proactive_processes[-1].runtime_outcome_ref).startswith(
-            expected_outcome
-        )
+        assert str(proactive_processes[-1].runtime_outcome_ref).startswith(expected_outcome)
         # Simulate reverse completion without changing process-open order:
         # the later-opened consideration completes first, then the
         # earlier-opened attempt records its technical failure.

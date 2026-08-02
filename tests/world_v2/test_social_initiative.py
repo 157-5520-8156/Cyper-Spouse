@@ -795,6 +795,51 @@ async def test_not_due_retry_does_not_starve_an_independent_due_situation() -> N
 
 
 @pytest.mark.asyncio
+async def test_not_due_situation_retry_does_not_occupy_the_ambient_cadence() -> None:
+    compiler, projection, _committed = _compiler_fixture(receptive=True)
+    failed_situation = SimpleNamespace(
+        consideration_id="consideration:failed-situation",
+        source_kind="situation_change",
+    )
+    ambient = SimpleNamespace(
+        consideration_id="consideration:ambient-next-epoch",
+        source_kind="ambient_presence",
+    )
+
+    async def no_pending(  # type: ignore[no-untyped-def]
+        _projection, *, excluded_consideration_ids
+    ):
+        del _projection, excluded_consideration_ids
+        return None
+
+    async def failed_retry(_projection):  # type: ignore[no-untyped-def]
+        del _projection
+        return failed_situation
+
+    async def no_situation(  # type: ignore[no-untyped-def]
+        _projection, _logical_time, *, excluded_consideration_ids
+    ):
+        del _projection, _logical_time, excluded_consideration_ids
+        return None
+
+    async def ambient_opportunity(_projection, _logical_time):  # type: ignore[no-untyped-def]
+        del _projection, _logical_time
+        return ambient
+
+    compiler._pending_consideration = no_pending  # type: ignore[method-assign]  # noqa: SLF001
+    compiler._failed_consideration_retry = failed_retry  # type: ignore[method-assign]  # noqa: SLF001
+    compiler._situation_change = no_situation  # type: ignore[method-assign]  # noqa: SLF001
+    compiler._spontaneous_contact = ambient_opportunity  # type: ignore[method-assign]  # noqa: SLF001
+
+    opportunity = await compiler.next_opportunity(
+        projection,
+        excluded_consideration_ids=frozenset({failed_situation.consideration_id}),
+    )
+
+    assert opportunity is ambient
+
+
+@pytest.mark.asyncio
 async def test_successful_retry_terminally_settles_the_failed_consideration() -> None:
     compiler, projection, _committed = _compiler_fixture(receptive=True)
     occurred_at = NOW + timedelta(minutes=30)

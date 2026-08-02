@@ -122,12 +122,18 @@ class _WireReselectionSequenceModel(_SequenceModel):
 
 
 class _PinnedCapsuleCompiler:
-    def __init__(self, *, ledger: WorldLedger) -> None:
+    def __init__(
+        self,
+        *,
+        ledger: WorldLedger,
+        context: dict[str, object] | None = None,
+    ) -> None:
         self._ledger = ledger
+        self._context = context
 
     def compile_for_deliberation(self, _query):  # type: ignore[no-untyped-def]
         projection = self._ledger.project()
-        context = {
+        context = self._context or {
             "current_self_state": {
                 "character_core": {"values": ["autonomy"]},
                 "personality_state": {"availability": "present"},
@@ -145,6 +151,64 @@ class _PinnedCapsuleCompiler:
             model_content_json=json.dumps(context, ensure_ascii=False),
         )
         return SimpleNamespace(capsule=capsule)
+
+
+@pytest.mark.asyncio
+async def test_world_author_receives_recent_life_texture_as_non_directive_history() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    wake = _seed_clock(ledger)
+    context = {
+        "current_self_state": {
+            "character_core": {"values": ["autonomy"]},
+            "personality_state": {"availability": "present"},
+        },
+        "recent_world_life": [
+            {
+                "source_ref": "experience:library:1",
+                "summary": "在图书馆偶遇一位同学，聊到了旧书。",
+            },
+            {
+                "source_ref": "experience:bookstore:2",
+                "summary": "路过独立书店，看到一张诗会告示。",
+            },
+        ],
+    }
+    world_author = _SequenceModel(
+        model="world-author-recent-life-texture",
+        outputs=('{"decision":"no_op"}',),
+    )
+    character = _SequenceModel(
+        model="character-must-not-run-after-no-op",
+        outputs=(AssertionError("World Author no-op must not call Character Model"),),
+    )
+    runtime = LifeDevelopmentRuntime(
+        ledger=ledger,
+        content_store=InMemoryImmutableLifeContentStore(),
+        world_author=world_author,
+        character_model=character,
+        capsule_compiler=_PinnedCapsuleCompiler(ledger=ledger, context=context),
+        capability_manifest_compiler=_StaticManifestCompiler(wake=wake),
+        owner_actor_ref=OWNER,
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=wake.event_id,
+        trace_id="trace:recent-life-texture",
+        correlation_id="correlation:life-development",
+    )
+
+    assert result.status == "no_op"
+    supplied = json.loads(world_author.messages[0][1]["content"])
+    texture = supplied["recent_life_texture"]
+    assert texture["contract"] == "recent-life-texture.1"
+    assert texture["host_semantic_classification"] is False
+    assert [item["source_ref"] for item in texture["items"]] == [
+        "experience:library:1",
+        "experience:bookstore:2",
+    ]
+    system = world_author.messages[0][0]["content"]
+    assert "Repetition and departure are both available" in system
+    assert "avoid repeating" not in system.lower()
 
 
 def _commit_at_head(ledger: WorldLedger, event: WorldEvent) -> None:

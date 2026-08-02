@@ -219,13 +219,17 @@ class ScenarioVerificationError(AssertionError):
 # ``.45`` separates subjective Character direction from source-reviewed
 # objective biographical consequence and advances open-life proposal authority
 # to `.7`; the fixed suite still has no visible life-transition branch.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.45"
+# ``.46`` removes factual source-declaration bookkeeping from proactive role
+# authorship and moves it to a separately audited post-authorship binder. The
+# frozen scenarios retain their explicit visible behavior predicates; prompt,
+# provider-subcall and proposal audit identities intentionally change.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.46"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "c09f3ceff2a941b9d0ce255901e077159ec8c3775bbab786cf4d9beb519f1d71"
+    "b2bc41061852e1001650883b877eda8b4742072bcf716c6d3f949da2f2c5ef82"
 )
 
 

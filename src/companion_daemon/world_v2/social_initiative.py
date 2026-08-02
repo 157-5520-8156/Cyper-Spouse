@@ -309,11 +309,16 @@ class SocialInitiativeCompiler:
         )
         if situation is not None:
             return situation
-        # A pending retry still owns its message/ambient cadence context. Once
-        # the runtime excludes that not-yet-due consideration, only an
-        # independently grounded situation window may run in the meantime;
-        # minting a sibling cadence epoch would bypass the durable backoff.
-        if retry is not None:
+        # A pending message/ambient retry still owns that cadence context.
+        # Once the runtime excludes the not-yet-due consideration, minting a
+        # sibling cadence epoch would bypass its durable backoff. A failed
+        # situation consideration is narrower: it owns only that stimulus
+        # attempt and must not occupy the independent ambient cadence until
+        # its retry becomes due.
+        if retry is not None and retry.source_kind in {
+            "spontaneous_contact",
+            "ambient_presence",
+        }:
             return None
         spontaneous = await self._spontaneous_contact(projection, logical_time)
         if (

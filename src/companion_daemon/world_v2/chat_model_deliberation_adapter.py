@@ -600,10 +600,10 @@ class _ExpressionRecoveryContextStore:
         self._items.pop(_recovery_context_key(request), None)
 
 
-def expression_draft_shape_contract() -> str:
+def expression_draft_shape_contract(*, include_world_claims: bool = True) -> str:
     """Describe executable JSON fields without prescribing character behavior."""
 
-    return (
+    contract = (
         "Exact ExpressionDraft JSON field contract: private_turn_state is required and contains "
         "contract=private-turn-state.1, one concise inner_state_summary of the "
         "character's own genuinely salient feelings, attention, desires or resistance, "
@@ -629,20 +629,25 @@ def expression_draft_shape_contract() -> str:
         "Non-text beats must use only the installed expression_capabilities and their matching "
         "reaction_id or sticker_id field; typing has no value field. stance and "
         "brief_rationale are non-empty strings. confidence is an integer from 0 through 10000, "
-        "never a decimal fraction. world_claims is an array; each item uses claim_text, scope, "
-        "and source_refs. For new drafts scope is exactly one of current_world, past_world, "
-        "counterpart_history, shared_history, or stable_identity; never use conversation or "
-        "user_fact. world_claims describe specific facts in this project World, not ordinary "
-        "background or phenomenological generalizations whose truth is unbound to a particular "
-        "World entity, place, time, occurrence, or history. Subjective feelings, genuinely "
-        "unsettled conjectures, and world-unbound generalizations use no world_claim item. "
-        "subjective_or_hypothetical is legacy replay input and is invalid in a newly authored "
-        "draft. Every authored world_claim requires one or more matching pinned source refs. "
+        "never a decimal fraction. "
         "response_expectation, when chosen, uses hoped_response, pressure_bp, "
         "importance_bp, wait_seconds, and expires_after_seconds. "
         "response_expectation_assessment, when required by Context, uses status "
         "(fulfilled, superseded, still_pending, or uncertain) and reason. Do not add fields "
         "from a different chat or response schema."
+    )
+    if not include_world_claims:
+        return contract
+    return contract + (
+        " world_claims is an array; each item uses claim_text, scope, and source_refs. For new "
+        "drafts scope is exactly one of current_world, past_world, counterpart_history, "
+        "shared_history, or stable_identity; never use conversation or user_fact. world_claims "
+        "describe specific facts in this project World, not ordinary background or "
+        "phenomenological generalizations whose truth is unbound to a particular World entity, "
+        "place, time, occurrence, or history. Subjective feelings, genuinely unsettled "
+        "conjectures, and world-unbound generalizations use no world_claim item. "
+        "subjective_or_hypothetical is legacy replay input and is invalid in a newly authored "
+        "draft. Every authored world_claim requires one or more matching pinned source refs."
     )
 
 
