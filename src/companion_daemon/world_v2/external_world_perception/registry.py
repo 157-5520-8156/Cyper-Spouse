@@ -151,6 +151,31 @@ class ExternalPerceptionSourceRegistration(FrozenModel):
         return self
 
 
+class UnsupportedExternalPerceptionChannel(FrozenModel):
+    """One explicitly absent channel, kept visible to operators without polling it."""
+
+    source_id: str = Field(pattern=r"^cn\.[a-z0-9_.-]+\.v1$")
+    reason_code: str = Field(min_length=1, max_length=256)
+
+
+class ExternalPerceptionRegistryCoverageState(FrozenModel):
+    """Static registry coverage; this is configuration state, not a network probe."""
+
+    source_id: str = Field(min_length=1, max_length=512)
+    route_registered: bool
+    acquisition_state: Literal["enabled", "disabled_unlicensed", "disabled_operator", "unsupported"]
+    character_visibility: bool
+    reason_code: str = Field(min_length=1, max_length=256)
+
+
+class ExternalPerceptionRegistryHealth(FrozenModel):
+    registry_revision: str = Field(min_length=1, max_length=256)
+    registry_content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    registered_source_count: int = Field(ge=0)
+    enabled_source_count: int = Field(ge=0)
+    coverage_states: tuple[ExternalPerceptionRegistryCoverageState, ...]
+
+
 def _is_loopback_host(hostname: str | None) -> bool:
     if hostname is None:
         return False
@@ -178,6 +203,9 @@ class ExternalPerceptionSourceRegistry(FrozenModel):
     content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     uses_user_location: Literal[False]
     sources: tuple[ExternalPerceptionSourceRegistration, ...] = Field(max_length=64)
+    unsupported_channels: tuple[UnsupportedExternalPerceptionChannel, ...] = Field(
+        default=(), max_length=64
+    )
 
     @model_validator(mode="after")
     def identity_and_sources_are_closed(self) -> ExternalPerceptionSourceRegistry:
@@ -193,10 +221,63 @@ class ExternalPerceptionSourceRegistry(FrozenModel):
         source_ids = tuple(item.source_id for item in self.sources)
         if len(source_ids) != len(set(source_ids)):
             raise ValueError("registry source ids must be unique")
+        unsupported_ids = tuple(item.source_id for item in self.unsupported_channels)
+        if len(unsupported_ids) != len(set(unsupported_ids)):
+            raise ValueError("registry unsupported channel ids must be unique")
+        if set(source_ids).intersection(unsupported_ids):
+            raise ValueError("registry source cannot also be unsupported")
         policy_revisions = tuple(item.policy.policy_revision for item in self.sources)
         if len(policy_revisions) != len(set(policy_revisions)):
             raise ValueError("registry policy revisions must be unique")
         return self
+
+
+def external_perception_registry_health(
+    registry: ExternalPerceptionSourceRegistry,
+) -> ExternalPerceptionRegistryHealth:
+    """Project audited static coverage without touching an endpoint."""
+
+    states: list[ExternalPerceptionRegistryCoverageState] = []
+    for source in registry.sources:
+        if source.enabled:
+            acquisition_state = "enabled"
+            reason_code = "enabled"
+        elif not source.policy.may_fetch or not source.policy.may_cache_raw:
+            acquisition_state = "disabled_unlicensed"
+            reason_code = "usage_rights_not_approved"
+        else:
+            acquisition_state = "disabled_operator"
+            reason_code = "operator_disabled"
+        states.append(
+            ExternalPerceptionRegistryCoverageState(
+                source_id=source.source_id,
+                route_registered=source.adapter_kind == "rsshub" and source.route is not None,
+                acquisition_state=acquisition_state,
+                character_visibility=(
+                    source.enabled
+                    and source.policy.may_expose_to_character_model
+                    and source.policy.may_freeze_durable_snapshot
+                ),
+                reason_code=reason_code,
+            )
+        )
+    states.extend(
+        ExternalPerceptionRegistryCoverageState(
+            source_id=channel.source_id,
+            route_registered=False,
+            acquisition_state="unsupported",
+            character_visibility=False,
+            reason_code=channel.reason_code,
+        )
+        for channel in registry.unsupported_channels
+    )
+    return ExternalPerceptionRegistryHealth(
+        registry_revision=registry.registry_revision,
+        registry_content_hash=registry.content_hash,
+        registered_source_count=len(registry.sources),
+        enabled_source_count=sum(source.enabled for source in registry.sources),
+        coverage_states=tuple(sorted(states, key=lambda item: item.source_id)),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,10 +441,14 @@ def _build_adapter(
 
 
 __all__ = [
+    "ExternalPerceptionRegistryCoverageState",
+    "ExternalPerceptionRegistryHealth",
     "ExternalPerceptionSourceRegistration",
     "ExternalPerceptionSourceRegistry",
     "ProductionSourceFactoryResult",
     "build_production_source_profiles",
     "canonical_source_registry_content_hash",
+    "external_perception_registry_health",
     "load_external_perception_source_registry",
+    "UnsupportedExternalPerceptionChannel",
 ]

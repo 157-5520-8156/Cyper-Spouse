@@ -289,6 +289,9 @@ def test_registry_without_enabled_sources_stays_disabled_before_runtime_allocati
         "no_enabled_sources",
         None,
     )
+    assert deployment.registry_health is not None
+    assert deployment.registry_health["registered_source_count"] == 1
+    assert deployment.registry_health["enabled_source_count"] == 0
 
 
 @pytest.mark.asyncio

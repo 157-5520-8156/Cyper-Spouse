@@ -65,9 +65,7 @@ class _PlatformHost:
 
 @pytest.mark.asyncio
 async def test_scheduler_gives_one_background_unit_to_external_perception() -> None:
-    perception = _PerceptionHub(
-        PerceptionAdvanceResult(status="progressed", progressed_units=1)
-    )
+    perception = _PerceptionHub(PerceptionAdvanceResult(status="progressed", progressed_units=1))
     platform = _PlatformHost()
     host = QQC2CHost(
         host=platform,  # type: ignore[arg-type]
@@ -134,11 +132,41 @@ def test_unconfigured_external_perception_health_is_explicitly_disabled() -> Non
     }
 
 
+def test_external_perception_health_includes_static_registry_coverage() -> None:
+    registry_health = {
+        "registry_revision": "registry:test:1",
+        "registry_content_hash": "sha256:" + "a" * 64,
+        "registered_source_count": 2,
+        "enabled_source_count": 1,
+        "coverage_states": [
+            {
+                "source_id": "cn.social.weibo.trends.tophub.v1",
+                "route_registered": True,
+                "acquisition_state": "disabled_unlicensed",
+                "character_visibility": False,
+                "reason_code": "usage_rights_not_approved",
+            }
+        ],
+    }
+    host = QQC2CHost(
+        host=_PlatformHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        external_world_perception_registry_health=registry_health,
+        ingress_now=lambda: NOW,
+    )
+
+    assert host.external_world_perception_health() == {
+        "enabled": False,
+        "state": "disabled",
+        "reason": "not_configured",
+        "registry": registry_health,
+    }
+
+
 @pytest.mark.asyncio
 async def test_external_perception_failure_does_not_block_other_scheduler_work() -> None:
-    perception = _FailingPerceptionHub(
-        PerceptionAdvanceResult(status="idle", progressed_units=0)
-    )
+    perception = _FailingPerceptionHub(PerceptionAdvanceResult(status="idle", progressed_units=0))
     platform = _PlatformHost()
     host = QQC2CHost(
         host=platform,  # type: ignore[arg-type]

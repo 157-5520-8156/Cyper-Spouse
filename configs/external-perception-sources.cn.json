@@ -1,8 +1,14 @@
 {
   "schema_version": 1,
-  "registry_revision": "cn-domestic-social-rsshub-2026-08-03.4",
-  "content_hash": "sha256:b2bfd91ee52ac89207b3c30935a8b941988267b74547fdc252c3b60a6a900f42",
+  "registry_revision": "cn-domestic-social-rsshub-2026-08-03.5",
+  "content_hash": "sha256:633b48b0fed743ab1499b76b26e4be25e487941e49e648da6d0d45905c90be9c",
   "uses_user_location": false,
+  "unsupported_channels": [
+    {
+      "source_id": "cn.social.xiaohongshu.general.v1",
+      "reason_code": "no_auditable_no_login_non_browser_route"
+    }
+  ],
   "sources": [
     {
       "enabled": false,

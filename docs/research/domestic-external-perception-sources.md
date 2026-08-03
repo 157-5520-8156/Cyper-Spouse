@@ -307,8 +307,9 @@ live。这样保留 RSSHub 的覆盖和低接入成本，又不会让一次 rout
 
 ## 上线顺序与验收
 
-1. **第一批（现在）**：只启用五个新华网 HTTPS RSS 加人社部一个健康 RSS；关闭原先
-   国外普通新闻候选，USGS/NWS 仅保留为灾害交叉验证而不参与日常趋势。
+1. **第一批（原计划，已由当前 registry 取代）**：曾计划启用五个新华网 HTTPS RSS 加
+   人社部 RSS；当前实际仅启用人社部源，五个失效的新华 feed 保留登记但默认关闭。国外
+   普通新闻候选关闭，USGS/NWS 仅保留为灾害交叉验证而不参与日常趋势。
 2. **第二批（凭据）**：申请并配置微博官方趋势 API；申请抖音 `hotsearch`/
    `data.external.billboard_hot_video`。凭据未到位时 source 显示
    `credential_missing`，不能回退到 RSSHub 抓取。

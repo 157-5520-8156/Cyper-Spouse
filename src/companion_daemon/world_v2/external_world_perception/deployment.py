@@ -41,6 +41,7 @@ from .production_attention import (
 )
 from .registry import (
     build_production_source_profiles,
+    external_perception_registry_health,
     load_external_perception_source_registry,
 )
 
@@ -110,6 +111,7 @@ class ExternalPerceptionDeployment:
     hub: WorldPerceptionHub | None = None
     registry_revision: str | None = None
     registry_content_hash: str | None = None
+    registry_health: dict[str, object] | None = None
 
 
 def build_external_world_perception_deployment(
@@ -153,6 +155,11 @@ def build_external_world_perception_deployment(
     registry_sources_enabled = bool(
         registry is not None and any(item.enabled for item in registry.sources)
     )
+    registry_health = (
+        external_perception_registry_health(registry).model_dump(mode="json")
+        if registry is not None
+        else None
+    )
     if not registry_sources_enabled and authorized_search_profile is None:
         if registry is None:
             raise AssertionError("missing registry was handled before preflight")
@@ -161,6 +168,7 @@ def build_external_world_perception_deployment(
             reason="no_enabled_sources",
             registry_revision=registry.registry_revision,
             registry_content_hash=registry.content_hash,
+            registry_health=registry_health,
         )
 
     world_ledger: SQLiteWorldLedger | None = None
@@ -186,7 +194,13 @@ def build_external_world_perception_deployment(
         )
         if not automatic_channel.authority_is_available(actor_ref=actor_ref):
             world_ledger.close()
-            return ExternalPerceptionDeployment(status="disabled", reason="channel_not_configured")
+            return ExternalPerceptionDeployment(
+                status="disabled",
+                reason="channel_not_configured",
+                registry_revision=(registry.registry_revision if registry is not None else None),
+                registry_content_hash=(registry.content_hash if registry is not None else None),
+                registry_health=registry_health,
+            )
         channel_port = automatic_channel
 
     http_client = (
@@ -314,6 +328,7 @@ def build_external_world_perception_deployment(
         ),
         registry_revision=(registry.registry_revision if registry is not None else None),
         registry_content_hash=(registry.content_hash if registry is not None else None),
+        registry_health=registry_health,
     )
 
 

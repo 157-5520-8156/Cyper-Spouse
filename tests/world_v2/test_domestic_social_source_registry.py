@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from companion_daemon.world_v2.external_world_perception.registry import (
+    external_perception_registry_health,
     load_external_perception_source_registry,
 )
 
@@ -51,3 +52,18 @@ def test_domestic_social_channels_are_bounded_weak_observations() -> None:
     assert all(not source.policy.may_store_normalized_summary for source in social)
     assert all(not source.policy.may_embed for source in social)
     assert all(not source.policy.may_quote for source in social)
+
+
+def test_domestic_registry_health_distinguishes_disabled_and_unsupported_channels() -> None:
+    registry = load_external_perception_source_registry(_REGISTRY)
+    health = external_perception_registry_health(registry)
+    states = {item.source_id: item for item in health.coverage_states}
+
+    assert health.registered_source_count == 16
+    assert health.enabled_source_count == 1
+    assert states["cn.social.weibo.trends.tophub.v1"].route_registered is True
+    assert states["cn.social.weibo.trends.tophub.v1"].acquisition_state == "disabled_unlicensed"
+    assert states["cn.social.weibo.trends.tophub.v1"].character_visibility is False
+    assert states["cn.social.xiaohongshu.general.v1"].route_registered is False
+    assert states["cn.social.xiaohongshu.general.v1"].acquisition_state == "unsupported"
+    assert states["cn.social.xiaohongshu.general.v1"].character_visibility is False

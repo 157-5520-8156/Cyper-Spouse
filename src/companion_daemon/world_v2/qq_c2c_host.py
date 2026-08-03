@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Coroutine, Literal, TypeVar
+from typing import Any, Awaitable, Callable, Coroutine, Literal, Mapping, TypeVar
 
 from companion_daemon.config import Settings
 from companion_daemon.qq_delivery import QQDelivery
@@ -267,6 +267,7 @@ class QQC2CHost:
         owned_action_close_grace_seconds: float = 1.0,
         external_world_perception_hub: WorldPerceptionHub | None = None,
         external_world_perception_disabled_reason: str = "not_configured",
+        external_world_perception_registry_health: Mapping[str, object] | None = None,
     ) -> None:
         if not recipient_id or not canonical_user_id:
             raise ValueError("QQ C2C host requires recipient and canonical user ids")
@@ -279,8 +280,11 @@ class QQC2CHost:
         self._canonical_user_id = canonical_user_id
         self._semantic_chat = semantic_chat
         self._external_world_perception_hub = external_world_perception_hub
-        self._external_world_perception_disabled_reason = (
-            external_world_perception_disabled_reason
+        self._external_world_perception_disabled_reason = external_world_perception_disabled_reason
+        self._external_world_perception_registry_health = (
+            dict(external_world_perception_registry_health)
+            if external_world_perception_registry_health is not None
+            else None
         )
         self._ingress_store = ingress_store
         self._ingress_now = ingress_now or _utc_now
@@ -315,9 +319,7 @@ class QQC2CHost:
         self._endpoint_source_ids_by_task: dict[
             asyncio.Task[TextTurnEndpointSchedule], tuple[str, ...]
         ] = {}
-        self._endpoint_schedule_by_source_event_id: dict[
-            str, TextTurnEndpointSchedule
-        ] = {}
+        self._endpoint_schedule_by_source_event_id: dict[str, TextTurnEndpointSchedule] = {}
         self._endpoint_fragments: deque[tuple[str, str]] = deque(maxlen=8)
         self._recent_message_character_counts: deque[int] = deque(maxlen=16)
         self._recent_character_message_character_counts: deque[int] = deque(maxlen=16)
@@ -333,9 +335,7 @@ class QQC2CHost:
         # durable claim. Join their process-local execution so only one caller
         # enters World cognition; SQLite/World CAS remains the cross-process
         # effect-once authority.
-        self._ingress_batch_tasks: dict[
-            str, asyncio.Task[QQC2CIngressResult]
-        ] = {}
+        self._ingress_batch_tasks: dict[str, asyncio.Task[QQC2CIngressResult]] = {}
         self._lock = asyncio.Lock()
         # Serialize passive scheduler passes with one another.  A visible
         # turn's *targeted* Action deliberately does not take this mutex:
@@ -457,8 +457,7 @@ class QQC2CHost:
         )
         if ignored_cancellation:
             _LOG.error(
-                "world v2 owned scheduler-lane tasks ignored cancellation "
-                "during close count=%d",
+                "world v2 owned scheduler-lane tasks ignored cancellation during close count=%d",
                 len(ignored_cancellation),
             )
 
@@ -534,18 +533,14 @@ class QQC2CHost:
         result = await asyncio.shield(task)
         settled_visible_dispatch = (
             getattr(result, "status", None) == "settled"
-            and getattr(result, "action_kind", None)
-            in USER_VISIBLE_PLATFORM_ACTION_KINDS
+            and getattr(result, "action_kind", None) in USER_VISIBLE_PLATFORM_ACTION_KINDS
         )
         if (
             settled_visible_dispatch
             and getattr(result, "provider_status", None) == "provider_accepted"
         ):
             record_dispatch_ack()
-        if (
-            settled_visible_dispatch
-            and getattr(result, "provider_status", None) == "delivered"
-        ):
+        if settled_visible_dispatch and getattr(result, "provider_status", None) == "delivered":
             # A later provider verification (for example NapCat get_msg)
             # supplies the strong evidence absent from the original dispatch
             # ACK.  It can count as visible, but cannot manufacture a
@@ -600,9 +595,7 @@ class QQC2CHost:
 
     async def _drain_scheduled_action_once_unowned(self) -> object:
         async with self._action_pump_lock:
-            for retry_ordinal in range(
-                len(_ACTION_PUMP_CONFLICT_BACKOFF_SECONDS) + 1
-            ):
+            for retry_ordinal in range(len(_ACTION_PUMP_CONFLICT_BACKOFF_SECONDS) + 1):
                 try:
                     gated = getattr(
                         self._host,
@@ -619,9 +612,7 @@ class QQC2CHost:
                 except ConcurrencyConflict:
                     if retry_ordinal == len(_ACTION_PUMP_CONFLICT_BACKOFF_SECONDS):
                         raise
-                    await asyncio.sleep(
-                        _ACTION_PUMP_CONFLICT_BACKOFF_SECONDS[retry_ordinal]
-                    )
+                    await asyncio.sleep(_ACTION_PUMP_CONFLICT_BACKOFF_SECONDS[retry_ordinal])
             raise AssertionError("scheduled ActionPump CAS retry did not terminate")
 
     async def inbound_text(
@@ -687,9 +678,7 @@ class QQC2CHost:
                     # endpointing: stop the old producer immediately, then
                     # let the bounded probe below offer the new turn to the
                     # same role model.
-                    await cancel_streams(
-                        f"qq-barge-in:{fragment.source_event_id}"
-                    )
+                    await cancel_streams(f"qq-barge-in:{fragment.source_event_id}")
             elif fragment.control_kind == "typing_stopped":
                 self._last_typing_started_at = None
                 self._typing_signal_event.set()
@@ -708,17 +697,13 @@ class QQC2CHost:
             # Arrival, not a later batch claim, is the attention boundary.
             # This cancels only process-local unsent continuation units. The
             # already-authorized head and all durable facts remain immutable.
-            await cancel_streams(
-                f"qq-inbound-attention:{fragment.source_event_id}"
-            )
+            await cancel_streams(f"qq-inbound-attention:{fragment.source_event_id}")
         self._arrival_ns_by_source_event_id.setdefault(
             fragment.source_event_id,
             arrival_ns,
         )
         continuation_observed = (
-            burst_continuation
-            or self._rhythm_holds > 0
-            or self._coalescing_waits > 0
+            burst_continuation or self._rhythm_holds > 0 or self._coalescing_waits > 0
         )
         self._register_content_gap(
             received_at=received_at,
@@ -840,9 +825,7 @@ class QQC2CHost:
             recent_gap_seconds=tuple(self._personal_bubble_gap_seconds),
             typing_active=self._typing_is_active(now=received_at),
             burst_fragment_count=len(self._endpoint_fragments),
-            recent_message_character_counts=tuple(
-                self._recent_message_character_counts
-            ),
+            recent_message_character_counts=tuple(self._recent_message_character_counts),
             recent_character_message_character_counts=tuple(
                 self._recent_character_message_character_counts
             ),
@@ -850,8 +833,7 @@ class QQC2CHost:
                 user_count for _, user_count, _ in self._recent_exchange_shapes
             ),
             recent_exchange_character_bubble_counts=tuple(
-                character_count
-                for _, _, character_count in self._recent_exchange_shapes
+                character_count for _, _, character_count in self._recent_exchange_shapes
             ),
         )
         task = asyncio.create_task(
@@ -939,9 +921,7 @@ class QQC2CHost:
         probability = schedule.semantic_continuation_probability_bp
         confidence = schedule.semantic_confidence_bp
         return {
-            "continuation_probability_bp": (
-                probability if probability is not None else 0
-            ),
+            "continuation_probability_bp": (probability if probability is not None else 0),
             "confidence_bp": confidence if confidence is not None else 0,
             "typing_active": "typing_active" in schedule.reason_codes,
             "status": "predicted" if schedule.status == "predicted" else "fallback",
@@ -958,11 +938,7 @@ class QQC2CHost:
     def _forget_endpoint_fragments(self, source_event_ids: tuple[str, ...]) -> None:
         consumed = set(source_event_ids)
         self._endpoint_fragments = deque(
-            (
-                item
-                for item in self._endpoint_fragments
-                if item[0] not in consumed
-            ),
+            (item for item in self._endpoint_fragments if item[0] not in consumed),
             maxlen=8,
         )
         for source_event_id in consumed:
@@ -1065,9 +1041,7 @@ class QQC2CHost:
         if endpoint_gap is not None:
             quiet_gap = max(quiet_gap, endpoint_gap)
         if burst_continuation:
-            quiet_gap = max(
-                quiet_gap, self._BURST_CONTINUATION_QUIET_GAP_SECONDS
-            )
+            quiet_gap = max(quiet_gap, self._BURST_CONTINUATION_QUIET_GAP_SECONDS)
         hard_cap = received_at + timedelta(seconds=self._BURST_HOLD_CAP_SECONDS)
         yielded_at_quiet_edge = False
         self._rhythm_holds += 1
@@ -1076,9 +1050,7 @@ class QQC2CHost:
                 now = self._ingress_now()
                 latest = self._last_content_received_at or received_at
                 if self._endpoint_task is not observed_endpoint_task:
-                    endpoint_gap, observed_endpoint_task = (
-                        await self._endpoint_wait_seconds()
-                    )
+                    endpoint_gap, observed_endpoint_task = await self._endpoint_wait_seconds()
                     if endpoint_gap is not None:
                         quiet_gap = max(
                             self._quiet_gap_seconds(
@@ -1091,9 +1063,7 @@ class QQC2CHost:
                     # A newer bubble landed during this hold, so the volley is
                     # still going: let the newest bubble's shape and the
                     # just-measured cadence decide how much longer to wait.
-                    cadence_gap = self._quiet_gap_seconds(
-                        self._last_content_text, burst=True
-                    )
+                    cadence_gap = self._quiet_gap_seconds(self._last_content_text, burst=True)
                     quiet_gap = max(cadence_gap, endpoint_gap or 0.0)
                 # A provider "peer is typing" pulse counts as not-quiet: she
                 # can see the person still composing, so she keeps waiting
@@ -1231,8 +1201,8 @@ class QQC2CHost:
                 )
                 self._ingress_batch_tasks[batch.batch_id] = task
                 task.add_done_callback(
-                    lambda completed, batch_id=batch.batch_id: (
-                        self._finish_ingress_batch_task(batch_id, completed)
+                    lambda completed, batch_id=batch.batch_id: self._finish_ingress_batch_task(
+                        batch_id, completed
                     )
                 )
         try:
@@ -1286,11 +1256,7 @@ class QQC2CHost:
             (
                 started_ns
                 for source_event_id in batch.source_event_ids
-                if (
-                    started_ns := self._arrival_ns_by_source_event_id.get(
-                        source_event_id
-                    )
-                )
+                if (started_ns := self._arrival_ns_by_source_event_id.get(source_event_id))
                 is not None
             ),
             default=None,
@@ -1330,9 +1296,7 @@ class QQC2CHost:
         turn_budget = (
             self._interactive_turn_budget_policy.start(
                 processing_started_at=processing_started_at,
-                ingress_started_at=_parse_metadata_time(
-                    metadata.get("window_opened_at")
-                ),
+                ingress_started_at=_parse_metadata_time(metadata.get("window_opened_at")),
             )
             if self._interactive_turn_budget_policy is not None
             else None
@@ -1349,19 +1313,13 @@ class QQC2CHost:
         )
         outcome = await self._host.inbound(inbound)
         action_ids = tuple(
-            dict.fromkeys(
-                (*outcome.authorized_action_ids, *outcome.scheduled_action_ids)
-            )
+            dict.fromkeys((*outcome.authorized_action_ids, *outcome.scheduled_action_ids))
         )
         # Character shape is updated only from positively delivered text
         # Actions. Authorization, typing, media and failed sends are not
         # evidence that the peer saw a character bubble.
-        self._recent_exchange_shapes.append(
-            (batch.batch_id, len(batch.source_event_ids), 0)
-        )
-        retained_exchange_ids = {
-            exchange_id for exchange_id, _, _ in self._recent_exchange_shapes
-        }
+        self._recent_exchange_shapes.append((batch.batch_id, len(batch.source_event_ids), 0))
+        retained_exchange_ids = {exchange_id for exchange_id, _, _ in self._recent_exchange_shapes}
         self._exchange_id_by_action_id = {
             existing_action_id: exchange_id
             for existing_action_id, exchange_id in self._exchange_id_by_action_id.items()
@@ -1378,22 +1336,17 @@ class QQC2CHost:
             for candidate_action_id in action_ids:
                 drain_task = self._start_owned_action_drain(candidate_action_id)
                 dispatch_seconds = (
-                    turn_budget.remaining(include_reserve=True)
-                    if turn_budget is not None
-                    else None
+                    turn_budget.remaining(include_reserve=True) if turn_budget is not None else None
                 )
                 if (
                     dispatch_seconds is not None
                     and turn_budget is not None
-                    and dispatch_seconds
-                    < turn_budget.acceptance_dispatch_reserve_seconds
+                    and dispatch_seconds < turn_budget.acceptance_dispatch_reserve_seconds
                 ):
                     # Cognition may consume the absolute turn deadline, but an
                     # already-authorized visible reply must still get one
                     # bounded provider attempt in this user-owned lane.
-                    dispatch_seconds = (
-                        turn_budget.acceptance_dispatch_reserve_seconds
-                    )
+                    dispatch_seconds = turn_budget.acceptance_dispatch_reserve_seconds
                     _LOG.warning(
                         "world v2 dispatch grace trace=%s "
                         "reason=turn_budget_exhausted grace_seconds=%.3f",
@@ -1419,19 +1372,15 @@ class QQC2CHost:
                             inbound.trace_id,
                             candidate_action_id,
                         )
-                if (
-                    result is not None
-                    and result.action_id not in {None, candidate_action_id}
-                ):
-                    raise RuntimeError(
-                        "targeted QQ C2C drain returned a different Action"
-                    )
+                if result is not None and result.action_id not in {None, candidate_action_id}:
+                    raise RuntimeError("targeted QQ C2C drain returned a different Action")
                 settled_user_visible_dispatch = (
                     outcome.status == "action_authorized"
                     and result is not None
                     and result.status == "settled"
                     and result.action_kind in USER_VISIBLE_PLATFORM_ACTION_KINDS
-                    and result.provider_status in {
+                    and result.provider_status
+                    in {
                         "provider_accepted",
                         "delivered",
                     }
@@ -1845,9 +1794,7 @@ class QQC2CHost:
                 candidates.append(action_id)
             authorized = getattr(result, "authorized_action_ids", ())
             if isinstance(authorized, (tuple, list)):
-                candidates.extend(
-                    item for item in authorized if isinstance(item, str) and item
-                )
+                candidates.extend(item for item in authorized if isinstance(item, str) and item)
             for candidate in candidates:
                 if candidate not in priority_action_ids:
                     priority_action_ids.append(candidate)
@@ -1868,10 +1815,8 @@ class QQC2CHost:
                 and not self._visible_turn_in_flight()
             ):
                 try:
-                    perception_result = (
-                        await self._external_world_perception_hub.advance_once(
-                            observed_at=observed_at
-                        )
+                    perception_result = await self._external_world_perception_hub.advance_once(
+                        observed_at=observed_at
                     )
                 except Exception:
                     # The Hub owns durable retry and health state.  An
@@ -1884,9 +1829,7 @@ class QQC2CHost:
                     units = min(background_remaining, perception_result.progressed_units)
                     background_remaining -= units
                     if perception_result.status != "idle":
-                        pre_background.append(
-                            "external-perception:" + perception_result.status
-                        )
+                        pre_background.append("external-perception:" + perception_result.status)
             if callable(due_projection_reader):
                 due_projection = await due_projection_reader()
                 retry_due_before_tick = min(
@@ -1947,9 +1890,7 @@ class QQC2CHost:
                 if logical_from is None:
                     break
                 due_projection = (
-                    await due_projection_reader()
-                    if callable(due_projection_reader)
-                    else None
+                    await due_projection_reader() if callable(due_projection_reader) else None
                 )
                 action_due_target = (
                     _next_action_due_boundary(
@@ -1972,9 +1913,7 @@ class QQC2CHost:
                     else None
                 )
                 nearest_proactive_retry_due = (
-                    next_proactive_retry_due(due_projection)
-                    if due_projection is not None
-                    else None
+                    next_proactive_retry_due(due_projection) if due_projection is not None else None
                 )
                 proactive_retry_target = (
                     nearest_proactive_retry_due
@@ -2100,9 +2039,7 @@ class QQC2CHost:
                         break
             post_tick_actions: list[str] = []
             for priority_action_id in priority_action_ids[:max_action_units]:
-                targeted = await asyncio.shield(
-                    self._start_owned_action_drain(priority_action_id)
-                )
+                targeted = await asyncio.shield(self._start_owned_action_drain(priority_action_id))
                 if targeted is not None:
                     post_tick_actions.append(str(getattr(targeted, "status", "processed")))
             if heartbeat_life_wake is not None:
@@ -2151,11 +2088,14 @@ class QQC2CHost:
 
         hub = self._external_world_perception_hub
         if hub is None:
-            return {
+            payload: dict[str, object] = {
                 "enabled": False,
                 "state": "disabled",
                 "reason": self._external_world_perception_disabled_reason,
             }
+            if self._external_world_perception_registry_health is not None:
+                payload["registry"] = self._external_world_perception_registry_health
+            return payload
         try:
             snapshot = hub.health_snapshot()
         except Exception:
@@ -2171,15 +2111,16 @@ class QQC2CHost:
             payload = dict(snapshot)
         else:
             raise TypeError("external world perception health is not serializable")
-        return {"enabled": True, **payload}
+        result = {"enabled": True, **payload}
+        if self._external_world_perception_registry_health is not None:
+            result["registry"] = self._external_world_perception_registry_health
+        return result
 
     def local_provider_capacity_health(self) -> dict[str, object]:
         """Expose the shared local-inference lease without touching the model."""
 
         capacity = (
-            self._semantic_chat.local_provider_capacity
-            if self._semantic_chat is not None
-            else None
+            self._semantic_chat.local_provider_capacity if self._semantic_chat is not None else None
         )
         if capacity is None:
             return {"enabled": False, "status": "disabled"}
@@ -2325,8 +2266,7 @@ class QQC2CHost:
                 )
                 if still_pending_ingress:
                     _LOG.error(
-                        "world v2 owned ingress batches ignored cancellation "
-                        "during close count=%d",
+                        "world v2 owned ingress batches ignored cancellation during close count=%d",
                         len(still_pending_ingress),
                     )
         owned = tuple(self._owned_action_drains)
@@ -2349,8 +2289,7 @@ class QQC2CHost:
                 )
                 if still_pending:
                     _LOG.error(
-                        "world v2 owned Action drains ignored cancellation "
-                        "during close count=%d",
+                        "world v2 owned Action drains ignored cancellation during close count=%d",
                         len(still_pending),
                     )
         if self._external_world_perception_hub is not None:
@@ -2368,9 +2307,8 @@ class QQC2CHost:
                 "wait_for_shutdown_quiescence",
                 None,
             )
-            if (
-                getattr(self._host, "shutdown_pending_task_count", 0) > 0
-                and callable(world_quiescence)
+            if getattr(self._host, "shutdown_pending_task_count", 0) > 0 and callable(
+                world_quiescence
             ):
                 deferred = asyncio.create_task(
                     self._close_semantic_after_world_quiescence(world_quiescence),
@@ -2426,9 +2364,8 @@ class QQC2CHost:
                 "wait_for_shutdown_quiescence",
                 None,
             )
-            if (
-                getattr(self._host, "shutdown_pending_task_count", 0) > 0
-                and callable(world_quiescence)
+            if getattr(self._host, "shutdown_pending_task_count", 0) > 0 and callable(
+                world_quiescence
             ):
                 await world_quiescence()
         semantic = self._semantic_chat
@@ -2499,9 +2436,7 @@ def build_qq_c2c_host(
         raise ValueError("QQ C2C v2 requires one configured private recipient")
     configured_expression_episode_mode = settings.world_v2_expression_episode_mode
     if configured_expression_episode_mode not in {"off", "shadow", "stream"}:
-        raise ValueError(
-            "production QQ expression episode mode must be off, shadow, or stream"
-        )
+        raise ValueError("production QQ expression episode mode must be off, shadow, or stream")
     # The provisional Expression Episode remains useful for exercising its
     # dormant recovery lifecycle, but ADR 0014 forbids exposing that one-beat
     # candidate through production Settings.  Tests must opt in at this
@@ -2513,9 +2448,7 @@ def build_qq_c2c_host(
         settings.qq_adapter,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
     )
-    interactive_turn_budget_policy = (
-        interactive_turn_budget_policy or InteractiveTurnBudgetPolicy()
-    )
+    interactive_turn_budget_policy = interactive_turn_budget_policy or InteractiveTurnBudgetPolicy()
     semantic_chat = build_semantic_chat_composition(
         settings=settings,
         flash_model=model,
@@ -2638,6 +2571,7 @@ def build_qq_c2c_host(
         now=bootstrap_at or datetime.now(UTC),
     )
     external_world_perception_disabled_reason = "not_configured"
+    external_world_perception_registry_health: dict[str, object] | None = None
     if external_world_perception_hub is None:
         perception_deployment = build_external_world_perception_deployment(
             settings=settings,
@@ -2650,6 +2584,7 @@ def build_qq_c2c_host(
         )
         external_world_perception_hub = perception_deployment.hub
         external_world_perception_disabled_reason = perception_deployment.reason
+        external_world_perception_registry_health = perception_deployment.registry_health
     return QQC2CHost(
         host=WorldV2PlatformHost(application=application),
         recipient_id=recipient_id,
@@ -2657,9 +2592,7 @@ def build_qq_c2c_host(
         semantic_chat=semantic_chat,
         ingress_store=SQLiteQQIngressStore(
             Path(settings.database_path),
-            catalog=QQIngressPolicyCatalog(
-                default_window_ms=settings.qq_c2c_transport_coalesce_ms
-            ),
+            catalog=QQIngressPolicyCatalog(default_window_ms=settings.qq_c2c_transport_coalesce_ms),
         ),
         ingress_now=ingress_now,
         ingress_sleep=ingress_sleep if ingress_sleep is not None else asyncio.sleep,
@@ -2668,9 +2601,8 @@ def build_qq_c2c_host(
         action_due_sleep=action_due_sleep,
         interactive_turn_budget_policy=interactive_turn_budget_policy,
         external_world_perception_hub=external_world_perception_hub,
-        external_world_perception_disabled_reason=(
-            external_world_perception_disabled_reason
-        ),
+        external_world_perception_disabled_reason=(external_world_perception_disabled_reason),
+        external_world_perception_registry_health=(external_world_perception_registry_health),
         endpoint_controller=semantic_chat.text_endpoint_controller,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
         idle_heartbeat_seconds=settings.qq_c2c_idle_heartbeat_seconds,
