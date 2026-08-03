@@ -10,6 +10,11 @@ from companion_daemon.world_v2.external_world_perception.registry import (
     ExternalPerceptionSourceRegistry,
     build_production_source_profiles,
     canonical_source_registry_content_hash,
+    load_external_perception_source_registry,
+)
+from companion_daemon.world_v2.external_world_perception.rss import (
+    RssAtomSourceAdapter,
+    RssHubPullAdapter,
 )
 from companion_daemon.world_v2.external_world_perception.nws import NwsAlertsAdapter
 from companion_daemon.world_v2.external_world_perception.usgs import (
@@ -75,6 +80,54 @@ def _registry_value(*, sources: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def _rsshub_source(
+    *,
+    source_id: str = "cn.weibo.search.hot.v1",
+    route: str = "/weibo/search/hot",
+    allowed_item_hosts: list[str] | None = None,
+) -> dict[str, object]:
+    source = _source(
+        adapter_kind="rsshub",
+        endpoint="http://127.0.0.1:1200",
+        source_id=source_id,
+        policy=_policy(f"{source_id}-public-feed-review-2026-08-03"),
+    )
+    source.update(
+        {
+            "route": route,
+            "signal_kind": "public_discourse_signal",
+            "upstream_publisher_ref": "publisher:weibo",
+            "allowed_item_hosts": allowed_item_hosts or ["s.weibo.com", "weibo.com"],
+            "license_evidence_refs": [
+                "https://github.com/DIYgod/RSSHub/tree/master/lib/routes/weibo"
+            ],
+            "poll_interval_seconds": 600,
+            "page_limit": 12,
+        }
+    )
+    return source
+
+
+def _publisher_rss_source() -> dict[str, object]:
+    source = _source(
+        adapter_kind="rss_atom",
+        endpoint="https://www.xinhuanet.com/edu/news_edu.xml",
+        source_id="cn.news.xinhua.edu.v1",
+        policy=_policy("xinhua-publisher-rss-review-2026-08-03"),
+    )
+    source.update(
+        {
+            "signal_kind": "publisher_news_signal",
+            "upstream_publisher_ref": "publisher:xinhua",
+            "allowed_item_hosts": ["www.news.cn", "www.xinhuanet.com"],
+            "license_evidence_refs": ["https://www.news.cn/linktous.htm"],
+            "poll_interval_seconds": 600,
+            "page_limit": 5,
+        }
+    )
+    return source
+
+
 def _write_registry(path: Path, value: dict[str, object]) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
@@ -135,6 +188,66 @@ def test_shadow_registry_builds_only_explicit_usgs_and_nws_adapters(tmp_path: Pa
         "usgs.earthquake.global.v1",
         "noaa.nws.alerts.us.cap.v1",
     ]
+
+
+def test_shadow_registry_builds_exact_allowlisted_local_rsshub_route(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    _write_registry(registry_path, _registry_value(sources=[_rsshub_source()]))
+
+    result = build_production_source_profiles(
+        deployment_mode="shadow",
+        registry_path=registry_path,
+        http_client=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.status == "ready"
+    assert len(result.source_profiles) == 1
+    adapter = result.source_profiles[0].adapter
+    assert isinstance(adapter, RssHubPullAdapter)
+    assert adapter.source_id == "cn.weibo.search.hot.v1"
+
+
+def test_registry_builds_publisher_native_rss_without_rsshub(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    _write_registry(registry_path, _registry_value(sources=[_publisher_rss_source()]))
+
+    result = build_production_source_profiles(
+        deployment_mode="live",
+        registry_path=registry_path,
+        http_client=object(),  # type: ignore[arg-type]
+    )
+
+    adapter = result.source_profiles[0].adapter
+    assert isinstance(adapter, RssAtomSourceAdapter)
+    assert not isinstance(adapter, RssHubPullAdapter)
+    assert adapter.source_id == "cn.news.xinhua.edu.v1"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"endpoint": "https://rsshub.example.com"}, "loopback"),
+        ({"route": "https://evil.example/feed"}, "fixed local path"),
+        ({"route": "/weibo/search/hot#fragment"}, "fixed local path"),
+        ({"allowed_item_hosts": []}, "at least 1 item"),
+    ],
+)
+def test_registry_rejects_nonlocal_or_open_ended_rsshub_authority(
+    tmp_path: Path,
+    mutation: dict[str, object],
+    message: str,
+) -> None:
+    registry_path = tmp_path / "registry.json"
+    source = _rsshub_source()
+    source.update(mutation)
+    _write_registry(registry_path, _registry_value(sources=[source]))
+
+    with pytest.raises((ValueError, ValidationError), match=message):
+        build_production_source_profiles(
+            deployment_mode="shadow",
+            registry_path=registry_path,
+            http_client=object(),  # type: ignore[arg-type]
+        )
 
 
 def test_registry_is_hash_bound_and_frozen(tmp_path: Path) -> None:
@@ -248,3 +361,17 @@ def test_registry_with_no_enabled_sources_remains_disabled(tmp_path: Path) -> No
     assert result.status == "disabled"
     assert result.reason == "no_enabled_sources"
     assert result.source_profiles == ()
+
+
+def test_checked_in_production_registry_is_domestic_and_bounded() -> None:
+    path = Path(__file__).parents[2] / "configs" / "external-perception-sources.cn.json"
+
+    registry = load_external_perception_source_registry(path)
+    enabled = tuple(item for item in registry.sources if item.enabled)
+
+    assert len(enabled) == 1
+    assert all(item.source_id.startswith("cn.") for item in enabled)
+    assert all(item.adapter_kind == "rss_atom" for item in enabled)
+    assert sum(item.page_limit for item in enabled) <= 3
+    assert all(not item.policy.may_store_normalized_summary for item in enabled)
+    assert all(not item.policy.may_quote for item in enabled)

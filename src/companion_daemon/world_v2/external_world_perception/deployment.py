@@ -35,6 +35,7 @@ from .production_attention import (
     CapsuleBackedShadowAttentionContextPort,
     ChatCompletionLiveAttentionModel,
     ChatCompletionShadowAttentionModel,
+    LedgerPublicInformationChannelPort,
     LiveAttentionChannelPort,
 )
 from .registry import (
@@ -128,14 +129,7 @@ def build_external_world_perception_deployment(
     if mode == "off":
         return ExternalPerceptionDeployment(status="disabled", reason="mode_off")
     if registry_path is None and authorized_search_profile is None:
-        return ExternalPerceptionDeployment(
-            status="disabled", reason="registry_not_configured"
-        )
-    if mode == "live" and channel_port is None:
-        return ExternalPerceptionDeployment(
-            status="disabled", reason="channel_not_configured"
-        )
-
+        return ExternalPerceptionDeployment(status="disabled", reason="registry_not_configured")
     if authorized_search_profile is not None and not isinstance(
         authorized_search_profile.adapter,
         AcceptedWebSearchResultAdapter,
@@ -168,6 +162,29 @@ def build_external_world_perception_deployment(
             registry_content_hash=registry.content_hash,
         )
 
+    world_ledger: SQLiteWorldLedger | None = None
+    if mode == "live" and channel_port is None:
+        source_ids = [
+            item.source_id
+            for item in (registry.sources if registry is not None else ())
+            if item.enabled
+        ]
+        if authorized_search_profile is not None:
+            source_ids.append(authorized_search_profile.adapter.source_id)
+        accessible_source_ids = tuple(sorted(set(source_ids)))
+        world_ledger = SQLiteWorldLedger(path=Path(settings.database_path), world_id=world_id)
+        automatic_channel = LedgerPublicInformationChannelPort(
+            ledger=world_ledger,
+            accessible_source_ids=accessible_source_ids,
+        )
+        if not automatic_channel.authority_is_available(
+            actor_ref=actor_ref,
+            observed_at=wall_clock(),
+        ):
+            world_ledger.close()
+            return ExternalPerceptionDeployment(status="disabled", reason="channel_not_configured")
+        channel_port = automatic_channel
+
     http_client = (
         httpx.AsyncClient(follow_redirects=False, trust_env=False)
         if registry_sources_enabled
@@ -194,11 +211,8 @@ def build_external_world_perception_deployment(
             not profile.policy.may_expose_to_character_model
             or not profile.policy.may_freeze_durable_snapshot
         ):
-            raise ValueError(
-                "live source policy must allow model exposure and durable snapshots"
-            )
+            raise ValueError("live source policy must allow model exposure and durable snapshots")
 
-    world_ledger: SQLiteWorldLedger | None = None
     shadow_runtime: ShadowAttentionRuntime | None = None
     live_runtime: LiveAttentionRuntime | None = None
     registry_hash = registry.content_hash if registry is not None else None
@@ -234,7 +248,18 @@ def build_external_world_perception_deployment(
             world_id=world_id,
             delivery_producer=producer,
         )
-        world_ledger = acceptance.ledger
+        if world_ledger is None:
+            world_ledger = acceptance.ledger
+        elif acceptance.ledger is not world_ledger:
+            # The acceptance runtime owns a second handle to the same file;
+            # use its handle consistently and close the preflight handle.
+            world_ledger.close()
+            world_ledger = acceptance.ledger
+            if isinstance(channel_port, LedgerPublicInformationChannelPort):
+                channel_port = LedgerPublicInformationChannelPort(
+                    ledger=world_ledger,
+                    accessible_source_ids=tuple(item.adapter.source_id for item in source_profiles),
+                )
         compiler = context_capsule_compiler_from_ledger(ledger=world_ledger)
         acceptance_port = LifeWakingExternalPerceptionAcceptance(
             acceptance=ProducerBackedExternalPerceptionAcceptance(

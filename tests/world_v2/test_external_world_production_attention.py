@@ -23,6 +23,8 @@ from companion_daemon.world_v2.external_world_perception.production_attention im
     CapsuleBackedShadowAttentionContextPort,
     ChatCompletionLiveAttentionModel,
     ChatCompletionShadowAttentionModel,
+    LedgerPublicInformationChannelPort,
+    PUBLIC_INFORMATION_CAPABILITY_ID,
     StaticLiveAttentionChannelPort,
 )
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -166,6 +168,105 @@ async def test_context_port_rejects_channel_evidence_missing_from_pinned_world()
             actor_ref="character:zhizhi",
             observed_at=NOW,
         )
+
+
+@pytest.mark.asyncio
+async def test_public_information_channel_is_derived_from_exact_active_ledger_capability() -> None:
+    capability = SimpleNamespace(
+        grant_id=PUBLIC_INFORMATION_CAPABILITY_ID,
+        entity_revision=1,
+        values=SimpleNamespace(
+            capability_kind="read_only_tool",
+            actor_ref="character:zhizhi",
+            target_scope_refs=("tool:web_search",),
+            constraint_refs=("constraint:read-only",),
+            valid_from=NOW - timedelta(minutes=1),
+            expires_at=None,
+            state="active",
+        ),
+        origin=SimpleNamespace(
+            event_ref="event:public-information-capability",
+            enforcement_eligible=True,
+        ),
+    )
+    projection = SimpleNamespace(
+        world_revision=3,
+        deliberation_revision=2,
+        ledger_sequence=9,
+        capability_grants=(capability,),
+    )
+    ledger = SimpleNamespace(world_id="world:attention-production", project=lambda: projection)
+    port = LedgerPublicInformationChannelPort(
+        ledger=ledger,
+        accessible_source_ids=("cn.weibo.search.hot.v1", "cn.cctv.xwlb.v1"),
+    )
+
+    channels = await port.available_channels(
+        world_id=ledger.world_id,
+        actor_ref="character:zhizhi",
+        cursor=ProjectionCursor(
+            world_revision=3,
+            deliberation_revision=2,
+            ledger_sequence=9,
+        ),
+        capsule=SimpleNamespace(),
+        observed_at=NOW,
+    )
+
+    assert len(channels) == 1
+    assert channels[0].evidence_refs == ("event:public-information-capability",)
+    assert channels[0].accessible_source_ids == (
+        "cn.cctv.xwlb.v1",
+        "cn.weibo.search.hot.v1",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["revoked", "expired"])
+async def test_public_information_channel_fails_closed_without_active_authority(
+    state: str,
+) -> None:
+    capability = SimpleNamespace(
+        grant_id=PUBLIC_INFORMATION_CAPABILITY_ID,
+        entity_revision=1,
+        values=SimpleNamespace(
+            capability_kind="read_only_tool",
+            actor_ref="character:zhizhi",
+            target_scope_refs=("tool:web_search",),
+            constraint_refs=("constraint:read-only",),
+            valid_from=NOW - timedelta(minutes=1),
+            expires_at=NOW - timedelta(seconds=1) if state == "expired" else None,
+            state="active" if state == "expired" else "revoked",
+        ),
+        origin=SimpleNamespace(
+            event_ref="event:public-information-capability",
+            enforcement_eligible=True,
+        ),
+    )
+    projection = SimpleNamespace(
+        world_revision=3,
+        deliberation_revision=2,
+        ledger_sequence=9,
+        capability_grants=(capability,),
+    )
+    port = LedgerPublicInformationChannelPort(
+        ledger=SimpleNamespace(world_id="world:attention-production", project=lambda: projection),
+        accessible_source_ids=("cn.weibo.search.hot.v1",),
+    )
+
+    channels = await port.available_channels(
+        world_id="world:attention-production",
+        actor_ref="character:zhizhi",
+        cursor=ProjectionCursor(
+            world_revision=3,
+            deliberation_revision=2,
+            ledger_sequence=9,
+        ),
+        capsule=SimpleNamespace(),
+        observed_at=NOW,
+    )
+
+    assert channels == ()
 
 
 class _ChatModel:

@@ -10,7 +10,7 @@ permissions needed by the live acceptance boundary.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 import hashlib
 import json
 from typing import Protocol
@@ -57,6 +57,8 @@ _CONTEXT_SLICE_GROUPS = {
         "recent_experiences",
     ),
 }
+
+PUBLIC_INFORMATION_CAPABILITY_ID = "capability:world-v2:public-information-read"
 
 
 def _canonical(value: object) -> str:
@@ -116,6 +118,99 @@ class StaticLiveAttentionChannelPort:
         return self._channels
 
 
+class LedgerPublicInformationChannelPort:
+    """Resolve one public-information channel from an enforcement capability.
+
+    The capability authorizes read-only public web access; the immutable
+    deployment registry independently narrows that broad permission to the
+    exact source ids exposed by this channel.  Neither side proves that the
+    character noticed or believed any item.
+    """
+
+    def __init__(self, *, ledger: LedgerPort, accessible_source_ids: tuple[str, ...]) -> None:
+        source_ids = tuple(sorted(set(accessible_source_ids)))
+        if not source_ids or len(source_ids) != len(accessible_source_ids):
+            raise ValueError("public information channel source ids must be nonempty and unique")
+        self._ledger = ledger
+        self._accessible_source_ids = source_ids
+
+    def authority_is_available(self, *, actor_ref: str, observed_at: datetime) -> bool:
+        return (
+            self._active_grant(
+                projection=self._ledger.project(),
+                actor_ref=actor_ref,
+                observed_at=observed_at,
+            )
+            is not None
+        )
+
+    async def available_channels(
+        self,
+        *,
+        world_id: str,
+        actor_ref: str,
+        cursor: ProjectionCursor,
+        capsule: ContextCapsule,
+        observed_at: datetime,
+    ) -> tuple[PerceptionChannelProof, ...]:
+        del capsule
+        if world_id != self._ledger.world_id:
+            raise ValueError("public information channel requested another world")
+        projection = self._ledger.project()
+        current = ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        )
+        if current != cursor:
+            raise ValueError("public information authority changed after Context was pinned")
+        grant = self._active_grant(
+            projection=projection,
+            actor_ref=actor_ref,
+            observed_at=observed_at,
+        )
+        if grant is None:
+            return ()
+        values = grant.values
+        return (
+            PerceptionChannelProof(
+                channel_ref="channel:public-information",
+                channel_kind="public_information_feed",
+                evidence_refs=(grant.origin.event_ref,),
+                accessible_source_ids=self._accessible_source_ids,
+                valid_until=values.expires_at or datetime.max.replace(tzinfo=UTC),
+            ),
+        )
+
+    @staticmethod
+    def _active_grant(
+        *, projection: object, actor_ref: str, observed_at: datetime
+    ) -> object | None:
+        matching = tuple(
+            grant
+            for grant in projection.capability_grants  # type: ignore[attr-defined]
+            if grant.grant_id == PUBLIC_INFORMATION_CAPABILITY_ID
+        )
+        if len(matching) > 1:
+            raise ValueError("public information capability identity is ambiguous")
+        if not matching:
+            return None
+        grant = matching[0]
+        values = grant.values
+        if (
+            values.state != "active"
+            or values.capability_kind != "read_only_tool"
+            or values.actor_ref != actor_ref
+            or tuple(values.target_scope_refs) != ("tool:web_search",)
+            or "constraint:read-only" not in values.constraint_refs
+            or not grant.origin.enforcement_eligible
+            or values.valid_from > observed_at
+            or (values.expires_at is not None and values.expires_at <= observed_at)
+        ):
+            return None
+        return grant
+
+
 class CapsuleBackedLiveAttentionContextPort:
     """Freeze role-safe Context slices at one complete read-only ledger cursor.
 
@@ -167,13 +262,9 @@ class CapsuleBackedLiveAttentionContextPort:
         )
         if any(item.valid_until <= observed_at for item in channels):
             raise ValueError("live attention Context contains an expired channel")
-        committed_event_refs = {
-            item.event_id for item in projection.committed_world_event_refs
-        }
+        committed_event_refs = {item.event_id for item in projection.committed_world_event_refs}
         for channel in channels:
-            missing = tuple(
-                ref for ref in channel.evidence_refs if ref not in committed_event_refs
-            )
+            missing = tuple(ref for ref in channel.evidence_refs if ref not in committed_event_refs)
             if missing:
                 raise ValueError(
                     "live attention channel evidence is absent from the pinned World cursor"
@@ -549,7 +640,9 @@ __all__ = [
     "CapsuleBackedShadowAttentionContextPort",
     "ChatCompletionLiveAttentionModel",
     "ChatCompletionShadowAttentionModel",
+    "LedgerPublicInformationChannelPort",
     "LiveAttentionChannelPort",
+    "PUBLIC_INFORMATION_CAPABILITY_ID",
     "ProductionAttentionModelTrace",
     "StaticLiveAttentionChannelPort",
 ]

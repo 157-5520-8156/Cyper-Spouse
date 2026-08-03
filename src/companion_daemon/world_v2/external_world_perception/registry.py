@@ -21,16 +21,17 @@ from pydantic import Field, model_validator
 from ..schema_core import FrozenModel
 from .contracts import SourcePolicyRevision, SourceProfile
 from .nws import NwsAlertsAdapter
+from .rss import RssAtomSourceAdapter, RssHubPullAdapter
 from .usgs import UsgsEarthquakeGeoJsonAdapter
 
 
 DeploymentMode = Literal["off", "shadow", "live"]
-AdapterKind = Literal["usgs_geojson", "nws_alerts"]
+AdapterKind = Literal["usgs_geojson", "nws_alerts", "rss_atom", "rsshub"]
 FactoryStatus = Literal["disabled", "ready"]
 FactoryReason = Literal["mode_off", "registry_not_configured", "no_enabled_sources", "ready"]
 
 _MAX_REGISTRY_BYTES = 1_000_000
-_EXPECTED_SOURCE_IDS: dict[AdapterKind, str] = {
+_EXPECTED_SOURCE_IDS: dict[str, str] = {
     "usgs_geojson": "usgs.earthquake.global.v1",
     "nws_alerts": "noaa.nws.alerts.us.cap.v1",
 }
@@ -54,6 +55,10 @@ class ExternalPerceptionSourceRegistration(FrozenModel):
     adapter_kind: AdapterKind
     source_id: str = Field(min_length=1, max_length=512)
     endpoint: str = Field(min_length=1, max_length=4_096)
+    route: str | None = Field(default=None, min_length=1, max_length=2_048)
+    signal_kind: str | None = Field(default=None, min_length=1, max_length=128)
+    upstream_publisher_ref: str | None = Field(default=None, min_length=1, max_length=1_024)
+    allowed_item_hosts: tuple[str, ...] = Field(default=(), min_length=0, max_length=32)
     policy_owner_ref: str = Field(min_length=1, max_length=512)
     license_evidence_refs: tuple[str, ...] = Field(min_length=1, max_length=16)
     policy: SourcePolicyRevision
@@ -66,10 +71,57 @@ class ExternalPerceptionSourceRegistration(FrozenModel):
 
     @model_validator(mode="after")
     def authority_is_exact_and_auditable(self) -> ExternalPerceptionSourceRegistration:
-        if self.source_id != _EXPECTED_SOURCE_IDS[self.adapter_kind]:
-            raise ValueError("registry source id does not match adapter authority")
+        if self.adapter_kind in _EXPECTED_SOURCE_IDS:
+            if self.source_id != _EXPECTED_SOURCE_IDS[self.adapter_kind]:
+                raise ValueError("registry source id does not match adapter authority")
+            if (
+                self.route
+                or self.signal_kind
+                or self.upstream_publisher_ref
+                or self.allowed_item_hosts
+            ):
+                raise ValueError("native adapters cannot declare RSSHub authority")
+        elif not self.source_id.startswith("cn.") or not self.source_id.endswith(".v1"):
+            raise ValueError("RSS source id must use the closed cn.*.v1 namespace")
         endpoint = urlsplit(self.endpoint)
-        if (
+        if self.adapter_kind == "rsshub":
+            if endpoint.scheme not in {"http", "https"} or not _is_loopback_host(endpoint.hostname):
+                raise ValueError("RSSHub endpoint must be a credential-free loopback URL")
+            if endpoint.username is not None or endpoint.password is not None:
+                raise ValueError("RSSHub endpoint must be a credential-free loopback URL")
+            route = urlsplit(self.route or "")
+            if (
+                not self.route
+                or not self.route.startswith("/")
+                or route.scheme
+                or route.netloc
+                or route.fragment
+            ):
+                raise ValueError("RSSHub route must be one fixed local path")
+            if not self.signal_kind or not self.upstream_publisher_ref:
+                raise ValueError("RSSHub source identity is incomplete")
+            if not self.allowed_item_hosts:
+                raise ValueError("RSSHub allowed_item_hosts must contain at least 1 item")
+            if any(not _is_plain_hostname(host) for host in self.allowed_item_hosts):
+                raise ValueError("RSSHub item hosts must be exact hostnames")
+        elif self.adapter_kind == "rss_atom":
+            if (
+                endpoint.scheme != "https"
+                or not endpoint.hostname
+                or endpoint.username is not None
+                or endpoint.password is not None
+                or endpoint.fragment
+            ):
+                raise ValueError("publisher RSS endpoint must be credential-free HTTPS")
+            if self.route is not None:
+                raise ValueError("publisher RSS cannot declare an RSSHub route")
+            if not self.signal_kind or not self.upstream_publisher_ref:
+                raise ValueError("publisher RSS source identity is incomplete")
+            if not self.allowed_item_hosts:
+                raise ValueError("publisher RSS allowed_item_hosts must contain at least 1 item")
+            if any(not _is_plain_hostname(host) for host in self.allowed_item_hosts):
+                raise ValueError("publisher RSS item hosts must be exact hostnames")
+        elif (
             endpoint.scheme != "https"
             or endpoint.username is not None
             or endpoint.password is not None
@@ -88,6 +140,25 @@ class ExternalPerceptionSourceRegistration(FrozenModel):
         return self
 
 
+def _is_loopback_host(hostname: str | None) -> bool:
+    if hostname is None:
+        return False
+    normalized = hostname.casefold().rstrip(".")
+    return normalized == "localhost" or normalized == "127.0.0.1" or normalized == "::1"
+
+
+def _is_plain_hostname(value: str) -> bool:
+    parsed = urlsplit(f"//{value}")
+    return (
+        bool(parsed.hostname)
+        and parsed.hostname == value.casefold().rstrip(".")
+        and parsed.port is None
+        and parsed.username is None
+        and parsed.password is None
+        and "/" not in value
+    )
+
+
 class ExternalPerceptionSourceRegistry(FrozenModel):
     """Immutable, revisioned deployment authority loaded from one JSON file."""
 
@@ -99,7 +170,13 @@ class ExternalPerceptionSourceRegistry(FrozenModel):
 
     @model_validator(mode="after")
     def identity_and_sources_are_closed(self) -> ExternalPerceptionSourceRegistry:
-        material = self.model_dump(mode="json", exclude={"content_hash"})
+        # Optional adapter-specific fields must not retroactively change the
+        # semantic hash of registries created before that adapter existed.
+        material = self.model_dump(
+            mode="json",
+            exclude={"content_hash"},
+            exclude_defaults=True,
+        )
         if self.content_hash != canonical_source_registry_content_hash(material):
             raise ValueError("registry content hash mismatch")
         source_ids = tuple(item.source_id for item in self.sources)
@@ -228,7 +305,7 @@ def _build_adapter(
     registration: ExternalPerceptionSourceRegistration,
     *,
     http_client: httpx.AsyncClient,
-) -> UsgsEarthquakeGeoJsonAdapter | NwsAlertsAdapter:
+) -> UsgsEarthquakeGeoJsonAdapter | NwsAlertsAdapter | RssAtomSourceAdapter | RssHubPullAdapter:
     if registration.adapter_kind == "usgs_geojson":
         return UsgsEarthquakeGeoJsonAdapter(
             http_client=http_client,
@@ -238,6 +315,34 @@ def _build_adapter(
         return NwsAlertsAdapter(
             http_client=http_client,
             feed_url=registration.endpoint,
+        )
+    if registration.adapter_kind == "rsshub":
+        assert registration.route is not None
+        assert registration.signal_kind is not None
+        assert registration.upstream_publisher_ref is not None
+        return RssHubPullAdapter(
+            source_id=registration.source_id,
+            base_url=registration.endpoint,
+            route=registration.route,
+            allowed_routes=frozenset({registration.route}),
+            signal_kind=registration.signal_kind,
+            upstream_publisher_ref=registration.upstream_publisher_ref,
+            allowed_item_hosts=frozenset(registration.allowed_item_hosts),
+            http_client=http_client,
+        )
+    if registration.adapter_kind == "rss_atom":
+        assert registration.signal_kind is not None
+        assert registration.upstream_publisher_ref is not None
+        endpoint_host = urlsplit(registration.endpoint).hostname
+        assert endpoint_host is not None
+        return RssAtomSourceAdapter(
+            source_id=registration.source_id,
+            feed_url=registration.endpoint,
+            signal_kind=registration.signal_kind,
+            upstream_publisher_ref=registration.upstream_publisher_ref,
+            allowed_hosts=frozenset(registration.allowed_item_hosts),
+            transport_allowed_hosts=frozenset({endpoint_host}),
+            http_client=http_client,
         )
     raise AssertionError("closed adapter kind was not handled")
 

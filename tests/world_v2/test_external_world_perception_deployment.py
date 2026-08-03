@@ -24,6 +24,11 @@ from companion_daemon.world_v2.external_world_perception.production_attention im
 from companion_daemon.world_v2.external_world_perception.registry import (
     canonical_source_registry_content_hash,
 )
+from companion_daemon.world_v2.public_information_authority_provisioning import (
+    PublicInformationAuthorityProvisioner,
+)
+from companion_daemon.world_v2.schemas import WorldEvent
+from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
 NOW = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
@@ -197,6 +202,66 @@ def test_live_requires_an_explicit_source_bound_character_channel(tmp_path: Path
     assert ready.status == "ready"
     assert ready.reason == "ready"
     assert ready.hub is not None
+
+
+@pytest.mark.asyncio
+async def test_live_auto_composes_channel_from_root_signed_public_information_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
+    database = tmp_path / "world.sqlite"
+    ledger = SQLiteWorldLedger(path=database, world_id="world:test")
+    try:
+        ledger.commit(
+            (
+                WorldEvent.from_payload(
+                    schema_version="world-v2.1",
+                    event_id="event:world-started:public-info-deployment",
+                    event_type="WorldStarted",
+                    world_id="world:test",
+                    logical_time=NOW,
+                    created_at=NOW,
+                    actor="system:test",
+                    source="test",
+                    trace_id="trace:public-info-deployment",
+                    causation_id="cause:public-info-deployment",
+                    correlation_id="correlation:public-info-deployment",
+                    idempotency_key="identity:public-info-deployment",
+                    payload={},
+                ),
+            ),
+            expected_world_revision=0,
+            expected_deliberation_revision=0,
+        )
+        PublicInformationAuthorityProvisioner(
+            ledger=ledger,
+            signing_key_hex="11" * 32,
+            companion_actor_ref="agent:companion",
+        ).ensure()
+    finally:
+        ledger.close()
+    registry = tmp_path / "registry.json"
+    _registry(registry)
+
+    deployment = build_external_world_perception_deployment(
+        settings=Settings(
+            _env_file=None,
+            database_path=database,
+            WORLD_V2_EXTERNAL_PERCEPTION_MODE="live",
+            WORLD_V2_EXTERNAL_PERCEPTION_SOURCE_REGISTRY_PATH=registry,
+            WORLD_V2_EXTERNAL_PERCEPTION_SIDECAR_PATH=tmp_path / "sidecar.sqlite",
+        ),
+        world_id="world:test",
+        actor_ref="agent:companion",
+        model=Model(),
+        life=Life(),
+        wall_clock=lambda: NOW,
+    )
+
+    assert deployment.status == "ready"
+    assert deployment.hub is not None
+    await deployment.hub.aclose()
 
 
 def test_registry_without_enabled_sources_stays_disabled_before_runtime_allocation(
