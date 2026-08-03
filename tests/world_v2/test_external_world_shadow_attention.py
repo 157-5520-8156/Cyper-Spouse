@@ -156,6 +156,63 @@ def _slow_profile(source: RecordedSignalSourceAdapter) -> SourceProfile:
 
 
 @pytest.mark.asyncio
+async def test_new_attention_opportunity_is_not_starved_by_a_large_due_source_set(
+    tmp_path,
+) -> None:
+    source_ids = tuple(f"source:fixture:busy:{index:02d}" for index in range(11))
+    sources = tuple(
+        RecordedSignalSourceAdapter(
+            source_id=source_id,
+            pages=(
+                ExternalSignalSourcePage(
+                    evidence_media_type="application/atom+xml",
+                    evidence_bytes=b"<feed>first observed trend</feed>",
+                    items=(
+                        ExternalSignalSourceItem(
+                            upstream_item_id="item:first-trend",
+                            gateway_ref="gateway:fixture",
+                            upstream_publisher_ref="publisher:fixture",
+                            signal_kind="platform_trend_observation",
+                            headline="一个刚出现的趋势",
+                            published_at=NOW,
+                        ),
+                    ),
+                ),
+            )
+            if index == 0
+            else (),
+        )
+        for index, source_id in enumerate(source_ids)
+    )
+    hub = SQLiteWorldPerceptionHub(
+        path=tmp_path / "external-perception-shadow-fairness.sqlite3",
+        sources=tuple(_profile(source) for source in sources),
+        wall_clock=lambda: NOW,
+        shadow_attention=ShadowAttentionRuntime(
+            world_id="zhizhi-world-v2",
+            actor_ref="character:zhizhi",
+            attention_policy_revision="attention-policy:shadow:fairness",
+            deployment_mode_revision="shadow:fairness",
+            worker_id="worker:test:fairness",
+            context_port=_ContextPort(_context(source_ids=source_ids)),
+            model=_SequenceAttentionModel((CharacterAttentionResult(selections=()),)),
+            merge_wait_seconds=120,
+        ),
+    )
+    try:
+        assert (await hub.advance_once(observed_at=NOW)).status == "progressed"
+
+        waiting = await hub.advance_once(observed_at=NOW)
+
+        assert waiting.status == "window_wait"
+        assert waiting.next_wake_at == NOW + timedelta(minutes=2)
+        assert sources[0].observed_cursors == (None,)
+        assert all(source.observed_cursors == () for source in sources[1:])
+    finally:
+        await hub.aclose()
+
+
+@pytest.mark.asyncio
 async def test_shadow_attention_freezes_a_sourced_window_and_records_model_none_once(
     tmp_path,
 ) -> None:

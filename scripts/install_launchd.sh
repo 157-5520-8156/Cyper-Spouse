@@ -9,6 +9,7 @@ cp "$ROOT/launchd/com.girl-agent.qq-ws.plist" "$LAUNCH_AGENTS/"
 cp "$ROOT/launchd/com.girl-agent.proactive.plist" "$LAUNCH_AGENTS/"
 cp "$ROOT/launchd/com.girl-agent.daemon.plist" "$LAUNCH_AGENTS/"
 cp "$ROOT/launchd/com.girl-agent.napcat.plist" "$LAUNCH_AGENTS/"
+cp "$ROOT/launchd/com.girl-agent.rsshub.plist" "$LAUNCH_AGENTS/"
 if [ "${INSTALL_SILLYTAVERN:-0}" = "1" ]; then
   cp "$ROOT/launchd/com.girl-agent.sillytavern.plist" "$LAUNCH_AGENTS/"
 fi
@@ -17,11 +18,13 @@ launchctl unload "$LAUNCH_AGENTS/com.girl-agent.proactive.plist" 2>/dev/null || 
 launchctl unload "$LAUNCH_AGENTS/com.girl-agent.qq-ws.plist" 2>/dev/null || true
 launchctl unload "$LAUNCH_AGENTS/com.girl-agent.daemon.plist" 2>/dev/null || true
 launchctl unload "$LAUNCH_AGENTS/com.girl-agent.napcat.plist" 2>/dev/null || true
+launchctl unload "$LAUNCH_AGENTS/com.girl-agent.rsshub.plist" 2>/dev/null || true
 launchctl unload "$LAUNCH_AGENTS/com.girl-agent.sillytavern.plist" 2>/dev/null || true
 launchctl load "$LAUNCH_AGENTS/com.girl-agent.qq-ws.plist"
 launchctl load "$LAUNCH_AGENTS/com.girl-agent.proactive.plist"
 launchctl load "$LAUNCH_AGENTS/com.girl-agent.daemon.plist"
 launchctl load "$LAUNCH_AGENTS/com.girl-agent.napcat.plist"
+launchctl load "$LAUNCH_AGENTS/com.girl-agent.rsshub.plist"
 if [ "${INSTALL_SILLYTAVERN:-0}" = "1" ]; then
   launchctl load "$LAUNCH_AGENTS/com.girl-agent.sillytavern.plist"
 fi
@@ -32,6 +35,7 @@ echo "  $ROOT/logs/qq-ws.out.log"
 echo "  $ROOT/logs/proactive.out.log"
 echo "  $ROOT/logs/daemon.out.log"
 echo "  $ROOT/logs/napcat.out.log"
+echo "  $ROOT/logs/rsshub.out.log"
 if [ "${INSTALL_SILLYTAVERN:-0}" = "1" ]; then
   echo "  $ROOT/logs/sillytavern.out.log"
 else

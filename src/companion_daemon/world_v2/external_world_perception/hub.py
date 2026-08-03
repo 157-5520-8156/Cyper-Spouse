@@ -386,6 +386,14 @@ class SQLiteWorldPerceptionHub:
         self._delete_expired_raw_evidence(observed_at)
         self._delete_expired_search_index(observed_at)
         self._delete_expired_normalized_signals(observed_at)
+        if self._attention_coordinator is not None and self._attention_coordinator.has_due_work(
+            observed_at
+        ):
+            attention_result = await self._attention_coordinator.advance_once(
+                observed_at=observed_at
+            )
+            if attention_result is not None:
+                return attention_result
         due = self._due_sources(observed_at)
         if due:
             source_id = due[0]

@@ -57,6 +57,7 @@ class ExternalPerceptionSourceRegistration(FrozenModel):
     endpoint: str = Field(min_length=1, max_length=4_096)
     route: str | None = Field(default=None, min_length=1, max_length=2_048)
     signal_kind: str | None = Field(default=None, min_length=1, max_length=128)
+    use_observed_at_for_undated_items: bool = False
     upstream_publisher_ref: str | None = Field(default=None, min_length=1, max_length=1_024)
     allowed_item_hosts: tuple[str, ...] = Field(default=(), min_length=0, max_length=32)
     policy_owner_ref: str = Field(min_length=1, max_length=512)
@@ -104,7 +105,13 @@ class ExternalPerceptionSourceRegistration(FrozenModel):
                 raise ValueError("RSSHub allowed_item_hosts must contain at least 1 item")
             if any(not _is_plain_hostname(host) for host in self.allowed_item_hosts):
                 raise ValueError("RSSHub item hosts must be exact hostnames")
+            if self.use_observed_at_for_undated_items and self.signal_kind != (
+                "platform_trend_observation"
+            ):
+                raise ValueError("undated RSSHub fallback is restricted to trend observations")
         elif self.adapter_kind == "rss_atom":
+            if self.use_observed_at_for_undated_items:
+                raise ValueError("publisher RSS must retain source publication time")
             if (
                 endpoint.scheme != "https"
                 or not endpoint.hostname
@@ -328,6 +335,7 @@ def _build_adapter(
             signal_kind=registration.signal_kind,
             upstream_publisher_ref=registration.upstream_publisher_ref,
             allowed_item_hosts=frozenset(registration.allowed_item_hosts),
+            use_observed_at_for_undated_items=(registration.use_observed_at_for_undated_items),
             http_client=http_client,
         )
     if registration.adapter_kind == "rss_atom":

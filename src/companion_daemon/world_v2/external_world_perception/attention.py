@@ -1273,6 +1273,7 @@ class SQLiteShadowAttentionCoordinator:
 
     def has_due_work(self, observed_at: datetime) -> bool:
         with self._lock:
+            eligible_signal = bool(self._eligible_signal_rows(observed_at=observed_at))
             due_attempt = self._connection.execute(
                 """
                 SELECT 1 FROM external_perception_attention_attempts
@@ -1291,7 +1292,7 @@ class SQLiteShadowAttentionCoordinator:
                 """,
                 (_iso_utc(observed_at),),
             ).fetchone()
-        return due_attempt is not None or due_opportunity is not None
+        return eligible_signal or due_attempt is not None or due_opportunity is not None
 
     def next_wake_at(self) -> datetime | None:
         with self._lock:

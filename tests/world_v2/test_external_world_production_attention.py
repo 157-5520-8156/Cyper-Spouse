@@ -395,6 +395,17 @@ async def test_invalid_model_shape_is_returned_to_coordinator_without_local_repa
 
 
 @pytest.mark.asyncio
+async def test_live_model_accepts_the_exact_contract_value_when_provider_wraps_its_label() -> None:
+    model = _ChatModel('{"output_contract":{"selections":[]}}')
+    adapter = ChatCompletionLiveAttentionModel(model=model, model_id=model.model)
+
+    result = await adapter.consider_attention(_request())
+
+    assert result.decision == LiveCharacterAttentionResult(selections=())
+    assert result.model_result.proposal_hash == "sha256:" + _hash_text('{"selections":[]}')
+
+
+@pytest.mark.asyncio
 async def test_shadow_context_uses_same_capsule_but_only_an_opaque_read_cursor() -> None:
     ledger = _world()
     compiler = _Compiler()
@@ -468,3 +479,46 @@ async def test_shadow_model_uses_real_character_choice_without_v2_audit_authorit
     assert result == CharacterAttentionResult(selections=())
     assert not hasattr(result, "model_result")
     assert "是否注意以及注意多少条都由你决定" in model.calls[0][0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_shadow_model_accepts_the_exact_contract_value_when_provider_wraps_its_label() -> (
+    None
+):
+    live_request = _request()
+    shadow_context = CharacterAttentionContext(
+        world_id=live_request.current_context.world_id,
+        actor_ref=live_request.current_context.actor_ref,
+        pinned_world_cursor="projection-cursor:{}",
+        current_self_state=(),
+        situation=(),
+        relevant_context=(),
+        available_channels=(),
+    )
+    shadow_window = PerceptionWindow.model_construct(
+        **live_request.window.model_dump(
+            mode="python",
+            exclude={
+                "durable_snapshots",
+                "pinned_world_cursor",
+                "deployment_mode",
+                "deployment_mode_revision",
+            },
+        ),
+        deployment_mode="shadow",
+        deployment_mode_revision="shadow:test:wrapped-contract",
+        pinned_world_cursor=shadow_context.pinned_world_cursor,
+    )
+    request = CharacterAttentionRequest(
+        attention_attempt_id=shadow_window.attention_attempt_id,
+        retry_ordinal=0,
+        selection_ordinal=0,
+        window=shadow_window,
+        current_context=shadow_context,
+    )
+    model = _ChatModel('{"output_contract":{"selections":[]}}')
+    adapter = ChatCompletionShadowAttentionModel(model=model, model_id=model.model)
+
+    result = await adapter.consider_attention(request)
+
+    assert result == CharacterAttentionResult(selections=())

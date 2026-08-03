@@ -10,6 +10,7 @@ from companion_daemon.world_v2.external_world_perception import (
     ExternalSignalSourceItem,
     ExternalSignalSourceFailure,
     ExternalSignalSourcePage,
+    PerceptionAdvanceResult,
     RecordedSignalSourceAdapter,
     SourceCursor,
     SourcePolicyRevision,
@@ -32,6 +33,28 @@ TEST_POLICY = SourcePolicyRevision(
     maximum_signal_retention_seconds=86_400,
     maximum_normalized_retention_seconds=2_592_000,
 )
+
+
+class _DueAttentionCoordinator:
+    def __init__(self) -> None:
+        self.advance_calls = 0
+
+    def has_due_work(self, observed_at: datetime) -> bool:
+        assert observed_at == NOW
+        return True
+
+    async def advance_once(self, *, observed_at: datetime) -> PerceptionAdvanceResult:
+        assert observed_at == NOW
+        self.advance_calls += 1
+        return PerceptionAdvanceResult(
+            status="attention_no_selection",
+            progressed_units=1,
+            next_wake_at=NOW + timedelta(minutes=10),
+            more_due=False,
+        )
+
+    def next_wake_at(self) -> datetime:
+        return NOW
 
 
 def test_source_profile_cannot_exceed_its_audited_retention_policy() -> None:
@@ -61,6 +84,41 @@ def test_source_profile_cannot_exceed_its_audited_retention_policy() -> None:
             signal_ttl_seconds=3_600,
             raw_retention_seconds=3_601,
         )
+
+
+@pytest.mark.asyncio
+async def test_due_attention_is_not_starved_by_many_due_sources(tmp_path) -> None:
+    sources = tuple(
+        RecordedSignalSourceAdapter(
+            source_id=f"source:fixture:busy:{index}",
+            pages=(),
+        )
+        for index in range(11)
+    )
+    hub = SQLiteWorldPerceptionHub(
+        path=tmp_path / "external-perception-attention-fairness.sqlite3",
+        sources=tuple(
+            SourceProfile(
+                adapter=source,
+                policy=TEST_POLICY,
+                poll_interval_seconds=300,
+                signal_ttl_seconds=3_600,
+                raw_retention_seconds=86_400,
+            )
+            for source in sources
+        ),
+        wall_clock=lambda: NOW,
+    )
+    attention = _DueAttentionCoordinator()
+    hub._attention_coordinator = attention  # noqa: SLF001
+    try:
+        result = await hub.advance_once(observed_at=NOW)
+
+        assert result.status == "attention_no_selection"
+        assert attention.advance_calls == 1
+        assert all(source.observed_cursors == () for source in sources)
+    finally:
+        await hub.aclose()
 
 
 @pytest.mark.asyncio

@@ -188,6 +188,39 @@ async def test_rsshub_transport_host_is_not_an_allowed_evidence_link_host() -> N
 
 
 @pytest.mark.asyncio
+async def test_rsshub_trend_can_explicitly_timestamp_an_undated_ranking_observation() -> None:
+    feed = b"""<rss><channel><item><guid>rank:one</guid><title>One trend</title>
+      <link>https://upstream.example/trends/one</link>
+    </item></channel></rss>"""
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=feed, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter = RssHubPullAdapter(
+            source_id="source:rsshub:undated-trend",
+            base_url="http://127.0.0.1:1200",
+            route="/approved/trend",
+            allowed_routes=frozenset({"/approved/trend"}),
+            signal_kind="platform_trend_observation",
+            upstream_publisher_ref="aggregator:trend",
+            allowed_item_hosts=frozenset({"upstream.example"}),
+            use_observed_at_for_undated_items=True,
+            http_client=client,
+        )
+        page = await adapter.fetch(
+            after=None,
+            observed_at=NOW,
+            deadline_at=NOW + timedelta(seconds=5),
+            limit=20,
+        )
+
+    assert page.parser_rejected_item_count == 0
+    assert page.items[0].upstream_item_id == "rank:one"
+    assert page.items[0].published_at == NOW
+
+
+@pytest.mark.asyncio
 async def test_atom_adapter_preserves_publisher_identity_and_rejects_unsafe_xml() -> None:
     atom = b"""<?xml version="1.0"?>
     <feed xmlns="http://www.w3.org/2005/Atom"><entry>

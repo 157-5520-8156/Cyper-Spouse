@@ -90,6 +90,7 @@ class RssAtomSourceAdapter:
         http_client: httpx.AsyncClient,
         gateway_ref: str | None = None,
         transport_allowed_hosts: frozenset[str] | None = None,
+        use_observed_at_for_undated_items: bool = False,
     ) -> None:
         if not source_id or not signal_kind or not upstream_publisher_ref:
             raise ValueError("RSS source identity is incomplete")
@@ -109,6 +110,7 @@ class RssAtomSourceAdapter:
         self._http_client = http_client
         self._allowed_hosts = normalized_allowed_hosts
         self._gateway_ref = gateway_ref or _default_gateway_ref(feed_url)
+        self._use_observed_at_for_undated_items = use_observed_at_for_undated_items
 
     async def fetch(
         self,
@@ -164,6 +166,8 @@ class RssAtomSourceAdapter:
             upstream_publisher_ref=self._upstream_publisher_ref,
             allowed_hosts=self._allowed_hosts,
             limit=limit,
+            observed_at=observed_at,
+            use_observed_at_for_undated_items=self._use_observed_at_for_undated_items,
         )
         return ExternalSignalSourcePage(
             evidence_media_type=media_type[:256],
@@ -189,6 +193,7 @@ class RssHubPullAdapter(RssAtomSourceAdapter):
         upstream_publisher_ref: str,
         allowed_item_hosts: frozenset[str],
         http_client: httpx.AsyncClient,
+        use_observed_at_for_undated_items: bool = False,
     ) -> None:
         _validate_local_rsshub_base(base_url)
         if route not in allowed_routes:
@@ -214,6 +219,7 @@ class RssHubPullAdapter(RssAtomSourceAdapter):
             http_client=http_client,
             gateway_ref=f"rsshub:{normalized_base}",
             transport_allowed_hosts=frozenset({base_host}),
+            use_observed_at_for_undated_items=use_observed_at_for_undated_items,
         )
 
 
@@ -237,6 +243,8 @@ def _parse_feed(
     upstream_publisher_ref: str,
     allowed_hosts: frozenset[str],
     limit: int,
+    observed_at: datetime,
+    use_observed_at_for_undated_items: bool,
 ) -> tuple[tuple[ExternalSignalSourceItem, ...], int]:
     lowered = payload.lower()
     if any(marker in lowered for marker in _UNSAFE_XML_MARKERS):
@@ -258,7 +266,10 @@ def _parse_feed(
     rejected_count = 0
     for element in elements[:limit]:
         try:
-            values = parser(element)
+            values = parser(
+                element,
+                observed_at if use_observed_at_for_undated_items else None,
+            )
             published_at = values["published_at"]
             headline = str(values["headline"])
             canonical_url = _safe_item_url(
@@ -271,7 +282,7 @@ def _parse_feed(
                     source_id=source_id,
                     headline=headline,
                     canonical_url=canonical_url,
-                    published_at=published_at,
+                    published_at=values.get("identity_published_at"),
                 )
             parsed.append(
                 ExternalSignalSourceItem(
@@ -293,12 +304,17 @@ def _parse_feed(
     return tuple(parsed), rejected_count
 
 
-def _parse_rss_item(element: ET.Element) -> dict[str, object]:
+def _parse_rss_item(
+    element: ET.Element, observed_at_fallback: datetime | None
+) -> dict[str, object]:
     headline = _plain(_child_text(element, "title"), limit=1_000)
     if not headline:
         raise ValueError("RSS item has no title")
-    published = _parse_source_datetime(
-        _child_text(element, "pubDate") or _child_text(element, "date")
+    published_text = _child_text(element, "pubDate") or _child_text(element, "date")
+    published = (
+        _parse_source_datetime(published_text)
+        if published_text
+        else _observed_at_fallback(observed_at_fallback)
     )
     return {
         "upstream_item_id": _child_text(element, "guid"),
@@ -306,15 +322,22 @@ def _parse_rss_item(element: ET.Element) -> dict[str, object]:
         "summary": _plain(_child_text(element, "description"), limit=8_000),
         "canonical_url": _child_text(element, "link"),
         "published_at": published,
+        "identity_published_at": published if published_text else None,
     }
 
 
-def _parse_atom_entry(element: ET.Element) -> dict[str, object]:
+def _parse_atom_entry(
+    element: ET.Element, observed_at_fallback: datetime | None
+) -> dict[str, object]:
     headline = _plain(_child_text(element, "title"), limit=1_000)
     if not headline:
         raise ValueError("Atom entry has no title")
     published_text = _child_text(element, "published") or _child_text(element, "updated")
-    published = _parse_source_datetime(published_text)
+    published = (
+        _parse_source_datetime(published_text)
+        if published_text
+        else _observed_at_fallback(observed_at_fallback)
+    )
     updated_text = _child_text(element, "updated")
     updated = _parse_source_datetime(updated_text) if updated_text else None
     canonical_url = None
@@ -334,8 +357,17 @@ def _parse_atom_entry(element: ET.Element) -> dict[str, object]:
         ),
         "canonical_url": canonical_url,
         "published_at": published,
+        "identity_published_at": published if published_text else None,
         "updated_at": updated,
     }
+
+
+def _observed_at_fallback(value: datetime | None) -> datetime:
+    if value is None:
+        raise ValueError("feed item has no publication time")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("source observation time must be timezone-aware")
+    return value.astimezone(UTC)
 
 
 def _child_text(element: ET.Element, name: str) -> str:
@@ -417,9 +449,15 @@ def _safe_item_url(value: object, *, allowed_hosts: frozenset[str]) -> str | Non
 
 
 def _fallback_item_id(
-    *, source_id: str, headline: str, canonical_url: str | None, published_at: datetime
+    *,
+    source_id: str,
+    headline: str,
+    canonical_url: str | None,
+    published_at: datetime | None,
 ) -> str:
-    material = "\x1f".join((source_id, canonical_url or "", headline, published_at.isoformat()))
+    material = "\x1f".join(
+        (source_id, canonical_url or "", headline, published_at.isoformat() if published_at else "")
+    )
     return "derived:sha256:" + hashlib.sha256(material.encode()).hexdigest()
 
 

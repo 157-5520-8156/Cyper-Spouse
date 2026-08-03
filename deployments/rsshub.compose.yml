@@ -1,0 +1,35 @@
+services:
+  rsshub:
+    image: diygod/rsshub:chromium-bundled@sha256:1f9c3d85e8e600c6b2d2ffc8e7f3c27964019e17c441cd7958b0c4c628c2beb6
+    container_name: girl-agent-rsshub
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1200:1200"
+    environment:
+      NODE_ENV: production
+      CACHE_TYPE: memory
+      HTTP_PROXY: "${RSSHUB_UPSTREAM_PROXY:-}"
+      HTTPS_PROXY: "${RSSHUB_UPSTREAM_PROXY:-}"
+      NO_PROXY: "localhost,127.0.0.1,::1"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    shm_size: 256m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:1200/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
