@@ -594,6 +594,7 @@ class SQLiteShadowAttentionCoordinator:
                     licensed_summary=item.licensed_summary,
                     canonical_url=item.canonical_url,
                     published_at=item.published_at,
+                    observed_at=_parse_datetime(row["observed_at"]),
                     updated_at=item.updated_at,
                     expires_at=_parse_datetime(row["effective_expires_at"]),
                     source_provided_certainty=item.source_provided_certainty,

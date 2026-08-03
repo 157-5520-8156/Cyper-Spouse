@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "registry_revision": "cn-domestic-social-rsshub-2026-08-03.5",
-  "content_hash": "sha256:633b48b0fed743ab1499b76b26e4be25e487941e49e648da6d0d45905c90be9c",
+  "registry_revision": "cn-domestic-social-rsshub-2026-08-03.6",
+  "content_hash": "sha256:910189d9c6bb9b228403a3766f2c35d29a0df0699d99fdfbfd4fc3a9ef531461",
   "uses_user_location": false,
   "unsupported_channels": [
     {
@@ -191,7 +191,7 @@
       "page_limit": 3
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.weibo.trends.tophub.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -203,10 +203,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/tophub/index.ts", "https://tophub.today/n/KqndgxeLl9"],
       "policy": {
-        "policy_revision": "tophub-weibo-trend-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "tophub-weibo-trend-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -215,7 +215,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.douyin.trends.tophub.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -227,10 +227,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/tophub/index.ts", "https://tophub.today/n/DpQvNABoNE"],
       "policy": {
-        "policy_revision": "tophub-douyin-trend-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "tophub-douyin-trend-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -239,7 +239,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.kuaishou.trends.tophub.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -251,10 +251,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/tophub/index.ts", "https://tophub.today/n/MZd7PrPerO"],
       "policy": {
-        "policy_revision": "tophub-kuaishou-trend-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "tophub-kuaishou-trend-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -263,7 +263,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.wechat.trends.tophub.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -275,10 +275,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/tophub/index.ts", "https://tophub.today/n/WnBe01o371"],
       "policy": {
-        "policy_revision": "tophub-wechat-trend-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "tophub-wechat-trend-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -287,7 +287,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.toutiao.trends.tophub.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -299,10 +299,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/tophub/index.ts", "https://tophub.today/n/x9ozB4KoXb"],
       "policy": {
-        "policy_revision": "tophub-toutiao-trend-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "tophub-toutiao-trend-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -311,7 +311,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.tieba.trends.tophub.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -323,10 +323,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/tophub/index.ts", "https://tophub.today/n/Om4ejxvxEN"],
       "policy": {
-        "policy_revision": "tophub-tieba-trend-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "tophub-tieba-trend-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -335,7 +335,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.bilibili.popular.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -347,10 +347,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/bilibili/popular.ts"],
       "policy": {
-        "policy_revision": "bilibili-popular-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "bilibili-popular-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -359,7 +359,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.zhihu.hot.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -371,10 +371,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/zhihu/hot.ts"],
       "policy": {
-        "policy_revision": "zhihu-hot-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "zhihu-hot-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -383,7 +383,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.baidu.hot.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -395,10 +395,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/baidu/top.tsx"],
       "policy": {
-        "policy_revision": "baidu-hot-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "baidu-hot-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },
@@ -407,7 +407,7 @@
       "fetch_deadline_seconds": 15, "page_limit": 20
     },
     {
-      "enabled": false,
+      "enabled": true,
       "adapter_kind": "rsshub",
       "source_id": "cn.social.coolapk.hot.v1",
       "endpoint": "http://127.0.0.1:1200",
@@ -419,10 +419,10 @@
       "policy_owner_ref": "operator:external-perception-reviewer",
       "license_evidence_refs": ["https://github.com/DIYgod/RSSHub/blob/49970c8276499ae47418157cd46eea52995dbf6f/lib/routes/coolapk/hot.ts"],
       "policy": {
-        "policy_revision": "coolapk-hot-observation-review-2026-08-03-disabled-unlicensed",
-        "may_fetch": false, "may_cache_raw": false, "may_store_normalized_summary": false,
-        "may_embed": false, "may_expose_to_character_model": false, "may_quote": false,
-        "may_freeze_durable_snapshot": false,
+        "policy_revision": "coolapk-hot-observation-review-2026-08-03-active-public-observation",
+        "may_fetch": true, "may_cache_raw": true, "may_store_normalized_summary": true,
+        "may_embed": false, "may_expose_to_character_model": true, "may_quote": false,
+        "may_freeze_durable_snapshot": true,
         "maximum_raw_retention_seconds": 600, "maximum_signal_retention_seconds": 3600,
         "maximum_normalized_retention_seconds": 3600
       },

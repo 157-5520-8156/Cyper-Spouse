@@ -290,6 +290,30 @@ def _source():
     )
 
 
+def _undated_trend_source():
+    return RecordedSignalSourceAdapter(
+        source_id="source:fixture:live",
+        pages=(
+            ExternalSignalSourcePage(
+                evidence_media_type="application/rss+xml",
+                evidence_bytes=b"<rss>observed platform ranking</rss>",
+                items=(
+                    ExternalSignalSourceItem(
+                        upstream_item_id="rank:music-festival",
+                        gateway_ref="rsshub:http://127.0.0.1:1200",
+                        upstream_publisher_ref="aggregator:trend",
+                        signal_kind="platform_trend_observation",
+                        headline="周末音乐节临时增加夜场",
+                        licensed_summary="",
+                        canonical_url="https://example.test/trends/music-festival",
+                        published_at=None,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 def _multi_revision_source():
     canonical_url = "https://events.example.test/music-festival"
     return RecordedSignalSourceAdapter(
@@ -403,6 +427,41 @@ async def test_live_attention_commits_selected_evidence_with_audited_character_c
 
 
 @pytest.mark.asyncio
+async def test_live_attention_uses_observation_time_without_forging_publication_time(tmp_path):
+    clock = [NOW]
+    producer = ExternalPerceptionDeliveryProducer()
+    acceptance = ExternalPerceptionAcceptanceRuntime.in_memory(
+        world_id=WORLD_ID, delivery_producer=producer
+    )
+    port = _AcceptancePort(acceptance)
+    port.producer = producer
+    model = _LiveModel()
+    hub = _hub(
+        tmp_path,
+        model=model,
+        acceptance_port=port,
+        context_port=_LedgerContextPort(acceptance),
+        clock=clock,
+        source=_undated_trend_source(),
+    )
+    try:
+        result = await _reach_attention(hub, clock)
+        visible = model.requests[0].window.candidates[0].model_visible_material[0]
+        snapshot = port.calls[0].selections[0].snapshot
+
+        assert result.status == "perception_committed"
+        assert visible.published_at is None
+        assert visible.observed_at == NOW
+        assert snapshot.published_at is None
+        assert snapshot.observed_at == NOW
+        assert acceptance.ledger.export_replay_evidence().projection == (
+            acceptance.ledger.export_replay_evidence().replay
+        )
+    finally:
+        await hub.aclose()
+
+
+@pytest.mark.asyncio
 async def test_live_attention_end_to_end_commits_then_opens_one_life_opportunity(tmp_path):
     clock = [NOW]
     producer = ExternalPerceptionDeliveryProducer()
@@ -435,9 +494,7 @@ async def test_live_attention_end_to_end_commits_then_opens_one_life_opportunity
             {
                 "wake_event_ref": projection.external_perceptions[0].accepted_event_ref,
                 "trace_id": f"trace:external-perception:{model.requests[0].attention_attempt_id}",
-                "correlation_id": (
-                    f"external-perception:{model.requests[0].attention_attempt_id}"
-                ),
+                "correlation_id": (f"external-perception:{model.requests[0].attention_attempt_id}"),
             }
         ]
         assert (await hub.advance_once(observed_at=clock[0])).status in {

@@ -303,11 +303,21 @@ class LicensedEvidenceView(FrozenModel):
     headline: str = Field(min_length=1, max_length=1_000)
     licensed_summary: str = Field(default="", max_length=8_000)
     canonical_url: str | None = Field(default=None, max_length=4_096)
-    published_at: datetime
+    published_at: datetime | None = None
+    observed_at: datetime | None = None
     updated_at: datetime | None = None
     expires_at: datetime
     source_provided_certainty: str | None = Field(default=None, max_length=256)
     place_scope: ExternalSignalPlace | None = None
+
+    @model_validator(mode="after")
+    def evidence_time_is_explicit(self) -> LicensedEvidenceView:
+        if self.published_at is None and self.observed_at is None:
+            raise ValueError("external evidence needs publication or observation time")
+        for value in (self.published_at, self.observed_at, self.updated_at, self.expires_at):
+            if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+                raise ValueError("external evidence times must be timezone-aware")
+        return self
 
 
 class CorrectionEdge(FrozenModel):

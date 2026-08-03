@@ -37,7 +37,7 @@ def test_domestic_social_channels_are_bounded_weak_observations() -> None:
 
     assert len(social) == 10
     assert all(source.adapter_kind == "rsshub" for source in social)
-    assert all(not source.enabled for source in social)
+    assert all(source.enabled for source in social)
     assert all(source.endpoint == "http://127.0.0.1:1200" for source in social)
     assert all(source.signal_kind == "platform_trend_observation" for source in social)
     assert all(source.allow_undated_items for source in social)
@@ -45,11 +45,11 @@ def test_domestic_social_channels_are_bounded_weak_observations() -> None:
     assert all(source.poll_interval_seconds >= 300 for source in social)
     assert all(source.signal_ttl_seconds <= 3_600 for source in social)
     assert all(source.raw_retention_seconds <= 600 for source in social)
-    assert all(not source.policy.may_fetch for source in social)
-    assert all(not source.policy.may_cache_raw for source in social)
-    assert all(not source.policy.may_expose_to_character_model for source in social)
-    assert all(not source.policy.may_freeze_durable_snapshot for source in social)
-    assert all(not source.policy.may_store_normalized_summary for source in social)
+    assert all(source.policy.may_fetch for source in social)
+    assert all(source.policy.may_cache_raw for source in social)
+    assert all(source.policy.may_expose_to_character_model for source in social)
+    assert all(source.policy.may_freeze_durable_snapshot for source in social)
+    assert all(source.policy.may_store_normalized_summary for source in social)
     assert all(not source.policy.may_embed for source in social)
     assert all(not source.policy.may_quote for source in social)
 
@@ -60,10 +60,10 @@ def test_domestic_registry_health_distinguishes_disabled_and_unsupported_channel
     states = {item.source_id: item for item in health.coverage_states}
 
     assert health.registered_source_count == 16
-    assert health.enabled_source_count == 1
+    assert health.enabled_source_count == 11
     assert states["cn.social.weibo.trends.tophub.v1"].route_registered is True
-    assert states["cn.social.weibo.trends.tophub.v1"].acquisition_state == "disabled_unlicensed"
-    assert states["cn.social.weibo.trends.tophub.v1"].character_visibility is False
+    assert states["cn.social.weibo.trends.tophub.v1"].acquisition_state == "enabled"
+    assert states["cn.social.weibo.trends.tophub.v1"].character_visibility is True
     assert states["cn.social.xiaohongshu.general.v1"].route_registered is False
     assert states["cn.social.xiaohongshu.general.v1"].acquisition_state == "unsupported"
     assert states["cn.social.xiaohongshu.general.v1"].character_visibility is False

@@ -392,18 +392,19 @@ shadow，并把每个平台 route 当作可丢失的感知渠道；任何 route 
 
 ## 当前落地范围（2026-08-03）
 
-当前 registry 已登记微博、抖音、快手、微信公众号、今日头条、贴吧、B 站、知乎、百度和
-酷安共 10 个固定 RSSHub 趋势/热榜 transport；固定版本的本机 gateway 和适配器已完成
-一次性路由连通、解析、稳定 ID 与重复抑制验证。公开 route、RSSHub 的 AGPL 和普通网页
-可访问性都不能证明上游允许自动获取、缓存或输入模型，因此这些 source 当前统一标记为
-`disabled-unlicensed`：`may_fetch`、`may_cache_raw`、`may_expose_to_character_model` 和
-`may_freeze_durable_snapshot` 均为 false，生产调度不会拉取，也不保留社交榜单 sidecar
-内容。RSSHub gateway 只是已就绪的 transport，不代表角色已经获得这些感知渠道。
+当前 registry 已登记并启用微博、抖音、快手、微信公众号、今日头条、贴吧、B 站、知乎、
+百度和酷安共 10 个固定 RSSHub 趋势/热榜 transport。项目所有者在 2026-08-03 明确要求
+把这些公开榜单变成实际生产感知，因此 `.6` policy 开放自动获取、最长 10 分钟原始缓存、
+最长 1 小时规范化信号、角色模型注意和来源绑定的 World 快照；仍禁止逐字引用、embedding、
+个人 Cookie、登录态、浏览器自动化和绕过反爬。任何 route 失效只降低覆盖，不得伪造数据。
+
+这些条目只证明“RSSHub/聚合入口在某次抓取时呈现了这个榜单项”，不证明榜单中提及的事件
+真实发生。没有来源发布时间的趋势条目保留 `published_at = null`，并把实际抓取时间作为
+独立的 `observed_at` 暴露和冻结；不能拿观察时间冒充发布时间。角色模型可自行决定注意、
+忽略和如何理解候选，但系统继续约束来源闭包、短期有效期、权限和 effect-once。
 
 若后续取得官方 API、书面许可或许可范围明确的商业聚合接口，应创建新的 source policy
-revision，再独立开放获取、缓存和角色注意权限。未带来源发布时间的趋势条目可在隔离适配
-测试中保留 `published_at = null`，但 registry 会阻止它进入模型或冻结成 World 事实，
-不能拿观测时间冒充发布时间。
+revision 替换 transport，并保留旧 revision 的审计身份。
 
 小红书没有发现无需登录、无需浏览器自动化且有明确使用边界的通用热榜 route，因此当前
 明确为 `unsupported`，未伪造一个空 source，也不能对外宣称已经覆盖全部国内主流平台。
