@@ -82,7 +82,9 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 model=settings.world_v2_source_review_fallback_model,
-                reasoning_effort="none",
+                # GPT-4.1/4o Chat Completions reject this optional field.
+                # Empty means omit it at the transport boundary.
+                reasoning_effort="",
                 max_completion_tokens=1_200,
                 proxy_url=settings.openai_proxy_url,
             )

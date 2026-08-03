@@ -73,6 +73,7 @@ async def test_simulator_cli_wires_an_independent_life_source_reviewer_when_conf
     author = SimpleNamespace(model="deepseek-world-author")
     reviewer = SimpleNamespace(model="openai-independent-source-reviewer")
     built: dict[str, object] = {}
+    reviewer_kwargs: dict[str, object] = {}
 
     class _Application:
         async def respond(self, _turn):  # type: ignore[no-untyped-def]
@@ -109,7 +110,11 @@ async def test_simulator_cli_wires_an_independent_life_source_reviewer_when_conf
         ),
     )
     monkeypatch.setattr(cli, "DeepSeekChatModel", lambda **_kwargs: author)
-    monkeypatch.setattr(cli, "OpenAICompatibleChatModel", lambda **_kwargs: reviewer)
+    def _reviewer(**kwargs):  # type: ignore[no-untyped-def]
+        reviewer_kwargs.update(kwargs)
+        return reviewer
+
+    monkeypatch.setattr(cli, "OpenAICompatibleChatModel", _reviewer)
 
     def _build(**kwargs):  # type: ignore[no-untyped-def]
         built.update(kwargs)
@@ -125,3 +130,4 @@ async def test_simulator_cli_wires_an_independent_life_source_reviewer_when_conf
     assert world_author.authority_origin is author
     assert source_rewriter.authority_origin is author
     assert source_reviewer.authority_origin is reviewer
+    assert reviewer_kwargs["reasoning_effort"] == ""

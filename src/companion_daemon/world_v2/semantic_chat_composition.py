@@ -1668,10 +1668,9 @@ def build_semantic_chat_composition(
         appraisal_model=local_appraisal_model,
         # The built-in production route always installs semantic truth
         # closure. Ordinary source review remains independent of the DeepSeek
-        # author. In a redundant deployment, the already configured OpenAI
-        # recovery leaf may also execute the candidate's one permitted
-        # source-closure re-selection; that fresh draft is reviewed through
-        # the author-excluding recovery authority assembled above.
+        # author. Any permitted correction remains a DeepSeek character
+        # choice; OpenAI/Qwen are reviewer or binder authorities only and
+        # never author visible expression.
         source_closure_model=proactive_reviewer,
         report_relative_source_closure_model=proactive_reviewer,
         recovery_source_closure_model=recovery_source_closure_model,
