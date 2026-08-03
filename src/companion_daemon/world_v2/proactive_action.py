@@ -1045,9 +1045,7 @@ class ProactiveDraftAdapter:
         ):
             if binding_unbound:
                 pass
-            elif binding_attempts > 1:
-                raise ValidationTechnicalFailure("proactive_claim_binding_invalid")
-            else:
+            elif binding_attempts <= 1:
                 draft, rebinding_usage, _, binding_unbound = await self._bind_world_claims(
                     draft=draft,
                     request=binding_request,
@@ -1078,11 +1076,12 @@ class ProactiveDraftAdapter:
                 report_relative_adjudication_used = (
                     report_relative_adjudication_used or rebinding_report_relative_used
                 )
-            if (
-                _binder_declaration_only_rejection(semantic_review)
-                or _binder_omission_rejection(semantic_review)
-            ) and not binding_unbound:
-                raise ValidationTechnicalFailure("proactive_claim_binding_invalid")
+            # The binder only declares source use; it does not own the visible
+            # expression.  Once a syntactically valid binding has been retried,
+            # a persistent semantic disagreement belongs to the existing
+            # source-boundary rechoice below.  Returning that exact boundary to
+            # the role once preserves character agency and avoids misclassifying
+            # a correctable authored choice as provider infrastructure failure.
         usage = _combine_usage(usage, review_usage, request.call_id)
         grounding_error = deterministic_grounding_error or semantic_grounding_error
         if grounding_error is not None:

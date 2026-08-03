@@ -494,6 +494,72 @@ async def test_claim_only_semantic_rejection_retries_binder_not_character() -> N
 
 
 @pytest.mark.asyncio
+async def test_persistent_binder_only_rejection_returns_boundary_to_character_once() -> None:
+    source_ref = "event:life-content:experience:visible"
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["recent_experiences"] = {
+        "availability": "available",
+        "items": [
+            {
+                "item_ref": "experience:visible",
+                "source_bindings": [{"ref": source_ref}],
+                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
+            }
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    role = _ProactiveReplySequence(
+        [
+            _proactive_draft("刚翻到一本《小王子》，突然想跟你说句话。"),
+            _proactive_draft("刚刚忽然有点想和你说句话。"),
+        ]
+    )
+    rejected_binding = {
+        "contract": "proactive-world-claim-binding.1",
+        "world_claims": [
+            {
+                "claim_text": "沈知栀刚去了火星",
+                "scope": "past_world",
+                "source_refs": [source_ref],
+            }
+        ],
+    }
+    binder = _ProactiveReplySequence(
+        [
+            rejected_binding,
+            rejected_binding,
+            {
+                "contract": "proactive-world-claim-binding.1",
+                "world_claims": [],
+            },
+        ]
+    )
+    reviewer = _ProactiveReplySequence(
+        [
+            _source_closure_review(claim_indexes=(0,)),
+            _source_closure_review(claim_indexes=(0,)),
+            _source_closure_review(),
+        ]
+    )
+
+    output = await ProactiveDraftAdapter(
+        model=role,
+        target="user:primary",
+        proactive_claim_binder_model=binder,
+        source_closure_reviewer=reviewer,
+    ).propose(request)
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    assert proposal.action_intents
+    assert role.calls == 2
+    assert binder.calls == 3
+    assert reviewer.calls == 3
+
+
+@pytest.mark.asyncio
 async def test_undeclared_visible_fact_retries_binder_not_character() -> None:
     source_ref = "event:life-content:experience:visible"
     request = _proactive_model_request()

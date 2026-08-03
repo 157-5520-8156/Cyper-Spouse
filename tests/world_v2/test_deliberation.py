@@ -1720,6 +1720,46 @@ async def test_actual_failure_reuses_an_open_turn_recovery_window_without_extend
 
 
 @pytest.mark.asyncio
+async def test_terminal_character_reselection_failure_cancels_an_already_started_hedge() -> None:
+    clock = _ManualClock()
+    primary = _ControlledMain()
+    fallback = _ControlledQuick()
+    running = asyncio.create_task(
+        Deliberation(
+            router=_Router(),
+            main_model=primary,
+            quick_recovery=fallback,
+        ).deliberate(
+            _capsule(),
+            attempt_id="attempt:terminal-reselection-after-hedge",
+            budget=InteractiveTurnBudgetPolicy(
+                total_seconds=5.5,
+                hedge_after_seconds=1.5,
+                acceptance_dispatch_reserve_seconds=1.2,
+                technical_recovery_seconds=2.0,
+                clock=clock,
+                sleep=clock.sleep,
+            ).start(),
+        )
+    )
+    await primary.started.wait()
+    await clock.advance(1.6)
+    await fallback.started.wait()
+    assert primary.result is not None
+    primary.result.set_exception(
+        ValidationTechnicalFailure("authored_expression_reselection_invalid")
+    )
+
+    result = await running
+
+    assert result.proposal is None
+    assert len(result.attempt_audits) == 1
+    assert result.audit.status == "main_exception"
+    assert result.audit.failure_code == "authored_expression_reselection_invalid"
+    assert fallback.result is not None and fallback.result.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_corrective_claims_second_slot_and_prevents_hedge_or_third_call() -> None:
     class CorrectingMain(_Main):
         async def propose(self, request: ModelInput) -> ModelOutput:

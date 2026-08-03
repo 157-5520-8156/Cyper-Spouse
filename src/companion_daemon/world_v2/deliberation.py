@@ -3183,6 +3183,21 @@ class Deliberation:
                         # validation/reselection lane.  A new role author would
                         # be a forbidden third semantic choice, not technical
                         # recovery for an initial author failure.
+                        if backup_task is not None:
+                            if not backup_task.done():
+                                backup_task.cancel()
+                                await asyncio.gather(backup_task, return_exceptions=True)
+                            discard_candidate = getattr(
+                                self._quick,
+                                "discard_candidate",
+                                None,
+                            )
+                            if callable(discard_candidate) and backup_input is not None:
+                                discard_candidate(backup_input)
+                            backup_task = None
+                            backup_result = None
+                            backup_call_id = None
+                            backup_request_hash = None
                         primary_failure_for_recovery = failure
                         break
                     primary_failure_for_recovery = (
