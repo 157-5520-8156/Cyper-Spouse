@@ -229,13 +229,18 @@ class ScenarioVerificationError(AssertionError):
 # behavior predicates remain unchanged; projection and replay identities move
 # because the reducer bundle is intentionally versioned rather than silently
 # changing the .48 state-hash protocol.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.47"
+# ``.48`` binds public-information authority to the exact domestic source
+# registry under reducer .50. A differential run across all 17 scenario
+# families kept visible output, event types, Action states, model-call counts,
+# room views and explicit predicates unchanged; only authenticated replay
+# hashes move with the reducer identity.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.48"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "dfad1a97e7d60817073d9b112f6aaf802d934603f7cf6e79476a85561f6d0e28"
+    "124d98072cc2a5066c26dd3767142880119ecdbf2f131f15ca0b852770266dee"
 )
 
 
