@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 
 import pytest
+
+from companion_daemon.world_v2.authorization_events import (
+    ACTION_SCOPES,
+    CAPABILITY_POLICY_DIGEST,
+    CapabilityMutationPayload,
+)
 
 from companion_daemon.world_v2.external_world_perception.production_attention import (
     public_information_capability_id,
@@ -74,6 +81,14 @@ def test_public_information_authority_is_root_signed_and_idempotent(
     assert grant.values.constraint_refs == ("constraint:read-only",)
     assert grant.values.actor_ref == "character:zhizhi"
     assert grant.origin.enforcement_eligible is True
+    assert "public_information_read" not in ACTION_SCOPES
+
+    event = ledger._by_event_id[first.committed_event_ids[-1]].event  # noqa: SLF001
+    downgraded = json.loads(event.payload_json)
+    downgraded["policy_version"] = "capability-policy.1"
+    downgraded["policy_digest"] = CAPABILITY_POLICY_DIGEST
+    with pytest.raises(ValueError, match=r"policy \.1 cannot grant"):
+        CapabilityMutationPayload.model_validate_json(json.dumps(downgraded))
 
 
 def test_public_information_reuses_existing_operator_authority(

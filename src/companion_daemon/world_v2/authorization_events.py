@@ -49,9 +49,16 @@ TARGET_SCOPES_V1 = frozenset(
         "provider:media",
     }
 )
-CAPABILITY_KINDS = CAPABILITY_KINDS_V1 | {"public_information_read"}
-TARGET_SCOPES = TARGET_SCOPES_V1 | {"channel:public_information"}
-ACTION_SCOPES = CAPABILITY_KINDS
+CAPABILITY_ALLOWED_KINDS_V1 = CAPABILITY_KINDS_V1 | {"perception_tool"}
+TARGET_ALLOWED_SCOPES_V1 = TARGET_SCOPES_V1 | {
+    "perception:vision",
+    "perception:transcription",
+}
+CAPABILITY_KINDS = CAPABILITY_ALLOWED_KINDS_V1 | {"public_information_read"}
+TARGET_SCOPES = TARGET_ALLOWED_SCOPES_V1 | {"channel:public_information"}
+# Consent policy .1 remains byte-for-byte stable. Public information is role-
+# owned public data and does not acquire a user consent action scope.
+ACTION_SCOPES = CAPABILITY_KINDS_V1
 DATA_SCOPES = frozenset(
     {"data:message_content", "data:user_profile", "data:attachment", "data:location"}
 )
@@ -143,6 +150,17 @@ class CapabilityMutationPayload(_AuthorizationMutationBase):
 
     @model_validator(mode="after")
     def validate_contract(self) -> CapabilityMutationPayload:
+        if self.policy_version == "capability-policy.1":
+            for values in (self.values_before, self.values_after):
+                if values is None:
+                    continue
+                if (
+                    values.capability_kind not in CAPABILITY_ALLOWED_KINDS_V1
+                    or not set(values.target_scope_refs) <= TARGET_ALLOWED_SCOPES_V1
+                ):
+                    raise ValueError(
+                        "capability policy .1 cannot grant capability policy .2 scopes"
+                    )
         expected = (
             CAPABILITY_POLICY_DIGEST
             if self.policy_version == "capability-policy.1"
