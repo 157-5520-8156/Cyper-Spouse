@@ -269,9 +269,9 @@ def test_registry_is_hash_bound_and_frozen(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("expose", "freeze"),
-    [(False, True), (True, False), (False, False)],
+    [(False, True), (True, False)],
 )
-def test_live_requires_model_exposure_and_durable_snapshot_rights(
+def test_live_requires_model_exposure_and_durable_snapshot_rights_to_match(
     tmp_path: Path,
     expose: bool,
     freeze: bool,
@@ -289,6 +289,29 @@ def test_live_requires_model_exposure_and_durable_snapshot_rights(
             registry_path=registry_path,
             http_client=object(),  # type: ignore[arg-type]
         )
+
+
+def test_live_allows_a_fetch_only_source_that_cannot_enter_character_attention(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.json"
+    _write_registry(
+        registry_path,
+        _registry_value(
+            sources=[_source(policy=_policy("fetch-only-1", expose=False, freeze=False))]
+        ),
+    )
+
+    result = build_production_source_profiles(
+        deployment_mode="live",
+        registry_path=registry_path,
+        http_client=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.status == "ready"
+    assert len(result.source_profiles) == 1
+    assert not result.source_profiles[0].policy.may_expose_to_character_model
+    assert not result.source_profiles[0].policy.may_freeze_durable_snapshot
 
 
 @pytest.mark.parametrize(

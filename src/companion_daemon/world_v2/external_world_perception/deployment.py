@@ -212,10 +212,10 @@ def build_external_world_perception_deployment(
     )
     for profile in source_profiles:
         if mode == "live" and (
-            not profile.policy.may_expose_to_character_model
-            or not profile.policy.may_freeze_durable_snapshot
+            profile.policy.may_expose_to_character_model
+            != profile.policy.may_freeze_durable_snapshot
         ):
-            raise ValueError("live source policy must allow model exposure and durable snapshots")
+            raise ValueError("live source policy exposure and durable snapshot rights must match")
 
     shadow_runtime: ShadowAttentionRuntime | None = None
     live_runtime: LiveAttentionRuntime | None = None

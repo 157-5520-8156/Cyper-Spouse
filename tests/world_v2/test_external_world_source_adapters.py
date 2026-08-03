@@ -188,7 +188,7 @@ async def test_rsshub_transport_host_is_not_an_allowed_evidence_link_host() -> N
 
 
 @pytest.mark.asyncio
-async def test_rsshub_trend_can_explicitly_timestamp_an_undated_ranking_observation() -> None:
+async def test_rsshub_trend_can_explicitly_preserve_an_undated_ranking_observation() -> None:
     feed = b"""<rss><channel><item><guid>rank:one</guid><title>One trend</title>
       <link>https://upstream.example/trends/one</link>
     </item></channel></rss>"""
@@ -205,7 +205,7 @@ async def test_rsshub_trend_can_explicitly_timestamp_an_undated_ranking_observat
             signal_kind="platform_trend_observation",
             upstream_publisher_ref="aggregator:trend",
             allowed_item_hosts=frozenset({"upstream.example"}),
-            use_observed_at_for_undated_items=True,
+            allow_undated_items=True,
             http_client=client,
         )
         page = await adapter.fetch(
@@ -217,7 +217,7 @@ async def test_rsshub_trend_can_explicitly_timestamp_an_undated_ranking_observat
 
     assert page.parser_rejected_item_count == 0
     assert page.items[0].upstream_item_id == "rank:one"
-    assert page.items[0].published_at == NOW
+    assert page.items[0].published_at is None
 
 
 @pytest.mark.asyncio

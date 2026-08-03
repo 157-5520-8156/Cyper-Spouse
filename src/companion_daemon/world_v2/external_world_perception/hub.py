@@ -1560,6 +1560,8 @@ def _cluster_basis_key(item: ExternalSignalSourceItem) -> str:
         )
         return f"canonical-url:{normalized_url}"
     normalized_headline = " ".join(unicodedata.normalize("NFKC", item.headline).casefold().split())
+    if item.published_at is None:
+        return _stable_ref("headline-undated", {"headline": normalized_headline})
     publication_day = item.published_at.astimezone(UTC).date()
     return _stable_ref(
         "headline-publication-day",

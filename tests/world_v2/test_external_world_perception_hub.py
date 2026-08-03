@@ -264,6 +264,60 @@ async def test_hub_appends_a_revision_when_the_same_source_item_changes(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_repeated_undated_ranking_observation_reuses_its_semantic_revision(
+    tmp_path,
+) -> None:
+    item = ExternalSignalSourceItem(
+        upstream_item_id="rank:one",
+        gateway_ref="rsshub:http://127.0.0.1:1200",
+        upstream_publisher_ref="aggregator:trend",
+        signal_kind="platform_trend_observation",
+        headline="同一个榜单话题",
+        canonical_url="https://example.test/trends/one",
+        published_at=None,
+    )
+    source = RecordedSignalSourceAdapter(
+        source_id="source:fixture:undated-ranking",
+        pages=(
+            ExternalSignalSourcePage(
+                evidence_media_type="application/rss+xml",
+                evidence_bytes=b"<rss>first observation</rss>",
+                items=(item,),
+            ),
+            ExternalSignalSourcePage(
+                evidence_media_type="application/rss+xml",
+                evidence_bytes=b"<rss>second observation</rss>",
+                items=(item,),
+            ),
+        ),
+    )
+    hub = SQLiteWorldPerceptionHub(
+        path=tmp_path / "external-perception-undated-ranking.sqlite3",
+        sources=(
+            SourceProfile(
+                adapter=source,
+                policy=TEST_POLICY,
+                poll_interval_seconds=300,
+                signal_ttl_seconds=3_600,
+                raw_retention_seconds=600,
+            ),
+        ),
+        wall_clock=lambda: NOW,
+    )
+    try:
+        assert (await hub.advance_once(observed_at=NOW)).status == "progressed"
+        assert (
+            await hub.advance_once(observed_at=NOW + timedelta(minutes=5))
+        ).status == "progressed"
+
+        health = hub.health_snapshot()
+        assert health.signal_revision_count == 1
+        assert health.duplicate_suppressed_count == 1
+    finally:
+        await hub.aclose()
+
+
+@pytest.mark.asyncio
 async def test_restart_resumes_cursor_and_suppresses_an_identical_revision(tmp_path) -> None:
     database = tmp_path / "external-perception-restart.sqlite3"
     item = ExternalSignalSourceItem(

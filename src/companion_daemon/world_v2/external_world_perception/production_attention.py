@@ -403,18 +403,6 @@ class ProductionAttentionModelTrace(FrozenModel):
     model_result: ModelResultRecordedPayload
 
 
-def _attention_decision_json(raw: str) -> str:
-    extracted = extract_json_object_text(raw)
-    value = json.loads(extracted)
-    if (
-        isinstance(value, dict)
-        and set(value) == {"output_contract"}
-        and isinstance(value["output_contract"], dict)
-    ):
-        return canonical_json(value["output_contract"])
-    return extracted
-
-
 class ChatCompletionLiveAttentionModel:
     """Adapt the existing background chat provider to audited live attention."""
 
@@ -444,7 +432,8 @@ class ChatCompletionLiveAttentionModel:
             raise TypeError("live attention provider returned non-text output")
         response_hash = sha256(raw)
         try:
-            extracted = _attention_decision_json(raw)
+            extracted = extract_json_object_text(raw)
+            json.loads(extracted)
             decision = LiveCharacterAttentionResult.model_validate_json(extracted, strict=True)
         except (json.JSONDecodeError, ValueError, TypeError):
             # The live coordinator owns the one bounded reselection.  There is
@@ -623,7 +612,8 @@ class ChatCompletionShadowAttentionModel:
         if not isinstance(raw, str):
             raise TypeError("shadow attention provider returned non-text output")
         try:
-            extracted = _attention_decision_json(raw)
+            extracted = extract_json_object_text(raw)
+            json.loads(extracted)
             return CharacterAttentionResult.model_validate_json(extracted, strict=True)
         except (json.JSONDecodeError, ValueError, TypeError):
             # Preserve the real rejected bytes for the coordinator's sole

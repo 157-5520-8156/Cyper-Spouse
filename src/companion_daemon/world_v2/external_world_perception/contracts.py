@@ -62,7 +62,7 @@ class ExternalSignalSourceItem(FrozenModel):
     licensed_summary: str = Field(default="", max_length=8_000)
     canonical_url: str | None = Field(default=None, max_length=4_096)
     occurred_at: datetime | None = None
-    published_at: datetime
+    published_at: datetime | None = None
     updated_at: datetime | None = None
     expires_at: datetime | None = None
     correction_of_upstream_item_id: str | None = Field(default=None, max_length=1_024)
@@ -80,9 +80,17 @@ class ExternalSignalSourceItem(FrozenModel):
         ):
             if value is not None and (value.tzinfo is None or value.utcoffset() is None):
                 raise ValueError("source item timestamps must be timezone-aware")
-        if self.updated_at is not None and self.updated_at < self.published_at:
+        if (
+            self.updated_at is not None
+            and self.published_at is not None
+            and self.updated_at < self.published_at
+        ):
             raise ValueError("source item update cannot predate publication")
-        if self.expires_at is not None and self.expires_at <= self.published_at:
+        if (
+            self.expires_at is not None
+            and self.published_at is not None
+            and self.expires_at <= self.published_at
+        ):
             raise ValueError("source item expiry must follow publication")
         if self.correction_of_upstream_item_id == self.upstream_item_id:
             raise ValueError("source item cannot correct itself")
@@ -292,7 +300,7 @@ class LicensedEvidenceView(FrozenModel):
     headline: str = Field(min_length=1, max_length=1_000)
     licensed_summary: str = Field(default="", max_length=8_000)
     canonical_url: str | None = Field(default=None, max_length=4_096)
-    published_at: datetime
+    published_at: datetime | None = None
     updated_at: datetime | None = None
     expires_at: datetime
     source_provided_certainty: str | None = Field(default=None, max_length=256)

@@ -388,3 +388,17 @@ RSSHub，而是采购一个许可范围明确的商业社媒数据 API**；World
 的折中是：自托管固定版本 RSSHub，只开放无需 Cookie/浏览器/反爬的热榜 route，全部先
 shadow，并把每个平台 route 当作可丢失的感知渠道；任何 route 失效只降低覆盖，不能由
 系统猜测数据或把旧榜单继续当成当前信息。这样是低现金成本，不是零维护。
+
+## 当前落地范围（2026-08-03）
+
+当前 registry 已通过本机固定版本 RSSHub 接入微博、抖音、快手、微信公众号、今日头条、
+贴吧、B 站、知乎、百度和酷安共 10 个趋势/热榜 transport。它们全部是
+`fetch-only`：可以进入隔离 sidecar 做可用性、稳定 ID、重复抑制和 TTL 观测，但没有
+`may_expose_to_character_model` 或 `may_freeze_durable_snapshot` 权限。TopHub 条目只表示
+聚合器在某次拉取时呈现过该榜单项，不证明平台或榜单内容中的事件属实；没有来源发布时间
+的条目保留 `published_at = null`，不能拿观测时间冒充发布时间。
+
+小红书没有发现无需登录、无需浏览器自动化且有明确使用边界的通用热榜 route，因此当前
+明确为 `unsupported`，未伪造一个空 source，也不能对外宣称已经覆盖全部国内主流平台。
+后续若取得官方 API、书面许可或许可范围明确的商业聚合接口，应创建新的 source policy
+revision 后再开放角色模型注意；不能原地修改历史权限记录。

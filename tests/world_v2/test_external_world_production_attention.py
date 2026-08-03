@@ -395,14 +395,13 @@ async def test_invalid_model_shape_is_returned_to_coordinator_without_local_repa
 
 
 @pytest.mark.asyncio
-async def test_live_model_accepts_the_exact_contract_value_when_provider_wraps_its_label() -> None:
+async def test_live_model_rejects_a_provider_wrapped_contract_for_model_owned_reselection() -> None:
     model = _ChatModel('{"output_contract":{"selections":[]}}')
     adapter = ChatCompletionLiveAttentionModel(model=model, model_id=model.model)
 
     result = await adapter.consider_attention(_request())
 
-    assert result.decision == LiveCharacterAttentionResult(selections=())
-    assert result.model_result.proposal_hash == "sha256:" + _hash_text('{"selections":[]}')
+    assert result["invalid_model_output"] == '{"output_contract":{"selections":[]}}'
 
 
 @pytest.mark.asyncio
@@ -482,7 +481,7 @@ async def test_shadow_model_uses_real_character_choice_without_v2_audit_authorit
 
 
 @pytest.mark.asyncio
-async def test_shadow_model_accepts_the_exact_contract_value_when_provider_wraps_its_label() -> (
+async def test_shadow_model_rejects_a_provider_wrapped_contract_for_model_owned_reselection() -> (
     None
 ):
     live_request = _request()
@@ -521,4 +520,4 @@ async def test_shadow_model_accepts_the_exact_contract_value_when_provider_wraps
 
     result = await adapter.consider_attention(request)
 
-    assert result == CharacterAttentionResult(selections=())
+    assert result["invalid_model_output"] == '{"output_contract":{"selections":[]}}'
