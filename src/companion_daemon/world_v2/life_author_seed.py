@@ -429,6 +429,12 @@ class ReviewedLifeSeedNpc(FrozenModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
     npc_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
     stable_identity_ref: str = Field(min_length=1, max_length=256)
+    identity_summary: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1_000,
+        exclude_if=lambda value: value is None,
+    )
     known_trait_refs: tuple[str, ...] = ()
     privacy: PrivacyClass
     location_id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")

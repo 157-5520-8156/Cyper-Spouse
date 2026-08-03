@@ -477,12 +477,12 @@ VERTICAL_REGISTRY: tuple[VerticalRegistration, ...] = (
     # Hand-rolled B-shape wells (clock checks, no TriggerProcess)
     # ------------------------------------------------------------------
     VerticalRegistration(
-        lane_id="npc_initiative",
-        summary="Reviewed NPC enters her day uninvited (daily 2 slots)",
-        shape="daily_check",
+        lane_id="npc_ecology",
+        summary="Model-owned NPC state and world-adjudicated social ecology",
+        shape="event_or_ambient_consideration",
         hand_rolled=True,
-        module="npc_initiative.py",
-        composition_markers=("NpcInitiativeRuntime(", "npc_initiative_followup="),
+        module="npc_ecology.py",
+        composition_markers=("NpcEcology(", "npc_initiative_followup="),
         drain_site="LifeEcologyRuntime followup on clock wake",
     ),
     VerticalRegistration(

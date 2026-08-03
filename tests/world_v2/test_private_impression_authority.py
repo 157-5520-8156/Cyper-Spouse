@@ -361,7 +361,7 @@ def test_v44_head_with_v4_private_impression_cold_replays_under_v45(tmp_path) ->
 
     reopened = SQLiteWorldLedger(path=path, world_id=expected.world_id)
     migrated = reopened.project()
-    assert migrated.reducer_bundle_version == "world-v2-reducers.50"
+    assert migrated.reducer_bundle_version == "world-v2-reducers.51"
     assert migrated.private_impressions == expected.private_impressions
     assert reopened.rebuild() == migrated
     reopened.close()

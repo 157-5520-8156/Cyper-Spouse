@@ -71,6 +71,8 @@ from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
 from .life_content import LifeContentCompiler, RecentExperienceContextItem
 from .life_content_store import ImmutableLifeContentStore
 from .life_development_runtime import LifeDevelopmentProposalReader
+from .life_events import NpcRegisteredPayload
+from .npc_identity_view import npc_identity_views
 from .perception_result_context import (
     PerceptionResultContextCompiler,
     PerceptionResultContextItem,
@@ -86,6 +88,7 @@ from .recent_dialogue import RecentDialogueCompiler, RecentDialogueItem
 from .recall_corpus import (
     AffectOpeningRecallItem,
     MAX_RECALL_CORPUS_DOCUMENTS,
+    NpcIdentityRecallItem,
     RecallCorpusSources,
     required_recall_authority_refs,
     select_recall_authority_bindings,
@@ -223,6 +226,7 @@ def context_capsule_compiler_from_ledger(
     biographical_catalog: BiographicalLifecycleCatalog | None = None,
     biographical_timezone_name: str | None = None,
     biographical_timeline: BiographicalTimelineConfiguredPayload | None = None,
+    reviewed_npc_identity_summaries: dict[str, str] | None = None,
 ) -> ContextCapsuleCompiler:
     """Composition-root factory for the production ledger-backed seam."""
 
@@ -238,6 +242,7 @@ def context_capsule_compiler_from_ledger(
             biographical_catalog=biographical_catalog,
             biographical_timezone_name=biographical_timezone_name,
             biographical_timeline=biographical_timeline,
+            reviewed_npc_identity_summaries=reviewed_npc_identity_summaries,
         ),
         policy=policy,
     )
@@ -863,6 +868,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         biographical_catalog: BiographicalLifecycleCatalog | None = None,
         biographical_timezone_name: str | None = None,
         biographical_timeline: BiographicalTimelineConfiguredPayload | None = None,
+        reviewed_npc_identity_summaries: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         if (biographical_catalog is None) != (biographical_timezone_name is None):
@@ -893,6 +899,8 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         )
         self._conversation_continuity = ConversationContinuityCompiler()
         self._life_content = LifeContentCompiler(store=life_content_store)
+        self._life_content_store = life_content_store
+        self._reviewed_npc_identity_summaries = reviewed_npc_identity_summaries or {}
         self._world_life = WorldLifeContextCompiler(
             life_content=self._life_content,
             active_occurrence_reader=(
@@ -971,6 +979,107 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             cache_hits=self._resolve_cache_hits,
             cache_misses=self._resolve_cache_misses,
         )
+
+    def _npc_identity_recall_items(
+        self, projection: LedgerProjection
+    ) -> tuple[NpcIdentityRecallItem, ...]:
+        """Close NPC descriptors over registration plus exact immutable bytes."""
+
+        if self._life_content_store is None:
+            return ()
+        views = npc_identity_views(
+            projection,
+            content_store=self._life_content_store,
+            reviewed_identity_summaries=self._reviewed_npc_identity_summaries,
+        )
+        committed = {
+            item.event_id: item for item in projection.committed_world_event_refs
+        }
+        registrations: dict[str, list[CommittedWorldEventRef]] = {}
+        for authority in projection.committed_world_event_refs:
+            if authority.event_type != "NpcRegistered":
+                continue
+            located = self._ledger.lookup_event_commit(authority.event_id)
+            if located is None:
+                continue
+            event, commit = located
+            if (
+                event.payload_hash != authority.payload_hash
+                or event.event_id not in commit.event_ids
+                or commit.ledger_sequence > projection.ledger_sequence
+            ):
+                continue
+            try:
+                payload = NpcRegisteredPayload.model_validate_json(event.payload_json)
+            except ValueError:
+                continue
+            registrations.setdefault(f"npc:{payload.npc.npc_id}", []).append(authority)
+
+        npc_by_ref = {f"npc:{item.npc_id}": item for item in projection.npcs}
+        result: list[NpcIdentityRecallItem] = []
+        for view in views:
+            exact = committed.get(view.promotion_event_ref)
+            candidates = registrations.get(view.npc_ref, [])
+            registration = (
+                exact
+                if exact is not None and exact.event_type == "NpcRegistered"
+                else candidates[0]
+                if len(candidates) == 1
+                else None
+            )
+            npc = npc_by_ref.get(view.npc_ref)
+            if registration is None or npc is None:
+                continue
+            bindings = tuple(
+                sorted(
+                    (
+                        RecallSourceBinding(
+                            source_kind="committed_event",
+                            authority_type="NpcRegistered",
+                            ref=registration.event_id,
+                            source_world_revision=registration.world_revision,
+                            immutable_hash=registration.payload_hash,
+                        ),
+                        RecallSourceBinding(
+                            source_kind="immutable_payload",
+                            authority_type="NpcIdentityDescriptor",
+                            ref=view.descriptor_content_ref,
+                            source_world_revision=registration.world_revision,
+                            immutable_hash=view.descriptor_payload_hash,
+                        ),
+                    ),
+                    key=lambda item: (
+                        item.source_kind,
+                        item.authority_type,
+                        item.ref,
+                        item.source_world_revision,
+                        item.immutable_hash,
+                    ),
+                )
+            )
+            result.append(
+                NpcIdentityRecallItem(
+                    npc_ref=view.npc_ref,
+                    descriptor=view.descriptor,
+                    descriptor_content_ref=view.descriptor_content_ref,
+                    lifecycle_state=view.lifecycle_state,
+                    occurred_at=registration.logical_time,
+                    privacy_class=npc.privacy_class,
+                    bindings=bindings,
+                    link_refs=tuple(
+                        sorted(
+                            {
+                                *view.shared_experience_refs,
+                                *view.active_plan_refs,
+                                *view.organization_refs,
+                                *view.life_arc_refs,
+                                *((view.current_location_ref,) if view.current_location_ref else ()),
+                            }
+                        )
+                    ),
+                )
+            )
+        return tuple(sorted(result, key=lambda item: item.npc_ref))
 
     def _scope_for_query(
         self, query: ContextCompileQuery, projection: LedgerProjection
@@ -1538,6 +1647,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 recall_dialogue = tuple(
                     sorted(dialogue_candidates, key=lambda item: item.occurred_at)
                 )[:-CHAT_RECENT_DIALOGUE_ITEM_LIMIT]
+                npc_identities = self._npc_identity_recall_items(projection)
                 recall_sources = RecallCorpusSources(
                     recent_dialogue=recall_dialogue,
                     relevant_facts=recalled_facts,
@@ -1559,21 +1669,30 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                         and item.subject_ref in subject_refs
                         and item.origin is not None
                     ),
+                    npc_identities=npc_identities,
                 )
                 required_authority_refs = required_recall_authority_refs(recall_sources)
                 recall_authority = select_recall_authority_bindings(
                     sources=recall_sources,
                     candidates=(
-                        RecallSourceBinding(
-                            source_kind="committed_event",
-                            authority_type=item.event_type,
-                            ref=item.event_id,
-                            source_world_revision=item.world_revision,
-                            immutable_hash=item.payload_hash,
-                        )
-                        for item in projection.committed_world_event_refs
-                        if item.world_revision <= query.world_revision
-                        and item.event_id in required_authority_refs
+                        *(
+                            RecallSourceBinding(
+                                source_kind="committed_event",
+                                authority_type=item.event_type,
+                                ref=item.event_id,
+                                source_world_revision=item.world_revision,
+                                immutable_hash=item.payload_hash,
+                            )
+                            for item in projection.committed_world_event_refs
+                            if item.world_revision <= query.world_revision
+                            and item.event_id in required_authority_refs
+                        ),
+                        *(
+                            binding
+                            for identity in npc_identities
+                            for binding in identity.bindings
+                            if binding.source_kind == "immutable_payload"
+                        ),
                     ),
                 )
                 self._recall.refresh(

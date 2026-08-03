@@ -187,3 +187,47 @@ async def test_settled_npc_event_can_create_a_source_bound_companion_appraisal()
     assert appraisal.evidence_refs[0].ref_id == "occurrence-settled"
     assert appraisal.evidence_refs[0].evidence_type == "settled_world_event"
     assert ledger.project().trigger_processes[0].state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_settled_npc_event_defaults_to_its_only_exact_npc_subject() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    seed_through_proposal(ledger)
+    commit(ledger, settlement_batch())
+
+    model = _WorldAppraisalModel()
+    turn = SettledWorldAppraisalTurn(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            relevance_scope=ContextRelevanceScope(actor_ref="actor:companion"),
+        ),
+        deliberation=Deliberation(router=_Router(), main_model=model, quick_recovery=model),
+        companion_actor_ref="actor:companion",
+    )
+    worker = AppraisalProposalWorker(
+        compiler=AppraisalProposalCompiler(ledger=ledger),
+        acceptance=AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:appraisal",
+    )
+
+    result = await NpcWorldAppraisalTriggerRuntime(
+        ledger=ledger,
+        turn=turn,
+        worker=worker,
+        owner_id="worker:appraisal",
+        affect_owner_id="worker:affect",
+        relationship_owner_id="worker:relationship",
+    ).drain_one()
+
+    assert result.status == "processed"
+    assert result.work_status == "accepted"
+    assert ledger.project().appraisals[0].subject_ref == "npc:lin"
+    downstream = {
+        item.process_kind: item
+        for item in ledger.project().trigger_processes
+        if item.process_kind in {"affect_deliberation", "relationship_deliberation"}
+    }
+    assert set(downstream) == {"affect_deliberation", "relationship_deliberation"}
+    assert all(item.source_evidence_ref for item in downstream.values())

@@ -1241,11 +1241,16 @@ class LifeContentDescriptorProjection(FrozenModel):
     """
 
     content_id: str = Field(min_length=1)
-    content_kind: Literal["occurrence_result", "experience_summary"]
+    content_kind: Literal[
+        "occurrence_result",
+        "experience_summary",
+        "npc_inner_state",
+        "npc_goal",
+    ]
     content_ref: str = Field(min_length=1)
     content_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     privacy_class: PrivacyClass
-    source_kind: Literal["occurrence_settlement", "experience"]
+    source_kind: Literal["occurrence_settlement", "experience", "npc_state"]
     source_event_ref: str = Field(min_length=1)
     source_world_revision: int = Field(ge=1)
     source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -2379,6 +2384,87 @@ def validate_plan_authority_state(
         raise ValueError("Plan authority transition ids must be unique")
 
 
+class NpcSocialVariables(FrozenModel):
+    """One NPC's directional, subjective stance toward another actor."""
+
+    trust_bp: int = Field(default=3_000, ge=0, le=10_000)
+    closeness_bp: int = Field(default=2_000, ge=0, le=10_000)
+    respect_bp: int = Field(default=3_000, ge=0, le=10_000)
+    reliability_bp: int = Field(default=3_000, ge=0, le=10_000)
+    mutuality_bp: int = Field(default=2_000, ge=0, le=10_000)
+    repair_confidence_bp: int = Field(default=3_000, ge=0, le=10_000)
+    friction_bp: int = Field(default=0, ge=0, le=10_000)
+    tension_bp: int = Field(default=0, ge=0, le=10_000)
+
+
+class NpcSubjectiveState(FrozenModel):
+    """Compact NPC-owned state; open text remains model-authored sidecar data."""
+
+    subject_ref: str = Field(min_length=1)
+    inner_state_content_ref: str = Field(min_length=1, max_length=512)
+    inner_state_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    relationship_to_subject: NpcSocialVariables = Field(default_factory=NpcSocialVariables)
+    goal_content_refs: tuple[str, ...] = Field(default=(), max_length=8)
+    goal_content_hashes: tuple[str, ...] = Field(default=(), max_length=8)
+    organization_refs: tuple[str, ...] = Field(default=(), max_length=8)
+    life_arc_refs: tuple[str, ...] = Field(default=(), max_length=8)
+    source_event_refs: tuple[str, ...] = Field(min_length=1, max_length=32)
+    pending_actor_event_ref: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None
+    )
+    pending_impulse_summary: str | None = Field(
+        default=None, min_length=1, max_length=1_000, exclude_if=lambda value: value is None
+    )
+    pending_impulse_source_refs: tuple[str, ...] = Field(
+        default=(), max_length=32, exclude_if=lambda value: not value
+    )
+    evolved_at: datetime
+
+    @model_validator(mode="after")
+    def refs_and_time_are_canonical(self) -> "NpcSubjectiveState":
+        for refs in (
+            self.goal_content_refs,
+            self.organization_refs,
+            self.life_arc_refs,
+            self.source_event_refs,
+            self.pending_impulse_source_refs,
+        ):
+            if refs != tuple(sorted(set(refs))):
+                raise ValueError("NPC subjective refs must be sorted and unique")
+        if len(self.goal_content_refs) != len(self.goal_content_hashes):
+            raise ValueError("NPC goal refs and hashes must be paired")
+        if any(
+            len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
+            for value in self.goal_content_hashes
+        ):
+            raise ValueError("NPC goal content hash is invalid")
+        pending = (
+            self.pending_actor_event_ref is not None,
+            self.pending_impulse_summary is not None,
+            bool(self.pending_impulse_source_refs),
+        )
+        if any(pending) and not all(pending):
+            raise ValueError("NPC pending impulse binding must be complete")
+        if self.evolved_at.tzinfo is None or self.evolved_at.utcoffset() is None:
+            raise ValueError("NPC subjective state time must be timezone-aware")
+        return self
+
+
+class NpcPromotionEdge(FrozenModel):
+    """Immutable identity edge created when a provisional person materializes.
+
+    The edge records identity continuity only.  It does not add traits,
+    relationship state, or any authority for future behavior.
+    """
+
+    provisional_entity_ref: str = Field(pattern=r"^provisional:npc:")
+    stable_npc_ref: str = Field(pattern=r"^npc:")
+    origin_settlement_event_ref: str = Field(min_length=1)
+    descriptor_content_ref: str = Field(min_length=1)
+    descriptor_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    registration_event_ref: str = Field(min_length=1)
+
+
 class NpcProjection(FrozenModel):
     npc_id: str = Field(min_length=1)
     entity_revision: int = Field(ge=1)
@@ -2386,11 +2472,20 @@ class NpcProjection(FrozenModel):
     known_trait_refs: tuple[str, ...] = ()
     privacy_class: PrivacyClass
     current_location_ref: str | None = None
-    status: Literal["active", "retired"] = "active"
+    status: Literal["active", "dormant", "departed", "retired"] = "active"
     # Present only for a provisional NPC materialized by one settled outcome.
     source_event_ref: str | None = Field(default=None, min_length=1)
     effect_descriptor_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     accepted_event_ref: str | None = Field(default=None, min_length=1)
+    registration_event_ref: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None
+    )
+    promotion_edge: NpcPromotionEdge | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    subjective_state: NpcSubjectiveState | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def dynamic_introduction_binding_is_complete(self) -> "NpcProjection":
@@ -2398,6 +2493,22 @@ class NpcProjection(FrozenModel):
             raise ValueError("dynamic NPC introduction binding must be complete")
         if self.accepted_event_ref is not None and self.source_event_ref is None:
             raise ValueError("accepted dynamic NPC requires its settlement source")
+        edge = self.promotion_edge
+        if edge is not None and (
+            self.source_event_ref is None
+            or self.effect_descriptor_hash is None
+            or edge.provisional_entity_ref == edge.stable_npc_ref
+            or edge.stable_npc_ref != f"npc:{self.npc_id}"
+            or edge.origin_settlement_event_ref != self.source_event_ref
+            or edge.descriptor_content_ref != self.stable_identity_ref
+            or edge.descriptor_hash != self.effect_descriptor_hash
+            or edge.registration_event_ref != self.accepted_event_ref
+            or (
+                self.registration_event_ref is not None
+                and edge.registration_event_ref != self.registration_event_ref
+            )
+        ):
+            raise ValueError("NPC promotion edge disagrees with reviewed identity binding")
         return self
 
 
@@ -5659,7 +5770,7 @@ from .external_perception_acceptance_manifest import (  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.50"
+    reducer_bundle_version: str = "world-v2-reducers.51"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -5864,6 +5975,66 @@ class LedgerProjection(FrozenModel):
             self.committed_world_event_refs,
             logical_time=self.logical_time,
         )
+        promotion_edges = tuple(
+            item.promotion_edge for item in self.npcs if item.promotion_edge is not None
+        )
+        provisional_refs = tuple(item.provisional_entity_ref for item in promotion_edges)
+        origin_descriptors = tuple(
+            (item.origin_settlement_event_ref, item.descriptor_hash) for item in promotion_edges
+        )
+        if len(provisional_refs) != len(set(provisional_refs)) or len(origin_descriptors) != len(
+            set(origin_descriptors)
+        ):
+            raise ValueError("NPC promotion edges must be one-to-one")
+        committed_by_ref = {item.event_id: item for item in self.committed_world_event_refs}
+        for npc in self.npcs:
+            edge = npc.promotion_edge
+            if edge is None:
+                continue
+            occurrence_matches = tuple(
+                item
+                for item in self.world_occurrences
+                if item.status == "settled"
+                and item.settlement_event_ref == edge.origin_settlement_event_ref
+            )
+            occurrence = occurrence_matches[0] if len(occurrence_matches) == 1 else None
+            candidate = (
+                next(
+                    (
+                        item
+                        for item in occurrence.candidate_outcomes
+                        if item.candidate_result_ref == occurrence.settled_outcome_ref
+                    ),
+                    None,
+                )
+                if occurrence is not None
+                else None
+            )
+            descriptor_matches = (
+                tuple(
+                    item
+                    for item in candidate.provisional_npc_introductions
+                    if item.provisional_entity_ref == edge.provisional_entity_ref
+                    and item.summary_content_ref == edge.descriptor_content_ref
+                    and item.descriptor_hash == edge.descriptor_hash
+                )
+                if candidate is not None
+                else ()
+            )
+            registration = committed_by_ref.get(edge.registration_event_ref)
+            if (
+                len(descriptor_matches) != 1
+                or registration is None
+                or registration.event_type != "NpcRegistered"
+                or npc.npc_id
+                != open_life_npc_id(
+                    world_id=self.world_id,
+                    settlement_event_ref=edge.origin_settlement_event_ref,
+                    provisional_entity_ref=edge.provisional_entity_ref,
+                    descriptor_hash=edge.descriptor_hash,
+                )
+            ):
+                raise ValueError("NPC promotion edge lacks exact settlement authority")
         for place in self.world_places:
             occurrence = next(
                 (
@@ -5912,7 +6083,6 @@ class LedgerProjection(FrozenModel):
                 )
             ):
                 raise ValueError("World place ref lacks exact settlement identity")
-        committed_by_ref = {item.event_id: item for item in self.committed_world_event_refs}
         for coordinate in self.biographical_coordinates:
             source = committed_by_ref.get(coordinate.settlement_event_ref)
             occurrence = next(

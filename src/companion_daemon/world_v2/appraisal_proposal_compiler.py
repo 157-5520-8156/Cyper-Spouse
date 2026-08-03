@@ -18,6 +18,7 @@ from .batch_invariants import interaction_appraisal_trigger_identity
 from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
+from .life_events import WorldOccurrenceSettledPayload
 from .schema_core import EvidenceRef, FrozenModel
 from .schemas import (
     AppraisalHypothesis,
@@ -183,7 +184,10 @@ class AppraisalProposalCompiler:
                 raise AppraisalProposalCompilerError("source_trigger_not_claimed")
             source_evidence_ref = source_event.event_id
             source_evidence_type = "settled_world_event"
-            subject_ref = self._companion_subject(projection)
+            subject_ref = self._settled_world_subject(
+                projection=projection,
+                source_event=source_event,
+            )
             source_cluster_ref = "world-occurrence:" + _digest({"event": source_event.event_id})
         elif source_event.event_type == "ExecutionReceiptRecorded":
             trigger = next(
@@ -343,6 +347,39 @@ class AppraisalProposalCompiler:
         if projection.character_core is None:
             raise AppraisalProposalCompilerError("companion_subject_unavailable")
         return projection.character_core.actor_ref
+
+    def _settled_world_subject(self, *, projection, source_event: WorldEvent) -> str:
+        """Resolve the person actually implicated by one settled occurrence.
+
+        A world occurrence with one exact NPC participant is about that NPC
+        for relationship/appraisal purposes.  Multiple NPCs are deliberately
+        not guessed apart; an explicit composition override or the companion
+        subject keeps that ambiguous event from contaminating every NPC.
+        """
+
+        if self._world_appraisal_subject_ref is not None:
+            return self._world_appraisal_subject_ref
+        payload = WorldOccurrenceSettledPayload.model_validate_json(
+            source_event.payload_json
+        )
+        occurrence = next(
+            (
+                item
+                for item in projection.world_occurrences
+                if item.occurrence_id == payload.occurrence_id
+            ),
+            None,
+        )
+        if occurrence is None:
+            raise AppraisalProposalCompilerError("settled_occurrence_missing")
+        npc_refs = tuple(
+            dict.fromkeys(
+                ref for ref in occurrence.participant_refs if ref.startswith("npc:")
+            )
+        )
+        if len(npc_refs) == 1:
+            return npc_refs[0]
+        return self._companion_subject(projection)
 
     @staticmethod
     def _expiry(*, raw: dict[str, object], at):

@@ -110,10 +110,16 @@ from .context_resolver import query_from_projection
 from .change_phase_view import change_phase_reading_prose, change_phase_readings
 from .mood_view import MOOD_LABELS
 from .npc_relationship_view import npc_relationship_readings
+from .npc_ecology_health import npc_ecology_health_snapshot
+from .npc_identity_view import npc_identity_views
 from .context_capsule import ContextCapsuleBudgetPolicy, SliceBudget
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .local_chronology import LocalChronology
-from .life_content_store import SQLiteImmutableLifeContentStore
+from .life_content_store import (
+    SQLiteImmutableLifeContentStore,
+    StoredLifeContent,
+    life_content_payload_hash,
+)
 from .situation_compiler import SituationCompiler
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .media_v2 import MediaPlanner, SQLiteImmutableMediaPayloadStore
@@ -148,7 +154,7 @@ from .private_impression_producer import (
     PrivateImpressionDraftAdapter,
 )
 from .shared_private_invitation import SharedPrivateInvitationRuntime
-from .npc_initiative import NpcInitiativeRuntime
+from .npc_ecology import NpcEcology
 from .open_world_event_draft import OpenWorldEventModel
 from .open_world_event_runtime import (
     ActivePlanSituationSource,
@@ -410,9 +416,7 @@ def _proactive_reliability_health(
     cutoff = as_of - window if as_of is not None else None
     attempts = []
     for process in projection.trigger_processes:
-        considered_at = (
-            process.claim_lease.acquired_at if process.claim_lease is not None else None
-        )
+        considered_at = process.claim_lease.acquired_at if process.claim_lease is not None else None
         if (
             process.process_kind != ProactiveActionRuntime.PROCESS_KIND
             or process.state != "terminal"
@@ -427,9 +431,7 @@ def _proactive_reliability_health(
         latest_by_consideration[process.trigger_ref] = process
     considerations = tuple(latest_by_consideration.values())
     actions_by_id = {item.action_id: item for item in projection.actions}
-    audits_by_result = {
-        item.model_result_ref: item for item in projection.model_result_audits
-    }
+    audits_by_result = {item.model_result_ref: item for item in projection.model_result_audits}
 
     technical_attempts = tuple(
         item
@@ -455,17 +457,14 @@ def _proactive_reliability_health(
         if str(item.runtime_outcome_ref).startswith("proactive:authorized:")
     )
     authorized_actions = tuple(
-        actions_by_id.get(
-            str(item.runtime_outcome_ref).removeprefix("proactive:authorized:")
-        )
+        actions_by_id.get(str(item.runtime_outcome_ref).removeprefix("proactive:authorized:"))
         for item in authorized
     )
     delivered_count = sum(
         item is not None and item.state == "delivered" for item in authorized_actions
     )
     non_delivered_terminal_count = sum(
-        item is not None
-        and item.state in {"failed", "cancelled", "expired", "unknown"}
+        item is not None and item.state in {"failed", "cancelled", "expired", "unknown"}
         for item in authorized_actions
     )
     delivery_pending_count = len(authorized_actions) - (
@@ -473,9 +472,7 @@ def _proactive_reliability_health(
     )
     failure_codes: Counter[str] = Counter()
     for process in technical_attempts:
-        result_ref = str(process.runtime_outcome_ref).removeprefix(
-            "proactive:deliberation-failed:"
-        )
+        result_ref = str(process.runtime_outcome_ref).removeprefix("proactive:deliberation-failed:")
         audit = audits_by_result.get(result_ref)
         audit_failure_code = None
         if audit is not None:
@@ -487,9 +484,7 @@ def _proactive_reliability_health(
                 candidate_failure_code = parsed_audit.get("failure_code")
                 if isinstance(candidate_failure_code, str) and candidate_failure_code:
                     audit_failure_code = candidate_failure_code
-        failure_codes[
-            audit_failure_code or "unknown_technical_failure"
-        ] += 1
+        failure_codes[audit_failure_code or "unknown_technical_failure"] += 1
 
     consideration_count = len(considerations)
     terminal_delivery_count = delivered_count + non_delivered_terminal_count
@@ -521,15 +516,9 @@ def _proactive_reliability_health(
         "delivered_count": delivered_count,
         "delivery_pending_count": delivery_pending_count,
         "delivery_non_delivered_terminal_count": non_delivered_terminal_count,
-        "model_decision_success_rate": rate(
-            len(authorized) + len(silent), consideration_count
-        ),
-        "technical_failure_rate": rate(
-            len(technical_considerations), consideration_count
-        ),
-        "technical_failure_attempt_rate": rate(
-            len(technical_attempts), len(attempts)
-        ),
+        "model_decision_success_rate": rate(len(authorized) + len(silent), consideration_count),
+        "technical_failure_rate": rate(len(technical_considerations), consideration_count),
+        "technical_failure_attempt_rate": rate(len(technical_attempts), len(attempts)),
         "visible_authorization_rate": rate(len(authorized), consideration_count),
         "visible_delivery_rate": rate(delivered_count, consideration_count),
         "delivery_success_rate": rate(delivered_count, terminal_delivery_count),
@@ -554,9 +543,7 @@ def external_perception_downstream_health(
     )
     perception_refs = frozenset(item.accepted_event_ref for item in batch)
     latest_message_revision = (
-        projection.message_observations[-1].world_revision
-        if projection.message_observations
-        else 0
+        projection.message_observations[-1].world_revision if projection.message_observations else 0
     )
     stimulus_refs = tuple(
         sorted(
@@ -572,10 +559,7 @@ def external_perception_downstream_health(
     social_anchor_refs = set(perception_refs)
     clusters: list[list[object]] = []
     for ref in stimulus_refs:
-        if (
-            not clusters
-            or ref.logical_time - clusters[-1][0].logical_time >= timedelta(minutes=10)
-        ):
+        if not clusters or ref.logical_time - clusters[-1][0].logical_time >= timedelta(minutes=10):
             clusters.append([ref])
         else:
             clusters[-1].append(ref)
@@ -617,8 +601,7 @@ def external_perception_downstream_health(
     life_processes = tuple(
         item
         for item in projection.trigger_processes
-        if item.process_kind == "life_ecology"
-        and item.source_evidence_ref in perception_refs
+        if item.process_kind == "life_ecology" and item.source_evidence_ref in perception_refs
     )
     life_state = "opportunity_pending"
     if any(item.state == "terminal" for item in life_processes):
@@ -842,10 +825,8 @@ class WorldV2TurnApplicationConfig:
     # catalog's reviewed ``future_openings``.  It shares the life ecology
     # worker and model, so it only exists where life_ecology is installed.
     future_life_author_enabled: bool = True
-    # NPC light autonomy: reviewed ``npc_initiated_events`` may enter her day
-    # uninvited through a recorded probability draw plus a bounded model
-    # confirmation (at most two checks and one occurrence per local day).  It
-    # shares the life ecology worker and model like the future author lane.
+    # Compatibility name for the model-owned NPC Ecology lane.  The old
+    # reviewed-candidate/random-act implementation is no longer composed.
     npc_initiative_enabled: bool = True
     # The aspiration layer: reviewed ``aspiration_seeds`` may sprout into
     # low-stakes wishes (no due window, no lifecycle pipeline) through one
@@ -982,6 +963,7 @@ class WorldV2TurnApplication:
         latency_recorder: ProductionLatencyRecorder,
         trace_environment: TraceEnvironment,
         social_initiative_policy: SocialInitiativePolicy,
+        reviewed_npc_identity_summaries: dict[str, str] | None = None,
         recall_index: SQLiteRecallIndex | None = None,
         recall_coordinator: RecallCoordinator | None = None,
         owned_deliberations: tuple[_AsyncCloseable, ...] = (),
@@ -1039,6 +1021,7 @@ class WorldV2TurnApplication:
         self._latency = latency_recorder
         self._trace_environment = trace_environment
         self._social_initiative_policy = social_initiative_policy
+        self._reviewed_npc_identity_summaries = reviewed_npc_identity_summaries or {}
         self._recall_index = recall_index
         self._recall_coordinator = recall_coordinator
         self._owned_deliberations = owned_deliberations
@@ -1052,14 +1035,10 @@ class WorldV2TurnApplication:
         self._last_character_outcome = outcome.status
         return outcome
 
-    async def cancel_superseded_expression_streams(
-        self, current_trigger_ref: str
-    ) -> None:
+    async def cancel_superseded_expression_streams(self, current_trigger_ref: str) -> None:
         """Drop only process-local, not-yet-visible units for newer ingress."""
 
-        await self._turns.cancel_superseded_expression_streams(
-            current_trigger_ref
-        )
+        await self._turns.cancel_superseded_expression_streams(current_trigger_ref)
 
     async def delivered_text_character_count(self, action_id: str) -> int | None:
         """Resolve the exact immutable text behind one delivered Action."""
@@ -1593,14 +1572,10 @@ class WorldV2TurnApplication:
     async def drain_actions_once(
         self,
         *,
-        provider_accepted_reconciliation_gate: (
-            ProviderAcceptedReconciliationGate | None
-        ) = None,
+        provider_accepted_reconciliation_gate: (ProviderAcceptedReconciliationGate | None) = None,
     ) -> ActionPumpResult | None:
         result = await self._turns.drain_actions_once(
-            provider_accepted_reconciliation_gate=(
-                provider_accepted_reconciliation_gate
-            )
+            provider_accepted_reconciliation_gate=(provider_accepted_reconciliation_gate)
         )
         await self._join_deferred_terminal_action(result)
         return result
@@ -1622,9 +1597,7 @@ class WorldV2TurnApplication:
 
         if result is None or result.action_id is None:
             if self._ledger.blocks_event_loop:
-                await asyncio.to_thread(
-                    self._deferred_replies.recover_one_terminal_commitment
-                )
+                await asyncio.to_thread(self._deferred_replies.recover_one_terminal_commitment)
             else:
                 self._deferred_replies.recover_one_terminal_commitment()
             return
@@ -2476,13 +2449,9 @@ class WorldV2TurnApplication:
         retry_states = proactive_technical_retry_states(projection)
         active_retry = retry_states[-1] if retry_states else None
         consecutive_technical_failures = (
-            active_retry.consecutive_technical_failures
-            if active_retry is not None
-            else 0
+            active_retry.consecutive_technical_failures if active_retry is not None else 0
         )
-        last_failure_code = (
-            active_retry.last_failure_code if active_retry is not None else None
-        )
+        last_failure_code = active_retry.last_failure_code if active_retry is not None else None
         if active_retry is not None:
             # Cadence recomputation can legitimately move to a later ambient
             # epoch, but it cannot replace the deadline owned by an unresolved
@@ -2495,18 +2464,14 @@ class WorldV2TurnApplication:
             else:
                 initiative_state = (
                     "retry_wait"
-                    if logical_time is not None
-                    and logical_time < active_retry.next_retry_at
+                    if logical_time is not None and logical_time < active_retry.next_retry_at
                     else "consideration_due"
                 )
                 spontaneous_pending = (
-                    logical_time is not None
-                    and logical_time >= active_retry.next_retry_at
+                    logical_time is not None and logical_time >= active_retry.next_retry_at
                 )
         initiative_reliability_24h = _proactive_reliability_health(projection)
-        warning_reasons: list[str] = list(
-            initiative_reliability_24h["warning_reasons"]
-        )
+        warning_reasons: list[str] = list(initiative_reliability_24h["warning_reasons"])
         if consecutive_technical_failures >= 3:
             warning_reasons.append("repeated_technical_failures")
         if consecutive_technical_failures and initiative_state not in {
@@ -2552,9 +2517,7 @@ class WorldV2TurnApplication:
 
         # Registration and proposal/audit records prove infrastructure, not
         # that the character has actually lived through anything.
-        lived_world_event_types = (
-            frozenset(LIFE_PAYLOAD_MODELS) | {"LifeArcChanged"}
-        ) - {
+        lived_world_event_types = (frozenset(LIFE_PAYLOAD_MODELS) | {"LifeArcChanged"}) - {
             "NpcRegistered",
             "NpcStatusChanged",
             "ActivityLifecycleProposalRecorded",
@@ -2579,9 +2542,7 @@ class WorldV2TurnApplication:
         for experience in projection.experiences:
             located_decision = self._ledger.lookup_event_commit(
                 experience_memory_decision_event_id(
-                    experience_authority_event_ref=(
-                        experience.origin.accepted_event_ref
-                    )
+                    experience_authority_event_ref=(experience.origin.accepted_event_ref)
                 )
             )
             if located_decision is None:
@@ -2677,6 +2638,37 @@ class WorldV2TurnApplication:
             key=lambda item: item.failed_at,
             reverse=True,
         )[:8]
+        npc_views = npc_identity_views(
+            projection,
+            content_store=self._life_content_store,
+            relationships=npc_relationship_readings(projection),
+            reviewed_identity_summaries=self._reviewed_npc_identity_summaries,
+        )
+        npc_observability = (
+            await asyncio.to_thread(
+                npc_ecology_health_snapshot,
+                projection=projection,
+                ledger=self._ledger,
+                identity_views=npc_views,
+            )
+            if self._ledger.blocks_event_loop
+            else npc_ecology_health_snapshot(
+                projection=projection,
+                ledger=self._ledger,
+                identity_views=npc_views,
+            )
+        )
+        described_npc_refs = {item.npc_ref for item in npc_views}
+        repeatedly_referenced_npc_refs = {
+            ref
+            for ref in described_npc_refs
+            if sum(
+                ref in occurrence.participant_refs
+                for occurrence in projection.world_occurrences
+                if occurrence.status == "settled"
+            )
+            > 1
+        }
         mechanisms = {
             # This is deliberately a read-only projection of what reached the
             # ledger.  It distinguishes "the mechanism has no state yet" from
@@ -2715,11 +2707,7 @@ class WorldV2TurnApplication:
                         "context_tags": list(item.context_tags),
                         "status": item.status,
                         "started_at": item.started_at.isoformat(),
-                        "ends_at": (
-                            item.ends_at.isoformat()
-                            if item.ends_at is not None
-                            else None
-                        ),
+                        "ends_at": (item.ends_at.isoformat() if item.ends_at is not None else None),
                         "source_event_ref": item.source_event_ref,
                     }
                     for item in projection.life_arcs[-8:]
@@ -2748,16 +2736,12 @@ class WorldV2TurnApplication:
                 "experience_decision_counts": dict(
                     sorted(experience_memory_decision_counts.items())
                 ),
-                "experience_memory_retry_count": len(
-                    experience_memory_retries
-                ),
+                "experience_memory_retry_count": len(experience_memory_retries),
                 "experience_memory_retries": [
                     {
                         "source_event_ref": item.source_event_ref,
                         "retry_ordinal": item.retry_ordinal,
-                        "consecutive_technical_failures": (
-                            item.consecutive_technical_failures
-                        ),
+                        "consecutive_technical_failures": (item.consecutive_technical_failures),
                         "failure_code": item.failure_code,
                         "failed_at": item.failed_at.isoformat(),
                         "next_retry_at": item.next_retry_at.isoformat(),
@@ -2778,8 +2762,26 @@ class WorldV2TurnApplication:
             "npc": {
                 "registered_count": len(projection.npcs),
                 "active_count": sum(item.status == "active" for item in projection.npcs),
+                "dormant_count": sum(item.status == "dormant" for item in projection.npcs),
+                "departed_count": sum(item.status == "departed" for item in projection.npcs),
                 "retired_count": sum(item.status == "retired" for item in projection.npcs),
+                "subjective_state_count": sum(
+                    item.subjective_state is not None for item in projection.npcs
+                ),
+                "source_closed_descriptor_count": len(npc_views),
+                "orphan_descriptor_count": len(projection.npcs) - len(npc_views),
+                "repeatedly_referenced_count": len(repeatedly_referenced_npc_refs),
+                "last_evolved_at": (
+                    max(
+                        item.subjective_state.evolved_at
+                        for item in projection.npcs
+                        if item.subjective_state is not None
+                    ).isoformat()
+                    if any(item.subjective_state is not None for item in projection.npcs)
+                    else None
+                ),
                 "world_appraisal_count": trigger_counts.get("npc_world_appraisal", 0),
+                **npc_observability,
             },
             "triggers": {
                 "by_kind": dict(sorted(trigger_counts.items())),
@@ -3102,6 +3104,7 @@ class WorldV2TurnApplication:
                 "last_adjusted_at": _iso(latest.last_adjusted_at),
             }
         npc_names = {f"npc:{npc.npc_id}": npc.npc_id for npc in projection.npcs}
+        npc_by_ref = {f"npc:{npc.npc_id}": npc for npc in projection.npcs}
         npc_states = [
             {
                 "npc_ref": reading.npc_ref,
@@ -3111,6 +3114,22 @@ class WorldV2TurnApplication:
                 "friction_bp": reading.friction_bp,
                 "settled_shared_count": reading.settled_shared_count,
                 "last_shared_at": _iso(reading.last_shared_at),
+                "lifecycle_state": npc_by_ref[reading.npc_ref].status,
+                "npc_to_protagonist": (
+                    npc_by_ref[reading.npc_ref].subjective_state.relationship_to_subject.model_dump(
+                        mode="json"
+                    )
+                    if npc_by_ref[reading.npc_ref].subjective_state is not None
+                    else None
+                ),
+                "npc_private_state_available": (
+                    npc_by_ref[reading.npc_ref].subjective_state is not None
+                ),
+                "npc_last_evolved_at": (
+                    _iso(npc_by_ref[reading.npc_ref].subjective_state.evolved_at)
+                    if npc_by_ref[reading.npc_ref].subjective_state is not None
+                    else None
+                ),
             }
             for reading in npc_relationship_readings(projection)[:8]
         ]
@@ -3335,12 +3354,8 @@ def build_sqlite_world_v2_turn_application(
             "inject either an outcome proposal adapter or an outcome draft model, not both"
         )
     if (life_world_author_model is None) != (life_character_model is None):
-        raise ValueError(
-            "open life development requires both World Author and Character Model"
-        )
-    open_life_requested = (
-        life_world_author_model is not None and life_character_model is not None
-    )
+        raise ValueError("open life development requires both World Author and Character Model")
+    open_life_requested = life_world_author_model is not None and life_character_model is not None
     if open_life_requested and config.life_ecology is None:
         raise ValueError("open life development requires Life Ecology")
     if life_source_closure_reviewer is not None and not open_life_requested:
@@ -3438,11 +3453,24 @@ def build_sqlite_world_v2_turn_application(
             if config.life_ecology is not None
             else None
         )
+        if life_seed_catalog is not None:
+            for reviewed_npc in life_seed_catalog.reviewed_npcs:
+                if reviewed_npc.identity_summary is None:
+                    continue
+                life_content_store.put_if_absent(
+                    StoredLifeContent(
+                        content_ref=reviewed_npc.stable_identity_ref,
+                        content_kind="provisional_npc_introduction",
+                        content_payload_hash=life_content_payload_hash(
+                            reviewed_npc.identity_summary
+                        ),
+                        text=reviewed_npc.identity_summary,
+                    )
+                )
         if (
             open_life_requested
             and life_seed_catalog is not None
-            and life_seed_catalog.story_candidate_role
-            != "legacy_replay_and_fixture"
+            and life_seed_catalog.story_candidate_role != "legacy_replay_and_fixture"
         ):
             raise ValueError(
                 "production story candidates must be marked "
@@ -3461,8 +3489,7 @@ def build_sqlite_world_v2_turn_application(
                 path=config.life_ecology.seed_catalog_path,
                 timezone_name=config.local_timezone,
             )
-            if config.life_ecology is not None
-            and biographical_timeline is not None
+            if config.life_ecology is not None and biographical_timeline is not None
             else None
         )
         _bootstrap(
@@ -3506,11 +3533,18 @@ def build_sqlite_world_v2_turn_application(
             recall_coordinator=recall_coordinator,
             biographical_catalog=biographical_context_catalog,
             biographical_timezone_name=(
-                config.local_timezone
-                if biographical_context_catalog is not None
-                else None
+                config.local_timezone if biographical_context_catalog is not None else None
             ),
             biographical_timeline=biographical_timeline,
+            reviewed_npc_identity_summaries=(
+                {
+                    item.stable_identity_ref: item.identity_summary
+                    for item in life_seed_catalog.reviewed_npcs
+                    if item.identity_summary is not None
+                }
+                if life_seed_catalog is not None
+                else None
+            ),
         )
         chat_capsules = context_capsule_compiler_from_ledger(
             ledger=ledger,
@@ -3542,11 +3576,18 @@ def build_sqlite_world_v2_turn_application(
             recall_coordinator=recall_coordinator,
             biographical_catalog=biographical_context_catalog,
             biographical_timezone_name=(
-                config.local_timezone
-                if biographical_context_catalog is not None
-                else None
+                config.local_timezone if biographical_context_catalog is not None else None
             ),
             biographical_timeline=biographical_timeline,
+            reviewed_npc_identity_summaries=(
+                {
+                    item.stable_identity_ref: item.identity_summary
+                    for item in life_seed_catalog.reviewed_npcs
+                    if item.identity_summary is not None
+                }
+                if life_seed_catalog is not None
+                else None
+            ),
         )
         expression_episode_diagnostics = ExpressionEpisodeDiagnostics(
             mode=config.expression_episode_mode
@@ -3678,9 +3719,7 @@ def build_sqlite_world_v2_turn_application(
                     if ledger.blocks_event_loop
                     else chat_capsules.compile(query)
                 )
-                return reconsideration_role_context_from_capsule(
-                    capsule.model_content_json
-                )
+                return reconsideration_role_context_from_capsule(capsule.model_content_json)
 
             expression_reconsideration_reviewer = AuditedReplacementReconsiderationReviewer(
                 reviewer=ExpressionReconsiderationChatModelAdapter(
@@ -4436,19 +4475,19 @@ def build_sqlite_world_v2_turn_application(
             else None
         )
         npc_initiative = (
-            NpcInitiativeRuntime(
+            NpcEcology(
                 ledger=ledger,
-                catalog=life_seed_catalog,
-                model=activity_lifecycle_model,
+                content_store=life_content_store,
                 occurrence_content=occurrence_content,
-                owner_actor_ref=config.companion_actor_ref,
-                actor=config.life_ecology.worker_actor,
+                actor_model=life_character_model,
+                world_author=life_world_author_model,
+                protagonist_actor_ref=config.companion_actor_ref,
+                catalog=life_seed_catalog,
+                worker_actor=config.life_ecology.worker_actor,
             )
             if (
-                not open_life_requested
+                open_life_requested
                 and config.life_ecology is not None
-                and life_seed_catalog is not None
-                and activity_lifecycle_model is not None
                 and config.npc_initiative_enabled
             )
             else None
@@ -4658,6 +4697,15 @@ def build_sqlite_world_v2_turn_application(
             latency_recorder=latency,
             trace_environment=config.trace_environment,
             social_initiative_policy=config.social_initiative_policy,
+            reviewed_npc_identity_summaries=(
+                {
+                    item.stable_identity_ref: item.identity_summary
+                    for item in life_seed_catalog.reviewed_npcs
+                    if item.identity_summary is not None
+                }
+                if life_seed_catalog is not None
+                else None
+            ),
             recall_index=recall_index,
             recall_coordinator=recall_coordinator,
             owned_deliberations=(chat_deliberation,),
@@ -4747,18 +4795,15 @@ def _bootstrap(
     if timeline_refs:
         if biographical_timeline is None:
             raise ValueError(
-                "World v2 ledger has a biographical timeline but deployment "
-                "configuration does not"
+                "World v2 ledger has a biographical timeline but deployment configuration does not"
             )
         located = ledger.lookup_event_commit(timeline_refs[0].event_id)
         if located is None:
             raise ValueError("biographical timeline authority is not readable")
         timeline_event, timeline_commit = located
         try:
-            recorded_timeline = (
-                BiographicalTimelineConfiguredPayload.model_validate_json(
-                    timeline_event.payload_json
-                )
+            recorded_timeline = BiographicalTimelineConfiguredPayload.model_validate_json(
+                timeline_event.payload_json
             )
         except ValueError as exc:
             raise ValueError("biographical timeline authority payload is invalid") from exc
@@ -4768,12 +4813,8 @@ def _bootstrap(
             or timeline_event.payload_hash != timeline_refs[0].payload_hash
             or recorded_timeline != biographical_timeline
         ):
-            raise ValueError(
-                "configured biographical timeline differs from ledger authority"
-            )
-    missing_biographical_timeline = (
-        biographical_timeline is not None and not timeline_refs
-    )
+            raise ValueError("configured biographical timeline differs from ledger authority")
+    missing_biographical_timeline = biographical_timeline is not None and not timeline_refs
     accounts = [
         BudgetAccount(
             account_id=config.chat_account_id,
@@ -4856,9 +4897,7 @@ def _bootstrap(
         life_seed_catalog.biographical_context_at(
             instant=projection.logical_time or now,
             life_arcs=projection.life_arcs,
-            biographical_coordinates=getattr(
-                projection, "biographical_coordinates", ()
-            ),
+            biographical_coordinates=getattr(projection, "biographical_coordinates", ()),
         )
         if life_seed_catalog is not None
         else None

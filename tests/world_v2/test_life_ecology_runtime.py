@@ -689,6 +689,37 @@ async def test_life_development_technical_failure_schedules_retry_instead_of_idl
 
 
 @pytest.mark.asyncio
+async def test_npc_ecology_technical_failure_uses_shared_10_30_120_retry_lane() -> None:
+    event = _event("clock-npc-ecology-technical-failure")
+    trigger_store, media = _TriggerStore(), _Media()
+    development = _LifeDevelopment("no_op", reason_code="quiet")
+    npc_ecology = _LifeDevelopment(
+        "technical_failure", reason_code="npc_ecology.actor_model_failure"
+    )
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        life_development_followup=development,
+        npc_initiative_followup=npc_ecology,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:npc-ecology-failure",
+        correlation_id="correlation:npc-ecology-failure",
+    )
+
+    assert result.status == "failed_safe"
+    assert result.reason_code == "life_ecology.npc_ecology_technical_failure"
+    assert result.technical_failure_code.startswith("npc_ecology.")
+    assert trigger_store.completed[0][2].startswith(
+        "technical_failure.npc_ecology."
+    )
+
+
+@pytest.mark.asyncio
 async def test_aftermath_model_failure_keeps_its_precise_technical_retry_code() -> None:
     event = _event("clock-aftermath-technical-failure")
     trigger_store, media = _TriggerStore(), _Media()

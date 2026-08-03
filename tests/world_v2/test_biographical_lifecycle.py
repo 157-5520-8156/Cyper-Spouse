@@ -494,7 +494,7 @@ def test_life_arc_is_event_sourced_and_cold_replays(tmp_path: Path) -> None:
 
     migrated = SQLiteWorldLedger(path=path, world_id=world_id)
     reopened = migrated.project()
-    assert reopened.reducer_bundle_version == "world-v2-reducers.50"
+    assert reopened.reducer_bundle_version == "world-v2-reducers.51"
     assert reopened.life_arcs == projected.life_arcs
     assert migrated.rebuild() == reopened
     migrated.close()
@@ -1655,6 +1655,17 @@ def test_selected_open_outcome_registers_npc_and_only_adopted_dynamic_arc_once(
     assert len(projection.npcs) == 1
     assert projection.npcs[0].source_event_ref == settlement.event_id
     assert projection.npcs[0].effect_descriptor_hash == npc.descriptor_hash
+    assert projection.npcs[0].promotion_edge is not None
+    assert projection.npcs[0].promotion_edge.provisional_entity_ref == (
+        npc.provisional_entity_ref
+    )
+    assert projection.npcs[0].promotion_edge.stable_npc_ref == (
+        f"npc:{projection.npcs[0].npc_id}"
+    )
+    assert projection.npcs[0].promotion_edge.origin_settlement_event_ref == (
+        settlement.event_id
+    )
+    assert projection.npcs[0].promotion_edge.descriptor_hash == npc.descriptor_hash
     assert len(projection.life_arcs) == expected_arc_count
     if adopt_direction:
         assert projection.life_arcs[0].arc_kind == "dynamic"
@@ -1666,6 +1677,7 @@ def test_selected_open_outcome_registers_npc_and_only_adopted_dynamic_arc_once(
             "occupation:",
         )
     assert not projection.pending_biographical_settlements
+    assert ledger.rebuild().npcs[0].promotion_edge == projection.npcs[0].promotion_edge
 
 
 def test_settled_open_outcome_materializes_a_replayable_attempt_only_place(

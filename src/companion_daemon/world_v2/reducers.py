@@ -328,6 +328,7 @@ from .life_events import (
     ActivityPlannedPayload,
     ActivityTransitionPayload,
     NpcRegisteredPayload,
+    NpcStateChangedPayload,
     NpcStatusChangedPayload,
     OutcomeObservationRecordedPayload,
     OutcomeProposalRecordedPayload,
@@ -361,6 +362,7 @@ from .life_reducers import (
     record_outcome_proposal,
     register_npc,
     transition_npc_status,
+    transition_npc_state,
     settle_occurrence,
     terminate_occurrence,
     transition_activity,
@@ -504,6 +506,7 @@ from .schemas import (
     MemoryCandidateTransitionProjection,
     LifeArcProjection,
     NpcProjection,
+    NpcPromotionEdge,
     Observation,
     OutcomeObservationProjection,
     PendingBiographicalSettlementProjection,
@@ -548,8 +551,9 @@ _V44_REDUCER_BUNDLE_VERSION = "world-v2-reducers.44"
 _V46_REDUCER_BUNDLE_VERSION = "world-v2-reducers.46"
 _V47_REDUCER_BUNDLE_VERSION = "world-v2-reducers.47"
 V48_REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
+_V49_REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.51"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -601,6 +605,7 @@ def _experience_semantic_dump(
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
@@ -627,6 +632,7 @@ def _actor_authority_transition_semantic_dump(
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -653,6 +659,7 @@ def _life_arc_semantic_dump(
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -666,12 +673,19 @@ def _npc_semantic_dump(
     reducer_bundle_version: str,
 ) -> dict[str, Any]:
     dumped = npc.model_dump(mode="json")
+    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        # Promotion edges are a .51 projection addition.  Replaying an older
+        # bundle may derive the edge for current reads, but it must not rewrite
+        # that bundle's historical semantic hash.
+        dumped.pop("promotion_edge", None)
+        dumped.pop("registration_event_ref", None)
     if reducer_bundle_version not in {
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -698,6 +712,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -715,6 +730,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -725,6 +741,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -751,6 +768,7 @@ def _expression_plan_semantic_dump(
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -778,6 +796,7 @@ def _expression_beat_semantic_dump(
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         V48_REDUCER_BUNDLE_VERSION,
+        _V49_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -1566,6 +1585,7 @@ class ReducerState(FrozenModel):
             _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
             V48_REDUCER_BUNDLE_VERSION,
+            _V49_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
@@ -1716,6 +1736,7 @@ class ReducerState(FrozenModel):
                                 _V46_REDUCER_BUNDLE_VERSION,
                                 _V47_REDUCER_BUNDLE_VERSION,
                                 V48_REDUCER_BUNDLE_VERSION,
+                                _V49_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1807,6 +1828,7 @@ class ReducerState(FrozenModel):
                                         _V46_REDUCER_BUNDLE_VERSION,
                                         _V47_REDUCER_BUNDLE_VERSION,
                                         V48_REDUCER_BUNDLE_VERSION,
+                                        _V49_REDUCER_BUNDLE_VERSION,
                                         PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
                                     else {"settled_dynamic_life_direction_adopted": True}
@@ -1823,6 +1845,7 @@ class ReducerState(FrozenModel):
                                                 _V46_REDUCER_BUNDLE_VERSION,
                                                 _V47_REDUCER_BUNDLE_VERSION,
                                                 V48_REDUCER_BUNDLE_VERSION,
+                                                _V49_REDUCER_BUNDLE_VERSION,
                                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                             }
                                             else (
@@ -1935,6 +1958,7 @@ class ReducerState(FrozenModel):
             _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
             V48_REDUCER_BUNDLE_VERSION,
+            _V49_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -1964,6 +1988,7 @@ class ReducerState(FrozenModel):
                 _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
                 V48_REDUCER_BUNDLE_VERSION,
+                _V49_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -1990,6 +2015,7 @@ class ReducerState(FrozenModel):
             _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
             V48_REDUCER_BUNDLE_VERSION,
+            _V49_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2015,6 +2041,7 @@ class ReducerState(FrozenModel):
                     _V46_REDUCER_BUNDLE_VERSION,
                     _V47_REDUCER_BUNDLE_VERSION,
                     V48_REDUCER_BUNDLE_VERSION,
+                    _V49_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
@@ -2042,6 +2069,7 @@ class ReducerState(FrozenModel):
             _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
             V48_REDUCER_BUNDLE_VERSION,
+            _V49_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2070,6 +2098,7 @@ class ReducerState(FrozenModel):
                 _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
                 V48_REDUCER_BUNDLE_VERSION,
+                _V49_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2260,6 +2289,7 @@ class ReducerState(FrozenModel):
                 _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
                 V48_REDUCER_BUNDLE_VERSION,
+                _V49_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2279,6 +2309,7 @@ class ReducerState(FrozenModel):
                 _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
                 V48_REDUCER_BUNDLE_VERSION,
+                _V49_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -10293,16 +10324,26 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
             (item for item in pending if item.settlement_event_ref == npc.source_event_ref),
             None,
         )
-        descriptor = (
-            next(
-                (
-                    item
-                    for item in settlement.provisional_npc_introductions
-                    if item.descriptor_hash == npc.effect_descriptor_hash
-                ),
-                None,
+        matching_descriptors = (
+            tuple(
+                item
+                for item in settlement.provisional_npc_introductions
+                if item.descriptor_hash == npc.effect_descriptor_hash
             )
             if settlement is not None
+            else ()
+        )
+        descriptor = matching_descriptors[0] if len(matching_descriptors) == 1 else None
+        expected_edge = (
+            NpcPromotionEdge(
+                provisional_entity_ref=descriptor.provisional_entity_ref,
+                stable_npc_ref=f"npc:{npc.npc_id}",
+                origin_settlement_event_ref=npc.source_event_ref,
+                descriptor_content_ref=descriptor.summary_content_ref,
+                descriptor_hash=descriptor.descriptor_hash,
+                registration_event_ref=event.event_id,
+            )
+            if descriptor is not None
             else None
         )
         if (
@@ -10321,9 +10362,16 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
             or npc.current_location_ref is not None
             or npc.privacy_class != descriptor.privacy_class
             or npc.accepted_event_ref not in {None, event.event_id}
+            or (npc.promotion_edge is not None and npc.promotion_edge != expected_edge)
         ):
             raise ValueError("dynamic NPC registration must match its selected settlement effect")
-        npc = npc.model_copy(update={"accepted_event_ref": event.event_id})
+        npc = npc.model_copy(
+            update={
+                "accepted_event_ref": event.event_id,
+                "registration_event_ref": event.event_id,
+                "promotion_edge": expected_edge,
+            }
+        )
         payload = payload.model_copy(update={"npc": npc})
         remaining_descriptors = tuple(
             item
@@ -10340,6 +10388,10 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
             and replacement.dynamic_life_arc_context is None
         ):
             pending = tuple(item for item in pending if item != replacement)
+    if npc.registration_event_ref not in {None, event.event_id}:
+        raise ValueError("NPC registration event binding is inconsistent")
+    npc = npc.model_copy(update={"registration_event_ref": event.event_id})
+    payload = payload.model_copy(update={"npc": npc})
     return state.model_copy(
         update={
             "npcs": register_npc(state.npcs, payload),
@@ -10351,7 +10403,61 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
 def _npc_status_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     _require_life_time(state, event)
     payload = _validated_life_payload(state, event, NpcStatusChangedPayload)
+    current = next(
+        (item for item in state.npcs if item.npc_id == payload.npc_before.npc_id),
+        None,
+    )
+    if (
+        current is not None
+        and current.promotion_edge is not None
+        and payload.npc_before.promotion_edge is None
+        and payload.npc_after.promotion_edge is None
+        and payload.npc_before.source_event_ref == current.source_event_ref
+        and payload.npc_before.effect_descriptor_hash == current.effect_descriptor_hash
+        and payload.npc_before.accepted_event_ref == current.accepted_event_ref
+    ):
+        # Pre-.51 status events could not serialize the derived promotion edge.
+        # Carry forward the exact current edge; never infer a different merge.
+        payload = payload.model_copy(
+            update={
+                "npc_before": payload.npc_before.model_copy(
+                    update={"promotion_edge": current.promotion_edge}
+                ),
+                "npc_after": payload.npc_after.model_copy(
+                    update={"promotion_edge": current.promotion_edge}
+                ),
+            }
+        )
+    if (
+        current is not None
+        and current.registration_event_ref is not None
+        and payload.npc_before.registration_event_ref is None
+        and payload.npc_after.registration_event_ref is None
+    ):
+        payload = payload.model_copy(
+            update={
+                "npc_before": payload.npc_before.model_copy(
+                    update={"registration_event_ref": current.registration_event_ref}
+                ),
+                "npc_after": payload.npc_after.model_copy(
+                    update={"registration_event_ref": current.registration_event_ref}
+                ),
+            }
+        )
     return state.model_copy(update={"npcs": transition_npc_status(state.npcs, payload)})
+
+
+def _npc_state_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, NpcStateChangedPayload)
+    if payload.npc_after.subjective_state is None:
+        raise ValueError("NPC state transition requires a subjective state")
+    committed = {item.event_id for item in state.committed_world_event_refs}
+    if any(ref not in committed for ref in payload.npc_after.subjective_state.source_event_refs):
+        raise ValueError("NPC subjective state references uncommitted authority")
+    if event.actor != f"npc:{payload.npc_after.npc_id}":
+        raise ValueError("NPC subjective state must be authored by that NPC actor")
+    return state.model_copy(update={"npcs": transition_npc_state(state.npcs, payload)})
 
 
 def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -11364,7 +11470,7 @@ def _life_content_recorded(state: ReducerState, event: WorldEvent) -> ReducerSta
         ):
             raise ValueError("life content descriptor does not match settled occurrence")
         source_privacy = occurrence.visibility
-    else:
+    elif payload.source_kind == "experience":
         if (
             payload.content_kind != "experience_summary"
             or source_event.event_type != "ExperienceCommitted"
@@ -11387,6 +11493,43 @@ def _life_content_recorded(state: ReducerState, event: WorldEvent) -> ReducerSta
         ):
             raise ValueError("life content descriptor does not match committed experience")
         source_privacy = experience.values.privacy_class
+    else:
+        if (
+            payload.content_kind not in {"npc_inner_state", "npc_goal"}
+            or source_event.event_type != "NpcStateChanged"
+        ):
+            raise ValueError("NPC content must bind an exact NPC state transition")
+        npc = next(
+            (item for item in state.npcs if item.npc_id == payload.source_entity_id),
+            None,
+        )
+        subjective = npc.subjective_state if npc is not None else None
+        matches_inner = (
+            payload.content_kind == "npc_inner_state"
+            and subjective is not None
+            and subjective.inner_state_content_ref == payload.content_ref
+            and subjective.inner_state_payload_hash == payload.content_payload_hash
+        )
+        matches_goal = (
+            payload.content_kind == "npc_goal"
+            and subjective is not None
+            and (payload.content_ref, payload.content_payload_hash)
+            in set(
+                zip(
+                    subjective.goal_content_refs,
+                    subjective.goal_content_hashes,
+                    strict=True,
+                )
+            )
+        )
+        if (
+            npc is None
+            or subjective is None
+            or npc.entity_revision != payload.source_entity_revision
+            or not (matches_inner or matches_goal)
+        ):
+            raise ValueError("NPC content descriptor does not match current state")
+        source_privacy = npc.privacy_class
 
     if (
         _LIFE_CONTENT_PRIVACY_RANK[payload.privacy_class]
@@ -13150,6 +13293,7 @@ _EVENTS = {
         ),
         EventDefinition("NpcRegistered", RevisionClass.WORLD, _npc_registered),
         EventDefinition("NpcStatusChanged", RevisionClass.WORLD, _npc_status_changed),
+        EventDefinition("NpcStateChanged", RevisionClass.WORLD, _npc_state_changed),
         EventDefinition(
             "BiographicalTimelineConfigured",
             RevisionClass.WORLD,

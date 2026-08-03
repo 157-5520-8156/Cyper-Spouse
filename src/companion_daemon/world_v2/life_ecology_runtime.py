@@ -265,9 +265,7 @@ class LifeEcologyRuntime:
         logical_time = validated
         projection = self._ledger.project()
         schedule = getattr(projection, "life_ecology_schedule", None)
-        development_due = (
-            schedule is None or logical_time >= schedule.next_consideration_at
-        )
+        development_due = schedule is None or logical_time >= schedule.next_consideration_at
         key = LifeEcologyRunKey(
             world_id=self._ledger.world_id,
             wake_event_ref=wake_event_ref,
@@ -394,10 +392,7 @@ class LifeEcologyRuntime:
                         life_author_followup_status=author_status,
                         aftermath_followup_status=aftermath_status,
                     )
-                if (
-                    aftermath_status == "settled"
-                    and self._biographical_followup is not None
-                ):
+                if aftermath_status == "settled" and self._biographical_followup is not None:
                     followup = self._biographical_followup.advance_once(
                         wake_event_ref=wake_event_ref,
                         trace_id=trace_id,
@@ -407,9 +402,7 @@ class LifeEcologyRuntime:
                         followup = await followup
                     followup_status = getattr(followup, "status", None)
                     if not isinstance(followup_status, str) or not followup_status:
-                        raise ValueError(
-                            "post-settlement biographical result has no stable status"
-                        )
+                        raise ValueError("post-settlement biographical result has no stable status")
                     if followup_status == "transitioned":
                         biographical_status = followup_status
             except FactMemoryDraftTechnicalFailure as exc:
@@ -423,9 +416,7 @@ class LifeEcologyRuntime:
                     "_",
                     exc.failure_code.lower(),
                 ).strip("._-")
-                memory_postprocess_failure_code = "memory." + (
-                    normalized[:80] or "unknown"
-                )
+                memory_postprocess_failure_code = "memory." + (normalized[:80] or "unknown")
                 aftermath_status = "memory_technical_failure"
                 _LOG.warning(
                     "life ecology memory postprocess deferred wake=%s failure=%s",
@@ -438,9 +429,7 @@ class LifeEcologyRuntime:
                     "_",
                     exc.failure_code.lower(),
                 ).strip("._-")
-                failure_code = "aftermath." + (
-                    normalized[:80] or "unknown"
-                )
+                failure_code = "aftermath." + (normalized[:80] or "unknown")
                 persisted = await self._complete_technical_failure(
                     key=key,
                     trigger_id=claim.trigger_id,
@@ -457,9 +446,7 @@ class LifeEcologyRuntime:
                     activity_followup_status=activity_status,
                     life_author_followup_status=author_status,
                     aftermath_followup_status="technical_failure",
-                    technical_failure_code=(
-                        failure_code if persisted else None
-                    ),
+                    technical_failure_code=(failure_code if persisted else None),
                 )
             except Exception:
                 _LOG.exception(
@@ -499,9 +486,7 @@ class LifeEcologyRuntime:
                     if isinstance(supplied, str)
                     else ""
                 )
-                life_development_failure_code = (
-                    normalized[:96] or "life_development.unknown"
-                )
+                life_development_failure_code = normalized[:96] or "life_development.unknown"
             if life_development_status == "deferred":
                 return LifeEcologyRunResult(
                     status="deferred",
@@ -522,8 +507,7 @@ class LifeEcologyRuntime:
         # structured "blocked"; bugs must cross this boundary.
         if (
             self._life_development_followup is None
-            and
-            self._future_life_author_followup is not None
+            and self._future_life_author_followup is not None
             and author_status != "planned"
             and activity_status != "transitioned"
             and aftermath_status
@@ -539,16 +523,22 @@ class LifeEcologyRuntime:
                 raise ValueError("future life author result has no stable status")
 
         npc_initiative_status: str | None = None
-        # NPC initiative is a quiet-wake lane: it runs only when no main life
-        # family claimed this wake, exactly like the future calendar lane.  A
-        # committed NPC occurrence then becomes this wake's main family.
+        # NPC Ecology is a quiet-wake lane: it runs when no main life family
+        # claimed this wake.  Unlike the retired reviewed-candidate lane it is
+        # also valid beside open Life Development; both share the ordinary
+        # occurrence/aftermath event machine, so only one may materialize.
         if (
-            self._life_development_followup is None
-            and
             self._npc_initiative_followup is not None
             and author_status != "planned"
             and activity_status != "transitioned"
             and future_author_status != "planned"
+            and life_development_status
+            not in {
+                "occurrence_committed",
+                "plan_committed",
+                "plan_completed",
+                "technical_failure",
+            }
             and aftermath_status
             not in {"occurrence_opened", "settled", "recovered_experience", "recovered_memory"}
         ):
@@ -561,6 +551,36 @@ class LifeEcologyRuntime:
                 npc_initiative_status = getattr(npc_result, "status", None)
                 if not isinstance(npc_initiative_status, str) or not npc_initiative_status:
                     raise ValueError("npc initiative result has no stable status")
+                if npc_initiative_status == "technical_failure":
+                    supplied = getattr(npc_result, "reason_code", None)
+                    normalized = (
+                        re.sub(r"[^a-z0-9._-]+", "_", supplied.lower()).strip("._-")
+                        if isinstance(supplied, str)
+                        else ""
+                    )
+                    failure_code = "npc_ecology." + (normalized[:80] or "unknown")
+                    persisted = await self._complete_technical_failure(
+                        key=key,
+                        trigger_id=claim.trigger_id,
+                        failure_code=failure_code,
+                    )
+                    return LifeEcologyRunResult(
+                        status="failed_safe",
+                        trigger_id=claim.trigger_id,
+                        reason_code=(
+                            "life_ecology.npc_ecology_technical_failure"
+                            if persisted
+                            else "life_ecology.technical_failure_persistence_failed"
+                        ),
+                        activity_followup_status=activity_status,
+                        life_author_followup_status=author_status,
+                        future_life_author_followup_status=future_author_status,
+                        aftermath_followup_status=aftermath_status,
+                        biographical_followup_status=biographical_status,
+                        life_development_followup_status=life_development_status,
+                        npc_initiative_followup_status=npc_initiative_status,
+                        technical_failure_code=(failure_code if persisted else None),
+                    )
             except Exception:
                 await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
                 return LifeEcologyRunResult(
@@ -579,8 +599,7 @@ class LifeEcologyRuntime:
         # event, not an occurrence, so it neither blocks nor claims the wake.
         if (
             self._life_development_followup is None
-            and
-            self._aspiration_followup is not None
+            and self._aspiration_followup is not None
             and author_status != "planned"
             and activity_status != "transitioned"
             and future_author_status != "planned"
@@ -615,8 +634,7 @@ class LifeEcologyRuntime:
         # family: planning-to-ask is an inner event until the user answers.
         if (
             self._life_development_followup is None
-            and
-            self._shared_private_followup is not None
+            and self._shared_private_followup is not None
             and author_status != "planned"
             and activity_status != "transitioned"
             and future_author_status != "planned"
@@ -653,10 +671,16 @@ class LifeEcologyRuntime:
         # the model-authored lane gets a later wake once that family is done.
         if (
             self._life_development_followup is None
-            and
-            self._open_world_followup is not None
+            and self._open_world_followup is not None
             and future_author_status != "planned"
-            and npc_initiative_status not in {"committed", "recovered"}
+            and npc_initiative_status
+            not in {
+                "committed",
+                "plan_committed",
+                "plan_completed",
+                "occurrence_committed",
+                "recovered",
+            }
             and aftermath_status
             not in {"occurrence_opened", "settled", "recovered_experience", "recovered_memory"}
         ):
@@ -798,7 +822,14 @@ class LifeEcologyRuntime:
                     else "future_author_planned"
                     if future_author_status == "planned"
                     else "npc_initiative_committed"
-                    if npc_initiative_status in {"committed", "recovered"}
+                    if npc_initiative_status
+                    in {
+                        "committed",
+                        "plan_committed",
+                        "plan_completed",
+                        "occurrence_committed",
+                        "recovered",
+                    }
                     else "activity_transitioned"
                     if activity_status == "transitioned"
                     else "biographical_transitioned"
@@ -808,8 +839,7 @@ class LifeEcologyRuntime:
                     else f"life_development_{life_development_status}"
                     if life_development_status is not None
                     else "cooldown"
-                    if self._life_development_followup is not None
-                    and not development_due
+                    if self._life_development_followup is not None and not development_due
                     else "open_world_committed"
                     if open_world_status in {"committed", "recovered"}
                     else (f"author_{author_status}" if author_status is not None else "idle")
@@ -841,7 +871,12 @@ class LifeEcologyRuntime:
                 or activity_status == "transitioned"
                 or biographical_status == "transitioned"
                 or life_development_status
-                in {"plan_committed", "occurrence_committed", "recovered"}
+                in {
+                    "plan_committed",
+                    "plan_completed",
+                    "occurrence_committed",
+                    "recovered",
+                }
                 or aftermath_status
                 in {
                     "occurrence_opened",
@@ -849,7 +884,14 @@ class LifeEcologyRuntime:
                     "recovered_experience",
                     "recovered_memory",
                 }
-                or npc_initiative_status in {"committed", "recovered"}
+                or npc_initiative_status
+                in {
+                    "committed",
+                    "plan_committed",
+                    "plan_completed",
+                    "occurrence_committed",
+                    "recovered",
+                }
                 or open_world_status in {"committed", "recovered"}
                 else "idle"
             ),
@@ -872,8 +914,7 @@ class LifeEcologyRuntime:
                 else None
             ),
             technical_failure_code=(
-                life_development_failure_code
-                or memory_postprocess_failure_code
+                life_development_failure_code or memory_postprocess_failure_code
             ),
         )
 

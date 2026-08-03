@@ -243,13 +243,17 @@ class ScenarioVerificationError(AssertionError):
 # manifest already used by inbound expression and expands only those aliases
 # before local closure. The manifest selects no behavior; frozen visible
 # predicates remain unchanged while prompt/audit hashes intentionally move.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.50"
+# ``.51`` adds source-bound NPC identity/state projections and composes the
+# model-owned NPC ecology behind Life Ecology. The frozen corpus contains no
+# NPC ecology wake, so its visible predicates and provider-call counts remain
+# unchanged; authenticated projection identities move with reducer .51.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.51"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "55ec22c308e6a13c467784b80f1191ef57b855b19f1338f9add7e38418b236d8"
+    "8e7921d71481e136604879107d40623a0192cb9038910a3a75c3bf45d9306934"
 )
 
 

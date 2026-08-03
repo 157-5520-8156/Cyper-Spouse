@@ -15,6 +15,7 @@ from companion_daemon.world_v2.memory_retrieval import (
 from companion_daemon.world_v2.recall_audit import CharacterRecallRequest
 from companion_daemon.world_v2.recall_corpus import (
     AffectOpeningRecallItem,
+    NpcIdentityRecallItem,
     RecallCorpusCompiler,
     RecallCorpusSources,
     select_recall_authority_bindings,
@@ -378,6 +379,51 @@ def test_recent_experience_is_searchable_before_memory_consolidation() -> None:
         "event:life-content:experience:1",
     )
     assert "memory:tea-session" not in experience.link_refs
+
+
+def test_npc_identity_is_recallable_without_exposing_private_npc_state() -> None:
+    registration = RecallSourceBinding(
+        source_kind="committed_event",
+        authority_type="NpcRegistered",
+        ref="event:npc:lin:registered",
+        source_world_revision=25,
+        immutable_hash="a" * 64,
+    )
+    descriptor = RecallSourceBinding(
+        source_kind="immutable_payload",
+        authority_type="NpcIdentityDescriptor",
+        ref="content:npc:lin",
+        source_world_revision=25,
+        immutable_hash="b" * 64,
+    )
+    identity = NpcIdentityRecallItem(
+        npc_ref="npc:lin",
+        descriptor="林嘉，角色在实习团队里认识的设计师。",
+        descriptor_content_ref="content:npc:lin",
+        lifecycle_state="active",
+        occurred_at=NOW - timedelta(days=4),
+        privacy_class="personal",
+        bindings=tuple(sorted((registration, descriptor), key=lambda item: item.source_kind)),
+        link_refs=("experience:met-lin", "organization:internship"),
+    )
+    sources = RecallCorpusSources(
+        npc_identities=(identity,),
+        authority_bindings=identity.bindings,
+    )
+
+    documents = RecallCorpusCompiler().compile(
+        cursor=CURSOR,
+        actor_ref="agent:companion",
+        subject_refs=("agent:companion", "user:primary"),
+        sources=sources,
+    )
+
+    assert len(documents) == 1
+    document = documents[0]
+    assert document.text == identity.descriptor
+    assert document.subject_refs == ("agent:companion", "npc:lin")
+    assert document.source_refs == ("content:npc:lin", "event:npc:lin:registered")
+    assert "inner_state" not in document.text
 
 
 def test_foreign_recent_experience_does_not_enter_companion_recall() -> None:

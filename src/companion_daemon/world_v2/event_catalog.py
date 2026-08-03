@@ -162,7 +162,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.50"
+    reducer_bundle: str = "world-v2-reducers.51"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -652,6 +652,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ActionReconciliationRequired": "result_id+reason+observed_state",
         "NpcRegistered": "world_id+npc_id",
         "NpcStatusChanged": "world_id+npc_id+expected_entity_revision+transition_id",
+        "NpcStateChanged": "world_id+npc_id+expected_entity_revision+transition_id",
         "LifeArcChanged": "world_id+arc_id+expected_entity_revision+transition_id",
         "BiographicalTimelineConfigured": "world_id+timeline_id+document_hash+timezone_name",
         "AspirationPlanted": "world_id+aspiration_id+transition_id",
@@ -1809,6 +1810,32 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 successors=("NpcStatusChanged", "WorldOccurrenceCommitted"),
             ),
             _contract(
+                "NpcStateChanged",
+                "npc_ecology",
+                "world",
+                "NpcStateChangedPayload",
+                allowed_predecessors=(
+                    "ClockAdvanced",
+                    "ObservationRecorded",
+                    "WorldOccurrenceSettled",
+                    "AppraisalAccepted",
+                    "AffectEpisodeOpened",
+                    "AffectEpisodeUpdated",
+                    "NpcRegistered",
+                    "NpcStateChanged",
+                ),
+                evidence_types=(
+                    "committed_world_event",
+                    "settled_world_event",
+                    "observed_message",
+                ),
+                successors=(
+                    "NpcStateChanged",
+                    "WorldOccurrenceCommitted",
+                    "ActivityPlanned",
+                ),
+            ),
+            _contract(
                 "BiographicalTimelineConfigured",
                 "world_bootstrap",
                 "world",
@@ -2024,8 +2051,16 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "life_content_coordinator",
                 "world",
                 "LifeContentRecordedPayload",
-                allowed_predecessors=("WorldOccurrenceSettled", "ExperienceCommitted"),
-                evidence_types=("settled_world_event", "committed_experience"),
+                allowed_predecessors=(
+                    "WorldOccurrenceSettled",
+                    "ExperienceCommitted",
+                    "NpcStateChanged",
+                ),
+                evidence_types=(
+                    "settled_world_event",
+                    "committed_experience",
+                    "committed_world_event",
+                ),
             ),
             _contract(
                 "LegacyExperienceCommitted",

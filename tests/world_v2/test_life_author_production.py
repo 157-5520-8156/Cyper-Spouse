@@ -1767,7 +1767,7 @@ async def test_experience_memory_no_change_is_durable_and_never_reclassified(
         before_rebuild = restarted._ledger.project()  # noqa: SLF001
         rebuilt = restarted._ledger.rebuild()  # noqa: SLF001
         assert rebuilt.semantic_hash == before_rebuild.semantic_hash
-        assert rebuilt.reducer_bundle_version == "world-v2-reducers.50"
+        assert rebuilt.reducer_bundle_version == "world-v2-reducers.51"
     finally:
         restarted.close()
 
@@ -1924,6 +1924,6 @@ async def test_experience_memory_failure_waits_for_source_scoped_retry_after_res
         before_rebuild = recovered
         rebuilt = resumed._ledger.rebuild()  # noqa: SLF001
         assert rebuilt.semantic_hash == before_rebuild.semantic_hash
-        assert rebuilt.reducer_bundle_version == "world-v2-reducers.50"
+        assert rebuilt.reducer_bundle_version == "world-v2-reducers.51"
     finally:
         resumed.close()

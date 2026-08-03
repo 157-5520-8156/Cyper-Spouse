@@ -9,6 +9,7 @@ interpretation and can never become factual authority through retrieval.
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import json
 from collections.abc import Iterable
@@ -25,7 +26,7 @@ from .recall_index import (
     RecallSourceBinding,
 )
 from .recent_dialogue import RecentDialogueItem
-from .schema_core import FrozenModel
+from .schema_core import FrozenModel, PrivacyClass
 from .schemas import (
     AffectEpisodeProjection,
     AppraisalHypothesis,
@@ -47,6 +48,19 @@ class AffectOpeningRecallItem(FrozenModel):
     subject_authority_refs: tuple[str, ...] = Field(min_length=1, max_length=8)
 
 
+class NpcIdentityRecallItem(FrozenModel):
+    """Public/shared NPC identity material, never the NPC's private interior."""
+
+    npc_ref: str = Field(pattern=r"^npc:")
+    descriptor: str = Field(min_length=1, max_length=4_000)
+    descriptor_content_ref: str = Field(min_length=1)
+    lifecycle_state: str = Field(min_length=1)
+    occurred_at: datetime
+    privacy_class: PrivacyClass
+    bindings: tuple[RecallSourceBinding, ...] = Field(min_length=2, max_length=3)
+    link_refs: tuple[str, ...] = ()
+
+
 class RecallCorpusSources(FrozenModel):
     """The bounded, typed World views from which a recall sidecar is rebuilt."""
 
@@ -60,6 +74,7 @@ class RecallCorpusSources(FrozenModel):
     affect_openings: tuple[AffectOpeningRecallItem, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
     private_impressions: tuple[PrivateImpressionProjection, ...] = ()
+    npc_identities: tuple[NpcIdentityRecallItem, ...] = ()
     authority_bindings: tuple[RecallSourceBinding, ...] = Field(default=(), max_length=4_096)
 
 
@@ -104,6 +119,8 @@ def required_recall_authority_refs(sources: RecallCorpusSources) -> frozenset[st
         refs.update(item.source_refs)
         if item.origin is not None:
             refs.add(item.origin.accepted_event_ref)
+    for item in sources.npc_identities:
+        refs.update(binding.ref for binding in item.bindings)
     return frozenset(ref for ref in refs if ref)
 
 
@@ -460,6 +477,33 @@ class RecallCorpusCompiler:
                 )
             )
 
+        for item in sources.npc_identities:
+            bindings = _canonical_bindings(item.bindings)
+            if not all(authority.get(binding.ref) == binding for binding in bindings):
+                continue
+            documents.append(
+                self._document(
+                    memory_kind="semantic",
+                    source_item_ref=item.npc_ref,
+                    source_slice="world_life",
+                    bindings=bindings,
+                    text=item.descriptor,
+                    retrieval_text=(
+                        f"Known person {item.npc_ref}: {item.descriptor}\n"
+                        f"Lifecycle: {item.lifecycle_state}"
+                    ),
+                    actor_ref=actor_ref,
+                    subject_refs=_subjects(actor_ref, item.npc_ref),
+                    link_refs=(
+                        item.descriptor_content_ref,
+                        f"lifecycle:{item.lifecycle_state}",
+                        *item.link_refs,
+                    ),
+                    occurred_from=item.occurred_at,
+                    privacy_class=item.privacy_class,
+                )
+            )
+
         dialogue_by_ref: dict[str, RecentDialogueItem] = {}
         for item in sources.recent_dialogue:
             dialogue_by_ref[item.dialogue_id] = item
@@ -793,6 +837,7 @@ class RecallCorpusCompiler:
 
 __all__ = [
     "AffectOpeningRecallItem",
+    "NpcIdentityRecallItem",
     "RecallCorpusCompiler",
     "RecallCorpusSources",
     "MAX_RECALL_CORPUS_DOCUMENTS",

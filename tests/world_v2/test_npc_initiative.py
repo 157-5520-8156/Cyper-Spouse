@@ -254,75 +254,29 @@ def _npc_check_events(app):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.asyncio
-async def test_npc_initiated_event_settles_into_appraisal_and_experience(
+async def test_legacy_reviewed_npc_event_is_not_composed_into_production(
     tmp_path: Path,
 ) -> None:
     model = _LifeModel()
     app = _build(tmp_path, _seed(tmp_path / "seed.yaml"), model, name="end-to-end")
     try:
         await _tick(app, tick_id="e2e:occur", frm=NOW, to=NOW + timedelta(minutes=5))
-        projection = app._ledger.project()  # noqa: SLF001 - production seam assertion
-        occurrences = _npc_occurrences(projection)
-        assert len(occurrences) == 1
-        occurrence = occurrences[0]
-        assert occurrence.status == "active"
-        assert occurrence.location_ref == "location:campus-library"
-        assert set(occurrence.participant_refs) == {"agent:companion", "npc:fan-yuan"}
-        assert occurrence.visibility == "personal"
-        assert model.npc_calls == 1
-        assert "NPC-initiated moment" in (model.last_npc_system or "")
-        assert model.last_npc_payload is not None
-        eligibility = model.last_npc_payload["authoritative_eligibility"]
-        assert eligibility["npc_ref"] == "npc:fan-yuan"
-
-        # A later wake settles through the ordinary aftermath path: the
-        # mandatory npc_world_appraisal trigger opens and the settled outcome
-        # becomes a referencable Committed Experience plus life content.
-        await _tick(
-            app, tick_id="e2e:settle",
-            frm=NOW + timedelta(minutes=5), to=NOW + timedelta(minutes=30),
-        )
-        settled = app._ledger.project()  # noqa: SLF001
-        occurrence = _npc_occurrences(settled)[0]
-        assert occurrence.status == "settled"
-        assert any(
-            item.process_kind == "npc_world_appraisal" and item.state == "open"
-            for item in settled.trigger_processes
-        )
-        assert len(settled.experiences) == 1
-        assert any(
-            item.source_kind == "occurrence_settlement"
-            and item.source_entity_id == occurrence.occurrence_id
-            for item in settled.life_content_descriptors
-        )
-        result = app._life_content_store.read_exact(  # noqa: SLF001
-            content_ref=occurrence.result_payload_ref
-        )
-        assert result is not None
-        assert result.content_payload_hash == occurrence.result_payload_hash
-        assert result.text in {
-            "范予安忽然来借书，顺带聊了两句，气氛轻松。",
-            "那本书她还没读完，犹豫了一下还是借了。",
-        }
+        assert _npc_occurrences(app._ledger.project()) == []  # noqa: SLF001
+        assert model.npc_calls == 0
+        assert _npc_draw_events(app) == []
+        assert _npc_check_events(app) == []
     finally:
         app.close()
 
 
 @pytest.mark.asyncio
-async def test_at_most_two_checks_and_one_occurrence_per_local_day(
+async def test_legacy_daily_check_budget_does_not_run_in_production(
     tmp_path: Path,
 ) -> None:
     model = _LifeModel()
     app = _build(tmp_path, _seed(tmp_path / "seed.yaml"), model, name="daily-budget")
     try:
-        # Morning slot: the certain event occurs on the first quiet wake.
         await _tick(app, tick_id="day1:a", frm=NOW, to=NOW + timedelta(minutes=5))
-        assert len(_npc_occurrences(app._ledger.project())) == 1  # noqa: SLF001
-        assert model.npc_calls == 1
-
-        # The next wake settles the active occurrence (aftermath owns that
-        # wake); every following wake of the same local day converges on the
-        # already-occurred day identity instead of re-rolling.
         await _tick(
             app, tick_id="day1:b",
             frm=NOW + timedelta(minutes=5), to=NOW + timedelta(hours=1),
@@ -331,55 +285,34 @@ async def test_at_most_two_checks_and_one_occurrence_per_local_day(
             app, tick_id="day1:c",
             frm=NOW + timedelta(hours=1), to=NOW + timedelta(hours=2),
         )
-        # Afternoon slot of the same day: still no second occurrence.
         await _tick(
             app, tick_id="day1:d",
             frm=NOW + timedelta(hours=2), to=NOW + timedelta(hours=6),
         )
-        assert len(_npc_occurrences(app._ledger.project())) == 1  # noqa: SLF001
-        assert model.npc_calls == 1
-        assert len(_npc_draw_events(app)) == 1
-        assert len(_npc_check_events(app)) == 1
-
-        # The next companion-local day gets its own chance.
         await _tick(
             app, tick_id="day2:a",
             frm=NOW + timedelta(hours=6), to=NOW + timedelta(days=1),
         )
-        assert len(_npc_occurrences(app._ledger.project())) == 2  # noqa: SLF001
-        assert model.npc_calls == 2
+        assert _npc_occurrences(app._ledger.project()) == []  # noqa: SLF001
+        assert model.npc_calls == 0
+        assert _npc_draw_events(app) == []
+        assert _npc_check_events(app) == []
     finally:
         app.close()
 
 
 @pytest.mark.asyncio
-async def test_model_no_op_consumes_the_check_slot_without_an_event(
+async def test_legacy_model_no_op_contract_is_not_called(
     tmp_path: Path,
 ) -> None:
     model = _LifeModel(npc_decision="no_op")
     app = _build(tmp_path, _seed(tmp_path / "seed.yaml"), model, name="model-no-op")
     try:
-        # Morning slot: the draw selects the certain event, the model says
-        # "范予安今天没来找她" — always a legitimate answer.
         await _tick(app, tick_id="noop:a", frm=NOW, to=NOW + timedelta(minutes=5))
-        assert _npc_occurrences(app._ledger.project()) == []  # noqa: SLF001
-        assert model.npc_calls == 1
-        checks = _npc_check_events(app)
-        assert len(checks) == 1
-        assert checks[0].payload()["decision"] == "no_op"
-
-        # A second morning wake finds the slot consumed: no new draw, no new
-        # model call, still no occurrence.
         await _tick(
             app, tick_id="noop:b",
             frm=NOW + timedelta(minutes=5), to=NOW + timedelta(hours=1),
         )
-        assert _npc_occurrences(app._ledger.project()) == []  # noqa: SLF001
-        assert model.npc_calls == 1
-        assert len(_npc_draw_events(app)) == 1
-        assert len(_npc_check_events(app)) == 1
-
-        # The afternoon slot is a fresh, durable second (and last) check.
         await _tick(
             app, tick_id="noop:c",
             frm=NOW + timedelta(hours=1), to=NOW + timedelta(hours=6),
@@ -389,33 +322,30 @@ async def test_model_no_op_consumes_the_check_slot_without_an_event(
             frm=NOW + timedelta(hours=6), to=NOW + timedelta(hours=7),
         )
         assert _npc_occurrences(app._ledger.project()) == []  # noqa: SLF001
-        assert model.npc_calls == 2
-        assert len(_npc_check_events(app)) == 2
+        assert model.npc_calls == 0
+        assert _npc_draw_events(app) == []
+        assert _npc_check_events(app) == []
     finally:
         app.close()
 
 
 @pytest.mark.asyncio
-async def test_nothing_happens_outside_the_npc_presence_window(
+async def test_legacy_presence_windows_no_longer_gate_npc_behavior(
     tmp_path: Path,
 ) -> None:
     model = _LifeModel()
     early = NOW - timedelta(minutes=80)  # 08:10 local
     app = _build(tmp_path, _seed(tmp_path / "seed.yaml"), model, name="absent", now=early)
     try:
-        # 08:10-09:20 local: the library is open but 范予安 is not there yet
-        # (presence starts 09:00, event window 09:30).  No candidate exists,
-        # so no draw happens and no check slot is consumed.
         await _tick(app, tick_id="absent:a", frm=early, to=early + timedelta(minutes=30))
         assert _npc_occurrences(app._ledger.project()) == []  # noqa: SLF001
         assert model.npc_calls == 0
         assert _npc_draw_events(app) == []
         assert _npc_check_events(app) == []
 
-        # The same morning slot is still fully available once the reviewed
-        # window opens: absence never burns the daily budget.
         await _tick(app, tick_id="absent:b", frm=early + timedelta(minutes=30), to=NOW)
-        assert len(_npc_occurrences(app._ledger.project())) == 1  # noqa: SLF001
+        assert _npc_occurrences(app._ledger.project()) == []  # noqa: SLF001
+        assert model.npc_calls == 0
     finally:
         app.close()
 

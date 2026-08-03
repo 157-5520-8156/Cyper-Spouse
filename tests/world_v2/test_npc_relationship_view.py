@@ -165,6 +165,21 @@ def test_reading_warms_with_shared_history_and_cools_with_friction() -> None:
     assert calm[0].friction_bp == 0
 
 
+def test_conflict_appraisal_only_cools_the_exact_npc_subject() -> None:
+    fan = _npc("literature-fan")
+    classmate = _npc("classmate")
+
+    readings = npc_relationship_readings(_Projection(
+        npcs=(fan, classmate),
+        appraisals=(_conflict_appraisal(),),
+    ))
+
+    by_ref = {item.npc_ref: item for item in readings}
+    assert by_ref["npc:literature-fan"].friction_bp > 0
+    assert by_ref["npc:classmate"].friction_bp == 0
+    assert by_ref["npc:classmate"].closeness_bp == RESTING_CLOSENESS_BP
+
+
 def _candidate(kind: str) -> NpcInitiativeCandidate:
     return NpcInitiativeCandidate(
         token={"shared_time": "1" * 64, "friction": "2" * 64, "small_favor": "3" * 64}[kind],

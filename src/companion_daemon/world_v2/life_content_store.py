@@ -27,6 +27,8 @@ LifeContentKind = Literal[
     "provisional_npc_introduction",
     "provisional_place_introduction",
     "dynamic_life_arc_context",
+    "npc_inner_state",
+    "npc_goal",
     "raw_model_result",
 ]
 MAX_LIFE_CONTENT_CHARACTERS = 12_000
@@ -64,6 +66,8 @@ class StoredLifeContent:
             "provisional_npc_introduction",
             "provisional_place_introduction",
             "dynamic_life_arc_context",
+            "npc_inner_state",
+            "npc_goal",
             "raw_model_result",
         }:
             raise ValueError("unsupported life content kind")

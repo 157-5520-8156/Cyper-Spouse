@@ -161,6 +161,7 @@ life_author_catalog:
     - id: fan-yuan
       npc_id: literature-fan
       stable_identity_ref: reviewed-person:fan-yuan
+      identity_summary: 范予安，知知在文学社认识的朋友。
       known_trait_refs: [trait:literature-club]
       privacy: personal
       location_id: campus-library
@@ -169,6 +170,7 @@ life_author_catalog:
     - id: lin-wan
       npc_id: roommate-lin
       stable_identity_ref: reviewed-person:lin-wan
+      identity_summary: 林晚，知知的室友。
       known_trait_refs: [trait:roommate]
       privacy: personal
       location_id: dorm-room

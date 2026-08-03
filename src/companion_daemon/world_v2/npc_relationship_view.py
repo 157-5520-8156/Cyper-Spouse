@@ -93,7 +93,11 @@ def npc_relationship_readings(projection) -> tuple[NpcRelationshipReading, ...]:
                 last_shared = occurrence.settled_at
         friction = 0
         for appraisal in appraisals:
-            if appraisal.status != "active" or appraisal.expires_at <= logical_time:
+            if (
+                appraisal.status != "active"
+                or appraisal.expires_at <= logical_time
+                or appraisal.subject_ref != npc_ref
+            ):
                 continue
             conflict_weight = sum(
                 item.weight_bp

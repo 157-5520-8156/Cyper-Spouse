@@ -8,6 +8,7 @@ from .life_events import (
     ActivityPlannedPayload,
     ActivityTransitionPayload,
     NpcRegisteredPayload,
+    NpcStateChangedPayload,
     NpcStatusChangedPayload,
     OutcomeObservationRecordedPayload,
     OutcomeProposalRecordedPayload,
@@ -54,6 +55,21 @@ def register_npc(
         raise ValueError(f"NPC {payload.npc.npc_id!r} already exists")
     if any(npc.stable_identity_ref == payload.npc.stable_identity_ref for npc in npcs):
         raise ValueError("NPC stable identity is already registered")
+    edge = payload.npc.promotion_edge
+    if edge is not None and any(
+        current.promotion_edge is not None
+        and (
+            current.promotion_edge.provisional_entity_ref
+            == edge.provisional_entity_ref
+            or (
+                current.promotion_edge.origin_settlement_event_ref
+                == edge.origin_settlement_event_ref
+                and current.promotion_edge.descriptor_hash == edge.descriptor_hash
+            )
+        )
+        for current in npcs
+    ):
+        raise ValueError("provisional NPC identity is already promoted")
     return (*npcs, payload.npc)
 
 
@@ -63,6 +79,17 @@ def transition_npc_status(
     current = next((npc for npc in npcs if npc.npc_id == payload.npc_after.npc_id), None)
     if current is None or current != payload.npc_before:
         raise ValueError("NPC status before image does not match current projection")
+    return tuple(
+        payload.npc_after if npc.npc_id == current.npc_id else npc for npc in npcs
+    )
+
+
+def transition_npc_state(
+    npcs: tuple[NpcProjection, ...], payload: NpcStateChangedPayload
+) -> tuple[NpcProjection, ...]:
+    current = next((npc for npc in npcs if npc.npc_id == payload.npc_after.npc_id), None)
+    if current is None or current != payload.npc_before:
+        raise ValueError("NPC state before image does not match current projection")
     return tuple(
         payload.npc_after if npc.npc_id == current.npc_id else npc for npc in npcs
     )

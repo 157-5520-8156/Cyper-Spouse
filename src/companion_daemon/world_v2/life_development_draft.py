@@ -17,7 +17,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, ValidationError, computed_field, field_validator, model_validator
 
 from .schema_core import FrozenModel, PrivacyClass
-from .schemas import BiographicalCoordinateReplacement, DueWindow, ProjectionCursor
+from .schemas import (
+    BiographicalCoordinateReplacement,
+    DueWindow,
+    ProjectionCursor,
+)
 
 
 _NARRATIVE_TAG = re.compile(r"^narrative:[a-z0-9][a-z0-9._-]{0,63}$")
@@ -247,6 +251,37 @@ class LifeDevelopmentBiographicalCoordinateCapability(FrozenModel):
     settlement_event_ref: str = Field(min_length=1)
 
 
+class LifeDevelopmentNpcCapability(FrozenModel):
+    """One stable, source-bound person available to the World Author.
+
+    This carries identity facts, not a list of permitted plots or motives.
+    """
+
+    npc_ref: str = Field(pattern=r"^npc:")
+    lifecycle_state: str = Field(min_length=1, max_length=64)
+    identity_content_ref: str = Field(min_length=1, max_length=512)
+    identity_summary: str = Field(min_length=1, max_length=4_000)
+    identity_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authority_refs: tuple[str, ...] = Field(min_length=1, max_length=64)
+    first_occurrence_ref: str | None = None
+    shared_experience_refs: tuple[str, ...] = ()
+    active_plan_refs: tuple[str, ...] = ()
+    current_location_ref: str | None = None
+    protagonist_closeness_bp: int | None = Field(default=None, ge=0, le=10_000)
+    protagonist_friction_bp: int | None = Field(default=None, ge=0, le=10_000)
+
+    @model_validator(mode="after")
+    def refs_are_canonical(self) -> "LifeDevelopmentNpcCapability":
+        for values in (
+            self.authority_refs,
+            self.shared_experience_refs,
+            self.active_plan_refs,
+        ):
+            if values != tuple(sorted(set(values))):
+                raise ValueError("NPC capability refs must be sorted and unique")
+        return self
+
+
 class LifeDevelopmentCapabilityManifest(FrozenModel):
     """Pinned-input capability facts, never a menu of story choices."""
 
@@ -261,6 +296,9 @@ class LifeDevelopmentCapabilityManifest(FrozenModel):
     grounding_refs: tuple[str, ...] = ()
     location_capabilities: tuple[LifeDevelopmentLocationCapability, ...] = ()
     entity_refs: tuple[str, ...] = ()
+    npc_capabilities: tuple[LifeDevelopmentNpcCapability, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     biographical_context_tags: tuple[str, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
@@ -306,6 +344,15 @@ class LifeDevelopmentCapabilityManifest(FrozenModel):
         refs = tuple(item.coordinate_ref for item in self.biographical_coordinates)
         if len(refs) != len(set(refs)):
             raise ValueError("biographical coordinate capability refs must be unique")
+        if self.npc_capabilities != tuple(
+            sorted(self.npc_capabilities, key=lambda item: item.npc_ref)
+        ):
+            raise ValueError("NPC capabilities must be sorted")
+        npc_refs = tuple(item.npc_ref for item in self.npc_capabilities)
+        if len(npc_refs) != len(set(npc_refs)):
+            raise ValueError("NPC capability refs must be unique")
+        if any(ref not in self.entity_refs for ref in npc_refs):
+            raise ValueError("NPC capability must remain inside entity authority")
         return self
 
     @property

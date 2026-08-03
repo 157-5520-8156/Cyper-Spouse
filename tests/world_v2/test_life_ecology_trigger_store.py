@@ -356,7 +356,7 @@ async def test_sqlite_migrates_v33_terminal_ecology_head_to_current_bundle(
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
     try:
         projection = migrated.project()
-        assert projection.reducer_bundle_version == "world-v2-reducers.50"
+        assert projection.reducer_bundle_version == "world-v2-reducers.51"
         assert projection.completed_trigger_ids == ()
         assert projection.life_ecology_schedule == compact.life_ecology_schedule
         assert migrated.rebuild() == projection

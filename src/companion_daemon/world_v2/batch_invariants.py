@@ -75,10 +75,12 @@ from .fact_accepted_contracts import (
 from .life_events import (
     ActivityPlannedPayload,
     ActivityTransitionPayload,
+    NpcStateChangedPayload,
     OutcomeProposalRecordedPayload,
     WorldOccurrenceCommittedPayload,
     WorldOccurrenceSettledPayload,
 )
+from .life_content_events import LifeContentRecordedPayload
 from .aspiration_events import AspirationCrystallizedPayload
 from .life_development_draft import (
     LifeDevelopmentCapabilityManifest,
@@ -189,6 +191,57 @@ def _reject_new_private_impression_without_role_reflection(
             raise ValueError("private_impression.new_write_requires_role_reflection")
 
 
+def _validate_npc_state_content_batch(events: Sequence[WorldEvent]) -> None:
+    """Bind every new NPC private-state byte string in the same atomic commit."""
+
+    descriptors_by_source: dict[str, list[LifeContentRecordedPayload]] = {}
+    for event in events:
+        if event.event_type != "LifeContentRecorded":
+            continue
+        payload = LifeContentRecordedPayload.model_validate_json(event.payload_json)
+        if payload.source_kind == "npc_state":
+            descriptors_by_source.setdefault(payload.source_event_ref, []).append(payload)
+
+    for event in events:
+        if event.event_type != "NpcStateChanged":
+            continue
+        payload = NpcStateChangedPayload.model_validate_json(event.payload_json)
+        state = payload.npc_after.subjective_state
+        assert state is not None
+        expected = {
+            (
+                "npc_inner_state",
+                state.inner_state_content_ref,
+                state.inner_state_payload_hash,
+            ),
+            *{
+                ("npc_goal", ref, content_hash)
+                for ref, content_hash in zip(
+                    state.goal_content_refs,
+                    state.goal_content_hashes,
+                    strict=True,
+                )
+            },
+        }
+        actual_rows = descriptors_by_source.get(event.event_id, [])
+        actual = {
+            (item.content_kind, item.content_ref, item.content_payload_hash)
+            for item in actual_rows
+        }
+        if actual != expected or len(actual_rows) != len(expected):
+            raise ValueError(
+                "NpcStateChanged requires an exact same-batch private content closure"
+            )
+        if any(
+            item.source_payload_hash != event.payload_hash
+            or item.source_entity_id != payload.npc_after.npc_id
+            or item.source_entity_revision != payload.npc_after.entity_revision
+            or item.privacy_class != payload.npc_after.privacy_class
+            for item in actual_rows
+        ):
+            raise ValueError("NPC state content descriptor disagrees with its authority")
+
+
 def validate_commit_batch(
     events: Sequence[WorldEvent],
     *,
@@ -218,6 +271,7 @@ def validate_commit_batch(
     _reject_new_private_impression_without_role_reflection(events)
     _validate_deliberation_audit_transaction(events)
     _validate_life_development_location_authority_batch(events)
+    _validate_npc_state_content_batch(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
         events,

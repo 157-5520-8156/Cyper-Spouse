@@ -335,6 +335,10 @@ async def test_future_author_plans_at_most_once_per_local_day_and_rolls_over(
         assert [item["window_opens_at"] for item in upcoming] == sorted(
             item["window_opens_at"] for item in upcoming
         )
+        npc_health = diagnostics["mechanisms"]["npc"]
+        assert npc_health["dynamic_count"] == 0
+        assert npc_health["actor_no_op_rate"]["status"] == "not_measured"
+        assert npc_health["actor_usage"]["status"] == "unknown"
     finally:
         app.close()
 

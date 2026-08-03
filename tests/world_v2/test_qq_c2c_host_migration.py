@@ -3833,7 +3833,10 @@ def test_qq_fake_composition_keeps_open_life_fact_effects_fail_closed(
         )
         assert ecology._life_author_followup is None  # noqa: SLF001
         assert ecology._future_life_author_followup is None  # noqa: SLF001
-        assert ecology._npc_initiative_followup is None  # noqa: SLF001
+        assert ecology._npc_initiative_followup is not None  # noqa: SLF001
+        assert (  # noqa: SLF001
+            type(ecology._npc_initiative_followup).__name__ == "NpcEcology"
+        )
         assert ecology._aspiration_followup is None  # noqa: SLF001
         assert ecology._open_world_followup is None  # noqa: SLF001
     finally:

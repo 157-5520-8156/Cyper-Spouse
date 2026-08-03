@@ -10,7 +10,10 @@ from .life_development_draft import (
     LifeDevelopmentBiographicalCoordinateCapability,
     LifeDevelopmentCapabilityManifest,
     LifeDevelopmentLocationCapability,
+    LifeDevelopmentNpcCapability,
 )
+from .npc_identity_view import npc_identity_views
+from .npc_relationship_view import npc_relationship_readings
 from .schemas import ProjectionCursor, WorldEvent
 
 
@@ -214,6 +217,20 @@ class ProjectionLifeCapabilityManifestCompiler:
             if getattr(item, "status", None) == "active"
             and isinstance(getattr(item, "npc_id", None), str)
         }
+        identity_views = (
+            npc_identity_views(
+                projection,
+                content_store=self._content_store,
+                relationships=npc_relationship_readings(projection),
+                reviewed_identity_summaries={
+                    item.stable_identity_ref: item.identity_summary
+                    for item in self._catalog.reviewed_npcs
+                    if item.identity_summary is not None
+                },
+            )
+            if self._content_store is not None
+            else ()
+        )
         grounding_refs = tuple(sorted(visible_refs))
         current_situation_refs = {
             ref
@@ -260,6 +277,31 @@ class ProjectionLifeCapabilityManifestCompiler:
                 )
             ),
             entity_refs=tuple(sorted(entity_refs)),
+            npc_capabilities=tuple(
+                LifeDevelopmentNpcCapability(
+                    npc_ref=item.npc_ref,
+                    lifecycle_state=item.lifecycle_state,
+                    identity_content_ref=item.descriptor_content_ref,
+                    identity_summary=item.descriptor,
+                    identity_payload_hash=item.descriptor_payload_hash,
+                    authority_refs=tuple(sorted(item.source_refs)),
+                    first_occurrence_ref=item.first_occurrence_ref,
+                    shared_experience_refs=item.shared_experience_refs,
+                    active_plan_refs=item.active_plan_refs,
+                    current_location_ref=item.current_location_ref,
+                    protagonist_closeness_bp=(
+                        item.protagonist_relationship.closeness_bp
+                        if item.protagonist_relationship is not None
+                        else None
+                    ),
+                    protagonist_friction_bp=(
+                        item.protagonist_relationship.friction_bp
+                        if item.protagonist_relationship is not None
+                        else None
+                    ),
+                )
+                for item in identity_views
+            ),
             biographical_context_tags=biography.context_tags,
             biographical_coordinates=tuple(
                 LifeDevelopmentBiographicalCoordinateCapability(
