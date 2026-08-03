@@ -20,6 +20,8 @@ import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
 from ..sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
+from .attention import SQLiteShadowAttentionCoordinator
+from .live_attention import SQLiteLiveAttentionCoordinator
 from .contracts import (
     ExternalSignalSourceFailure,
     ExternalSignalEmbedding,
@@ -31,6 +33,8 @@ from .contracts import (
     SourceHealthSnapshot,
     SourcePolicyRevision,
     SourceProfile,
+    ShadowAttentionRuntime,
+    LiveAttentionRuntime,
     WallClock,
 )
 
@@ -60,6 +64,8 @@ class SQLiteWorldPerceptionHub:
         sources: tuple[SourceProfile, ...],
         wall_clock: WallClock,
         embedding: ExternalSignalEmbedding | None = None,
+        shadow_attention: ShadowAttentionRuntime | None = None,
+        live_attention: LiveAttentionRuntime | None = None,
     ) -> None:
         path_value = str(path)
         if not path_value or not sources:
@@ -118,6 +124,40 @@ class SQLiteWorldPerceptionHub:
                 )
             self._reconcile_embedding_jobs(observed_at=now)
             self._record_storage_sample(observed_at=now, force=True)
+        if shadow_attention is not None and live_attention is not None:
+            raise ValueError("World Perception Hub cannot run shadow and live attention together")
+        self._attention_coordinator = (
+            SQLiteShadowAttentionCoordinator(
+                connection=self._connection,
+                lock=self._lock,
+                database_write_lock=self._database_write_lock,
+                runtime=shadow_attention,
+                exposable_source_ids=tuple(
+                    profile.adapter.source_id
+                    for profile in sources
+                    if profile.policy.may_expose_to_character_model
+                ),
+                wall_clock=wall_clock,
+            )
+            if shadow_attention is not None
+            else (
+                SQLiteLiveAttentionCoordinator(
+                    connection=self._connection,
+                    lock=self._lock,
+                    database_write_lock=self._database_write_lock,
+                    runtime=live_attention,
+                    exposable_source_ids=tuple(
+                        profile.adapter.source_id
+                        for profile in sources
+                        if profile.policy.may_expose_to_character_model
+                        and profile.policy.may_freeze_durable_snapshot
+                    ),
+                    wall_clock=wall_clock,
+                )
+                if live_attention is not None
+                else None
+            )
+        )
 
     def _create_schema(self) -> None:
         self._connection.executescript(
@@ -347,70 +387,83 @@ class SQLiteWorldPerceptionHub:
         self._delete_expired_search_index(observed_at)
         self._delete_expired_normalized_signals(observed_at)
         due = self._due_sources(observed_at)
-        if not due:
-            embedding_jobs = self._due_embedding_jobs(observed_at)
-            if embedding_jobs:
-                return await self._advance_embedding_job(
-                    signal_revision_ref=embedding_jobs[0],
+        if due:
+            source_id = due[0]
+            profile = self._profiles[source_id]
+            cursor = self._source_cursor(source_id)
+            try:
+                page = await profile.adapter.fetch(
+                    after=cursor,
                     observed_at=observed_at,
+                    deadline_at=observed_at + timedelta(seconds=profile.fetch_deadline_seconds),
+                    limit=profile.page_limit,
                 )
-            return PerceptionAdvanceResult(
-                status="idle",
-                progressed_units=0,
-                next_wake_at=self._next_wake_at(),
-                more_due=False,
-            )
-        source_id = due[0]
-        profile = self._profiles[source_id]
-        cursor = self._source_cursor(source_id)
-        try:
-            page = await profile.adapter.fetch(
-                after=cursor,
-                observed_at=observed_at,
-                deadline_at=observed_at + timedelta(seconds=profile.fetch_deadline_seconds),
-                limit=profile.page_limit,
-            )
-        except ExternalSignalSourceFailure as exc:
-            self._record_failure(
+            except ExternalSignalSourceFailure as exc:
+                self._record_failure(
+                    source_id=source_id,
+                    observed_at=observed_at,
+                    failure_code=exc.failure_code,
+                    retry_after_seconds=exc.retry_after_seconds,
+                )
+                return PerceptionAdvanceResult(
+                    status="retry_wait",
+                    progressed_units=1,
+                    next_wake_at=self._next_wake_at(),
+                    more_due=self._has_due_work(observed_at),
+                )
+            except Exception as exc:  # external adapters may fail before typed parsing
+                self._record_failure(
+                    source_id=source_id,
+                    observed_at=observed_at,
+                    failure_code=f"source_exception:{type(exc).__name__}"[:128],
+                    retry_after_seconds=None,
+                )
+                return PerceptionAdvanceResult(
+                    status="retry_wait",
+                    progressed_units=1,
+                    next_wake_at=self._next_wake_at(),
+                    more_due=self._has_due_work(observed_at),
+                )
+            self._record_page(
                 source_id=source_id,
+                profile=profile,
                 observed_at=observed_at,
-                failure_code=exc.failure_code,
-                retry_after_seconds=exc.retry_after_seconds,
+                page=page,
             )
             return PerceptionAdvanceResult(
-                status="retry_wait",
+                status="progressed",
                 progressed_units=1,
                 next_wake_at=self._next_wake_at(),
                 more_due=self._has_due_work(observed_at),
             )
-        except Exception as exc:  # external adapters may fail before typed parsing
-            self._record_failure(
-                source_id=source_id,
+        if self._attention_coordinator is not None:
+            attention_result = await self._attention_coordinator.advance_once(
+                observed_at=observed_at
+            )
+            if attention_result is not None:
+                return attention_result
+        embedding_jobs = self._due_embedding_jobs(observed_at)
+        if embedding_jobs:
+            return await self._advance_embedding_job(
+                signal_revision_ref=embedding_jobs[0],
                 observed_at=observed_at,
-                failure_code=f"source_exception:{type(exc).__name__}"[:128],
-                retry_after_seconds=None,
             )
-            return PerceptionAdvanceResult(
-                status="retry_wait",
-                progressed_units=1,
-                next_wake_at=self._next_wake_at(),
-                more_due=self._has_due_work(observed_at),
-            )
-        self._record_page(
-            source_id=source_id,
-            profile=profile,
-            observed_at=observed_at,
-            page=page,
-        )
         return PerceptionAdvanceResult(
-            status="progressed",
-            progressed_units=1,
+            status="idle",
+            progressed_units=0,
             next_wake_at=self._next_wake_at(),
-            more_due=self._has_due_work(observed_at),
+            more_due=False,
         )
 
     def _has_due_work(self, observed_at: datetime) -> bool:
-        return bool(self._due_sources(observed_at) or self._due_embedding_jobs(observed_at))
+        return bool(
+            self._due_sources(observed_at)
+            or (
+                self._attention_coordinator is not None
+                and self._attention_coordinator.has_due_work(observed_at)
+            )
+            or self._due_embedding_jobs(observed_at)
+        )
 
     def _delete_expired_raw_evidence(self, observed_at: datetime) -> None:
         with self._database_write_lock, self._lock:
@@ -1238,7 +1291,16 @@ class SQLiteWorldPerceptionHub:
                 """
             ).fetchone()
         value = row["next_wake_at"] if row is not None else None
-        return _parse_datetime(str(value)) if value is not None else None
+        acquisition_wake = _parse_datetime(str(value)) if value is not None else None
+        attention_wake = (
+            self._attention_coordinator.next_wake_at()
+            if self._attention_coordinator is not None
+            else None
+        )
+        return min(
+            (item for item in (acquisition_wake, attention_wake) if item is not None),
+            default=None,
+        )
 
     def health_snapshot(self) -> PerceptionHealthSnapshot:
         as_of = self._wall_clock()
@@ -1361,6 +1423,11 @@ class SQLiteWorldPerceptionHub:
                 (_iso_utc(as_of - timedelta(hours=24)),),
             ).fetchone()
         source_states = tuple(self._source_health(row=row, as_of=as_of) for row in source_rows)
+        shadow_attention = (
+            self._attention_coordinator.health_snapshot(as_of=as_of)
+            if self._attention_coordinator is not None
+            else None
+        )
         warning_reasons = tuple(
             f"source:{item.source_id}:{item.state}"
             for item in source_states
@@ -1380,6 +1447,12 @@ class SQLiteWorldPerceptionHub:
         )
         if embedding_failure_code is not None:
             warning_reasons += (f"index:{embedding_failure_code}",)
+            state = "degraded"
+        if shadow_attention is not None and shadow_attention.state in {
+            "retry_wait",
+            "degraded",
+        }:
+            warning_reasons += (f"attention:{shadow_attention.last_failure_code or 'retry_wait'}",)
             state = "degraded"
         current_sidecar_bytes = _file_size(self._path) + _file_size(Path(f"{self._path}-wal"))
         baseline_bytes = int(growth_baseline["sidecar_bytes"]) if growth_baseline else 0
@@ -1414,6 +1487,7 @@ class SQLiteWorldPerceptionHub:
             duplicate_suppressed_count=sum(
                 item.duplicate_suppressed_count for item in source_states
             ),
+            **({"shadow_attention": shadow_attention} if shadow_attention is not None else {}),
             warning_reasons=warning_reasons,
         )
 

@@ -2389,16 +2389,12 @@ class NpcProjection(FrozenModel):
     status: Literal["active", "retired"] = "active"
     # Present only for a provisional NPC materialized by one settled outcome.
     source_event_ref: str | None = Field(default=None, min_length=1)
-    effect_descriptor_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    effect_descriptor_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     accepted_event_ref: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def dynamic_introduction_binding_is_complete(self) -> "NpcProjection":
-        if (self.source_event_ref is None) != (
-            self.effect_descriptor_hash is None
-        ):
+        if (self.source_event_ref is None) != (self.effect_descriptor_hash is None):
             raise ValueError("dynamic NPC introduction binding must be complete")
         if self.accepted_event_ref is not None and self.source_event_ref is None:
             raise ValueError("accepted dynamic NPC requires its settlement source")
@@ -2429,9 +2425,7 @@ class LifeArcProjection(FrozenModel):
     supersedes_context_tag_prefixes: tuple[str, ...] = Field(
         default=(), max_length=8, exclude_if=lambda value: not value
     )
-    effect_descriptor_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    effect_descriptor_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     status: Literal["active", "completed", "abandoned"] = "active"
     started_at: datetime
     ends_at: datetime | None = None
@@ -2612,39 +2606,37 @@ class OutcomeProposalProjection(FrozenModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     confidence_bp: int = Field(ge=0, le=10_000)
     expires_at: datetime
-    decision_authority: Literal[
-        "character_model",
-        "recorded_world_draw",
-        "external_observation",
-    ] | None = None
+    decision_authority: (
+        Literal[
+            "character_model",
+            "recorded_world_draw",
+            "external_observation",
+        ]
+        | None
+    ) = None
     recorded_world_draw: RecordedWorldDrawBinding | None = None
     decision_model: str | None = Field(default=None, min_length=1, max_length=256)
-    decision_raw_output_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    decision_raw_output_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     decision_model_result_ref: str | None = Field(default=None, min_length=1)
     decision_model_result_event_ref: str | None = Field(default=None, min_length=1)
     decision_audit_proposal_event_ref: str | None = Field(default=None, min_length=1)
     decision_audit_proposal_event_payload_hash: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
-    decision_candidate_matrix_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    decision_candidate_matrix_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     adopt_proposed_life_direction: bool | None = None
     character_life_direction: BiographicalCoordinateReplacement | None = None
-    context_identity_version: Literal[
-        "life-aftermath-context.1",
-        "life-aftermath-context.2",
-        "life-aftermath-context.3",
-    ] | None = None
+    context_identity_version: (
+        Literal[
+            "life-aftermath-context.1",
+            "life-aftermath-context.2",
+            "life-aftermath-context.3",
+        ]
+        | None
+    ) = None
     context_capsule_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    context_model_content_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
-    context_snapshot_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    context_model_content_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    context_snapshot_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     context_cursor: ProjectionCursor | None = None
 
 
@@ -2813,9 +2805,7 @@ def _validate_narrative_tags(
         )
         for tag in tags
     ):
-        raise ValueError(
-            f"{label} tags must use the lowercase narrative namespace"
-        )
+        raise ValueError(f"{label} tags must use the lowercase narrative namespace")
 
 
 def _validate_biographical_coordinate_replacement(
@@ -2827,9 +2817,7 @@ def _validate_biographical_coordinate_replacement(
     forbidden = {"narrative:", "season:", "relationship:", "privacy:", "safety:"}
     if context_tags != tuple(sorted(set(context_tags))):
         raise ValueError(f"{label} context tags must be sorted and unique")
-    if supersedes_context_tag_prefixes != tuple(
-        sorted(set(supersedes_context_tag_prefixes))
-    ):
+    if supersedes_context_tag_prefixes != tuple(sorted(set(supersedes_context_tag_prefixes))):
         raise ValueError(f"{label} replacement prefixes must be sorted and unique")
     for tag in context_tags:
         namespace, separator, value = tag.partition(":")
@@ -2852,9 +2840,7 @@ def _validate_biographical_coordinate_replacement(
             or not all(char in "abcdefghijklmnopqrstuvwxyz0123456789._-" for char in namespace)
             or sum(item.startswith(prefix) for item in context_tags) != 1
         ):
-            raise ValueError(
-                f"{label} replacement requires one safe current coordinate value"
-            )
+            raise ValueError(f"{label} replacement requires one safe current coordinate value")
 
 
 class ProvisionalNpcIntroductionDescriptor(FrozenModel):
@@ -2887,9 +2873,7 @@ class ProvisionalNpcIntroductionDescriptor(FrozenModel):
         return cls(**values, descriptor_hash=_open_life_descriptor_hash(values))
 
     def canonical_hash(self) -> str:
-        return _open_life_descriptor_hash(
-            self.model_dump(mode="json", exclude={"descriptor_hash"})
-        )
+        return _open_life_descriptor_hash(self.model_dump(mode="json", exclude={"descriptor_hash"}))
 
     @model_validator(mode="after")
     def descriptor_is_canonical(self) -> "ProvisionalNpcIntroductionDescriptor":
@@ -2944,9 +2928,7 @@ class ProvisionalPlaceIntroductionDescriptor(FrozenModel):
         return cls(**values, descriptor_hash=_open_life_descriptor_hash(values))
 
     def canonical_hash(self) -> str:
-        return _open_life_descriptor_hash(
-            self.model_dump(mode="json", exclude={"descriptor_hash"})
-        )
+        return _open_life_descriptor_hash(self.model_dump(mode="json", exclude={"descriptor_hash"}))
 
     @model_validator(mode="after")
     def descriptor_is_canonical(self) -> "ProvisionalPlaceIntroductionDescriptor":
@@ -3029,9 +3011,7 @@ class BiographicalCoordinateReplacement(FrozenModel):
         )
         prefixes = set(self.replaces_context_tag_prefixes)
         if ("academic:" in prefixes) != ("calendar:" in prefixes):
-            raise ValueError(
-                "academic and calendar coordinates must be replaced together"
-            )
+            raise ValueError("academic and calendar coordinates must be replaced together")
         expected = _open_life_descriptor_hash(
             self.model_dump(mode="json", exclude={"descriptor_hash"})
         )
@@ -3094,9 +3074,7 @@ class DynamicLifeArcContextDescriptor(FrozenModel):
     )
     @classmethod
     def canonicalize_tag_sets(cls, value: object) -> object:
-        if isinstance(value, (list, tuple)) and all(
-            isinstance(item, str) for item in value
-        ):
+        if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
             return tuple(value)
         return value
 
@@ -3126,9 +3104,7 @@ class DynamicLifeArcContextDescriptor(FrozenModel):
         return cls(**values, descriptor_hash=_open_life_descriptor_hash(values))
 
     def canonical_hash(self) -> str:
-        return _open_life_descriptor_hash(
-            self.model_dump(mode="json", exclude={"descriptor_hash"})
-        )
+        return _open_life_descriptor_hash(self.model_dump(mode="json", exclude={"descriptor_hash"}))
 
     @model_validator(mode="after")
     def descriptor_is_canonical(self) -> "DynamicLifeArcContextDescriptor":
@@ -3277,9 +3253,7 @@ class PendingBiographicalSettlementProjection(FrozenModel):
     candidate_result_ref: str = Field(min_length=1)
     settled_at: datetime
     life_arc_effect: FrozenLifeArcEffectDescriptor | None = None
-    provisional_npc_introductions: tuple[
-        ProvisionalNpcIntroductionDescriptor, ...
-    ] = ()
+    provisional_npc_introductions: tuple[ProvisionalNpcIntroductionDescriptor, ...] = ()
     dynamic_life_arc_context: DynamicLifeArcContextDescriptor | None = None
 
     @model_validator(mode="after")
@@ -3320,15 +3294,11 @@ class OutcomeCandidateDescriptor(FrozenModel):
     # probability. Only recorded world-contingency draws consume this value.
     relative_plausibility_weight: int = Field(default=1, ge=1, le=1_000_000)
     life_arc_effect: FrozenLifeArcEffectDescriptor | None = None
-    provisional_npc_introductions: tuple[
-        ProvisionalNpcIntroductionDescriptor, ...
-    ] = ()
-    provisional_place_introductions: tuple[
-        ProvisionalPlaceIntroductionDescriptor, ...
-    ] = Field(default=(), exclude_if=lambda value: not value)
-    objective_biographical_transition: BiographicalCoordinateReplacement | None = (
-        None
+    provisional_npc_introductions: tuple[ProvisionalNpcIntroductionDescriptor, ...] = ()
+    provisional_place_introductions: tuple[ProvisionalPlaceIntroductionDescriptor, ...] = Field(
+        default=(), exclude_if=lambda value: not value
     )
+    objective_biographical_transition: BiographicalCoordinateReplacement | None = None
     dynamic_life_arc_context: DynamicLifeArcContextDescriptor | None = None
 
     @model_validator(mode="after")
@@ -3336,8 +3306,7 @@ class OutcomeCandidateDescriptor(FrozenModel):
         if (self.content_ref is None) != (self.content_payload_hash is None):
             raise ValueError("outcome candidate content binding is incomplete")
         provisional_refs = tuple(
-            item.provisional_entity_ref
-            for item in self.provisional_npc_introductions
+            item.provisional_entity_ref for item in self.provisional_npc_introductions
         )
         if len(provisional_refs) != len(set(provisional_refs)):
             raise ValueError("outcome candidate provisional entity refs must be unique")
@@ -3356,10 +3325,7 @@ class OutcomeCandidateDescriptor(FrozenModel):
         )
         if len(place_descriptor_hashes) != len(set(place_descriptor_hashes)):
             raise ValueError("outcome candidate provisional place descriptors must be unique")
-        if (
-            self.life_arc_effect is not None
-            and self.dynamic_life_arc_context is not None
-        ):
+        if self.life_arc_effect is not None and self.dynamic_life_arc_context is not None:
             raise ValueError(
                 "outcome candidate cannot carry reviewed and dynamic Life Arc effects together"
             )
@@ -3367,17 +3333,13 @@ class OutcomeCandidateDescriptor(FrozenModel):
             transition = self.objective_biographical_transition
             if (
                 transition.coordinate_ref.startswith("biography:direction.")
-                or any(
-                    item.startswith("direction.") for item in transition.context_tags
-                )
+                or any(item.startswith("direction.") for item in transition.context_tags)
                 or any(
                     item.startswith("direction.")
                     for item in transition.replaces_context_tag_prefixes
                 )
             ):
-                raise ValueError(
-                    "objective transition cannot author character direction state"
-                )
+                raise ValueError("objective transition cannot author character direction state")
         privacy_rank = {
             "public": 0,
             "shareable": 1,
@@ -3387,24 +3349,24 @@ class OutcomeCandidateDescriptor(FrozenModel):
         }
         if (
             self.objective_biographical_transition is not None
-            and privacy_rank[
-                self.objective_biographical_transition.privacy_class
-            ]
+            and privacy_rank[self.objective_biographical_transition.privacy_class]
             < privacy_rank[self.privacy_class]
         ):
-            raise ValueError(
-                "objective transition cannot weaken outcome privacy"
+            raise ValueError("objective transition cannot weaken outcome privacy")
+        if (
+            any(
+                privacy_rank[item.privacy_class] < privacy_rank[self.privacy_class]
+                for item in self.provisional_npc_introductions
             )
-        if any(
-            privacy_rank[item.privacy_class] < privacy_rank[self.privacy_class]
-            for item in self.provisional_npc_introductions
-        ) or any(
-            privacy_rank[item.privacy_class] < privacy_rank[self.privacy_class]
-            for item in self.provisional_place_introductions
-        ) or (
-            self.dynamic_life_arc_context is not None
-            and privacy_rank[self.dynamic_life_arc_context.privacy_class]
-            < privacy_rank[self.privacy_class]
+            or any(
+                privacy_rank[item.privacy_class] < privacy_rank[self.privacy_class]
+                for item in self.provisional_place_introductions
+            )
+            or (
+                self.dynamic_life_arc_context is not None
+                and privacy_rank[self.dynamic_life_arc_context.privacy_class]
+                < privacy_rank[self.privacy_class]
+            )
         ):
             raise ValueError("outcome effect cannot weaken candidate privacy")
         return self
@@ -3456,13 +3418,8 @@ class WorldOccurrenceProjection(FrozenModel):
                 raise ValueError("settled occurrence requires one candidate outcome")
         elif self.settled_outcome_ref is not None:
             raise ValueError("non-settled occurrence cannot retain a settled outcome")
-        if (
-            self.status != "settled"
-            and self.settled_dynamic_life_direction_adopted is not None
-        ):
-            raise ValueError(
-                "non-settled occurrence cannot retain a direction-adoption decision"
-            )
+        if self.status != "settled" and self.settled_dynamic_life_direction_adopted is not None:
+            raise ValueError("non-settled occurrence cannot retain a direction-adoption decision")
         if self.candidate_outcomes:
             refs = tuple(item.candidate_result_ref for item in self.candidate_outcomes)
             if refs != self.candidate_outcome_refs or len(set(refs)) != len(refs):
@@ -3471,12 +3428,8 @@ class WorldOccurrenceProjection(FrozenModel):
                 self.candidate_outcomes
             ):
                 raise ValueError("outcome candidate result ids must be unique")
-            if len(
-                {item.causal_authority for item in self.candidate_outcomes}
-            ) != 1:
-                raise ValueError(
-                    "one occurrence candidate matrix must use one causal authority"
-                )
+            if len({item.causal_authority for item in self.candidate_outcomes}) != 1:
+                raise ValueError("one occurrence candidate matrix must use one causal authority")
         return self
 
 
@@ -4241,10 +4194,13 @@ class PrivateImpressionProposalProjection(FrozenModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     appraisal_refs: tuple[AppraisalMeaningRef, ...] = Field(min_length=1)
     policy_refs: tuple[str, ...] = Field(min_length=1)
-    reflection_contract: Literal[
-        "private-impression-draft.3",
-        "private-impression-draft.4",
-    ] | None = None
+    reflection_contract: (
+        Literal[
+            "private-impression-draft.3",
+            "private-impression-draft.4",
+        ]
+        | None
+    ) = None
     reflection_source_refs: tuple[str, ...] = ()
     source_model_result: str | None = Field(default=None, min_length=1, max_length=256)
     source_capsule_id: str | None = Field(
@@ -5690,6 +5646,13 @@ class CommitResult(FrozenModel):
 # event and cursor models without creating a module-import cycle.
 from .accepted_effect_contracts import AcceptanceManifestRefV3  # noqa: E402
 from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
+from .external_perception_events import (  # noqa: E402
+    ExternalPerceptionProjection,
+    ExternalSignalSnapshotProjection,
+)
+from .external_perception_acceptance_manifest import (  # noqa: E402
+    ExternalPerceptionAcceptanceManifest,
+)
 
 
 class LedgerProjection(FrozenModel):
@@ -5740,6 +5703,9 @@ class LedgerProjection(FrozenModel):
     tool_results: tuple[ToolResultProjection, ...] = ()
     perception_requests: tuple[PerceptionRequestProjection, ...] = ()
     perception_results: tuple[PerceptionResultProjection, ...] = ()
+    external_signal_snapshots: tuple[ExternalSignalSnapshotProjection, ...] = ()
+    external_perceptions: tuple[ExternalPerceptionProjection, ...] = ()
+    external_perception_acceptance_manifests: tuple[ExternalPerceptionAcceptanceManifest, ...] = ()
     appearance_states: tuple[AppearanceStateProjection, ...] = ()
     visible_physical_states: tuple[VisiblePhysicalStateProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
@@ -5762,9 +5728,7 @@ class LedgerProjection(FrozenModel):
     life_ecology_schedule: LifeEcologyScheduleProjection | None = None
     pending_contextual_life_sources: tuple[PendingContextualLifeSourceProjection, ...] = ()
     contextual_life_retries: tuple[ContextualLifeRetryProjection, ...] = ()
-    pending_biographical_settlements: tuple[
-        PendingBiographicalSettlementProjection, ...
-    ] = ()
+    pending_biographical_settlements: tuple[PendingBiographicalSettlementProjection, ...] = ()
     pending_external_observations: tuple[ExternalObservation, ...] = ()
     execution_receipts: tuple[ExecutionReceipt, ...] = ()
     budget_settlements: tuple[BudgetSettlement, ...] = ()
@@ -5946,9 +5910,7 @@ class LedgerProjection(FrozenModel):
                 )
             ):
                 raise ValueError("World place ref lacks exact settlement identity")
-        committed_by_ref = {
-            item.event_id: item for item in self.committed_world_event_refs
-        }
+        committed_by_ref = {item.event_id: item for item in self.committed_world_event_refs}
         for coordinate in self.biographical_coordinates:
             source = committed_by_ref.get(coordinate.settlement_event_ref)
             occurrence = next(
@@ -5956,8 +5918,7 @@ class LedgerProjection(FrozenModel):
                     item
                     for item in self.world_occurrences
                     if item.status == "settled"
-                    and item.settlement_event_ref
-                    == coordinate.settlement_event_ref
+                    and item.settlement_event_ref == coordinate.settlement_event_ref
                     and item.settled_at == coordinate.settled_at
                 ),
                 None,
@@ -5975,8 +5936,7 @@ class LedgerProjection(FrozenModel):
                     (
                         item
                         for item in occurrence.candidate_outcomes
-                        if item.candidate_result_ref
-                        == occurrence.settled_outcome_ref
+                        if item.candidate_result_ref == occurrence.settled_outcome_ref
                     ),
                     None,
                 )
@@ -5987,24 +5947,19 @@ class LedgerProjection(FrozenModel):
                 coordinate_ref=coordinate.coordinate_ref,
                 summary=coordinate.summary,
                 context_tags=coordinate.context_tags,
-                replaces_context_tag_prefixes=(
-                    coordinate.replaces_context_tag_prefixes
-                ),
+                replaces_context_tag_prefixes=(coordinate.replaces_context_tag_prefixes),
                 privacy_class=coordinate.privacy_class,
             )
             expected_descriptor = (
                 proposal.character_life_direction
-                if proposal is not None
-                and coordinate.authority_kind == "character_direction"
+                if proposal is not None and coordinate.authority_kind == "character_direction"
                 else candidate.objective_biographical_transition
-                if candidate is not None
-                and coordinate.authority_kind == "objective_transition"
+                if candidate is not None and coordinate.authority_kind == "objective_transition"
                 else None
             )
             if (
                 expected_descriptor is not None
-                and expected_descriptor.coordinate_ref
-                != coordinate.coordinate_ref
+                and expected_descriptor.coordinate_ref != coordinate.coordinate_ref
                 and expected_descriptor.replaces_context_tag_prefixes
                 == coordinate.replaces_context_tag_prefixes
             ):
@@ -6023,12 +5978,9 @@ class LedgerProjection(FrozenModel):
                 or occurrence is None
                 or proposal is None
                 or proposal.occurrence_id != occurrence.occurrence_id
-                or proposal.candidate_result_ref
-                != occurrence.settled_outcome_ref
+                or proposal.candidate_result_ref != occurrence.settled_outcome_ref
                 or source.payload_hash != coordinate.settlement_payload_hash
                 or descriptor != expected_descriptor
             ):
-                raise ValueError(
-                    "biographical coordinate lacks exact settlement authority"
-                )
+                raise ValueError("biographical coordinate lacks exact settlement authority")
         return self

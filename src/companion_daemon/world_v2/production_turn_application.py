@@ -539,6 +539,101 @@ def _proactive_reliability_health(
     }
 
 
+def external_perception_downstream_health(
+    projection: LedgerProjection,
+) -> dict[str, object] | None:
+    """Correlate the latest perception with its exact Life/Social outcomes."""
+
+    if not projection.external_perceptions:
+        return None
+    perception = projection.external_perceptions[-1]
+    batch = tuple(
+        item
+        for item in projection.external_perceptions
+        if item.attention_attempt_id == perception.attention_attempt_id
+    )
+    perception_refs = frozenset(item.accepted_event_ref for item in batch)
+    latest_message_revision = (
+        projection.message_observations[-1].world_revision
+        if projection.message_observations
+        else 0
+    )
+    stimulus_refs = tuple(
+        sorted(
+            (
+                item
+                for item in projection.committed_world_event_refs
+                if item.world_revision > latest_message_revision
+                and item.event_type in SITUATION_STIMULUS_EVENT_TYPES
+            ),
+            key=lambda item: (item.logical_time, item.world_revision, item.event_id),
+        )
+    )
+    social_anchor_refs = set(perception_refs)
+    clusters: list[list[object]] = []
+    for ref in stimulus_refs:
+        if (
+            not clusters
+            or ref.logical_time - clusters[-1][0].logical_time >= timedelta(minutes=10)
+        ):
+            clusters.append([ref])
+        else:
+            clusters[-1].append(ref)
+    for cluster in clusters:
+        if any(item.event_id in perception_refs for item in cluster):
+            social_anchor_refs.add(cluster[0].event_id)
+    related = tuple(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "proactive_action_deliberation"
+        and item.source_evidence_ref in social_anchor_refs
+    )
+    latest_related = related[-1] if related else None
+    social_state = "opportunity_pending"
+    if latest_related is not None and latest_related.state != "terminal":
+        social_state = "considering"
+    elif latest_related is not None:
+        outcome = str(latest_related.runtime_outcome_ref or "")
+        if outcome == "proactive:silent":
+            social_state = "model_silent_no_action"
+        elif outcome == "proactive:grounding-rejected":
+            social_state = "grounding_rejected_no_action"
+        elif outcome.startswith("proactive:deliberation-failed:"):
+            social_state = "technical_failure_retry"
+        elif outcome.startswith("proactive:authorized:"):
+            action_id = outcome.removeprefix("proactive:authorized:")
+            action = next(
+                (item for item in projection.actions if item.action_id == action_id),
+                None,
+            )
+            social_state = (
+                "action_pending"
+                if action is not None
+                and action.state not in {"delivered", "failed", "cancelled", "expired"}
+                else "action_settled"
+            )
+        else:
+            social_state = "considered_no_action"
+    life_processes = tuple(
+        item
+        for item in projection.trigger_processes
+        if item.process_kind == "life_ecology"
+        and item.source_evidence_ref in perception_refs
+    )
+    life_state = "opportunity_pending"
+    if any(item.state == "terminal" for item in life_processes):
+        life_state = "considered"
+    elif life_processes:
+        life_state = "considering"
+    return {
+        "perception_event_ref": batch[0].accepted_event_ref,
+        "perception_event_refs": [item.accepted_event_ref for item in batch],
+        "attention_attempt_id": perception.attention_attempt_id,
+        "life_state": life_state,
+        "social_state": social_state,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class LifeEcologyComposition:
     """Explicit production profile for the durable Life Ecology worker.
@@ -2716,6 +2811,7 @@ class WorldV2TurnApplication:
                 **turn_summary,
                 "character_outcome": self._last_character_outcome or "unavailable",
             }
+        external_perception_downstream = external_perception_downstream_health(projection)
         return {
             "initiative_last_status": last_status,
             "initiative_last_reason": last_reason,
@@ -2753,6 +2849,7 @@ class WorldV2TurnApplication:
             "initiative_reliability_24h": initiative_reliability_24h,
             "initiative_warning": bool(warning_reasons),
             "initiative_warning_reasons": warning_reasons,
+            "external_perception_downstream": external_perception_downstream,
             "life_event_count": life_event_count,
             "occurrence_count": occurrence_count,
             "experience_count": experience_count,

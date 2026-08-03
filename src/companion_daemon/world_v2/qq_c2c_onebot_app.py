@@ -517,6 +517,11 @@ def create_qq_c2c_onebot_app(
         scheduler_view["life_source_authority"] = (
             host.life_source_authority_health()
         )
+        external_perception_health = host.external_world_perception_health()
+        downstream = world.get("external_perception_downstream")
+        if isinstance(downstream, dict):
+            external_perception_health["downstream"] = downstream
+        scheduler_view["external_world_perception"] = external_perception_health
         scheduler_view["performance"] = production_latency_health_snapshot(
             host.latency_samples()
         )

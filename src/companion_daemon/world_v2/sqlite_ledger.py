@@ -164,6 +164,9 @@ _SEMANTIC_CONDITIONAL_FIELDS = frozenset(
         "world_places",
         "biographical_coordinates",
         "expression_payload_descriptors",
+        "external_signal_snapshots",
+        "external_perceptions",
+        "external_perception_acceptance_manifests",
         "life_ecology_schedule",
     }
 )
@@ -2913,8 +2916,7 @@ class SQLiteWorldLedger:
                     if (
                         rebuilt.semantic_hash != str(head["semantic_hash"])
                         or changed_fields != {"response_expectation_assessments"}
-                        or current_dump.get("response_expectation_assessments")
-                        not in (None, [])
+                        or current_dump.get("response_expectation_assessments") not in (None, [])
                         or not rebuilt_dump.get("response_expectation_assessments")
                     ):
                         raise LedgerIntegrityError(
@@ -3852,11 +3854,14 @@ class SQLiteWorldLedger:
             expression_beats=projection.expression_beats,
             interaction_bids=projection.interaction_bids,
             interaction_bid_proposals=projection.interaction_bid_proposals,
-            response_expectation_assessments=(
-                projection.response_expectation_assessments
-            ),
+            response_expectation_assessments=(projection.response_expectation_assessments),
             perception_requests=projection.perception_requests,
             perception_results=projection.perception_results,
+            external_signal_snapshots=projection.external_signal_snapshots,
+            external_perceptions=projection.external_perceptions,
+            external_perception_acceptance_manifests=(
+                projection.external_perception_acceptance_manifests
+            ),
             read_only_tool_requests=projection.read_only_tool_requests,
             tool_results=projection.tool_results,
             acceptance_decisions=projection.acceptance_decisions,
@@ -5377,9 +5382,7 @@ class SQLiteWorldLedger:
         for event_id in event_ids:
             located = self.lookup_event_commit(event_id)
             if located is None:
-                raise LedgerIntegrityError(
-                    "indexed historical Fact event is unavailable"
-                )
+                raise LedgerIntegrityError("indexed historical Fact event is unavailable")
             output.append(located[0])
         return tuple(output)
 

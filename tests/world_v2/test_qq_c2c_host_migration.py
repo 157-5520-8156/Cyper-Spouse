@@ -3280,6 +3280,11 @@ def test_qq_health_reports_a_running_scheduler_even_when_the_world_is_starved(
         "enabled": False,
         "status": "disabled",
     }
+    assert scheduler["external_world_perception"] == {
+        "enabled": False,
+        "state": "disabled",
+        "reason": "mode_off",
+    }
     assert scheduler["proactive_source_authority"] == {
         "status": "fact_effects_fail_closed",
         "warning": True,

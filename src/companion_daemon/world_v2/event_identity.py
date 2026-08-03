@@ -27,6 +27,9 @@ from .media_continuation_acceptance_manifest import (
 from .social_action_acceptance import (
     SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
 )
+from .external_perception_acceptance_manifest import (
+    EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION,
+)
 
 
 def domain_idempotency_key(
@@ -84,6 +87,7 @@ def _life_identity_components(
             MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
             *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
+            EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -228,6 +232,19 @@ def _life_identity_components(
         return world_id, _nested(payload, "request", "request_id")
     if event_type == "PerceptionResultAccepted":
         return world_id, _nested(payload, "result", "result_id")
+    if event_type == "ExternalSignalSnapshotAdopted":
+        return (
+            world_id,
+            _nested(payload, "snapshot", "snapshot_ref"),
+            _nested(payload, "snapshot", "signal_revision_ref"),
+        )
+    if event_type == "ExternalPerceptionRecorded":
+        return (
+            world_id,
+            payload.get("attention_attempt_id"),
+            payload.get("snapshot_ref"),
+            _nested(payload, "channel", "channel_ref"),
+        )
     if event_type == "MediaDeliveryThreadProposalRecorded":
         return world_id, payload.get("media_thread_proposal_id"), payload.get("change_id")
     if event_type in {"MediaDeliveryThreadOpened", "MediaDeliveryThreadUpdated"}:
@@ -308,10 +325,7 @@ def _life_identity_components(
         and payload.get("audit_contract") == "proposal-envelope-audit.1"
     ):
         return world_id, payload.get("trigger_ref"), payload.get("proposal_id")
-    if (
-        event_type == "ProposalRecorded"
-        and payload.get("proposal_kind") == "continuation"
-    ):
+    if event_type == "ProposalRecorded" and payload.get("proposal_kind") == "continuation":
         return world_id, payload.get("trigger_ref"), payload.get("proposal_id")
     if event_type == "FactCommitProposalRecorded":
         return world_id, payload.get("proposal_id"), payload.get("proposal_hash")
@@ -397,8 +411,7 @@ def _life_identity_components(
         )
     if (
         event_type == "AcceptanceRecorded"
-        and payload.get("manifest_version")
-        in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
+        and payload.get("manifest_version") in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
     ):
         return (
             world_id,
@@ -438,8 +451,17 @@ def _life_identity_components(
         )
     if (
         event_type == "AcceptanceRecorded"
-        and payload.get("manifest_version")
-        == RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION
+        and payload.get("manifest_version") == RELATIONSHIP_ADJUSTMENT_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION
     ):
         return (
             world_id,

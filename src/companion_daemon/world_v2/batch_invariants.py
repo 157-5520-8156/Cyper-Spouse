@@ -127,6 +127,15 @@ from .social_action_acceptance import (
     parse_social_deferred_acceptance_manifest,
     social_deferred_authority_event_types,
 )
+from .external_perception_acceptance_manifest import (
+    EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION,
+    EXTERNAL_PERCEPTION_ACCEPTANCE_POLICY_DIGEST,
+    ExternalPerceptionAcceptanceManifest,
+)
+from .external_perception_events import (
+    ExternalPerceptionRecordedPayload,
+    ExternalSignalSnapshotAdoptedPayload,
+)
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
@@ -205,6 +214,7 @@ def validate_commit_batch(
         reject_media_thread_acceptance_manifest_without_recorder(events)
         reject_expression_plan_manifest_without_recorder(events)
         reject_social_deferred_manifest_without_recorder(events)
+        reject_external_perception_manifest_without_recorder(events)
     _reject_new_private_impression_without_role_reflection(events)
     _validate_deliberation_audit_transaction(events)
     _validate_life_development_location_authority_batch(events)
@@ -275,6 +285,11 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_media_thread_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_external_perception_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -565,6 +580,17 @@ def _validate_expression_receipt_lifecycle_batch(events: Sequence[WorldEvent]) -
 def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> None:
     """Keep Phase-4A provider lineage and its optional Proposal indivisible."""
 
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        # This lane has its own closed validator because accepted batches must
+        # begin with AcceptanceRecorded while the ordinary proposal audit lane
+        # intentionally begins with ModelResultRecorded.
+        return
+
     context_v2_character_outcomes = [
         event
         for event in events
@@ -806,9 +832,7 @@ def _validate_life_development_location_authority_batch(
             possibility_version != "life-development-possibility.7"
             and _possibility_carries_objective_transition(possibility)
         ):
-            raise ValueError(
-                "objective transition requires possibility authority version .7"
-            )
+            raise ValueError("objective transition requires possibility authority version .7")
         if possibility_version in {
             "life-development-possibility.3",
             "life-development-possibility.4",
@@ -825,9 +849,7 @@ def _validate_life_development_location_authority_batch(
                 ).encode("utf-8")
             ).hexdigest()
             if proposal.get("possibility_authority_hash") != expected_possibility_hash:
-                raise ValueError(
-                    "life-development possibility subject authority hash is invalid"
-                )
+                raise ValueError("life-development possibility subject authority hash is invalid")
             authored_subject_ref = possibility.get("authored_subject_ref")
             outcomes = possibility.get("outcomes")
             if (
@@ -845,14 +867,10 @@ def _validate_life_development_location_authority_batch(
                 )
             deliberation = proposal.get("world_author_deliberation")
             manifest_value = (
-                deliberation.get("capability_manifest")
-                if isinstance(deliberation, dict)
-                else None
+                deliberation.get("capability_manifest") if isinstance(deliberation, dict) else None
             )
             if not isinstance(manifest_value, dict):
-                raise ValueError(
-                    "life-development subject has no pinned capability manifest"
-                )
+                raise ValueError("life-development subject has no pinned capability manifest")
             try:
                 subject_manifest = LifeDevelopmentCapabilityManifest.model_validate_json(
                     json.dumps(
@@ -863,25 +881,18 @@ def _validate_life_development_location_authority_batch(
                     )
                 )
             except ValueError as exc:
-                raise ValueError(
-                    "life-development subject capability manifest is invalid"
-                ) from exc
+                raise ValueError("life-development subject capability manifest is invalid") from exc
             if (
                 subject_manifest.owner_actor_ref != authored_subject_ref
-                or proposal.get("capability_manifest_version")
-                != subject_manifest.version
-                or proposal.get("capability_manifest_hash")
-                != subject_manifest.manifest_hash
+                or proposal.get("capability_manifest_version") != subject_manifest.version
+                or proposal.get("capability_manifest_hash") != subject_manifest.manifest_hash
             ):
-                raise ValueError(
-                    "life-development authored subject exceeds its pinned authority"
-                )
+                raise ValueError("life-development authored subject exceeds its pinned authority")
             possibility_entity_refs = possibility.get("entity_refs")
             if (
                 not isinstance(possibility_entity_refs, list)
                 or any(not isinstance(ref, str) for ref in possibility_entity_refs)
-                or not set(possibility_entity_refs)
-                <= set(subject_manifest.entity_refs)
+                or not set(possibility_entity_refs) <= set(subject_manifest.entity_refs)
             ):
                 raise ValueError(
                     "life-development possibility entities exceed pinned manifest authority"
@@ -901,9 +912,7 @@ def _validate_life_development_location_authority_batch(
                 "life-development-possibility.7",
             }:
                 review = proposal.get("world_author_source_closure_review")
-                review_deliberation = proposal.get(
-                    "world_author_source_closure_deliberation"
-                )
+                review_deliberation = proposal.get("world_author_source_closure_deliberation")
                 if not isinstance(review, dict) or not isinstance(
                     review_deliberation,
                     dict,
@@ -938,16 +947,11 @@ def _validate_life_development_location_authority_batch(
                     ).encode("utf-8")
                 ).hexdigest()
                 if (
-                    proposal.get("world_author_source_closure_review_hash")
-                    != expected_review_hash
-                    or proposal.get(
-                        "world_author_source_closure_deliberation_hash"
-                    )
+                    proposal.get("world_author_source_closure_review_hash") != expected_review_hash
+                    or proposal.get("world_author_source_closure_deliberation_hash")
                     != expected_review_deliberation_hash
-                    or review_deliberation.get("role")
-                    != "world_author_source_reviewer"
-                    or review_deliberation.get("capsule_id")
-                    != deliberation.get("capsule_id")
+                    or review_deliberation.get("role") != "world_author_source_reviewer"
+                    or review_deliberation.get("capsule_id") != deliberation.get("capsule_id")
                     or review_deliberation.get("context_cursor")
                     != deliberation.get("context_cursor")
                     or review_deliberation.get("capability_manifest")
@@ -957,18 +961,14 @@ def _validate_life_development_location_authority_batch(
                         str,
                     )
                 ):
-                    raise ValueError(
-                        "life-development source-closure authority binding is invalid"
-                    )
+                    raise ValueError("life-development source-closure authority binding is invalid")
                 raw_output_hash = proposal.get("world_author_raw_output_hash")
                 manifest_hash = proposal.get("capability_manifest_hash")
                 if not isinstance(raw_output_hash, str) or not isinstance(
                     manifest_hash,
                     str,
                 ):
-                    raise ValueError(
-                        "life-development review subject hashes are missing"
-                    )
+                    raise ValueError("life-development review subject hashes are missing")
                 request_hashes = review_deliberation.get("request_hashes")
                 review_cursor = review_deliberation.get("context_cursor")
                 trigger_id = proposal.get("trigger_id")
@@ -1000,28 +1000,20 @@ def _validate_life_development_location_authority_batch(
                         world_author_raw_output_hash=raw_output_hash,
                         capability_manifest_hash=manifest_hash,
                     )
-                if review_deliberation.get("decision_subject_hash") != (
-                    expected_source_subject
-                ):
-                    raise ValueError(
-                        "life-development source-closure reviewed another subject"
-                    )
+                if review_deliberation.get("decision_subject_hash") != (expected_source_subject):
+                    raise ValueError("life-development source-closure reviewed another subject")
             if possibility_version in {
                 "life-development-possibility.5",
                 "life-development-possibility.6",
                 "life-development-possibility.7",
             }:
                 novel_review = proposal.get("world_author_novel_origin_review")
-                novel_deliberation = proposal.get(
-                    "world_author_novel_origin_deliberation"
-                )
+                novel_deliberation = proposal.get("world_author_novel_origin_deliberation")
                 if not isinstance(novel_review, dict) or not isinstance(
                     novel_deliberation,
                     dict,
                 ):
-                    raise ValueError(
-                        "life-development v5 possibility lacks novel-origin authority"
-                    )
+                    raise ValueError("life-development v5 possibility lacks novel-origin authority")
                 if (
                     novel_review.get("decision") != "supported"
                     or novel_review.get("unsupported_claims") != []
@@ -1035,9 +1027,7 @@ def _validate_life_development_location_authority_batch(
                     != []
                     or novel_review.get("undeclared_premise_fragments") != []
                 ):
-                    raise ValueError(
-                        "life-development v5 possibility has unsupported novel origin"
-                    )
+                    raise ValueError("life-development v5 possibility has unsupported novel origin")
                 expected_novel_hash = hashlib.sha256(
                     json.dumps(
                         novel_review,
@@ -1055,14 +1045,11 @@ def _validate_life_development_location_authority_batch(
                     ).encode("utf-8")
                 ).hexdigest()
                 if (
-                    proposal.get("world_author_novel_origin_review_hash")
-                    != expected_novel_hash
+                    proposal.get("world_author_novel_origin_review_hash") != expected_novel_hash
                     or proposal.get("world_author_novel_origin_deliberation_hash")
                     != expected_novel_deliberation_hash
-                    or novel_deliberation.get("role")
-                    != "world_author_novel_origin_critic"
-                    or novel_deliberation.get("capsule_id")
-                    != deliberation.get("capsule_id")
+                    or novel_deliberation.get("role") != "world_author_novel_origin_critic"
+                    or novel_deliberation.get("capsule_id") != deliberation.get("capsule_id")
                     or novel_deliberation.get("context_cursor")
                     != deliberation.get("context_cursor")
                     or novel_deliberation.get("capability_manifest")
@@ -1072,9 +1059,7 @@ def _validate_life_development_location_authority_batch(
                         str,
                     )
                 ):
-                    raise ValueError(
-                        "life-development novel-origin authority binding is invalid"
-                    )
+                    raise ValueError("life-development novel-origin authority binding is invalid")
                 novel_request_hashes = novel_deliberation.get("request_hashes")
                 novel_cursor = novel_deliberation.get("context_cursor")
                 if possibility_version in {
@@ -1084,10 +1069,7 @@ def _validate_life_development_location_authority_batch(
                     if not (
                         isinstance(novel_request_hashes, list)
                         and novel_request_hashes
-                        and all(
-                            isinstance(item, str)
-                            for item in novel_request_hashes
-                        )
+                        and all(isinstance(item, str) for item in novel_request_hashes)
                         and isinstance(novel_cursor, dict)
                         and isinstance(trigger_id, str)
                     ):
@@ -1102,21 +1084,15 @@ def _validate_life_development_location_authority_batch(
                             context_cursor=novel_cursor,
                             wake_event_ref=trigger_id,
                             wake_world_id=proposal_event.world_id,
-                            wake_logical_time=(
-                                proposal_event.logical_time.isoformat()
-                            ),
+                            wake_logical_time=(proposal_event.logical_time.isoformat()),
                         )
                     }
                 else:
-                    expected_novel_subjects = (
-                        legacy_novel_origin_review_subject_hashes(
-                            world_author_raw_output_hash=raw_output_hash,
-                            capability_manifest_hash=manifest_hash,
-                        )
+                    expected_novel_subjects = legacy_novel_origin_review_subject_hashes(
+                        world_author_raw_output_hash=raw_output_hash,
+                        capability_manifest_hash=manifest_hash,
                     )
-                if novel_deliberation.get("decision_subject_hash") not in (
-                    expected_novel_subjects
-                ):
+                if novel_deliberation.get("decision_subject_hash") not in (expected_novel_subjects):
                     raise ValueError(
                         "life-development novel-origin critic reviewed another subject"
                     )
@@ -1189,14 +1165,10 @@ def _validate_life_development_location_authority_batch(
             raise ValueError("life-development location capability snapshot does not match its ref")
         deliberation = proposal.get("world_author_deliberation")
         manifest_value = (
-            deliberation.get("capability_manifest")
-            if isinstance(deliberation, dict)
-            else None
+            deliberation.get("capability_manifest") if isinstance(deliberation, dict) else None
         )
         if not isinstance(manifest_value, dict):
-            raise ValueError(
-                "life-development location has no pinned capability manifest"
-            )
+            raise ValueError("life-development location has no pinned capability manifest")
         try:
             manifest = LifeDevelopmentCapabilityManifest.model_validate_json(
                 json.dumps(
@@ -1207,16 +1179,12 @@ def _validate_life_development_location_authority_batch(
                 )
             )
         except ValueError as exc:
-            raise ValueError(
-                "life-development pinned capability manifest is invalid"
-            ) from exc
+            raise ValueError("life-development pinned capability manifest is invalid") from exc
         if (
             proposal.get("capability_manifest_version") != manifest.version
             or proposal.get("capability_manifest_hash") != manifest.manifest_hash
         ):
-            raise ValueError(
-                "life-development pinned capability manifest identity changed"
-            )
+            raise ValueError("life-development pinned capability manifest identity changed")
         if not any(
             item.capability_ref == capability_ref and item == capability
             for item in manifest.location_capabilities
@@ -1344,22 +1312,13 @@ def _validate_life_development_subject_effect(
             and event.causation_id == proposal_event.event_id
         ]
         if len(matching) != 1:
-            raise ValueError(
-                "life-development subject authority requires one adjacent Plan"
-            )
+            raise ValueError("life-development subject authority requires one adjacent Plan")
         effect = ActivityPlannedPayload.model_validate_json(matching[0].payload_json)
-        if (
-            effect.plan.plan_id != effect_ref
-            or effect.plan.owner_actor_ref != authored_subject_ref
-        ):
-            raise ValueError(
-                "life-development Plan owner exceeds authored subject authority"
-            )
+        if effect.plan.plan_id != effect_ref or effect.plan.owner_actor_ref != authored_subject_ref:
+            raise ValueError("life-development Plan owner exceeds authored subject authority")
         character_choice = proposal.get("character_choice")
         chosen_participants = (
-            character_choice.get("participant_refs")
-            if isinstance(character_choice, dict)
-            else None
+            character_choice.get("participant_refs") if isinstance(character_choice, dict) else None
         )
         entity_refs = possibility.get("entity_refs")
         if (
@@ -1370,9 +1329,7 @@ def _validate_life_development_subject_effect(
             or not set(chosen_participants) <= set(entity_refs)
             or effect.plan.participant_refs != tuple(chosen_participants)
         ):
-            raise ValueError(
-                "life-development Plan participants exceed character choice authority"
-            )
+            raise ValueError("life-development Plan participants exceed character choice authority")
         aspiration_source_ref = (
             character_choice.get("crystallized_aspiration_source_ref")
             if isinstance(character_choice, dict)
@@ -1380,26 +1337,19 @@ def _validate_life_development_subject_effect(
         )
         deliberation = proposal.get("world_author_deliberation")
         capability_manifest = (
-            deliberation.get("capability_manifest")
-            if isinstance(deliberation, dict)
-            else None
+            deliberation.get("capability_manifest") if isinstance(deliberation, dict) else None
         )
         active_aspiration_refs = (
             capability_manifest.get("active_aspiration_source_refs", [])
             if isinstance(capability_manifest, dict)
             else []
         )
-        if (
-            aspiration_source_ref is not None
-            and (
-                not isinstance(aspiration_source_ref, str)
-                or not isinstance(active_aspiration_refs, list)
-                or aspiration_source_ref not in active_aspiration_refs
-            )
+        if aspiration_source_ref is not None and (
+            not isinstance(aspiration_source_ref, str)
+            or not isinstance(active_aspiration_refs, list)
+            or aspiration_source_ref not in active_aspiration_refs
         ):
-            raise ValueError(
-                "life-development aspiration choice exceeds pinned authority"
-            )
+            raise ValueError("life-development aspiration choice exceeds pinned authority")
         aspiration_events = [
             event
             for event in events
@@ -1408,13 +1358,9 @@ def _validate_life_development_subject_effect(
         ]
         if aspiration_source_ref is None:
             if aspiration_events:
-                raise ValueError(
-                    "life-development Plan has an undeclared aspiration effect"
-                )
+                raise ValueError("life-development Plan has an undeclared aspiration effect")
         elif len(aspiration_events) != 1:
-            raise ValueError(
-                "life-development aspiration choice requires one adjacent effect"
-            )
+            raise ValueError("life-development aspiration choice requires one adjacent effect")
         else:
             aspiration_effect = AspirationCrystallizedPayload.model_validate_json(
                 aspiration_events[0].payload_json
@@ -1436,12 +1382,8 @@ def _validate_life_development_subject_effect(
             and event.causation_id == proposal_event.event_id
         ]
         if len(matching) != 1:
-            raise ValueError(
-                "life-development subject authority requires one adjacent occurrence"
-            )
-        effect = WorldOccurrenceCommittedPayload.model_validate_json(
-            matching[0].payload_json
-        )
+            raise ValueError("life-development subject authority requires one adjacent occurrence")
+        effect = WorldOccurrenceCommittedPayload.model_validate_json(matching[0].payload_json)
         entity_refs = possibility.get("entity_refs")
         if not isinstance(entity_refs, list) or any(
             not isinstance(ref, str) for ref in entity_refs
@@ -1456,27 +1398,17 @@ def _validate_life_development_subject_effect(
                 "life-development occurrence participants exceed authored subject authority"
             )
         candidates = effect.occurrence.candidate_outcomes
-        if (
-            possibility_version != "life-development-possibility.7"
-            and any(
-                candidate.objective_biographical_transition is not None
-                for candidate in candidates
-            )
+        if possibility_version != "life-development-possibility.7" and any(
+            candidate.objective_biographical_transition is not None for candidate in candidates
         ):
-            raise ValueError(
-                "objective transition requires possibility authority version .7"
-            )
+            raise ValueError("objective transition requires possibility authority version .7")
         if possibility_version == "life-development-possibility.7":
             outcomes = possibility.get("outcomes")
             if not isinstance(outcomes, list) or len(outcomes) != len(candidates):
-                raise ValueError(
-                    "life-development objective transition matrix changed shape"
-                )
+                raise ValueError("life-development objective transition matrix changed shape")
             for outcome, candidate in zip(outcomes, candidates, strict=True):
                 if not isinstance(outcome, dict):
-                    raise ValueError(
-                        "life-development objective transition outcome is invalid"
-                    )
+                    raise ValueError("life-development objective transition outcome is invalid")
                 descriptor_value = outcome.get("descriptor")
                 expected = OutcomeCandidateDescriptor.model_validate_json(
                     json.dumps(
@@ -1487,9 +1419,7 @@ def _validate_life_development_subject_effect(
                     )
                 )
                 if candidate != expected:
-                    raise ValueError(
-                        "life-development outcome descriptor changed after review"
-                    )
+                    raise ValueError("life-development outcome descriptor changed after review")
         return
     raise ValueError("life-development subject effect kind is invalid")
 
@@ -1553,6 +1483,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
             *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
+            EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION,
         }
     ]
     if unknown:
@@ -1570,6 +1501,127 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
     manifest = parse_acceptance_manifest_v2(manifests[0].payload())
     if manifest.status != "accepted" and manifest.authorized_effects:
         raise ValueError("non-accepted manifest cannot carry effects")
+
+
+def reject_external_perception_manifest_without_recorder(
+    events: Sequence[WorldEvent],
+) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("external_perception_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_external_perception_manifest_batch(
+    events: Sequence[WorldEvent],
+    *,
+    expected_world_revision: int,
+    authorized: bool,
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    external_effects = [
+        event
+        for event in events
+        if event.event_type in {"ExternalSignalSnapshotAdopted", "ExternalPerceptionRecorded"}
+    ]
+    if not manifests:
+        if external_effects:
+            raise ValueError("external perception effects require their accepted manifest")
+        return
+    if not authorized:
+        raise ValueError("external_perception_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or events[0] is not manifests[0]:
+        raise ValueError("external perception accepted batch must start with one manifest")
+    try:
+        manifest = ExternalPerceptionAcceptanceManifest.model_validate_json(
+            manifests[0].payload_json
+        )
+    except ValueError as exc:
+        raise ValueError("external perception manifest payload is invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or manifest.policy_digest != EXTERNAL_PERCEPTION_ACCEPTANCE_POLICY_DIGEST
+    ):
+        raise ValueError("external perception manifest is not pinned to installed authority")
+    effects = tuple(events[1:])
+    if len(effects) != len(manifest.effects) or tuple(
+        (event.event_id, event.event_type, event.payload_hash) for event in effects
+    ) != tuple(
+        (effect.event_id, effect.event_type, effect.payload_hash) for effect in manifest.effects
+    ):
+        raise ValueError("external perception manifest effects changed")
+    model_events = tuple(event for event in effects if event.event_type == "ModelResultRecorded")
+    snapshots = tuple(
+        event for event in effects if event.event_type == "ExternalSignalSnapshotAdopted"
+    )
+    perceptions = tuple(
+        event for event in effects if event.event_type == "ExternalPerceptionRecorded"
+    )
+    if (
+        len(model_events) != 1
+        or len(snapshots) != len(perceptions)
+        or tuple(event.event_type for event in effects)
+        != (
+            "ModelResultRecorded",
+            *("ExternalSignalSnapshotAdopted" for _ in snapshots),
+            *("ExternalPerceptionRecorded" for _ in perceptions),
+        )
+    ):
+        raise ValueError("external perception accepted batch ordering is invalid")
+    model = ModelResultRecordedPayload.model_validate_json(model_events[0].payload_json)
+    if (
+        model.attempt_id != manifest.attention_attempt_id
+        or model.trigger_ref != manifest.attention_attempt_id
+        or model.evaluated_world_revision != expected_world_revision
+        or model.capsule_id != manifest.candidate_snapshot_hash
+    ):
+        raise ValueError("external perception model result changed pinned attention identity")
+    snapshots_by_ref: dict[str, tuple[WorldEvent, ExternalSignalSnapshotAdoptedPayload]] = {}
+    for event in snapshots:
+        payload = ExternalSignalSnapshotAdoptedPayload.model_validate_json(event.payload_json)
+        snapshot = payload.snapshot
+        if (
+            payload.acceptance_id != manifest.acceptance_id
+            or payload.attention_attempt_id != manifest.attention_attempt_id
+            or payload.model_result_event_ref != model_events[0].event_id
+            or payload.model_result_event_payload_hash != model_events[0].payload_hash
+            or not snapshot.may_expose_to_character_model
+            or not snapshot.may_freeze_durable_snapshot
+            or snapshot.snapshot_ref in snapshots_by_ref
+        ):
+            raise ValueError("external perception snapshot is not licensed and model-bound")
+        snapshots_by_ref[snapshot.snapshot_ref] = (event, payload)
+    for event in perceptions:
+        payload = ExternalPerceptionRecordedPayload.model_validate_json(event.payload_json)
+        snapshot_pair = snapshots_by_ref.get(payload.snapshot_ref)
+        if snapshot_pair is None:
+            raise ValueError("external perception lacks an exact adopted snapshot")
+        snapshot_event, _ = snapshot_pair
+        if (
+            payload.acceptance_id != manifest.acceptance_id
+            or payload.attention_attempt_id != manifest.attention_attempt_id
+            or payload.window_id != manifest.window_id
+            or payload.candidate_snapshot_hash != manifest.candidate_snapshot_hash
+            or payload.pinned_cursor.world_revision != expected_world_revision
+            or payload.pinned_cursor.deliberation_revision
+            != manifest.evaluated_deliberation_revision
+            or payload.pinned_cursor.ledger_sequence != manifest.evaluated_ledger_sequence
+            or payload.snapshot_event_ref != snapshot_event.event_id
+            or payload.snapshot_event_payload_hash != snapshot_event.payload_hash
+            or payload.attention_model_result_ref != model.model_result_ref
+            or payload.attention_model_event_ref != model_events[0].event_id
+            or payload.attention_model_event_payload_hash != model_events[0].payload_hash
+        ):
+            raise ValueError("external perception changed accepted delivery lineage")
 
 
 def _validate_authorized_fact_manifest_v3_batch(

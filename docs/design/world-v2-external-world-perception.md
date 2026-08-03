@@ -1,12 +1,15 @@
 # World V2 外界感知系统设计
 
-状态：Draft，深化 [ADR-0013](../adr/0013-external-world-perception-hub.md)，尚未授权生产接源。
+状态：Implemented behind an explicit deployment gate，深化
+[ADR-0013](../adr/0013-external-world-perception-hub.md)。架构和运行链已实现，生产来源仍须逐项授权。
 
-实现进度（2026-08-03）：Phase 1 的隔离 sidecar、immutable signal revision、纠错 lineage、
-TTL/normalized retention、raw CAS、保守 cluster、FTS/可注入 embedding、health、录制回放
-Adapter、hostname allowlist 的 RSS/Atom 与 route/item-host allowlist 的本机 RSSHub Adapter
-已落地。当前来源审计表为空，未接生产 scheduler、
-角色模型、World V2、Life Ecology 或发送链；Phase 2 及以后仍未实现。
+实现进度（2026-08-03）：Phase 1–5 的首个完整纵向切片已经落地，包括隔离 sidecar、immutable
+signal revision、纠错 lineage、TTL/retention、raw CAS、保守 cluster、FTS/可注入 embedding、
+角色主导的 shadow/live attention、精确来源快照、V2 原子 acceptance、冷重放、Life Ecology
+单次 wake、Social Initiative 情境刺激、已授权 search 回执回流 Seam、生产 scheduler 与 health。
+USGS GeoJSON 和 NOAA/NWS Alerts 已有严格 allowlist Adapter，生产 registry 默认不存在且模式
+默认 `off`；没有审核过的 registry 和来源绑定角色 Channel 时，系统 fail closed，不抓取、
+不调用角色模型，也不写 V2。
 
 ## 1. 目标与非目标
 
@@ -433,44 +436,48 @@ lease；可以共享供应商配置和 HTTP pool。它不是廉价分类器：�
 
 不得把“来源没数据、检索没候选、角色没注意、角色感知但没行动、供应商失败”合并成沉默。
 
-## 14. 分阶段交付
+## 14. 分阶段交付状态
 
-### Phase 0：来源与许可审计
+### Phase 0：来源与许可审计（框架完成，逐来源持续进行）
 
 - 明确首批 RSSHub route、上游发布者、登录依赖、抓取/摘要/embedding/模型处理/持久化许可；
 - 选择至少一个权威结构化预警来源，但不接生产；
 - 确定用户位置默认用途与粒度；
 - 冻结 `ExternalSignalRevision`、source policy 和 health 合同。
 
-### Phase 1：纯 sidecar ingestion
+### Phase 1：纯 sidecar ingestion（完成）
 
 - 实现 Hub、fixture Adapter、RSS/Atom Adapter 与 RSSHub Adapter；
 - raw CAS、revision/correction、TTL、保守 cluster、FTS/embedding、health；
 - 不新增 V2 event，不接 Life Ecology，符合 Producer-First Authority。
 
-### Phase 2：Shadow attention
+### Phase 2：Shadow attention（完成）
 
 - 编译 Perception Window，调用角色模型，记录 sidecar model result；
 - Shadow 类型禁止 V2 commit；
 - 评估重复率、空选择率、误相关、位置误报、prompt injection、成本和自然度。
 
-### Phase 3：只记录实际感知
+### Phase 3：只记录实际感知（完成）
 
 - 同一 delivery 新增 producer、acceptance、reducer、Context consumer 和 health；
 - live 仅提交 External Perception，不唤醒 Affect、Life 或 Social Initiative；
 - 验证冷重放、CAS、重启、账本增长和 correction。
 
-### Phase 4：开放 Life Influence
+### Phase 4：开放 Life Influence（完成）
 
 - 整批感知只打开一次 Life Ecology wake；
 - Affect、Memory、World Author 各自通过已有模型 authority 自由处理或 no-op；
 - 观察生活是否被现实丰富，而不是演化成热点追逐。
 
-### Phase 5：Social Initiative 与主动搜索
+### Phase 5：Social Initiative 与主动搜索（感知侧完成）
 
 - 感知作为情境刺激进入主动考虑，不直接发送；
 - 角色可通过 read-only Action 自己决定搜索，结果重新进入 Hub；
 - 真实多轮观察地震关切、流行话题、普通无聊内容、错误报道和更正后的自然表现。
+
+`ToolResultAccepted` 的 immutable content reader 与 web-search provider 属于 read-only
+Action 部署权威，不由感知系统伪造。Hub 已有严格生产注入 Seam；未配置真实 provider、
+result sidecar 和对应 source policy 时保持禁用，不把“可注入 fake”写成已接通外网搜索。
 
 ## 15. 验证矩阵
 
@@ -485,7 +492,7 @@ lease；可以共享供应商配置和 HTTP pool。它不是廉价分类器：�
 - 后续各模型可因同一感知产生不同结果或 no-op；
 - 24 小时 sidecar/V2 增长、attention 调用数、candidate latency 和 source staleness。
 
-## 16. 实施前仍需确认
+## 16. 首次生产接源前仍需确认
 
 1. 首批允许的 RSSHub routes 与上游内容许可；
 2. 中国境内地震、气象、公共预警的可持续权威结构化来源；
@@ -496,7 +503,8 @@ lease；可以共享供应商配置和 HTTP pool。它不是廉价分类器：�
 7. Phase 3 是把 licensed snapshot 嵌入 `ExternalPerceptionRecorded`，还是同批采用独立
    `ExternalSignalSnapshotAdopted` 事件。
 
-这些选择会影响许可、隐私和不可变事件形状；在确认之前，ADR-0013 保持 proposed。
+这些选择会影响许可、隐私和部署权威；在确认之前，生产模式保持 `off`。事件形状、
+角色注意与重放边界已经由 ADR-0013 和实现测试冻结，不因某个来源上线而变化。
 
 ## 17. 参考
 

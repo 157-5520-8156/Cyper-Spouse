@@ -29,6 +29,7 @@ LIFE_ECOLOGY_WAKE_EVENT_TYPES = frozenset(
         "ActivityAbandoned",
         "WorldOccurrenceSettled",
         "ExperienceCommitted",
+        "ExternalPerceptionRecorded",
         "FactCommitted",
         "FactCorrected",
         "NpcRegistered",

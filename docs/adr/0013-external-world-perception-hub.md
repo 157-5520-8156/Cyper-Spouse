@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # 以独立 World Perception Hub 感知现实，并通过角色感知影响事件机
@@ -12,8 +12,9 @@ Pinned Turn 中实际注意到某条信号后，才提交 External Perception Wo
 Life Ecology、Affect、Memory、Relationship 与 Social Initiative 可以消费该
 感知事件，但外部信号本身不得直接命令角色行动或联系用户。
 
-本 ADR 记录待实施的边界和目标架构；它尚未授权接入任何生产数据源、后台调度或
-主动发送路径。
+本 ADR 的架构和运行边界已实现。它不构成任何具体生产数据源的授权：生产部署默认
+`off`，只有不可变来源 registry、许可证据、live 暴露/快照权限和来源绑定角色 Channel
+同时存在时才会启用。外界感知只开放 Life/Social 的考虑机会，不拥有主动发送权。
 
 ## 为什么不把它并入事件机
 
@@ -195,29 +196,28 @@ External Perception 时必须选择一个由当前 Context 支持的感知渠道
 健康投影最终应能区分：来源没有新信号、信号存在但无相关候选、候选未被角色注意、
 角色已感知但选择不行动、以及采集或模型技术失败。不能把这些状态全部显示为沉默。
 
-## 分阶段验证
+## 已实现的分阶段验证
 
-若进入实施，建议首先使用隔离数据库和 shadow 输出：
+实现按隔离数据库和 shadow-first 路径完成：
 
-1. 建立 `ExternalSignal`、revision、cluster、TTL 和 evidence sidecar，不接事件机。
-2. 接入少量权威地震与天气/灾害来源，验证时效、修正、地理匹配和重复率。
-3. 加入少量 RSS/Atom 或角色兴趣来源，验证有限注意力而不是新闻摘要行为。
-4. 让角色模型在 shadow 中选择 External Perception，但禁止影响生活和发送消息。
-5. 回放用户位置过期、同名城市、旅行计划、来源撤稿、重复报道和断网恢复场景。
-6. 验证精度、延迟、调用成本、账本增长与隐私后，再允许它成为 Life Influence。
-7. 最后开放 Social Initiative 的情境唤醒，并通过真实多轮对聊观察自然度和误报。
+1. `ExternalSignal`、revision、cluster、TTL 和 evidence sidecar 与 V2 权威隔离。
+2. USGS 与 NOAA/NWS 权威 Adapter 覆盖时效、更新、取消、限流、坏相邻记录和来源证明。
+3. RSS/Atom、RSSHub 和已授权 search 结果保持有限、可替换的 transport 身份。
+4. 角色模型在 shadow/live 中可选择零条或多条；shadow 永远不能升级为 live 权威。
+5. live delivery 原子记录模型审计、精确快照和角色感知，CAS/重启/崩溃保持 effect-once。
+6. 整批感知只打开一次 Life wake，并只给 Social Initiative 一个情境刺激。
+7. health 区分采集、候选、模型沉默、技术失败、delivery backlog、提交和 superseded。
 
 首期不追求覆盖整个互联网，也不建立固定“新闻类别到角色反应”的规则。验收重点是
 来源闭包、有限注意力、位置精度、修正能力、低重复率和对现有 Life Ecology 的开放
 影响。
 
-## 尚待实施前确认
+## 首次生产接源前确认
 
 - 中国境内地震、天气、公共预警和地方事件采用哪些可持续、许可明确的权威来源；
 - 普通新闻与趋势供应商的使用条款、全文保留与模型处理许可；
 - 用户位置用于灾害相关性匹配的显式授权和默认粒度；
 - 外部 evidence sidecar 的保留周期、容量预算与删除策略；
-- “立即打开考虑机会”的严重度与地理影响边界如何只控制调度而不成为行为规则；
 - shadow 阶段以什么生产轨迹衡量有效感知、误报和不自然的热点追逐。
 
 ## 参考标准与接口形态

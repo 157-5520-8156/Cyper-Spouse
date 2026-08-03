@@ -56,6 +56,16 @@ from .relationship_adjustment_acceptance_manifest import (
     RelationshipAdjustmentAcceptanceManifest,
     canonical_relationship_adjustment_acceptance_value_hash,
 )
+from .external_perception_acceptance_manifest import (
+    EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION,
+    ExternalPerceptionAcceptanceManifest,
+)
+from .external_perception_events import (
+    ExternalPerceptionProjection,
+    ExternalPerceptionRecordedPayload,
+    ExternalSignalSnapshotAdoptedPayload,
+    ExternalSignalSnapshotProjection,
+)
 from .outcome_acceptance_manifest import (
     OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
     OutcomeAcceptanceManifest,
@@ -822,6 +832,9 @@ class ReducerState(FrozenModel):
     tool_results: tuple[ToolResultProjection, ...] = ()
     perception_requests: tuple[PerceptionRequestProjection, ...] = ()
     perception_results: tuple[PerceptionResultProjection, ...] = ()
+    external_signal_snapshots: tuple[ExternalSignalSnapshotProjection, ...] = ()
+    external_perceptions: tuple[ExternalPerceptionProjection, ...] = ()
+    external_perception_acceptance_manifests: tuple[ExternalPerceptionAcceptanceManifest, ...] = ()
     appearance_states: tuple[AppearanceStateProjection, ...] = ()
     visible_physical_states: tuple[VisiblePhysicalStateProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
@@ -844,9 +857,7 @@ class ReducerState(FrozenModel):
     life_ecology_schedule: LifeEcologyScheduleProjection | None = None
     pending_contextual_life_sources: tuple[PendingContextualLifeSourceProjection, ...] = ()
     contextual_life_retries: tuple[ContextualLifeRetryProjection, ...] = ()
-    pending_biographical_settlements: tuple[
-        PendingBiographicalSettlementProjection, ...
-    ] = ()
+    pending_biographical_settlements: tuple[PendingBiographicalSettlementProjection, ...] = ()
     pending_external_observations: tuple[ExternalObservation, ...] = ()
     execution_receipts: tuple[ExecutionReceipt, ...] = ()
     budget_settlements: tuple[BudgetSettlement, ...] = ()
@@ -926,6 +937,17 @@ class ReducerState(FrozenModel):
         )
         if self.pending_actions != expected:
             raise ValueError("pending_actions must equal the non-terminal action index")
+        snapshot_refs = tuple(item.snapshot_ref for item in self.external_signal_snapshots)
+        perception_ids = tuple(item.perception_id for item in self.external_perceptions)
+        acceptance_ids = tuple(
+            item.acceptance_id for item in self.external_perception_acceptance_manifests
+        )
+        if (
+            len(snapshot_refs) != len(set(snapshot_refs))
+            or len(perception_ids) != len(set(perception_ids))
+            or len(acceptance_ids) != len(set(acceptance_ids))
+        ):
+            raise ValueError("external perception projection identities must be unique")
         validate_actor_authority_event_bindings(
             self.actor_authorities,
             self.actor_authority_transitions,
@@ -1440,9 +1462,7 @@ class ReducerState(FrozenModel):
         place_refs = tuple(item.location_ref for item in self.world_places)
         if len(place_refs) != len(set(place_refs)):
             raise ValueError("World place refs must be unique")
-        coordinate_refs = tuple(
-            item.coordinate_ref for item in self.biographical_coordinates
-        )
+        coordinate_refs = tuple(item.coordinate_ref for item in self.biographical_coordinates)
         if len(coordinate_refs) != len(set(coordinate_refs)):
             raise ValueError("biographical coordinate refs must be unique")
         for place in self.world_places:
@@ -1597,6 +1617,24 @@ class ReducerState(FrozenModel):
             "logical_time": self.logical_time.isoformat() if self.logical_time else None,
             **(
                 {
+                    "external_signal_snapshots": tuple(
+                        item.model_dump(mode="json") for item in self.external_signal_snapshots
+                    ),
+                    "external_perceptions": tuple(
+                        item.model_dump(mode="json") for item in self.external_perceptions
+                    ),
+                    "external_perception_acceptance_manifests": tuple(
+                        item.model_dump(mode="json")
+                        for item in self.external_perception_acceptance_manifests
+                    ),
+                }
+                if self.external_signal_snapshots
+                or self.external_perceptions
+                or self.external_perception_acceptance_manifests
+                else {}
+            ),
+            **(
+                {
                     "appearance_states": tuple(
                         item.model_dump(mode="json") for item in self.appearance_states
                     )
@@ -1672,19 +1710,14 @@ class ReducerState(FrozenModel):
                 for npc in self.npcs
             ),
             **(
-                {
-                    "world_places": tuple(
-                        item.model_dump(mode="json") for item in self.world_places
-                    )
-                }
+                {"world_places": tuple(item.model_dump(mode="json") for item in self.world_places)}
                 if self.world_places
                 else {}
             ),
             **(
                 {
                     "biographical_coordinates": tuple(
-                        item.model_dump(mode="json")
-                        for item in self.biographical_coordinates
+                        item.model_dump(mode="json") for item in self.biographical_coordinates
                     )
                 }
                 if self.biographical_coordinates
@@ -1734,54 +1767,51 @@ class ReducerState(FrozenModel):
                     occurrence.model_dump(
                         mode="json",
                         exclude=(
-                            (
-                                None
-                                if declared_reducer_bundle_version
-                                == REDUCER_BUNDLE_VERSION
-                                else {
-                                    **(
-                                        {}
-                                        if declared_reducer_bundle_version
-                                        in {
-                                            _V43_REDUCER_BUNDLE_VERSION,
-                                            _V44_REDUCER_BUNDLE_VERSION,
-                                            _V47_REDUCER_BUNDLE_VERSION,
-                                            PREVIOUS_REDUCER_BUNDLE_VERSION,
-                                        }
-                                        else {"settled_dynamic_life_direction_adopted": True}
-                                    ),
-                                    "candidate_outcomes": {
-                                        "__all__": {
-                                            "objective_biographical_transition",
-                                            *(
-                                                ()
-                                                if declared_reducer_bundle_version
-                                                in {
-                                                    _V43_REDUCER_BUNDLE_VERSION,
-                                                    _V44_REDUCER_BUNDLE_VERSION,
-                                                    _V47_REDUCER_BUNDLE_VERSION,
-                                                    PREVIOUS_REDUCER_BUNDLE_VERSION,
-                                                }
-                                                else (
-                                                    "causal_authority",
-                                                    "relative_plausibility_weight",
-                                                    "provisional_npc_introductions",
-                                                    "dynamic_life_arc_context",
-                                                    *(
-                                                        ()
-                                                        if declared_reducer_bundle_version
-                                                        in {
-                                                            "world-v2-reducers.41",
-                                                            "world-v2-reducers.42",
-                                                        }
-                                                        else ("life_arc_effect",)
-                                                    ),
-                                                )
-                                            ),
-                                        }
+                            None
+                            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                            else {
+                                **(
+                                    {}
+                                    if declared_reducer_bundle_version
+                                    in {
+                                        _V43_REDUCER_BUNDLE_VERSION,
+                                        _V44_REDUCER_BUNDLE_VERSION,
+                                        _V47_REDUCER_BUNDLE_VERSION,
+                                        PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
-                                }
-                            )
+                                    else {"settled_dynamic_life_direction_adopted": True}
+                                ),
+                                "candidate_outcomes": {
+                                    "__all__": {
+                                        "objective_biographical_transition",
+                                        *(
+                                            ()
+                                            if declared_reducer_bundle_version
+                                            in {
+                                                _V43_REDUCER_BUNDLE_VERSION,
+                                                _V44_REDUCER_BUNDLE_VERSION,
+                                                _V47_REDUCER_BUNDLE_VERSION,
+                                                PREVIOUS_REDUCER_BUNDLE_VERSION,
+                                            }
+                                            else (
+                                                "causal_authority",
+                                                "relative_plausibility_weight",
+                                                "provisional_npc_introductions",
+                                                "dynamic_life_arc_context",
+                                                *(
+                                                    ()
+                                                    if declared_reducer_bundle_version
+                                                    in {
+                                                        "world-v2-reducers.41",
+                                                        "world-v2-reducers.42",
+                                                    }
+                                                    else ("life_arc_effect",)
+                                                ),
+                                            )
+                                        ),
+                                    }
+                                },
+                            }
                         ),
                     )
                     if reducer_bundle_version in {"world-v2-reducers.21", REDUCER_BUNDLE_VERSION}
@@ -2845,9 +2875,7 @@ def _life_development_recall_result_recorded(
     state: ReducerState,
     event: WorldEvent,
 ) -> ReducerState:
-    payload = LifeDevelopmentRecallResultRecordedPayload.model_validate_json(
-        event.payload_json
-    )
+    payload = LifeDevelopmentRecallResultRecordedPayload.model_validate_json(event.payload_json)
     request_projection = next(
         (
             item
@@ -2861,14 +2889,11 @@ def _life_development_recall_result_recorded(
         if request_projection is not None
         else None
     )
-    decision_context = (
-        request_audit.decision_context if request_audit is not None else None
-    )
+    decision_context = request_audit.decision_context if request_audit is not None else None
     request_proposals = tuple(
         item
         for item in state.proposal_audits
-        if item.deliberation_result_id
-        == payload.request_deliberation_result_id
+        if item.deliberation_result_id == payload.request_deliberation_result_id
     )
     request_proposal = request_proposals[0] if len(request_proposals) == 1 else None
     request_envelope: MinimalProposal | None = None
@@ -2880,9 +2905,7 @@ def _life_development_recall_result_recorded(
                 strict=True,
             )
             metadata_value = json.loads(request_envelope.response_text)
-            request_metadata = (
-                metadata_value if isinstance(metadata_value, dict) else None
-            )
+            request_metadata = metadata_value if isinstance(metadata_value, dict) else None
         except (TypeError, ValueError, json.JSONDecodeError):
             request_envelope = None
             request_metadata = None
@@ -2895,17 +2918,13 @@ def _life_development_recall_result_recorded(
         )
     )
     expected_attempt_prefix = (
-        "attempt:life-development:character_recall_request:"
-        f"{expected_suffix}:"
+        f"attempt:life-development:character_recall_request:{expected_suffix}:"
     )
     expected_proposal_prefix = (
-        "proposal:life-development:model-output:character_recall_request:"
-        f"{expected_suffix}:"
+        f"proposal:life-development:model-output:character_recall_request:{expected_suffix}:"
     )
     context_identity = (
-        request_metadata.get("context_identity")
-        if request_metadata is not None
-        else None
+        request_metadata.get("context_identity") if request_metadata is not None else None
     )
     if (
         request_projection is None
@@ -2915,46 +2934,32 @@ def _life_development_recall_result_recorded(
         or request_envelope is None
         or request_metadata is None
         or not isinstance(context_identity, dict)
-        or request_projection.event_payload_hash
-        != payload.request_model_result_event_hash
+        or request_projection.event_payload_hash != payload.request_model_result_event_hash
         or request_projection.model_result_ref != payload.request_model_result_ref
-        or request_projection.deliberation_result_id
-        != payload.request_deliberation_result_id
+        or request_projection.deliberation_result_id != payload.request_deliberation_result_id
         or request_audit.response_hash != payload.request_response_hash
-        or request_projection.attempt_index
-        != request_projection.attempt_count - 1
+        or request_projection.attempt_index != request_projection.attempt_count - 1
         or request_projection.proposal_hash is None
         or not request_projection.attempt_id.startswith(expected_attempt_prefix)
-        or request_proposal.model_result_ref
-        != payload.request_model_result_ref
-        or request_proposal.deliberation_result_id
-        != payload.request_deliberation_result_id
+        or request_proposal.model_result_ref != payload.request_model_result_ref
+        or request_proposal.deliberation_result_id != payload.request_deliberation_result_id
         or request_proposal.model_call_id != request_projection.model_call_id
         or request_proposal.attempt_id != request_projection.attempt_id
         or request_proposal.capsule_id != request_projection.capsule_id
         or request_proposal.trigger_ref != payload.trigger_ref
-        or request_proposal.evaluated_world_revision
-        != payload.evaluated_world_revision
+        or request_proposal.evaluated_world_revision != payload.evaluated_world_revision
         or request_proposal.proposal_hash != request_projection.proposal_hash
         or not request_envelope.proposal_id.startswith(expected_proposal_prefix)
-        or request_envelope.source_model_result
-        != payload.request_model_result_ref
-        or request_metadata.get("model_role")
-        != "character_recall_request"
-        or request_metadata.get("final_response_hash")
-        != payload.request_response_hash
-        or request_metadata.get("decision_subject_hash")
-        != payload.decision_subject_hash
-        or request_metadata.get("validated_output_hash")
-        != payload.recall_request_hash
+        or request_envelope.source_model_result != payload.request_model_result_ref
+        or request_metadata.get("model_role") != "character_recall_request"
+        or request_metadata.get("final_response_hash") != payload.request_response_hash
+        or request_metadata.get("decision_subject_hash") != payload.decision_subject_hash
+        or request_metadata.get("validated_output_hash") != payload.recall_request_hash
         or context_identity.get("capsule_id") != request_projection.capsule_id
-        or context_identity.get("context_cursor")
-        != payload.context_cursor.model_dump(mode="json")
+        or context_identity.get("context_cursor") != payload.context_cursor.model_dump(mode="json")
         or request_audit.route.router_version != "life-development-router.2"
-        or request_audit.route.reason_code
-        != "life_development.character_recall_request"
-        or decision_context.decision_subject_hash
-        != payload.decision_subject_hash
+        or request_audit.route.reason_code != "life_development.character_recall_request"
+        or decision_context.decision_subject_hash != payload.decision_subject_hash
         or RecallCursor(
             world_revision=decision_context.world_revision,
             deliberation_revision=decision_context.deliberation_revision,
@@ -2962,8 +2967,7 @@ def _life_development_recall_result_recorded(
         )
         != payload.context_cursor
         or request_projection.trigger_ref != payload.trigger_ref
-        or payload.evaluated_world_revision
-        != len(state.committed_world_event_refs)
+        or payload.evaluated_world_revision != len(state.committed_world_event_refs)
         or event.causation_id != payload.request_model_result_event_ref
         or state.logical_time is None
         or event.logical_time != state.logical_time
@@ -3008,42 +3012,29 @@ def _validate_life_development_deliberation_binding(
     if (
         proposal.get("context_capsule_id") != world["capsule_id"]
         or proposal.get("context_cursor") != world["context_cursor"]
-        or proposal.get("context_model_content_hash")
-        != world["context_model_content_hash"]
-        or proposal.get("context_snapshot_hash")
-        != world["context_snapshot_hash"]
+        or proposal.get("context_model_content_hash") != world["context_model_content_hash"]
+        or proposal.get("context_snapshot_hash") != world["context_snapshot_hash"]
     ):
-        raise ValueError(
-            "life-development Proposal changed its World Author Context identity"
-        )
+        raise ValueError("life-development Proposal changed its World Author Context identity")
     manifest = world["capability_manifest"]
     if not isinstance(manifest, dict):
-        raise ValueError(
-            "life-development World Author audit lacks a capability manifest"
-        )
+        raise ValueError("life-development World Author audit lacks a capability manifest")
     try:
         parsed_manifest = LifeDevelopmentCapabilityManifest.model_validate_json(
             canonical_json(manifest)
         )
     except ValueError as exc:
-        raise ValueError(
-            "life-development audited capability manifest is invalid"
-        ) from exc
+        raise ValueError("life-development audited capability manifest is invalid") from exc
     if (
         proposal.get("capability_manifest_version") != parsed_manifest.version
-        or proposal.get("capability_manifest_hash")
-        != parsed_manifest.manifest_hash
+        or proposal.get("capability_manifest_hash") != parsed_manifest.manifest_hash
     ):
-        raise ValueError(
-            "life-development Proposal changed its audited capability manifest"
-        )
+        raise ValueError("life-development Proposal changed its audited capability manifest")
 
     character_value = proposal.get("character_deliberation")
     has_character_result = proposal.get("character_model_role") is not None
     if (character_value is None) != (not has_character_result):
-        raise ValueError(
-            "life-development Character deliberation presence is inconsistent"
-        )
+        raise ValueError("life-development Character deliberation presence is inconsistent")
     if character_value is not None:
         _validate_one_life_development_deliberation(
             state,
@@ -3062,13 +3053,8 @@ def _validate_one_life_development_deliberation(
 ) -> dict[str, object]:
     binding = proposal.get(field)
     binding_hash = proposal.get(f"{field}_hash")
-    if (
-        not isinstance(binding, dict)
-        or binding_hash != sha256(canonical_json(binding))
-    ):
-        raise ValueError(
-            f"life-development {expected_role} deliberation binding is invalid"
-        )
+    if not isinstance(binding, dict) or binding_hash != sha256(canonical_json(binding)):
+        raise ValueError(f"life-development {expected_role} deliberation binding is invalid")
     required = {
         "role",
         "capsule_id",
@@ -3090,9 +3076,7 @@ def _validate_one_life_development_deliberation(
         "capability_manifest_content_hash",
     }
     if set(binding) != required or binding.get("role") != expected_role:
-        raise ValueError(
-            f"life-development {expected_role} deliberation shape is invalid"
-        )
+        raise ValueError(f"life-development {expected_role} deliberation shape is invalid")
     audit_proposal = next(
         (
             item
@@ -3102,39 +3086,27 @@ def _validate_one_life_development_deliberation(
         None,
     )
     if audit_proposal is None or (
-        audit_proposal.event_payload_hash
-        != binding.get("audit_proposal_event_hash")
-        or audit_proposal.deliberation_result_id
-        != binding.get("deliberation_result_id")
-        or audit_proposal.model_result_ref
-        != binding.get("final_model_result_ref")
+        audit_proposal.event_payload_hash != binding.get("audit_proposal_event_hash")
+        or audit_proposal.deliberation_result_id != binding.get("deliberation_result_id")
+        or audit_proposal.model_result_ref != binding.get("final_model_result_ref")
         or audit_proposal.capsule_id != binding.get("capsule_id")
-        or audit_proposal.evaluated_world_revision
-        != proposal.get("evaluated_world_revision")
+        or audit_proposal.evaluated_world_revision != proposal.get("evaluated_world_revision")
     ):
-        raise ValueError(
-            f"life-development {expected_role} audit Proposal is not exact"
-        )
+        raise ValueError(f"life-development {expected_role} audit Proposal is not exact")
     try:
         audit_envelope = json.loads(audit_proposal.proposal_json)
         metadata = json.loads(audit_envelope["response_text"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            f"life-development {expected_role} audit metadata is invalid"
-        ) from exc
+        raise ValueError(f"life-development {expected_role} audit metadata is invalid") from exc
     context_identity = metadata.get("context_identity")
     if not isinstance(context_identity, dict):
-        raise ValueError(
-            f"life-development {expected_role} audit Context is absent"
-        )
+        raise ValueError(f"life-development {expected_role} audit Context is absent")
     manifest_binding = metadata.get("capability_manifest_binding")
     if manifest_binding is not None and not isinstance(
         manifest_binding,
         dict,
     ):
-        raise ValueError(
-            f"life-development {expected_role} manifest binding is invalid"
-        )
+        raise ValueError(f"life-development {expected_role} manifest binding is invalid")
     metadata_binding = {
         "role": metadata.get("model_role"),
         "capsule_id": context_identity.get("capsule_id"),
@@ -3142,15 +3114,11 @@ def _validate_one_life_development_deliberation(
         "request_hashes": metadata.get("request_hashes"),
         "response_hashes": metadata.get("response_hashes"),
         "raw_content_refs": metadata.get("raw_content_refs"),
-        "context_model_content_hash": context_identity.get(
-            "model_content_hash"
-        ),
+        "context_model_content_hash": context_identity.get("model_content_hash"),
         "context_snapshot_hash": context_identity.get("snapshot_hash"),
         "decision_subject_hash": metadata.get("decision_subject_hash"),
         "capability_manifest_content_ref": (
-            manifest_binding.get("content_ref")
-            if isinstance(manifest_binding, dict)
-            else None
+            manifest_binding.get("content_ref") if isinstance(manifest_binding, dict) else None
         ),
         "capability_manifest_content_hash": (
             manifest_binding.get("content_payload_hash")
@@ -3159,19 +3127,12 @@ def _validate_one_life_development_deliberation(
         ),
     }
     if any(binding.get(key) != value for key, value in metadata_binding.items()):
-        raise ValueError(
-            f"life-development {expected_role} binding changed audited metadata"
-        )
+        raise ValueError(f"life-development {expected_role} binding changed audited metadata")
     manifest_value = binding.get("capability_manifest")
     manifest_hash = binding.get("capability_manifest_content_hash")
     if manifest_value is None:
-        if (
-            binding.get("capability_manifest_content_ref") is not None
-            or manifest_hash is not None
-        ):
-            raise ValueError(
-                f"life-development {expected_role} manifest binding is partial"
-            )
+        if binding.get("capability_manifest_content_ref") is not None or manifest_hash is not None:
+            raise ValueError(f"life-development {expected_role} manifest binding is partial")
     elif (
         not isinstance(manifest_value, dict)
         or not isinstance(
@@ -3181,9 +3142,7 @@ def _validate_one_life_development_deliberation(
         or not isinstance(manifest_hash, str)
         or sha256(canonical_json(manifest_value)) != manifest_hash
     ):
-        raise ValueError(
-            f"life-development {expected_role} manifest bytes changed"
-        )
+        raise ValueError(f"life-development {expected_role} manifest bytes changed")
     event_refs = binding.get("model_result_event_refs")
     event_hashes = binding.get("model_result_event_hashes")
     request_hashes = binding.get("request_hashes")
@@ -3197,60 +3156,41 @@ def _validate_one_life_development_deliberation(
             response_hashes,
         )
     ):
-        raise ValueError(
-            f"life-development {expected_role} attempt arrays are invalid"
-        )
+        raise ValueError(f"life-development {expected_role} attempt arrays are invalid")
     assert isinstance(event_refs, list)
     assert isinstance(event_hashes, list)
     assert isinstance(request_hashes, list)
     assert isinstance(response_hashes, list)
     if not (
         1 <= len(event_refs) <= 2
-        and len(event_refs)
-        == len(event_hashes)
-        == len(request_hashes)
-        == len(response_hashes)
+        and len(event_refs) == len(event_hashes) == len(request_hashes) == len(response_hashes)
     ):
-        raise ValueError(
-            f"life-development {expected_role} attempt lineage is incomplete"
-        )
+        raise ValueError(f"life-development {expected_role} attempt lineage is incomplete")
     attempts = []
     for event_ref, event_hash in zip(event_refs, event_hashes, strict=True):
         attempt = next(
-            (
-                item
-                for item in state.model_result_audits
-                if item.event_ref == event_ref
-            ),
+            (item for item in state.model_result_audits if item.event_ref == event_ref),
             None,
         )
         if attempt is None or (
             attempt.event_payload_hash != event_hash
-            or attempt.deliberation_result_id
-            != binding.get("deliberation_result_id")
+            or attempt.deliberation_result_id != binding.get("deliberation_result_id")
             or attempt.capsule_id != binding.get("capsule_id")
         ):
-            raise ValueError(
-                f"life-development {expected_role} ModelResult is not exact"
-            )
+            raise ValueError(f"life-development {expected_role} ModelResult is not exact")
         attempts.append(attempt)
     attempts.sort(key=lambda item: item.attempt_index)
     recorded = tuple(
-        RecordedModelResultAudit.model_validate_json(item.audit_json)
-        for item in attempts
+        RecordedModelResultAudit.model_validate_json(item.audit_json) for item in attempts
     )
     if (
-        [item.attempt_index for item in attempts]
-        != list(range(len(attempts)))
+        [item.attempt_index for item in attempts] != list(range(len(attempts)))
         or [item.request_hash for item in recorded] != request_hashes
         or [item.response_hash for item in recorded] != response_hashes
-        or attempts[-1].model_result_ref
-        != binding.get("final_model_result_ref")
+        or attempts[-1].model_result_ref != binding.get("final_model_result_ref")
         or attempts[-1].attempt_index != attempts[-1].attempt_count - 1
     ):
-        raise ValueError(
-            f"life-development {expected_role} attempt bytes changed"
-        )
+        raise ValueError(f"life-development {expected_role} attempt bytes changed")
     return binding
 
 
@@ -3618,15 +3558,12 @@ def _private_impression_proposal_recorded(
             else None
         )
         reflection_digest = private_impression_reflection_digest(payload)
-        expected_decision_proposal_id = (
-            "proposal:private-reflection-decision:"
-            + sha256(
-                canonical_json(
-                    {
-                        "capsule_id": proposal.source_capsule_id,
-                        "reflection_digest": reflection_digest,
-                    }
-                )
+        expected_decision_proposal_id = "proposal:private-reflection-decision:" + sha256(
+            canonical_json(
+                {
+                    "capsule_id": proposal.source_capsule_id,
+                    "reflection_digest": reflection_digest,
+                }
             )
         )
         decision_audit = next(
@@ -3657,11 +3594,9 @@ def _private_impression_proposal_recorded(
             }
             or decision_audit is None
             or decision_audit.proposal_hash != audit.proposal_hash
-            or decision_audit.evaluated_world_revision
-            != proposal.evaluated_world_revision
+            or decision_audit.evaluated_world_revision != proposal.evaluated_world_revision
             or not isinstance(decision, DecisionProposal)
-            or decision.brief_rationale
-            != f"private-reflection-draft:{reflection_digest}"
+            or decision.brief_rationale != f"private-reflection-draft:{reflection_digest}"
         ):
             raise ValueError(
                 "private impression proposal lacks its final role-model reflection audit"
@@ -3713,8 +3648,7 @@ def _validate_private_impression_reflection_sources(
         (
             item
             for item in state.appraisals
-            if item.origin is not None
-            and item.origin.accepted_event_ref == audit.trigger_ref
+            if item.origin is not None and item.origin.accepted_event_ref == audit.trigger_ref
         ),
         None,
     )
@@ -3724,9 +3658,7 @@ def _validate_private_impression_reflection_sources(
         state,
         appraisal=anchor,
     )
-    source_authority = {
-        item.source_ref: item.authority_event_ref for item in offered
-    }
+    source_authority = {item.source_ref: item.authority_event_ref for item in offered}
     appraisal_sources: dict[str, tuple[str, str, str]] = {}
     for item in state.appraisals:
         for hypothesis in item.hypotheses:
@@ -3761,14 +3693,10 @@ def _validate_private_impression_reflection_sources(
         raise ValueError(
             "private impression reflection appraisal refs do not match selected sources"
         )
-    if (
-        tuple(selected_event_refs) != payload.impression.source_refs
-        or tuple(selected_event_refs)
-        != tuple(item.ref_id for item in payload.evidence_refs)
-    ):
-        raise ValueError(
-            "private impression reflection evidence does not match selected sources"
-        )
+    if tuple(selected_event_refs) != payload.impression.source_refs or tuple(
+        selected_event_refs
+    ) != tuple(item.ref_id for item in payload.evidence_refs):
+        raise ValueError("private impression reflection evidence does not match selected sources")
 
 
 def _validate_commitment_proposal_evidence(
@@ -3790,11 +3718,7 @@ def _validate_commitment_proposal_evidence(
     before = payload.commitment_before
     if before is not None:
         current = next(
-            (
-                item
-                for item in state.commitments
-                if item.commitment_id == before.commitment_id
-            ),
+            (item for item in state.commitments if item.commitment_id == before.commitment_id),
             None,
         )
         if current == before:
@@ -3804,10 +3728,7 @@ def _validate_commitment_proposal_evidence(
                 if item.evidence_type == "clock_observation"
             )
     for evidence in payload.evidence_refs:
-        if (
-            evidence.evidence_type == "clock_observation"
-            and evidence in inherited_clock_refs
-        ):
+        if evidence.evidence_type == "clock_observation" and evidence in inherited_clock_refs:
             continue
         _validate_evidence_authority(state, (evidence,), require_all=True)
 
@@ -4524,6 +4445,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
         MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
         *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
+        EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION,
     }:
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
     if raw.get("manifest_version") == "acceptance-manifest.2":
@@ -4534,13 +4456,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _minimal_reply_manifest_recorded(state, event)
     if raw.get("manifest_version") == EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION:
         return _expression_plan_manifest_recorded(state, event)
-    if (
-        raw.get("manifest_version")
-        in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS
-    ):
-        manifest = parse_social_deferred_acceptance_manifest(
-            event.payload_json
-        )
+    if raw.get("manifest_version") in SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS:
+        manifest = parse_social_deferred_acceptance_manifest(event.payload_json)
         source = next(
             (
                 item
@@ -4570,10 +4487,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
             or source_event.event_type != "ObservationRecorded"
             or source_event.payload_hash != manifest.source_observation_event_hash
             or manifest.expression_manifest.policy_digest == manifest.policy_digest
-            or any(
-                item.action.kind != "followup"
-                for item in manifest.expression_manifest.beats
-            )
+            or any(item.action.kind != "followup" for item in manifest.expression_manifest.beats)
         ):
             raise ValueError("social deferred manifest source or policy separation is invalid")
         return _expression_plan_manifest_recorded(
@@ -4594,6 +4508,22 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _outcome_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION:
         return _activity_lifecycle_acceptance_manifest_recorded(state, event)
+    if raw.get("manifest_version") == EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION:
+        manifest = ExternalPerceptionAcceptanceManifest.model_validate_json(event.payload_json)
+        if manifest.evaluated_world_revision != len(state.committed_world_event_refs) or any(
+            item.acceptance_id == manifest.acceptance_id
+            or item.attention_attempt_id == manifest.attention_attempt_id
+            for item in state.external_perception_acceptance_manifests
+        ):
+            raise ValueError("external perception Acceptance is stale or already registered")
+        return state.model_copy(
+            update={
+                "external_perception_acceptance_manifests": (
+                    *state.external_perception_acceptance_manifests,
+                    manifest,
+                )
+            }
+        )
     if raw.get("manifest_version") in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS:
         return _media_selection_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == MEDIA_CONTINUATION_ACCEPTANCE_MANIFEST_VERSION:
@@ -4730,9 +4660,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         None,
     )
     social_bridge_beat_count = (
-        len(social_bridge_plan.beats)
-        if social_bridge_plan is not None
-        else 0
+        len(social_bridge_plan.beats) if social_bridge_plan is not None else 0
     )
     social_bridge_types = (
         social_deferred_authority_event_types(social_bridge_beat_count)
@@ -4745,14 +4673,11 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         and thread_proposal is not None
         and thread_proposal.transition_kind == "open"
         and social_bridge_plan is not None
-        and current_world_revision
-        == evaluated_world_revision + social_bridge_event_count
+        and current_world_revision == evaluated_world_revision + social_bridge_event_count
         and len(state.committed_world_event_refs) >= social_bridge_event_count
         and tuple(
             item.event_type
-            for item in state.committed_world_event_refs[
-                -social_bridge_event_count:
-            ]
+            for item in state.committed_world_event_refs[-social_bridge_event_count:]
         )
         == social_bridge_types
         and state.commitments
@@ -4764,21 +4689,15 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         commitment = state.commitments[-1]
         action = state.actions[-1]
         deferred_thread_bridge = (
-            proposed_thread.thread_after.values.kind
-            == "reply_reconsideration"
-            and proposed_thread.thread_after.values.subject_ref
-            == commitment.values.subject_ref
+            proposed_thread.thread_after.values.kind == "reply_reconsideration"
+            and proposed_thread.thread_after.values.subject_ref == commitment.values.subject_ref
             and proposed_thread.thread_after.values.anchor_evidence_refs
             == commitment.values.anchor_evidence_refs
-            and proposed_thread.thread_after.values.due_window
-            == commitment.values.due_window
-            and action.action_id
-            == commitment.values.fulfillment_contract.expected_action_id
+            and proposed_thread.thread_after.values.due_window == commitment.values.due_window
+            and action.action_id == commitment.values.fulfillment_contract.expected_action_id
             and action.kind == "followup"
-            and action.not_before
-            == commitment.values.due_window.opens_at
-            and action.expires_at
-            == commitment.values.due_window.closes_at
+            and action.not_before == commitment.values.due_window.opens_at
+            and action.expires_at == commitment.values.due_window.closes_at
         )
     if status in {"accepted", "rejected"} and (
         evaluated_world_revision != current_world_revision
@@ -5141,9 +5060,7 @@ def _expression_plan_manifest_recorded(
     *,
     manifest_override: ExpressionPlanAcceptanceManifest | None = None,
     social_manifest: (
-        LegacySocialDeferredAcceptanceManifest
-        | SocialDeferredAcceptanceManifest
-        | None
+        LegacySocialDeferredAcceptanceManifest | SocialDeferredAcceptanceManifest | None
     ) = None,
 ) -> ReducerState:
     """Index a normal multi-beat ExpressionPlan before any effects exist."""
@@ -7434,8 +7351,8 @@ def _life_availability_snapshot_recorded(state: ReducerState, event: WorldEvent)
         payload.availability_scope == "current_presence"
         and payload.location_ref is not None
         and any(
-        active_npcs[item].current_location_ref != payload.location_ref
-        for item in payload.participant_refs
+            active_npcs[item].current_location_ref != payload.location_ref
+            for item in payload.participant_refs
         )
     ):
         raise ValueError("life availability snapshot NPC is not registered at the bound location")
@@ -8709,6 +8626,142 @@ def _perception_result_accepted(state: ReducerState, event: WorldEvent) -> Reduc
     return state.model_copy(update={"perception_results": (*state.perception_results, result)})
 
 
+def _external_signal_snapshot_adopted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = ExternalSignalSnapshotAdoptedPayload.model_validate_json(event.payload_json)
+    manifest = next(
+        (
+            item
+            for item in state.external_perception_acceptance_manifests
+            if item.acceptance_id == payload.acceptance_id
+        ),
+        None,
+    )
+    effect = (
+        next(
+            (item for item in manifest.effects if item.event_id == event.event_id),
+            None,
+        )
+        if manifest is not None
+        else None
+    )
+    model = next(
+        (
+            item
+            for item in state.model_result_audits
+            if item.event_ref == payload.model_result_event_ref
+        ),
+        None,
+    )
+    snapshot = payload.snapshot
+    if (
+        manifest is None
+        or effect is None
+        or effect.role != "signal_snapshot"
+        or effect.payload_hash != event.payload_hash
+        or model is None
+        or model.event_payload_hash != payload.model_result_event_payload_hash
+        or model.attempt_id != payload.attention_attempt_id
+        or not snapshot.may_expose_to_character_model
+        or not snapshot.may_freeze_durable_snapshot
+        or any(
+            item.snapshot_ref == snapshot.snapshot_ref
+            or item.signal_revision_ref == snapshot.signal_revision_ref
+            for item in state.external_signal_snapshots
+        )
+    ):
+        raise ValueError("external signal snapshot lacks accepted live attention authority")
+    projected = ExternalSignalSnapshotProjection(
+        **snapshot.model_dump(mode="python"),
+        acceptance_id=payload.acceptance_id,
+        attention_attempt_id=payload.attention_attempt_id,
+        model_result_event_ref=payload.model_result_event_ref,
+        model_result_event_payload_hash=payload.model_result_event_payload_hash,
+        accepted_event_ref=event.event_id,
+        accepted_event_payload_hash=event.payload_hash,
+        accepted_world_revision=len(state.committed_world_event_refs) + 1,
+    )
+    return state.model_copy(
+        update={
+            "external_signal_snapshots": (
+                *state.external_signal_snapshots,
+                projected,
+            )
+        }
+    )
+
+
+def _external_perception_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = ExternalPerceptionRecordedPayload.model_validate_json(event.payload_json)
+    manifest = next(
+        (
+            item
+            for item in state.external_perception_acceptance_manifests
+            if item.acceptance_id == payload.acceptance_id
+        ),
+        None,
+    )
+    effect = (
+        next(
+            (item for item in manifest.effects if item.event_id == event.event_id),
+            None,
+        )
+        if manifest is not None
+        else None
+    )
+    snapshot = next(
+        (
+            item
+            for item in state.external_signal_snapshots
+            if item.snapshot_ref == payload.snapshot_ref
+        ),
+        None,
+    )
+    model = next(
+        (
+            item
+            for item in state.model_result_audits
+            if item.event_ref == payload.attention_model_event_ref
+        ),
+        None,
+    )
+    if (
+        manifest is None
+        or effect is None
+        or effect.role != "external_perception"
+        or effect.payload_hash != event.payload_hash
+        or snapshot is None
+        or snapshot.accepted_event_ref != payload.snapshot_event_ref
+        or snapshot.accepted_event_payload_hash != payload.snapshot_event_payload_hash
+        or snapshot.attention_attempt_id != payload.attention_attempt_id
+        or model is None
+        or model.model_result_ref != payload.attention_model_result_ref
+        or model.event_payload_hash != payload.attention_model_event_payload_hash
+        or payload.pinned_cursor.world_revision != manifest.evaluated_world_revision
+        or payload.pinned_cursor.deliberation_revision != manifest.evaluated_deliberation_revision
+        or payload.pinned_cursor.ledger_sequence != manifest.evaluated_ledger_sequence
+        or payload.encountered_world_time != event.logical_time
+        or any(
+            item.perception_id == payload.perception_id
+            or (
+                item.attention_attempt_id == payload.attention_attempt_id
+                and item.snapshot_ref == payload.snapshot_ref
+                and item.channel.channel_ref == payload.channel.channel_ref
+            )
+            for item in state.external_perceptions
+        )
+    ):
+        raise ValueError("external perception lacks exact accepted evidence lineage")
+    projected = ExternalPerceptionProjection(
+        **payload.model_dump(mode="python"),
+        accepted_event_ref=event.event_id,
+        accepted_event_payload_hash=event.payload_hash,
+        accepted_world_revision=len(state.committed_world_event_refs) + 1,
+    )
+    return state.model_copy(
+        update={"external_perceptions": (*state.external_perceptions, projected)}
+    )
+
+
 def _budget_settlement_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     settlement = _model_from_payload(event, "settlement", BudgetSettlement)
     if any(item.settlement_id == settlement.settlement_id for item in state.budget_settlements):
@@ -8811,9 +8864,7 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
     if not isinstance(completed_at_raw, str):
         raise ValueError("TriggerProcessCompleted requires completed_at")
     completed_at = datetime.fromisoformat(completed_at_raw)
-    superseding_observation_event_ref = event.payload().get(
-        "superseding_observation_event_ref"
-    )
+    superseding_observation_event_ref = event.payload().get("superseding_observation_event_ref")
     inbound_supersession = superseding_observation_event_ref is not None
     if inbound_supersession:
         allowed_supersession = (
@@ -8830,9 +8881,7 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
             ),
         }
         if not allowed_supersession or event.causation_id != superseding_observation_event_ref:
-            raise ValueError(
-                "trigger supersession lacks exact inbound authority"
-            )
+            raise ValueError("trigger supersession lacks exact inbound authority")
         superseding_authority = next(
             (
                 item
@@ -8863,18 +8912,12 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
         if (
             source_observation is None
             or superseding_observation is None
-            or superseding_observation.world_revision
-            <= source_observation.world_revision
+            or superseding_observation.world_revision <= source_observation.world_revision
         ):
-            raise ValueError(
-                "trigger supersession requires a newer inbound Observation"
-            )
+            raise ValueError("trigger supersession requires a newer inbound Observation")
     if not (
         process.claim_lease.acquired_at <= completed_at
-        and (
-            completed_at <= process.claim_lease.expires_at
-            or inbound_supersession
-        )
+        and (completed_at <= process.claim_lease.expires_at or inbound_supersession)
     ):
         raise ValueError("trigger completion occurred outside its claim lease")
     completed = process.model_copy(
@@ -8922,8 +8965,7 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
                     "life-ecology:aftermath_recovered_experience",
                     "life-ecology:aftermath_recovered_memory",
                 }
-                or cadence_delay_seconds
-                not in {120, 900, 2700, 7200, 14_400, 21_600, 28_800}
+                or cadence_delay_seconds not in {120, 900, 2700, 7200, 14_400, 21_600, 28_800}
             ):
                 raise ValueError("life ecology cadence draw binding is invalid")
         prior = state.life_ecology_schedule
@@ -9006,18 +9048,16 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
             }
         )
     updates: dict[str, object] = {
-            "trigger_processes": (
-                *state.trigger_processes[:process_index],
-                completed,
-                *state.trigger_processes[process_index + 1 :],
-            ),
-            "completed_trigger_ids": (*state.completed_trigger_ids, trigger_id),
+        "trigger_processes": (
+            *state.trigger_processes[:process_index],
+            completed,
+            *state.trigger_processes[process_index + 1 :],
+        ),
+        "completed_trigger_ids": (*state.completed_trigger_ids, trigger_id),
     }
     if process.process_kind == "interaction_fact":
         updates["interaction_fact_decisions"] = tuple(
-            item
-            for item in state.interaction_fact_decisions
-            if item.trigger_id != trigger_id
+            item for item in state.interaction_fact_decisions if item.trigger_id != trigger_id
         )
     return state.model_copy(update=updates)
 
@@ -9025,15 +9065,9 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
 def _interaction_fact_technical_failure_recorded(
     state: ReducerState, event: WorldEvent
 ) -> ReducerState:
-    payload = InteractionFactTechnicalFailurePayload.model_validate_json(
-        event.payload_json
-    )
+    payload = InteractionFactTechnicalFailurePayload.model_validate_json(event.payload_json)
     process = next(
-        (
-            item
-            for item in state.trigger_processes
-            if item.trigger_id == payload.trigger_id
-        ),
+        (item for item in state.trigger_processes if item.trigger_id == payload.trigger_id),
         None,
     )
     if (
@@ -9047,9 +9081,7 @@ def _interaction_fact_technical_failure_recorded(
         or event.logical_time != state.logical_time
         or payload.failed_at != state.logical_time
     ):
-        raise ValueError(
-            "interaction fact technical failure does not bind the active attempt"
-        )
+        raise ValueError("interaction fact technical failure does not bind the active attempt")
     expected_delay = INTERACTION_FACT_RETRY_DELAYS_SECONDS[
         min(
             max(payload.retry_ordinal, 1),
@@ -9065,9 +9097,7 @@ def _interaction_fact_technical_failure_recorded(
 def _contextual_life_technical_failure_recorded(
     state: ReducerState, event: WorldEvent
 ) -> ReducerState:
-    payload = ContextualLifeTechnicalFailureRecordedPayload.model_validate_json(
-        event.payload_json
-    )
+    payload = ContextualLifeTechnicalFailureRecordedPayload.model_validate_json(event.payload_json)
     if (
         state.logical_time is None
         or event.logical_time != state.logical_time
@@ -9080,8 +9110,7 @@ def _contextual_life_technical_failure_recorded(
         (
             item
             for item in state.contextual_life_retries
-            if item.lane == payload.lane
-            and item.source_event_ref == payload.source_event_ref
+            if item.lane == payload.lane and item.source_event_ref == payload.source_event_ref
         ),
         None,
     )
@@ -9091,8 +9120,7 @@ def _contextual_life_technical_failure_recorded(
     ]
     if (
         payload.retry_ordinal != expected_ordinal
-        or payload.next_retry_at
-        != payload.failed_at + timedelta(seconds=expected_delay)
+        or payload.next_retry_at != payload.failed_at + timedelta(seconds=expected_delay)
     ):
         raise ValueError("contextual life retry ordinal or delay is invalid")
 
@@ -9184,8 +9212,7 @@ def _contextual_life_technical_failure_recorded(
     retained = tuple(
         item
         for item in state.contextual_life_retries
-        if (item.lane, item.source_event_ref)
-        != (payload.lane, payload.source_event_ref)
+        if (item.lane, item.source_event_ref) != (payload.lane, payload.source_event_ref)
     )
     return state.model_copy(update={"contextual_life_retries": (*retained, retry)})
 
@@ -9193,9 +9220,7 @@ def _contextual_life_technical_failure_recorded(
 def _contextual_life_source_disposition_recorded(
     state: ReducerState, event: WorldEvent
 ) -> ReducerState:
-    payload = ContextualLifeSourceDispositionRecordedPayload.model_validate_json(
-        event.payload_json
-    )
+    payload = ContextualLifeSourceDispositionRecordedPayload.model_validate_json(event.payload_json)
     source = next(
         (
             item
@@ -9216,18 +9241,10 @@ def _contextual_life_source_disposition_recorded(
     return state
 
 
-def _interaction_fact_decision_recorded(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
-    payload = InteractionFactDecisionRecordedPayload.model_validate_json(
-        event.payload_json
-    )
+def _interaction_fact_decision_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = InteractionFactDecisionRecordedPayload.model_validate_json(event.payload_json)
     process = next(
-        (
-            item
-            for item in state.trigger_processes
-            if item.trigger_id == payload.trigger_id
-        ),
+        (item for item in state.trigger_processes if item.trigger_id == payload.trigger_id),
         None,
     )
     source = next(
@@ -9268,8 +9285,7 @@ def _interaction_fact_decision_recorded(
         )
         if (
             proposal.trigger_ref != payload.source_event_ref
-            or proposal.evaluated_world_revision
-            != payload.evaluated_world_revision
+            or proposal.evaluated_world_revision != payload.evaluated_world_revision
         ):
             raise ValueError("recorded retain decision changed its pinned source")
     elif payload.decision_kind == "withdraw":
@@ -9281,10 +9297,8 @@ def _interaction_fact_decision_recorded(
                 "confidence_bp",
                 "brief_rationale",
             }
-            or decision.get("predicate_code")
-            not in INSTALLED_FACT_PREDICATE_CARDINALITY
-            or decision.get("assertion_source_ref")
-            != payload.source_observation_ref
+            or decision.get("predicate_code") not in INSTALLED_FACT_PREDICATE_CARDINALITY
+            or decision.get("assertion_source_ref") != payload.source_observation_ref
             or not isinstance(decision.get("confidence_bp"), int)
             or isinstance(decision.get("confidence_bp"), bool)
             or not 0 <= decision["confidence_bp"] <= 10_000
@@ -9305,18 +9319,10 @@ def _interaction_fact_decision_recorded(
     )
 
 
-def _fact_memory_decision_recorded(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
-    payload = FactMemoryDecisionRecordedPayload.model_validate_json(
-        event.payload_json
-    )
+def _fact_memory_decision_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = FactMemoryDecisionRecordedPayload.model_validate_json(event.payload_json)
     process = next(
-        (
-            item
-            for item in state.trigger_processes
-            if item.trigger_id == payload.trigger_id
-        ),
+        (item for item in state.trigger_processes if item.trigger_id == payload.trigger_id),
         None,
     )
     fact = next(
@@ -9359,9 +9365,7 @@ def _fact_memory_decision_recorded(
         or event.logical_time != state.logical_time
         or payload.recorded_at != state.logical_time
     ):
-        raise ValueError(
-            "Fact-memory decision does not bind the active attempt and Fact authority"
-        )
+        raise ValueError("Fact-memory decision does not bind the active attempt and Fact authority")
     if payload.decision_kind == "retain":
         FactMemoryRetentionDraft.model_validate_json(payload.decision_json)
     # This external result is audit-only. Memory acceptance remains a
@@ -9370,12 +9374,8 @@ def _fact_memory_decision_recorded(
     return state
 
 
-def _experience_memory_decision_recorded(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
-    payload = ExperienceMemoryDecisionRecordedPayload.model_validate_json(
-        event.payload_json
-    )
+def _experience_memory_decision_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = ExperienceMemoryDecisionRecordedPayload.model_validate_json(event.payload_json)
     experience = next(
         (
             item
@@ -9396,11 +9396,9 @@ def _experience_memory_decision_recorded(
     )
     if (
         experience is None
-        or experience.origin.accepted_event_ref
-        != payload.experience_authority_event_ref
+        or experience.origin.accepted_event_ref != payload.experience_authority_event_ref
         or authority is None
-        or authority.world_revision
-        != payload.experience_authority_world_revision
+        or authority.world_revision != payload.experience_authority_world_revision
         or authority.payload_hash != payload.experience_authority_payload_hash
         or event.causation_id != payload.experience_authority_event_ref
         or payload.decision_id
@@ -9416,9 +9414,7 @@ def _experience_memory_decision_recorded(
         or event.logical_time != state.logical_time
         or payload.recorded_at != state.logical_time
     ):
-        raise ValueError(
-            "Experience-memory decision does not bind current Experience authority"
-        )
+        raise ValueError("Experience-memory decision does not bind current Experience authority")
     if payload.decision_kind == "retain":
         FactMemoryRetentionDraft.model_validate_json(payload.decision_json)
     return state
@@ -9494,9 +9490,7 @@ def _expression_repin_reserved(
         or replacement.state != existing.state
         or replacement.runtime_outcome_ref != existing.runtime_outcome_ref
     ):
-        raise ValueError(
-            "expression repin reservation changed its claimed attempt identity"
-        )
+        raise ValueError("expression repin reservation changed its claimed attempt identity")
     repin_ordinal = payload.get("repin_ordinal")
     reservation_id = payload.get("reservation_id")
     if (
@@ -10244,19 +10238,11 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
     pending = state.pending_biographical_settlements
     if npc.source_event_ref is not None:
         source = next(
-            (
-                item
-                for item in payload.evidence_refs
-                if item.ref_id == npc.source_event_ref
-            ),
+            (item for item in payload.evidence_refs if item.ref_id == npc.source_event_ref),
             None,
         )
         settlement = next(
-            (
-                item
-                for item in pending
-                if item.settlement_event_ref == npc.source_event_ref
-            ),
+            (item for item in pending if item.settlement_event_ref == npc.source_event_ref),
             None,
         )
         descriptor = (
@@ -10288,9 +10274,7 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
             or npc.privacy_class != descriptor.privacy_class
             or npc.accepted_event_ref not in {None, event.event_id}
         ):
-            raise ValueError(
-                "dynamic NPC registration must match its selected settlement effect"
-            )
+            raise ValueError("dynamic NPC registration must match its selected settlement effect")
         npc = npc.model_copy(update={"accepted_event_ref": event.event_id})
         payload = payload.model_copy(update={"npc": npc})
         remaining_descriptors = tuple(
@@ -10301,9 +10285,7 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
         replacement = settlement.model_copy(
             update={"provisional_npc_introductions": remaining_descriptors}
         )
-        pending = tuple(
-            replacement if item == settlement else item for item in pending
-        )
+        pending = tuple(replacement if item == settlement else item for item in pending)
         if (
             not replacement.provisional_npc_introductions
             and replacement.life_arc_effect is None
@@ -10321,9 +10303,7 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
 def _npc_status_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     _require_life_time(state, event)
     payload = _validated_life_payload(state, event, NpcStatusChangedPayload)
-    return state.model_copy(
-        update={"npcs": transition_npc_status(state.npcs, payload)}
-    )
+    return state.model_copy(update={"npcs": transition_npc_status(state.npcs, payload)})
 
 
 def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -10368,11 +10348,7 @@ def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
             else None
         )
         effect = candidate.life_arc_effect if candidate is not None else None
-        dynamic_effect = (
-            candidate.dynamic_life_arc_context
-            if candidate is not None
-            else None
-        )
+        dynamic_effect = candidate.dynamic_life_arc_context if candidate is not None else None
         arc = payload.arc_after
         if (
             source is None
@@ -10398,8 +10374,7 @@ def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
                 and (
                     arc.effect_descriptor_hash != dynamic_effect.descriptor_hash
                     or arc.arc_kind != "dynamic"
-                    or arc.context_pack_ref
-                    != dynamic_effect.summary_content_ref
+                    or arc.context_pack_ref != dynamic_effect.summary_content_ref
                     or arc.context_tags
                     != tuple(
                         sorted(
@@ -10420,24 +10395,17 @@ def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
                 occurrence.settled_at
                 + timedelta(
                     days=(
-                        effect.duration_days
-                        if effect is not None
-                        else dynamic_effect.duration_days
+                        effect.duration_days if effect is not None else dynamic_effect.duration_days
                     )
                 )
                 if (
                     (effect is not None and effect.duration_days is not None)
-                    or (
-                        dynamic_effect is not None
-                        and dynamic_effect.duration_days is not None
-                    )
+                    or (dynamic_effect is not None and dynamic_effect.duration_days is not None)
                 )
                 else None
             )
         ):
-            raise ValueError(
-                "Life Arc start requires its settled WorldOccurrence as evidence"
-            )
+            raise ValueError("Life Arc start requires its settled WorldOccurrence as evidence")
     # ``accepted_event_ref`` is reducer-owned authority, not an assertion made
     # by the event payload. Older LifeArcChanged bytes therefore remain valid:
     # replay derives the binding from the immutable event currently being
@@ -10446,17 +10414,10 @@ def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     arc_before = payload.arc_before
     if arc_before is not None and arc_before.accepted_event_ref is None:
         projected_before = next(
-            (
-                item
-                for item in state.life_arcs
-                if item.arc_id == arc_before.arc_id
-            ),
+            (item for item in state.life_arcs if item.arc_id == arc_before.arc_id),
             None,
         )
-        if (
-            projected_before is not None
-            and projected_before.accepted_event_ref is not None
-        ):
+        if projected_before is not None and projected_before.accepted_event_ref is not None:
             arc_before = arc_before.model_copy(
                 update={
                     "accepted_event_ref": projected_before.accepted_event_ref,
@@ -10498,9 +10459,7 @@ def _life_arc_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     )
 
 
-def _biographical_timeline_configured(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
+def _biographical_timeline_configured(state: ReducerState, event: WorldEvent) -> ReducerState:
     BiographicalTimelineConfiguredPayload.model_validate_json(event.payload_json)
     if any(
         item.event_type == "BiographicalTimelineConfigured"
@@ -10834,9 +10793,7 @@ def _world_occurrence_settled(state: ReducerState, event: WorldEvent) -> Reducer
         settlement_world_revision=world_revision,
         settlement_payload_hash=event.payload_hash,
     )
-    occurrence = next(
-        item for item in occurrences if item.occurrence_id == payload.occurrence_id
-    )
+    occurrence = next(item for item in occurrences if item.occurrence_id == payload.occurrence_id)
     candidate = next(
         (
             item
@@ -10931,9 +10888,7 @@ def _world_occurrence_settled(state: ReducerState, event: WorldEvent) -> Reducer
                 coordinate_ref=overlapping[0].coordinate_ref,
                 summary=direction.summary,
                 context_tags=direction.context_tags,
-                replaces_context_tag_prefixes=(
-                    direction.replaces_context_tag_prefixes
-                ),
+                replaces_context_tag_prefixes=(direction.replaces_context_tag_prefixes),
                 privacy_class=direction.privacy_class,
             )
         previous = next(
@@ -10946,12 +10901,9 @@ def _world_occurrence_settled(state: ReducerState, event: WorldEvent) -> Reducer
         )
         if (
             previous is not None
-            and previous.replaces_context_tag_prefixes
-            != direction.replaces_context_tag_prefixes
+            and previous.replaces_context_tag_prefixes != direction.replaces_context_tag_prefixes
         ):
-            raise ValueError(
-                "a biographical coordinate cannot change its replacement namespace"
-            )
+            raise ValueError("a biographical coordinate cannot change its replacement namespace")
         projected_direction = BiographicalCoordinateProjection(
             coordinate_ref=direction.coordinate_ref,
             entity_revision=(previous.entity_revision + 1 if previous else 1),
@@ -10998,9 +10950,7 @@ def _world_occurrence_settled(state: ReducerState, event: WorldEvent) -> Reducer
                 candidate_result_ref=payload.candidate_result_ref,
                 settled_at=payload.settled_at,
                 life_arc_effect=candidate.life_arc_effect,
-                provisional_npc_introductions=(
-                    candidate.provisional_npc_introductions
-                ),
+                provisional_npc_introductions=(candidate.provisional_npc_introductions),
                 dynamic_life_arc_context=(
                     candidate.dynamic_life_arc_context
                     if payload.adopt_proposed_life_direction is True
@@ -11023,19 +10973,11 @@ def _normalized_outcome_weights(
 ) -> tuple[tuple[str, int], ...]:
     """Independently reconstruct RandomAuthority's one-million weight vector."""
 
-    refs = tuple(
-        sorted(item.candidate_result_ref for item in candidates)
-    )
-    weights = {
-        item.candidate_result_ref: item.relative_plausibility_weight
-        for item in candidates
-    }
+    refs = tuple(sorted(item.candidate_result_ref for item in candidates))
+    weights = {item.candidate_result_ref: item.relative_plausibility_weight for item in candidates}
     total = sum(weights.values())
     scale = 1_000_000
-    floor = {
-        ref: weights[ref] * scale // total
-        for ref in refs
-    }
+    floor = {ref: weights[ref] * scale // total for ref in refs}
     remaining = scale - sum(floor.values())
     order = sorted(
         refs,
@@ -11052,11 +10994,7 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
     if payload.evaluated_world_revision != len(state.committed_world_event_refs):
         raise ValueError("outcome proposal must evaluate the current world revision")
     occurrence = next(
-        (
-            item
-            for item in state.world_occurrences
-            if item.occurrence_id == payload.occurrence_id
-        ),
+        (item for item in state.world_occurrences if item.occurrence_id == payload.occurrence_id),
         None,
     )
     candidate = (
@@ -11096,33 +11034,22 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
                 privacy_rank[payload.character_life_direction.privacy_class]
                 < privacy_rank[candidate.privacy_class]
             ):
-                raise ValueError(
-                    "character life direction cannot weaken outcome privacy"
-                )
+                raise ValueError("character life direction cannot weaken outcome privacy")
         if (
             payload.decision_authority is not None
             and payload.decision_authority != expected_authority
         ) or (
-            (
-                has_open_effect
-                or candidate.causal_authority != "character_choice"
-            )
+            (has_open_effect or candidate.causal_authority != "character_choice")
             and payload.decision_authority != expected_authority
         ):
-            raise ValueError(
-                "outcome proposal authority does not match candidate causal authority"
-            )
-        if (
-            payload.decision_authority == "character_model"
-            and payload.context_identity_version
-            in {"life-aftermath-context.2", "life-aftermath-context.3"}
-        ):
+            raise ValueError("outcome proposal authority does not match candidate causal authority")
+        if payload.decision_authority == "character_model" and payload.context_identity_version in {
+            "life-aftermath-context.2",
+            "life-aftermath-context.3",
+        }:
             matrix_hash = sha256(
                 canonical_json(
-                    [
-                        item.model_dump(mode="json")
-                        for item in occurrence.candidate_outcomes
-                    ]
+                    [item.model_dump(mode="json") for item in occurrence.candidate_outcomes]
                 )
             )
             audit_projection = next(
@@ -11135,9 +11062,7 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
                 None,
             )
             audit = (
-                RecordedModelResultAudit.model_validate_json(
-                    audit_projection.audit_json
-                )
+                RecordedModelResultAudit.model_validate_json(audit_projection.audit_json)
                 if audit_projection is not None
                 else None
             )
@@ -11145,8 +11070,7 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
                 (
                     item
                     for item in state.proposal_audits
-                    if item.event_ref
-                    == payload.decision_audit_proposal_event_ref
+                    if item.event_ref == payload.decision_audit_proposal_event_ref
                     and item.event_payload_hash
                     == payload.decision_audit_proposal_event_payload_hash
                 ),
@@ -11162,9 +11086,7 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
             )
             expected_audit_text = outcome_selection_audit_text(
                 candidate_result_ref=payload.candidate_result_ref,
-                adopt_proposed_life_direction=bool(
-                    payload.adopt_proposed_life_direction
-                ),
+                adopt_proposed_life_direction=bool(payload.adopt_proposed_life_direction),
                 character_life_direction=payload.character_life_direction,
                 candidate_matrix_hash=matrix_hash,
                 response_hash=str(payload.decision_raw_output_hash),
@@ -11177,31 +11099,24 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
                 )
                 or audit_projection is None
                 or audit is None
-                or audit_projection.attempt_index
-                != audit_projection.attempt_count - 1
-                or audit.status
-                not in {"proposal_validated", "main_invalid_recovered"}
+                or audit_projection.attempt_index != audit_projection.attempt_count - 1
+                or audit.status not in {"proposal_validated", "main_invalid_recovered"}
                 or audit.model_id != payload.decision_model
                 or audit.response_hash != payload.decision_raw_output_hash
                 or audit_projection.capsule_id != payload.context_capsule_id
                 or audit_projection.evaluated_world_revision
                 != payload.context_cursor.world_revision
-                or audit_projection.evaluated_world_revision
-                != payload.evaluated_world_revision
+                or audit_projection.evaluated_world_revision != payload.evaluated_world_revision
                 or audit_projection.trigger_ref
                 != f"event:outcome-observation:{payload.observation_refs[0]}"
                 or proposal_audit is None
-                or proposal_audit.model_result_ref
-                != payload.decision_model_result_ref
+                or proposal_audit.model_result_ref != payload.decision_model_result_ref
                 or proposal_audit.capsule_id != payload.context_capsule_id
-                or proposal_audit.evaluated_world_revision
-                != payload.evaluated_world_revision
+                or proposal_audit.evaluated_world_revision != payload.evaluated_world_revision
                 or not isinstance(parsed_audit_proposal, MinimalProposal)
                 or parsed_audit_proposal.response_text != expected_audit_text
             ):
-                raise ValueError(
-                    "character outcome does not bind its durable model audit"
-                )
+                raise ValueError("character outcome does not bind its durable model audit")
         elif payload.decision_authority == "recorded_world_draw":
             binding = payload.recorded_world_draw
             committed_draw = (
@@ -11209,8 +11124,7 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
                     (
                         item
                         for item in state.committed_world_event_refs
-                        if binding is not None
-                        and item.event_id == binding.draw_event_ref
+                        if binding is not None and item.event_id == binding.draw_event_ref
                     ),
                     None,
                 )
@@ -11218,43 +11132,28 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
                 else None
             )
             draw = (
-                RandomDrawRecordedPayload.model_validate_json(
-                    binding.draw_payload_json
-                )
+                RandomDrawRecordedPayload.model_validate_json(binding.draw_payload_json)
                 if binding is not None
                 else None
             )
             expected_refs = tuple(
-                sorted(
-                    item.candidate_result_ref
-                    for item in occurrence.candidate_outcomes
-                )
+                sorted(item.candidate_result_ref for item in occurrence.candidate_outcomes)
             )
-            expected_weights = _normalized_outcome_weights(
-                occurrence.candidate_outcomes
-            )
+            expected_weights = _normalized_outcome_weights(occurrence.candidate_outcomes)
             if (
                 binding is None
                 or committed_draw is None
                 or committed_draw.event_type != "RandomDrawRecorded"
-                or committed_draw.payload_hash
-                != binding.draw_event_payload_hash
+                or committed_draw.payload_hash != binding.draw_event_payload_hash
                 or draw is None
                 or draw.catalog_version != "open-life-outcome.1"
-                or draw.weight_policy_version
-                != "open-life-outcome-weight.1"
+                or draw.weight_policy_version != "open-life-outcome-weight.1"
                 or draw.candidate_refs != expected_refs
-                or draw.selected_candidate_ref
-                != payload.candidate_result_ref
-                or tuple(
-                    (item.candidate_ref, item.weight_ppm)
-                    for item in draw.weight_vector
-                )
+                or draw.selected_candidate_ref != payload.candidate_result_ref
+                or tuple((item.candidate_ref, item.weight_ppm) for item in draw.weight_vector)
                 != expected_weights
             ):
-                raise ValueError(
-                    "world contingency does not bind its recorded weighted draw"
-                )
+                raise ValueError("world contingency does not bind its recorded weighted draw")
         elif payload.decision_authority == "external_observation":
             observation = next(
                 (
@@ -11265,13 +11164,8 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
                 ),
                 None,
             )
-            if (
-                observation is None
-                or observation.occurrence_id != occurrence.occurrence_id
-            ):
-                raise ValueError(
-                    "external outcome requires a settled external observation"
-                )
+            if observation is None or observation.occurrence_id != occurrence.occurrence_id:
+                raise ValueError("external outcome requires a settled external observation")
     if payload.outcome_proposal_id in state.proposal_ids:
         raise ValueError("proposal identity is already registered")
     if payload.deliberation_trigger_id is not None:
@@ -12600,16 +12494,13 @@ def _require_authorized_commitment(
             or after.values.subject_ref
             not in {item.observation_id for item in state.message_observations}
             or after.values.content_ref != first_beat.payload_ref
-            or after.values.content_hash
-            != first_beat.payload_hash.removeprefix("sha256:")
+            or after.values.content_hash != first_beat.payload_hash.removeprefix("sha256:")
             or after.values.fulfillment_contract.expected_action_id
             != terminal_beat.action.action_id
             or after.values.fulfillment_contract.expected_action_payload_hash
             != terminal_beat.action.payload_hash
-            or after.values.due_window.opens_at
-            != terminal_beat.action.not_before
-            or after.values.due_window.closes_at
-            != terminal_beat.action.expires_at
+            or after.values.due_window.opens_at != terminal_beat.action.not_before
+            or after.values.due_window.closes_at != terminal_beat.action.expires_at
         ):
             raise ValueError("social deferred commitment does not match accepted expression")
         # The social manifest itself is the persisted proposal authority; do
@@ -13199,6 +13090,16 @@ _EVENTS = {
         ),
         EventDefinition("AcceptanceRecorded", RevisionClass.WORLD, _acceptance_recorded),
         EventDefinition("LegacyAcceptanceAuditRecorded", RevisionClass.WORLD, _audit_only),
+        EventDefinition(
+            "ExternalSignalSnapshotAdopted",
+            RevisionClass.WORLD,
+            _external_signal_snapshot_adopted,
+        ),
+        EventDefinition(
+            "ExternalPerceptionRecorded",
+            RevisionClass.WORLD,
+            _external_perception_recorded,
+        ),
         EventDefinition("NpcRegistered", RevisionClass.WORLD, _npc_registered),
         EventDefinition("NpcStatusChanged", RevisionClass.WORLD, _npc_status_changed),
         EventDefinition(
@@ -13409,8 +13310,7 @@ def _reduce_contextual_life_work_index(
     pending = state.pending_contextual_life_sources
     retries = state.contextual_life_retries
     if event.event_type in _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES and not (
-        event.event_type == "ObservationRecorded"
-        and not event.actor.startswith("user:")
+        event.event_type == "ObservationRecorded" and not event.actor.startswith("user:")
     ):
         pending = (
             *pending,
@@ -13429,79 +13329,57 @@ def _reduce_contextual_life_work_index(
         if isinstance(source_event_ref, str):
             if proposal_kind == "contextual_life_inspiration":
                 pending = tuple(
-                    item
-                    for item in pending
-                    if item.source_event_ref != source_event_ref
+                    item for item in pending if item.source_event_ref != source_event_ref
                 )
                 retries = tuple(
                     item
                     for item in retries
-                    if (item.lane, item.source_event_ref)
-                    != ("formation", source_event_ref)
+                    if (item.lane, item.source_event_ref) != ("formation", source_event_ref)
                 )
             elif proposal_kind == "contextual_life_plan":
                 retries = tuple(
                     item
                     for item in retries
-                    if (item.lane, item.source_event_ref)
-                    != ("planning", source_event_ref)
+                    if (item.lane, item.source_event_ref) != ("planning", source_event_ref)
                 )
     elif event.event_type == "ContextualLifeSourceDispositionRecorded":
         source_event_ref = event.payload().get("source_event_ref")
-        pending = tuple(
-            item
-            for item in pending
-            if item.source_event_ref != source_event_ref
-        )
+        pending = tuple(item for item in pending if item.source_event_ref != source_event_ref)
         retries = tuple(
             item
             for item in retries
-            if (item.lane, item.source_event_ref)
-            != ("formation", source_event_ref)
+            if (item.lane, item.source_event_ref) != ("formation", source_event_ref)
         )
     elif event.event_type == "ExperienceMemoryDecisionRecorded":
-        source_event_ref = event.payload().get(
-            "experience_authority_event_ref"
-        )
+        source_event_ref = event.payload().get("experience_authority_event_ref")
         retries = tuple(
             item
             for item in retries
-            if (item.lane, item.source_event_ref)
-            != ("experience_memory", source_event_ref)
+            if (item.lane, item.source_event_ref) != ("experience_memory", source_event_ref)
         )
     elif event.event_type == "ClockAdvanced":
         target = state.logical_time
         if target is not None:
             floor = target - _CONTEXTUAL_LIFE_SOURCE_MAX_AGE
-            live_refs = {
-                item.source_event_ref for item in pending if item.logical_time >= floor
-            }
-            pending = tuple(
-                item for item in pending if item.source_event_ref in live_refs
-            )
+            live_refs = {item.source_event_ref for item in pending if item.logical_time >= floor}
+            pending = tuple(item for item in pending if item.source_event_ref in live_refs)
             retries = tuple(
                 item
                 for item in retries
-                if item.lane != "formation"
-                or item.source_event_ref in live_refs
+                if item.lane != "formation" or item.source_event_ref in live_refs
             )
     elif event.event_type in {"AspirationFaded", "AspirationCrystallized"}:
         payload = event.payload()
         aspiration_id = payload.get("aspiration_id")
         aspiration = next(
-            (
-                item
-                for item in state.aspirations
-                if item.aspiration_id == aspiration_id
-            ),
+            (item for item in state.aspirations if item.aspiration_id == aspiration_id),
             None,
         )
         if aspiration is not None and aspiration.seed_id.startswith("contextual:"):
             retries = tuple(
                 item
                 for item in retries
-                if (item.lane, item.source_event_ref)
-                != ("planning", aspiration.planted_event_ref)
+                if (item.lane, item.source_event_ref) != ("planning", aspiration.planted_event_ref)
             )
     if (
         pending == state.pending_contextual_life_sources
@@ -13661,6 +13539,9 @@ def make_projection(
         tool_results=state.tool_results,
         perception_requests=state.perception_requests,
         perception_results=state.perception_results,
+        external_signal_snapshots=state.external_signal_snapshots,
+        external_perceptions=state.external_perceptions,
+        external_perception_acceptance_manifests=(state.external_perception_acceptance_manifests),
         appearance_states=state.appearance_states,
         visible_physical_states=state.visible_physical_states,
         photo_candidates=state.photo_candidates,

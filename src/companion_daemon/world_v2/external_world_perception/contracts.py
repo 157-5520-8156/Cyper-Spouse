@@ -10,7 +10,13 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 
+from ..external_perception_events import (
+    ExternalPerceptionLiveDelivery,
+    FrozenExternalSignalSnapshot,
+)
+from ..proposal_audit_schemas import ModelResultRecordedPayload
 from ..schema_core import FrozenModel
+from ..schemas import ProjectionCursor
 
 
 MAX_EVIDENCE_BYTES = 2_000_000
@@ -231,6 +237,473 @@ class SourceProfile:
         return self.normalized_retention_seconds or self.signal_ttl_seconds
 
 
+class SourceBoundAttentionContextItem(FrozenModel):
+    """One current character-context item with exact World-side provenance."""
+
+    context_ref: str = Field(min_length=1, max_length=1_024)
+    context_kind: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1, max_length=4_096)
+    source_refs: tuple[BoundedSignalText, ...] = Field(min_length=1, max_length=32)
+
+
+class PerceptionChannelProof(FrozenModel):
+    """A current capability proving access, never attention or prior use."""
+
+    channel_ref: str = Field(min_length=1, max_length=1_024)
+    channel_kind: str = Field(min_length=1, max_length=128)
+    evidence_refs: tuple[BoundedSignalText, ...] = Field(min_length=1, max_length=32)
+    accessible_source_ids: tuple[BoundedSignalText, ...] = Field(min_length=1, max_length=64)
+    valid_until: datetime
+
+
+class CharacterAttentionContext(FrozenModel):
+    """Source-bound current context frozen by a World-facing read-only port."""
+
+    world_id: str = Field(min_length=1, max_length=512)
+    actor_ref: str = Field(min_length=1, max_length=512)
+    pinned_world_cursor: str = Field(min_length=1, max_length=1_024)
+    current_self_state: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=32)
+    situation: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=32)
+    relevant_context: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=64)
+    available_channels: tuple[PerceptionChannelProof, ...] = Field(max_length=32)
+
+    @model_validator(mode="after")
+    def refs_are_unambiguous(self) -> CharacterAttentionContext:
+        context_refs = tuple(
+            item.context_ref
+            for item in (*self.current_self_state, *self.situation, *self.relevant_context)
+        )
+        channel_refs = tuple(item.channel_ref for item in self.available_channels)
+        if len(context_refs) != len(set(context_refs)):
+            raise ValueError("attention context refs must be unique")
+        if len(channel_refs) != len(set(channel_refs)):
+            raise ValueError("perception channel refs must be unique")
+        return self
+
+
+class LicensedEvidenceView(FrozenModel):
+    """Exact licensed, untrusted source material shown as data to the model."""
+
+    signal_revision_ref: str = Field(min_length=1, max_length=1_024)
+    content_trust: Literal["untrusted_external_evidence"] = "untrusted_external_evidence"
+    source_id: str = Field(min_length=1, max_length=512)
+    upstream_publisher_ref: str = Field(min_length=1, max_length=1_024)
+    signal_kind: str = Field(min_length=1, max_length=128)
+    headline: str = Field(min_length=1, max_length=1_000)
+    licensed_summary: str = Field(default="", max_length=8_000)
+    canonical_url: str | None = Field(default=None, max_length=4_096)
+    published_at: datetime
+    updated_at: datetime | None = None
+    expires_at: datetime
+    source_provided_certainty: str | None = Field(default=None, max_length=256)
+    place_scope: ExternalSignalPlace | None = None
+
+
+class CorrectionEdge(FrozenModel):
+    correction_revision_ref: str = Field(min_length=1, max_length=1_024)
+    corrected_revision_ref: str = Field(min_length=1, max_length=1_024)
+
+
+class SourceDisagreement(FrozenModel):
+    """Structural conflict evidence; it deliberately carries no system verdict."""
+
+    signal_revision_refs: tuple[BoundedSignalText, ...] = Field(min_length=2, max_length=32)
+    differing_fields: tuple[Literal["headline", "licensed_summary", "certainty"], ...] = Field(
+        min_length=1,
+        max_length=3,
+    )
+
+
+class PerceptionDossier(FrozenModel):
+    candidate_ref: str = Field(min_length=1, max_length=1_024)
+    exact_signal_revisions: tuple[BoundedSignalText, ...] = Field(min_length=1, max_length=32)
+    corrections: tuple[CorrectionEdge, ...] = Field(default=(), max_length=32)
+    source_disagreements: tuple[SourceDisagreement, ...] = Field(default=(), max_length=16)
+    accessible_channels: tuple[PerceptionChannelProof, ...] = Field(min_length=1, max_length=32)
+    model_visible_material: tuple[LicensedEvidenceView, ...] = Field(min_length=1, max_length=32)
+    evidence_digest: str = Field(min_length=64, max_length=64)
+
+
+class PerceptionWindow(FrozenModel):
+    """Frozen source packet offered to one shadow character-attention attempt."""
+
+    window_id: str = Field(min_length=1, max_length=256)
+    attention_attempt_id: str = Field(min_length=1, max_length=256)
+    opportunity_id: str = Field(min_length=1, max_length=256)
+    world_id: str = Field(min_length=1, max_length=512)
+    actor_ref: str = Field(min_length=1, max_length=512)
+    pinned_world_cursor: str = Field(min_length=1, max_length=1_024)
+    attention_policy_revision: str = Field(min_length=1, max_length=256)
+    deployment_mode: Literal["shadow"] = "shadow"
+    deployment_mode_revision: str = Field(min_length=1, max_length=256)
+    generated_at: datetime
+    expires_at: datetime
+    candidates: tuple[PerceptionDossier, ...] = Field(min_length=1, max_length=16)
+    candidate_set_hash: str = Field(min_length=64, max_length=64)
+    exposure_draw_ref: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def window_identity_is_coherent(self) -> PerceptionWindow:
+        if self.expires_at <= self.generated_at:
+            raise ValueError("perception window expiry must follow generation")
+        candidate_refs = tuple(item.candidate_ref for item in self.candidates)
+        if len(candidate_refs) != len(set(candidate_refs)):
+            raise ValueError("perception window candidate refs must be unique")
+        return self
+
+
+class CharacterAttentionSelection(FrozenModel):
+    candidate_ref: str = Field(min_length=1, max_length=1_024)
+    exact_signal_revision_refs: tuple[BoundedSignalText, ...] = Field(
+        min_length=1,
+        max_length=32,
+    )
+    selected_channel_ref: str = Field(min_length=1, max_length=1_024)
+    subjective_summary: str = Field(min_length=1, max_length=8_000)
+    epistemic_notes: str = Field(default="", max_length=4_000)
+    attended_context_refs: tuple[BoundedSignalText, ...] = Field(default=(), max_length=64)
+
+
+class CharacterAttentionResult(FrozenModel):
+    """Character-authored attention; an empty tuple is an explicit model choice."""
+
+    selections: tuple[CharacterAttentionSelection, ...] = Field(max_length=16)
+
+
+class CharacterAttentionRequest(FrozenModel):
+    attention_attempt_id: str = Field(min_length=1, max_length=256)
+    retry_ordinal: int = Field(ge=0)
+    selection_ordinal: Literal[0, 1]
+    window: PerceptionWindow
+    current_context: CharacterAttentionContext
+    validation_failure_codes: tuple[BoundedSignalText, ...] = Field(default=(), max_length=32)
+    rejected_result_json: str | None = Field(default=None, max_length=65_536)
+
+    @model_validator(mode="after")
+    def reselection_fields_are_coherent(self) -> CharacterAttentionRequest:
+        if self.attention_attempt_id != self.window.attention_attempt_id:
+            raise ValueError("attention request and window attempt ids differ")
+        if self.selection_ordinal == 0 and (
+            self.validation_failure_codes or self.rejected_result_json is not None
+        ):
+            raise ValueError("primary attention request cannot carry reselection feedback")
+        if self.selection_ordinal == 1 and not self.validation_failure_codes:
+            raise ValueError("attention reselection requires exact validation failures")
+        return self
+
+
+class CharacterAttentionContextPort(Protocol):
+    async def freeze_attention_context(
+        self,
+        *,
+        world_id: str,
+        actor_ref: str,
+        observed_at: datetime,
+    ) -> CharacterAttentionContext: ...
+
+
+class CharacterAttentionModelPort(Protocol):
+    model_id: str
+
+    async def consider_attention(self, request: CharacterAttentionRequest) -> object: ...
+
+
+class CharacterAttentionTechnicalFailure(RuntimeError):
+    """Typed provider failure; never translated into a character choosing none."""
+
+    def __init__(self, failure_code: str) -> None:
+        if not failure_code or len(failure_code) > 128:
+            raise ValueError("character attention failure code is invalid")
+        super().__init__(failure_code)
+        self.failure_code = failure_code
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowAttentionRuntime:
+    """Explicit shadow-only capability bundle; it has no World writer."""
+
+    world_id: str
+    actor_ref: str
+    attention_policy_revision: str
+    deployment_mode_revision: str
+    worker_id: str
+    context_port: CharacterAttentionContextPort
+    model: CharacterAttentionModelPort
+    merge_wait_seconds: int = 120
+    window_ttl_seconds: int = 21_600
+    lease_seconds: int = 300
+    model_timeout_seconds: int = 120
+    max_candidate_dossiers: int = 12
+    attempt_retention_seconds: int = 604_800
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.world_id, "world id"),
+            (self.actor_ref, "actor ref"),
+            (self.attention_policy_revision, "attention policy revision"),
+            (self.deployment_mode_revision, "deployment mode revision"),
+            (self.worker_id, "worker id"),
+            (self.model.model_id, "model id"),
+        ):
+            if not value or len(value) > 512:
+                raise ValueError(f"shadow attention {label} is invalid")
+        if not self.deployment_mode_revision.startswith("shadow:"):
+            raise ValueError("shadow attention cannot use a live deployment identity")
+        for value, label in (
+            (self.merge_wait_seconds, "merge wait"),
+            (self.window_ttl_seconds, "window TTL"),
+            (self.lease_seconds, "lease"),
+            (self.model_timeout_seconds, "model timeout"),
+            (self.max_candidate_dossiers, "candidate limit"),
+            (self.attempt_retention_seconds, "attempt retention"),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"shadow attention {label} must be positive")
+        if self.max_candidate_dossiers > 16:
+            raise ValueError("shadow attention candidate limit exceeds the contract")
+
+
+class LiveCharacterAttentionContext(FrozenModel):
+    """World context pinned to the complete CAS cursor for a fresh live attempt."""
+
+    world_id: str = Field(min_length=1, max_length=512)
+    actor_ref: str = Field(min_length=1, max_length=512)
+    pinned_world_cursor: ProjectionCursor
+    world_logical_time: datetime
+    current_self_state: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=32)
+    situation: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=32)
+    relevant_context: tuple[SourceBoundAttentionContextItem, ...] = Field(max_length=64)
+    available_channels: tuple[PerceptionChannelProof, ...] = Field(max_length=32)
+
+    @model_validator(mode="after")
+    def refs_and_time_are_closed(self) -> LiveCharacterAttentionContext:
+        if self.world_logical_time.tzinfo is None or self.world_logical_time.utcoffset() is None:
+            raise ValueError("live attention logical time must be timezone-aware")
+        context_refs = tuple(
+            item.context_ref
+            for item in (*self.current_self_state, *self.situation, *self.relevant_context)
+        )
+        channel_refs = tuple(item.channel_ref for item in self.available_channels)
+        if len(context_refs) != len(set(context_refs)):
+            raise ValueError("attention context refs must be unique")
+        if len(channel_refs) != len(set(channel_refs)):
+            raise ValueError("perception channel refs must be unique")
+        return self
+
+
+class LivePerceptionWindow(FrozenModel):
+    """Fresh live window; no shadow attempt can be promoted into this identity."""
+
+    window_id: str = Field(min_length=1, max_length=256)
+    attention_attempt_id: str = Field(min_length=1, max_length=256)
+    opportunity_id: str = Field(min_length=1, max_length=256)
+    world_id: str = Field(min_length=1, max_length=512)
+    actor_ref: str = Field(min_length=1, max_length=512)
+    pinned_world_cursor: ProjectionCursor
+    attention_policy_revision: str = Field(min_length=1, max_length=256)
+    deployment_mode: Literal["live"] = "live"
+    deployment_mode_revision: str = Field(min_length=1, max_length=256)
+    generated_at: datetime
+    expires_at: datetime
+    candidates: tuple[PerceptionDossier, ...] = Field(min_length=1, max_length=16)
+    durable_snapshots: tuple[FrozenExternalSignalSnapshot, ...] = Field(min_length=1, max_length=64)
+    candidate_set_hash: str = Field(min_length=64, max_length=64)
+    exposure_draw_ref: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def live_window_is_closed(self) -> LivePerceptionWindow:
+        if not self.deployment_mode_revision.startswith("live:"):
+            raise ValueError("live window requires a live deployment identity")
+        if self.expires_at <= self.generated_at:
+            raise ValueError("perception window expiry must follow generation")
+        candidate_refs = tuple(item.candidate_ref for item in self.candidates)
+        snapshot_refs = tuple(item.signal_revision_ref for item in self.durable_snapshots)
+        offered_revisions = {
+            revision
+            for candidate in self.candidates
+            for revision in candidate.exact_signal_revisions
+        }
+        if len(candidate_refs) != len(set(candidate_refs)):
+            raise ValueError("perception window candidate refs must be unique")
+        if len(snapshot_refs) != len(set(snapshot_refs)):
+            raise ValueError("live perception snapshots must be unique")
+        if set(snapshot_refs) != offered_revisions:
+            raise ValueError("live perception snapshots do not close the offered revisions")
+        if any(
+            not item.may_expose_to_character_model or not item.may_freeze_durable_snapshot
+            for item in self.durable_snapshots
+        ):
+            raise ValueError("live window contains evidence not licensed for durable exposure")
+        return self
+
+
+class LiveCharacterAttentionSelection(CharacterAttentionSelection):
+    """Character-authored encounter plus the privacy reading used downstream."""
+
+    privacy_class: Literal["public", "shareable", "personal", "private", "withhold"]
+
+
+class LiveCharacterAttentionResult(FrozenModel):
+    """A live model may notice zero or many offered candidates."""
+
+    selections: tuple[LiveCharacterAttentionSelection, ...] = Field(max_length=12)
+
+
+class AuditedLiveCharacterAttentionResult(FrozenModel):
+    """Exact character decision paired with its immutable provider/model audit."""
+
+    decision: LiveCharacterAttentionResult
+    model_result: ModelResultRecordedPayload
+
+
+class LiveCharacterAttentionRequest(FrozenModel):
+    attention_attempt_id: str = Field(min_length=1, max_length=256)
+    retry_ordinal: int = Field(ge=0)
+    selection_ordinal: Literal[0, 1]
+    window: LivePerceptionWindow
+    current_context: LiveCharacterAttentionContext
+    validation_failure_codes: tuple[BoundedSignalText, ...] = Field(default=(), max_length=32)
+    rejected_result_json: str | None = Field(default=None, max_length=65_536)
+
+    @model_validator(mode="after")
+    def request_is_pinned_and_reselection_is_bounded(self) -> LiveCharacterAttentionRequest:
+        if self.attention_attempt_id != self.window.attention_attempt_id:
+            raise ValueError("attention request and window attempt ids differ")
+        if self.current_context.pinned_world_cursor != self.window.pinned_world_cursor:
+            raise ValueError("live attention request changed its pinned cursor")
+        if self.selection_ordinal == 0 and (
+            self.validation_failure_codes or self.rejected_result_json is not None
+        ):
+            raise ValueError("primary attention request cannot carry reselection feedback")
+        if self.selection_ordinal == 1 and not self.validation_failure_codes:
+            raise ValueError("attention reselection requires exact validation failures")
+        return self
+
+
+class LiveCharacterAttentionContextPort(Protocol):
+    async def freeze_attention_context(
+        self,
+        *,
+        world_id: str,
+        actor_ref: str,
+        observed_at: datetime,
+    ) -> LiveCharacterAttentionContext: ...
+
+
+class LiveCharacterAttentionModelPort(Protocol):
+    model_id: str
+
+    async def consider_attention(self, request: LiveCharacterAttentionRequest) -> object: ...
+
+
+class ExternalPerceptionAcceptancePort(Protocol):
+    async def accept_external_perception(
+        self, delivery: ExternalPerceptionLiveDelivery
+    ) -> object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LiveAttentionRuntime:
+    """Explicit live-only bundle; it cannot reuse a shadow attempt identity."""
+
+    world_id: str
+    actor_ref: str
+    attention_policy_revision: str
+    deployment_mode_revision: str
+    worker_id: str
+    context_port: LiveCharacterAttentionContextPort
+    model: LiveCharacterAttentionModelPort
+    acceptance_port: ExternalPerceptionAcceptancePort
+    merge_wait_seconds: int = 120
+    window_ttl_seconds: int = 21_600
+    lease_seconds: int = 300
+    model_timeout_seconds: int = 120
+    max_candidate_dossiers: int = 12
+    attempt_retention_seconds: int = 604_800
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.world_id, "world id"),
+            (self.actor_ref, "actor ref"),
+            (self.attention_policy_revision, "attention policy revision"),
+            (self.deployment_mode_revision, "deployment mode revision"),
+            (self.worker_id, "worker id"),
+        ):
+            if not isinstance(value, str) or not value or len(value) > 512:
+                raise ValueError(f"live attention {label} is invalid")
+        if not self.deployment_mode_revision.startswith("live:"):
+            raise ValueError("live attention cannot use a shadow deployment identity")
+        model_id = getattr(self.model, "model_id", None)
+        if not isinstance(model_id, str) or not model_id or len(model_id) > 512:
+            raise ValueError("live attention model id is invalid")
+        for value, label in (
+            (self.merge_wait_seconds, "merge wait"),
+            (self.window_ttl_seconds, "window TTL"),
+            (self.lease_seconds, "lease"),
+            (self.model_timeout_seconds, "model timeout"),
+            (self.max_candidate_dossiers, "candidate limit"),
+            (self.attempt_retention_seconds, "attempt retention"),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"live attention {label} must be positive")
+        if self.max_candidate_dossiers > 16:
+            raise ValueError("live attention candidate limit exceeds the contract")
+
+
+class ShadowAttentionHealthSnapshot(FrozenModel):
+    state: Literal[
+        "disabled",
+        "no_candidate",
+        "window_wait",
+        "ready",
+        "considering",
+        "retry_wait",
+        "attention_no_selection",
+        "shadow_selected",
+        "delivery_pending",
+        "perception_committed",
+        "superseded",
+        "degraded",
+    ]
+    deployment_mode_revision: str | None = None
+    eligible_signal_count: int = Field(ge=0)
+    pending_opportunity_count: int = Field(ge=0)
+    waiting_window_count: int = Field(ge=0)
+    claimed_attempt_count: int = Field(ge=0)
+    retry_wait_count: int = Field(ge=0)
+    model_no_selection_count: int = Field(ge=0)
+    shadow_selected_count: int = Field(ge=0)
+    exposed_signal_count: int = Field(ge=0)
+    model_call_count_24h: int = Field(ge=0)
+    invalid_result_count_24h: int = Field(ge=0)
+    technical_failure_count_24h: int = Field(ge=0)
+    live_delivery_pending_count: int = Field(default=0, ge=0)
+    live_committed_count: int = Field(default=0, ge=0)
+    live_superseded_count: int = Field(default=0, ge=0)
+    acceptance_failure_count_24h: int = Field(default=0, ge=0)
+    outbox_backlog_count: int = Field(default=0, ge=0)
+    last_attempt_id: str | None = None
+    last_result: str | None = None
+    last_failure_code: str | None = None
+    next_attention_at: datetime | None = None
+
+
+DISABLED_SHADOW_ATTENTION_HEALTH = ShadowAttentionHealthSnapshot(
+    state="disabled",
+    eligible_signal_count=0,
+    pending_opportunity_count=0,
+    waiting_window_count=0,
+    claimed_attempt_count=0,
+    retry_wait_count=0,
+    model_no_selection_count=0,
+    shadow_selected_count=0,
+    exposed_signal_count=0,
+    model_call_count_24h=0,
+    invalid_result_count_24h=0,
+    technical_failure_count_24h=0,
+)
+
+
 class PerceptionAdvanceResult(FrozenModel):
     status: Literal[
         "idle",
@@ -239,6 +712,7 @@ class PerceptionAdvanceResult(FrozenModel):
         "attention_no_selection",
         "shadow_selected",
         "perception_committed",
+        "superseded",
         "retry_wait",
         "joined_existing",
         "deferred_visible_turn",
@@ -309,6 +783,7 @@ class PerceptionHealthSnapshot(FrozenModel):
     raw_evidence_count: int = Field(ge=0)
     raw_evidence_bytes: int = Field(ge=0)
     duplicate_suppressed_count: int = Field(ge=0)
+    shadow_attention: ShadowAttentionHealthSnapshot = DISABLED_SHADOW_ATTENTION_HEALTH
     warning_reasons: tuple[str, ...] = ()
 
 
@@ -372,17 +847,43 @@ class WorldPerceptionHub(Protocol):
 
 
 __all__ = [
+    "AuditedLiveCharacterAttentionResult",
+    "CharacterAttentionContext",
+    "CharacterAttentionContextPort",
+    "CharacterAttentionModelPort",
+    "CharacterAttentionRequest",
+    "CharacterAttentionResult",
+    "CharacterAttentionSelection",
+    "CharacterAttentionTechnicalFailure",
+    "CorrectionEdge",
     "ExternalSignalSourceFailure",
     "ExternalSignalEmbedding",
     "ExternalSignalPlace",
     "ExternalSignalSourceItem",
     "ExternalSignalSourcePage",
     "ExternalSignalSourcePort",
+    "ExternalPerceptionAcceptancePort",
+    "LicensedEvidenceView",
+    "LiveAttentionRuntime",
+    "LiveCharacterAttentionContext",
+    "LiveCharacterAttentionContextPort",
+    "LiveCharacterAttentionModelPort",
+    "LiveCharacterAttentionRequest",
+    "LiveCharacterAttentionResult",
+    "LiveCharacterAttentionSelection",
+    "LivePerceptionWindow",
     "MAX_EVIDENCE_BYTES",
     "PerceptionAdvanceResult",
+    "PerceptionChannelProof",
+    "PerceptionDossier",
     "PerceptionHealthSnapshot",
+    "PerceptionWindow",
     "RecordedSignalSourceAdapter",
+    "ShadowAttentionHealthSnapshot",
+    "ShadowAttentionRuntime",
+    "SourceBoundAttentionContextItem",
     "SourceCursor",
+    "SourceDisagreement",
     "SourceHealthSnapshot",
     "SourcePolicyRevision",
     "SourceProfile",

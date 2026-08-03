@@ -1,44 +1,147 @@
-"""External-world signal acquisition without World-event authority.
+"""Source-bounded external signals and role-authored World perception.
 
 This package is deliberately separate from ``world_v2.perception_*``, which
-describes provider analysis of user-supplied media.  Phase 1 stores only
-source-reported External Signals in a disposable sidecar; it cannot write the
-World ledger or decide that the companion noticed anything.
+describes provider analysis of user-supplied media. Acquisition stays in a
+disposable sidecar. Only the live acceptance seam can adopt exact licensed
+snapshots into World V2 after the role model selects them at a pinned cursor;
+the Hub itself never decides that the companion noticed or acted on anything.
 """
 
 from .contracts import (
+    AuditedLiveCharacterAttentionResult,
+    CharacterAttentionContext,
+    CharacterAttentionContextPort,
+    CharacterAttentionModelPort,
+    CharacterAttentionRequest,
+    CharacterAttentionResult,
+    CharacterAttentionSelection,
+    CharacterAttentionTechnicalFailure,
+    CorrectionEdge,
     ExternalSignalEmbedding,
     ExternalSignalPlace,
     ExternalSignalSourceFailure,
     ExternalSignalSourceItem,
     ExternalSignalSourcePage,
+    LicensedEvidenceView,
+    LiveAttentionRuntime,
+    LiveCharacterAttentionContext,
+    LiveCharacterAttentionContextPort,
+    LiveCharacterAttentionModelPort,
+    LiveCharacterAttentionRequest,
+    LiveCharacterAttentionResult,
+    LiveCharacterAttentionSelection,
+    LivePerceptionWindow,
     PerceptionAdvanceResult,
+    PerceptionChannelProof,
+    PerceptionDossier,
     PerceptionHealthSnapshot,
+    PerceptionWindow,
     RecordedSignalSourceAdapter,
+    ShadowAttentionHealthSnapshot,
+    ShadowAttentionRuntime,
+    SourceBoundAttentionContextItem,
     SourceCursor,
+    SourceDisagreement,
     SourceHealthSnapshot,
     SourcePolicyRevision,
     SourceProfile,
     WorldPerceptionHub,
 )
 from .hub import SQLiteWorldPerceptionHub
+from .authorized_search import (
+    AcceptedWebSearchResultAdapter,
+    LedgerAcceptedToolResultProjectionReader,
+)
+from .deployment import (
+    ExternalPerceptionDeployment,
+    build_external_world_perception_deployment,
+)
+from .live_acceptance import (
+    LifeWakingExternalPerceptionAcceptance,
+    ProducerBackedExternalPerceptionAcceptance,
+)
+from .nws import NwsAlertsAdapter
+from .production_attention import (
+    CapsuleBackedLiveAttentionContextPort,
+    CapsuleBackedShadowAttentionContextPort,
+    ChatCompletionLiveAttentionModel,
+    ChatCompletionShadowAttentionModel,
+    LiveAttentionChannelPort,
+    ProductionAttentionModelTrace,
+    StaticLiveAttentionChannelPort,
+)
+from .registry import (
+    ExternalPerceptionSourceRegistration,
+    ExternalPerceptionSourceRegistry,
+    ProductionSourceFactoryResult,
+    build_production_source_profiles,
+    canonical_source_registry_content_hash,
+    load_external_perception_source_registry,
+)
 from .rss import RssAtomSourceAdapter, RssHubPullAdapter
+from .usgs import UsgsEarthquakeGeoJsonAdapter
 
 __all__ = [
+    "AuditedLiveCharacterAttentionResult",
+    "AcceptedWebSearchResultAdapter",
+    "CapsuleBackedLiveAttentionContextPort",
+    "CapsuleBackedShadowAttentionContextPort",
+    "CharacterAttentionContext",
+    "CharacterAttentionContextPort",
+    "CharacterAttentionModelPort",
+    "CharacterAttentionRequest",
+    "CharacterAttentionResult",
+    "CharacterAttentionSelection",
+    "CharacterAttentionTechnicalFailure",
+    "ChatCompletionLiveAttentionModel",
+    "ChatCompletionShadowAttentionModel",
+    "CorrectionEdge",
     "ExternalSignalSourceFailure",
     "ExternalSignalEmbedding",
     "ExternalSignalPlace",
     "ExternalSignalSourceItem",
     "ExternalSignalSourcePage",
+    "ExternalPerceptionSourceRegistration",
+    "ExternalPerceptionSourceRegistry",
+    "ExternalPerceptionDeployment",
+    "LicensedEvidenceView",
+    "LiveAttentionRuntime",
+    "LiveAttentionChannelPort",
+    "LiveCharacterAttentionContext",
+    "LiveCharacterAttentionContextPort",
+    "LiveCharacterAttentionModelPort",
+    "LiveCharacterAttentionRequest",
+    "LiveCharacterAttentionResult",
+    "LiveCharacterAttentionSelection",
+    "LivePerceptionWindow",
+    "LifeWakingExternalPerceptionAcceptance",
+    "LedgerAcceptedToolResultProjectionReader",
+    "NwsAlertsAdapter",
     "PerceptionAdvanceResult",
+    "PerceptionChannelProof",
+    "PerceptionDossier",
     "PerceptionHealthSnapshot",
+    "PerceptionWindow",
+    "ProductionSourceFactoryResult",
+    "ProductionAttentionModelTrace",
+    "ProducerBackedExternalPerceptionAcceptance",
     "RecordedSignalSourceAdapter",
     "RssAtomSourceAdapter",
     "RssHubPullAdapter",
     "SQLiteWorldPerceptionHub",
+    "ShadowAttentionHealthSnapshot",
+    "ShadowAttentionRuntime",
+    "SourceBoundAttentionContextItem",
     "SourceCursor",
+    "SourceDisagreement",
     "SourceHealthSnapshot",
     "SourcePolicyRevision",
     "SourceProfile",
+    "StaticLiveAttentionChannelPort",
+    "UsgsEarthquakeGeoJsonAdapter",
     "WorldPerceptionHub",
+    "build_production_source_profiles",
+    "build_external_world_perception_deployment",
+    "canonical_source_registry_content_hash",
+    "load_external_perception_source_registry",
 ]

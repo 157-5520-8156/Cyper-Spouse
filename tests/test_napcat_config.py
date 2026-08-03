@@ -28,6 +28,38 @@ def test_production_settings_keep_expression_episode_observational() -> None:
         Settings(_env_file=None, WORLD_V2_EXPRESSION_EPISODE_MODE="on")
 
 
+def test_external_world_perception_is_fail_closed_until_a_source_registry_is_supplied() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.world_v2_external_perception_mode == "off"
+    assert settings.world_v2_external_perception_source_registry_path is None
+    assert settings.world_v2_external_perception_user_location_enabled is False
+    assert settings.world_v2_external_perception_sidecar_path == Path(
+        "data/external-world-perception.sqlite"
+    )
+
+    configured = Settings(
+        _env_file=None,
+        WORLD_V2_EXTERNAL_PERCEPTION_MODE="shadow",
+        WORLD_V2_EXTERNAL_PERCEPTION_SOURCE_REGISTRY_PATH="configs/perception-sources.json",
+    )
+    assert configured.world_v2_external_perception_mode == "shadow"
+    assert configured.world_v2_external_perception_source_registry_path == Path(
+        "configs/perception-sources.json"
+    )
+
+    with pytest.raises(ValidationError, match="WORLD_V2_EXTERNAL_PERCEPTION_MODE"):
+        Settings(_env_file=None, WORLD_V2_EXTERNAL_PERCEPTION_MODE="enabled")
+    with pytest.raises(
+        ValidationError,
+        match="WORLD_V2_EXTERNAL_PERCEPTION_USER_LOCATION_ENABLED",
+    ):
+        Settings(
+            _env_file=None,
+            WORLD_V2_EXTERNAL_PERCEPTION_USER_LOCATION_ENABLED=True,
+        )
+
+
 def test_text_endpoint_request_does_not_make_local_appraisal_mandatory() -> None:
     settings = Settings(
         _env_file=None,

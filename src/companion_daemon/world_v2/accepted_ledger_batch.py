@@ -37,6 +37,9 @@ from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_V
 from .social_action_acceptance import (
     SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
 )
+from .external_perception_acceptance_manifest import (
+    EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION,
+)
 
 
 class AcceptedLedgerBatchError(ValueError):
@@ -160,6 +163,7 @@ class AcceptedLedgerBatchIssuer:
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             *SOCIAL_DEFERRED_ACCEPTANCE_MANIFEST_VERSIONS,
+            EXTERNAL_PERCEPTION_ACCEPTANCE_MANIFEST_VERSION,
         }:
             raise AcceptedLedgerBatchError("accepted batch must begin with an accepted manifest")
         for name, value in {

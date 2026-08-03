@@ -76,6 +76,10 @@ from .perception_result_context import (
     PerceptionResultContextItem,
     PerceptionResultReader,
 )
+from .external_perception_events import (
+    ExternalPerceptionLifeInfluenceView,
+    compile_external_perception_life_influences,
+)
 from .expression_payload_store import ImmutableExpressionPayloadStore
 from .model_facing_context import CHAT_RECENT_DIALOGUE_ITEM_LIMIT
 from .recent_dialogue import RecentDialogueCompiler, RecentDialogueItem
@@ -245,8 +249,10 @@ def _item_ref(slice_name: SliceName, item: BaseModel) -> str:
             item,
             (
                 "biography_id"
-                if slice_name == "world_life"
-                and isinstance(item, BiographicalWorldContextItem)
+                if slice_name == "world_life" and isinstance(item, BiographicalWorldContextItem)
+                else "influence_id"
+                if slice_name == "perception_results"
+                and isinstance(item, ExternalPerceptionLifeInfluenceView)
                 else _ITEM_ID[slice_name]
             ),
         )
@@ -295,23 +301,18 @@ def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tupl
             )
         )
     if isinstance(item, ActiveWorldOccurrenceContextItem):
-        return tuple(
-            sorted(
-                binding.authority_event_ref
-                for binding in item.source_bindings
-            )
-        )
+        return tuple(sorted(binding.authority_event_ref for binding in item.source_bindings))
     if isinstance(item, WorldLifeContextItem):
         refs = {item.source.authority_event_ref}
         if item.content is not None:
             refs.add(item.content.descriptor_event_ref)
         return tuple(sorted(refs))
     if isinstance(item, BiographicalWorldContextItem):
-        return tuple(
-            sorted(binding.authority_event_ref for binding in item.source_bindings)
-        )
+        return tuple(sorted(binding.authority_event_ref for binding in item.source_bindings))
     if isinstance(item, PerceptionResultContextItem):
         return tuple(sorted({item.source.result_event_ref, item.source.receipt_event_ref}))
+    if isinstance(item, ExternalPerceptionLifeInfluenceView):
+        return (item.source_event_ref,)
     if isinstance(item, FactProjection):
         # A Fact's full assertion/evidence structure is committed by this
         # exact Fact event. Its retained observation id is an internal anchor,
@@ -476,6 +477,14 @@ def _typed_authority_claims(
                 item.source.result_event_ref,
                 item.source.result_world_revision,
                 item.source.result_payload_hash,
+            ),
+        )
+    if isinstance(item, ExternalPerceptionLifeInfluenceView):
+        return (
+            (
+                item.source_event_ref,
+                item.source_world_revision,
+                item.source_event_payload_hash,
             ),
         )
     values = getattr(item, "values", None)
@@ -856,31 +865,22 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         biographical_timeline: BiographicalTimelineConfiguredPayload | None = None,
     ) -> None:
         super().__init__()
-        if (biographical_catalog is None) != (
-            biographical_timezone_name is None
-        ):
-            raise ValueError(
-                "biographical Context catalog and timezone must be installed together"
-            )
+        if (biographical_catalog is None) != (biographical_timezone_name is None):
+            raise ValueError("biographical Context catalog and timezone must be installed together")
         if (biographical_catalog is None) != (biographical_timeline is None):
             raise ValueError(
-                "biographical Context catalog and timeline authority must be "
-                "installed together"
+                "biographical Context catalog and timeline authority must be installed together"
             )
         if (
             biographical_catalog is not None
             and biographical_timezone_name is not None
             and biographical_timeline is not None
             and (
-                biographical_catalog.document_hash
-                != biographical_timeline.document_hash
-                or biographical_timezone_name
-                != biographical_timeline.timezone_name
+                biographical_catalog.document_hash != biographical_timeline.document_hash
+                or biographical_timezone_name != biographical_timeline.timezone_name
             )
         ):
-            raise ValueError(
-                "biographical Context catalog does not match its timeline authority"
-            )
+            raise ValueError("biographical Context catalog does not match its timeline authority")
         self._ledger = ledger
         self._situation_compiler = situation_compiler
         self._relevance_scope = relevance_scope
@@ -906,8 +906,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             biography=biographical_catalog,
             biography_timezone=(
                 ZoneInfo(biographical_timezone_name)
-                if biographical_catalog is not None
-                and biographical_timezone_name is not None
+                if biographical_catalog is not None and biographical_timezone_name is not None
                 else None
             ),
         )
@@ -941,8 +940,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         )
         if len(authorities) != 1:
             raise ValueError(
-                "configured biographical Context requires exactly one committed "
-                "timeline authority"
+                "configured biographical Context requires exactly one committed timeline authority"
             )
         authority = authorities[0]
         located = self._ledger.lookup_event_commit(authority.event_id)
@@ -956,15 +954,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         ):
             raise ValueError("biographical timeline authority binding is inconsistent")
         try:
-            recorded = BiographicalTimelineConfiguredPayload.model_validate_json(
-                event.payload_json
-            )
+            recorded = BiographicalTimelineConfiguredPayload.model_validate_json(event.payload_json)
         except ValueError as exc:
             raise ValueError("biographical timeline authority payload is invalid") from exc
         if recorded != expected:
-            raise ValueError(
-                "biographical timeline authority differs from configured chronology"
-            )
+            raise ValueError("biographical timeline authority differs from configured chronology")
         return WorldLifeSourceBinding(
             authority_event_ref=authority.event_id,
             authority_world_revision=authority.world_revision,
@@ -1198,8 +1192,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         expected_experience_ids = {
             item.experience_id
             for item in projection.experiences
-            if hasattr(item, "origin")
-            and query.actor_ref in item.values.participant_refs
+            if hasattr(item, "origin") and query.actor_ref in item.values.participant_refs
         }
         experience_content_unavailable = any(
             item.source_entity_id in expected_experience_ids
@@ -1207,17 +1200,13 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             for item in life_content.suppressions
         )
         recent_experiences_domain = (
-            scoped_experiences
-            if scoped_experiences or not experience_content_unavailable
-            else None
+            scoped_experiences if scoped_experiences or not experience_content_unavailable else None
         )
         world_life = self._world_life.compile(
             projection=projection,
             actor_ref=query.actor_ref,
             cursor=query.cursor,
-            biographical_timeline_source=self._biographical_timeline_source(
-                projection
-            ),
+            biographical_timeline_source=self._biographical_timeline_source(projection),
         )
         world_life_ms = (time.perf_counter() - domain_phase_started) * 1000
         domain_phase_started = time.perf_counter()
@@ -1230,6 +1219,12 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             if self._perception_results is not None
             else None
         )
+        external_perception_influences = compile_external_perception_life_influences(projection)
+        if external_perception_influences:
+            perception_results = (
+                *(perception_results or ()),
+                *external_perception_influences,
+            )
         scoped_source_ids = {
             *(item.fact_id for item in scoped_facts),
             *(item.thread_id for item in scoped_threads),
@@ -1412,11 +1407,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         # safe historical recall authority.
         recall_appraisal_candidates = tuple(
             sorted(
-                (
-                    item
-                    for item in projection.appraisals
-                    if item.subject_ref in subject_refs
-                ),
+                (item for item in projection.appraisals if item.subject_ref in subject_refs),
                 key=lambda item: (item.accepted_at, item.appraisal_id),
                 reverse=True,
             )[:32]
@@ -1435,9 +1426,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             key=lambda item: (item.opened_at, item.episode_id),
             reverse=True,
         )[:32]:
-            located = self._ledger.lookup_event_commit(
-                episode.origin.accepted_event_ref
-            )
+            located = self._ledger.lookup_event_commit(episode.origin.accepted_event_ref)
             if located is None:
                 continue
             event, _ = located
@@ -1457,9 +1446,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             ):
                 continue
             try:
-                opening = AffectEpisodeOpenedPayload.model_validate_json(
-                    event.payload_json
-                ).episode
+                opening = AffectEpisodeOpenedPayload.model_validate_json(event.payload_json).episode
             except ValueError:
                 continue
             if (
@@ -1476,11 +1463,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 for meaning in component.appraisal_refs
             }:
                 appraisal = next(
-                    (
-                        item
-                        for item in projection.appraisals
-                        if item.appraisal_id == meaning_ref[0]
-                    ),
+                    (item for item in projection.appraisals if item.appraisal_id == meaning_ref[0]),
                     None,
                 )
                 if appraisal is None or appraisal.subject_ref not in subject_refs:
@@ -1493,8 +1476,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     (
                         ref
                         for ref in projection.committed_world_event_refs
-                        if ref.event_id
-                        == appraisal.origin.accepted_event_ref
+                        if ref.event_id == appraisal.origin.accepted_event_ref
                     ),
                     None,
                 )
@@ -1505,17 +1487,14 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 if (
                     appraisal_event.event_type != "AppraisalAccepted"
                     or appraisal_committed.world_revision > query.world_revision
-                    or appraisal_committed.payload_hash
-                    != appraisal_event.payload_hash
+                    or appraisal_committed.payload_hash != appraisal_event.payload_hash
                 ):
                     subject_scope_is_closed = False
                     break
                 try:
-                    accepted_appraisal = (
-                        AppraisalAcceptedPayload.model_validate_json(
-                            appraisal_event.payload_json
-                        ).appraisal
-                    )
+                    accepted_appraisal = AppraisalAcceptedPayload.model_validate_json(
+                        appraisal_event.payload_json
+                    ).appraisal
                 except ValueError:
                     subject_scope_is_closed = False
                     break
@@ -1524,8 +1503,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     or accepted_appraisal.subject_ref != appraisal.subject_ref
                     or meaning_ref[1]
                     not in {
-                        hypothesis.hypothesis_id
-                        for hypothesis in accepted_appraisal.hypotheses
+                        hypothesis.hypothesis_id for hypothesis in accepted_appraisal.hypotheses
                     }
                 ):
                     subject_scope_is_closed = False
@@ -1538,9 +1516,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 AffectOpeningRecallItem(
                     episode=opening,
                     subject_refs=tuple(sorted(scoped_appraisal_subjects)),
-                    subject_authority_refs=tuple(
-                        sorted(subject_authority_refs)
-                    ),
+                    subject_authority_refs=tuple(sorted(subject_authority_refs)),
                 )
             )
         if self._recall is not None:
@@ -1571,9 +1547,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                         item for item in scoped_experiences if hasattr(item, "origin")
                     ),
                     world_life=tuple(
-                        item
-                        for item in world_life
-                        if isinstance(item, WorldLifeContextItem)
+                        item for item in world_life if isinstance(item, WorldLifeContextItem)
                     ),
                     active_memory_candidates=memory_retrievals.items,
                     affect_openings=tuple(recall_affect_openings),
@@ -1700,8 +1674,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                             trigger_ref=query.trigger_ref,
                         )
                         _LOG.warning(
-                            "world v2 recall prefetch unavailable world=%s "
-                            "cursor=%s failure=%s",
+                            "world v2 recall prefetch unavailable world=%s cursor=%s failure=%s",
                             query.world_id,
                             query.ledger_sequence,
                             type(exc).__name__,

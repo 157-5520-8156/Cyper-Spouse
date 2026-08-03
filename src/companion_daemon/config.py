@@ -188,6 +188,38 @@ class Settings(BaseSettings):
     attachment_cache_path: Path = Field(
         default=Path("data/attachments"), alias="ATTACHMENT_CACHE_PATH"
     )
+    # External reality is an independently retained sidecar.  Production is
+    # fail-closed until an audited source registry is supplied; possessing a
+    # chat credential does not authorize fetching, embedding, model exposure,
+    # durable snapshots, or use of user location.
+    world_v2_external_perception_mode: Literal["off", "shadow", "live"] = Field(
+        default="off",
+        alias="WORLD_V2_EXTERNAL_PERCEPTION_MODE",
+    )
+    world_v2_external_perception_sidecar_path: Path = Field(
+        default=Path("data/external-world-perception.sqlite"),
+        alias="WORLD_V2_EXTERNAL_PERCEPTION_SIDECAR_PATH",
+    )
+    world_v2_external_perception_source_registry_path: Path | None = Field(
+        default=None,
+        alias="WORLD_V2_EXTERNAL_PERCEPTION_SOURCE_REGISTRY_PATH",
+    )
+    world_v2_external_perception_user_location_enabled: Literal[False] = Field(
+        default=False,
+        alias="WORLD_V2_EXTERNAL_PERCEPTION_USER_LOCATION_ENABLED",
+    )
+    world_v2_external_perception_merge_wait_seconds: int = Field(
+        default=600,
+        ge=30,
+        le=3_600,
+        alias="WORLD_V2_EXTERNAL_PERCEPTION_MERGE_WAIT_SECONDS",
+    )
+    world_v2_external_perception_attempt_retention_seconds: int = Field(
+        default=604_800,
+        ge=3_600,
+        le=7_776_000,
+        alias="WORLD_V2_EXTERNAL_PERCEPTION_ATTEMPT_RETENTION_SECONDS",
+    )
     world_seed_path: Path = Field(default=Path("configs/world_seed.yaml"), alias="WORLD_SEED_PATH")
     character_path: Path = Path("configs/character.yaml")
     stickers_path: Path = Path("configs/stickers.yaml")

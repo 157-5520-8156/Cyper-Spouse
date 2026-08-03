@@ -45,6 +45,7 @@ from .world_life_context import (
     WorldLifeModelContextItem,
 )
 from .perception_result_context import PerceptionResultContextItem
+from .external_perception_events import ExternalPerceptionLifeInfluenceView
 from .recent_dialogue import RecentDialogueItem
 
 
@@ -529,11 +530,12 @@ class ContextCapsuleRequest(_FrozenModel):
     affect_episodes: ResolvedSlice[tuple[AffectEpisodeProjection, ...]] | None = None
     open_threads: ResolvedSlice[tuple[ThreadProjection, ...]] | None = None
     relevant_facts: ResolvedSlice[tuple[FactProjection | FactRecallItem, ...]] | None = None
-    recent_experiences: (
-        ResolvedSlice[tuple[RecentExperienceContextItem, ...]] | None
-    ) = None
+    recent_experiences: ResolvedSlice[tuple[RecentExperienceContextItem, ...]] | None = None
     world_life: ResolvedSlice[tuple[WorldLifeModelContextItem, ...]] | None = None
-    perception_results: ResolvedSlice[tuple[PerceptionResultContextItem, ...]] | None = None
+    perception_results: (
+        ResolvedSlice[tuple[PerceptionResultContextItem | ExternalPerceptionLifeInfluenceView, ...]]
+        | None
+    ) = None
     active_memory_candidates: (
         ResolvedSlice[tuple[MemoryCandidateProjection | MemoryRetrievalItem, ...]] | None
     ) = None
@@ -733,8 +735,7 @@ class RelationshipEvaluationContext(_FrozenModel):
             and self.appraisal_source is not None
         )
         interaction = (
-            self.interaction_source_summary_json is not None
-            and self.interaction_source is not None
+            self.interaction_source_summary_json is not None and self.interaction_source is not None
         )
         if appraisal == interaction:
             raise ValueError("relationship evaluation requires exactly one exact source")
@@ -875,8 +876,10 @@ def _values(bound: ResolvedSlice[object]) -> tuple[BaseModel, ...]:
 def _identity(slice_name: SliceName, item: BaseModel) -> str:
     field = (
         "biography_id"
-        if slice_name == "world_life"
-        and isinstance(item, BiographicalWorldContextItem)
+        if slice_name == "world_life" and isinstance(item, BiographicalWorldContextItem)
+        else "influence_id"
+        if slice_name == "perception_results"
+        and isinstance(item, ExternalPerceptionLifeInfluenceView)
         else _ITEM_IDS[slice_name]
     )
     identity = getattr(item, field)
@@ -1017,24 +1020,11 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
         if item.content is not None:
             refs.add(item.content.descriptor_event_ref)
         return tuple(sorted(refs))
-    if slice_name == "world_life" and isinstance(
-        item, ActiveWorldOccurrenceContextItem
-    ):
-        return tuple(
-            sorted(
-                binding.authority_event_ref
-                for binding in item.source_bindings
-            )
-        )
-    if slice_name == "world_life" and isinstance(
-        item, BiographicalWorldContextItem
-    ):
-        return tuple(
-            sorted(binding.authority_event_ref for binding in item.source_bindings)
-        )
-    if slice_name == "recent_experiences" and isinstance(
-        item, RecentExperienceContextItem
-    ):
+    if slice_name == "world_life" and isinstance(item, ActiveWorldOccurrenceContextItem):
+        return tuple(sorted(binding.authority_event_ref for binding in item.source_bindings))
+    if slice_name == "world_life" and isinstance(item, BiographicalWorldContextItem):
+        return tuple(sorted(binding.authority_event_ref for binding in item.source_bindings))
+    if slice_name == "recent_experiences" and isinstance(item, RecentExperienceContextItem):
         return tuple(
             sorted(
                 (
@@ -1045,6 +1035,8 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
         )
     if slice_name == "perception_results" and isinstance(item, PerceptionResultContextItem):
         return tuple(sorted({item.source.result_event_ref, item.source.receipt_event_ref}))
+    if slice_name == "perception_results" and isinstance(item, ExternalPerceptionLifeInfluenceView):
+        return (item.source_event_ref,)
     if slice_name == "relevant_facts" and isinstance(item, FactProjection):
         # The accepted Fact event is the whole immutable authority for the
         # projection.  Its observation id stays an internal Fact anchor.
@@ -1162,13 +1154,13 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
     if isinstance(item, BiographicalWorldContextItem):
         return tuple(
             sorted(
-            (
-                "committed_event",
-                binding.authority_event_ref,
-                binding.authority_world_revision,
-                binding.authority_payload_hash,
-            )
-            for binding in item.source_bindings
+                (
+                    "committed_event",
+                    binding.authority_event_ref,
+                    binding.authority_world_revision,
+                    binding.authority_payload_hash,
+                )
+                for binding in item.source_bindings
             )
         )
     if isinstance(item, PerceptionResultContextItem):
@@ -1184,6 +1176,15 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
                 item.source.result_event_ref,
                 item.source.result_world_revision,
                 item.source.result_payload_hash,
+            ),
+        )
+    if isinstance(item, ExternalPerceptionLifeInfluenceView):
+        return (
+            (
+                "committed_event",
+                item.source_event_ref,
+                item.source_world_revision,
+                item.source_event_payload_hash,
             ),
         )
     authorities: set[tuple[str, str, int, str]] = set()
@@ -1806,8 +1807,7 @@ def _relationship_evaluation_context(
             and item.speaker == "counterpart"
             and item.speaker_ref is not None
             and any(
-                claim.authority_event_ref == request.trigger_ref
-                for claim in item.source_claims
+                claim.authority_event_ref == request.trigger_ref for claim in item.source_claims
             )
         )
         if len(matches) != 1:
@@ -1820,11 +1820,7 @@ def _relationship_evaluation_context(
         )
     if appraisal is None and interaction is None:
         return None
-    subject_ref = (
-        appraisal.subject_ref
-        if appraisal is not None
-        else interaction.speaker_ref
-    )
+    subject_ref = appraisal.subject_ref if appraisal is not None else interaction.speaker_ref
     if subject_ref is None:
         return None
     relationship = None
@@ -1834,8 +1830,7 @@ def _relationship_evaluation_context(
         matching_states = tuple(
             item
             for item in states
-            if isinstance(item, RelationshipStateProjection)
-            and item.subject_ref == subject_ref
+            if isinstance(item, RelationshipStateProjection) and item.subject_ref == subject_ref
         )
         if len(matching_states) == 1:
             relationship = matching_states[0]
@@ -2218,11 +2213,7 @@ def _compile_resolved_context(
             # one made their identity tie-breaks occasionally retain the same
             # source twice and omit the other accepted fact.
             and len(slice_.items)
-            > (
-                2
-                if name == "relevant_facts"
-                else max(1, terminal_minimum_items.get(name, 0))
-            )
+            > (2 if name == "relevant_facts" else max(1, terminal_minimum_items.get(name, 0)))
         ]
         if candidates:
             return min(candidates, key=lambda item: (item[0], item[1]))[1]
@@ -2268,9 +2259,7 @@ def _compile_resolved_context(
             if collapsed.budget.used_characters < slices[collapse_name].budget.used_characters:
                 slices[collapse_name] = collapsed
                 global_omissions[collapse_name] = global_omissions.get(collapse_name, 0) + 1
-                model_content = _context_model_content(
-                    request, slices, relationship_evaluation
-                )
+                model_content = _context_model_content(request, slices, relationship_evaluation)
             continue
         selected_name = _deep_eviction_candidate()
         if selected_name is not None:
@@ -2299,9 +2288,7 @@ def _compile_resolved_context(
         _, head_name = max(truncatable, key=lambda item: (item[0], item[1]))
         current_preview = head_preview_characters[head_name]
         if current_preview is None:
-            next_preview = max(
-                len(item.payload_json) for item in slices[head_name].items
-            ) // 2
+            next_preview = max(len(item.payload_json) for item in slices[head_name].items) // 2
         else:
             next_preview = current_preview // 2
         head_preview_characters[head_name] = next_preview

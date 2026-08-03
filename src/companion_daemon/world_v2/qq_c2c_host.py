@@ -63,6 +63,13 @@ from .text_turn_endpoint import (
     TextTurnEndpointSchedule,
 )
 from .expression_draft import qq_expression_capabilities
+from .external_world_perception import SourceProfile, WorldPerceptionHub
+from .external_world_perception.deployment import (
+    build_external_world_perception_deployment,
+)
+from .external_world_perception.production_attention import (
+    LiveAttentionChannelPort,
+)
 from .expression_episode_lifecycle import next_expression_retry_due
 from .proactive_action import next_proactive_retry_due
 from .interactive_turn_budget import InteractiveTurnBudgetPolicy
@@ -258,6 +265,8 @@ class QQC2CHost:
         barge_in_enabled: bool = True,
         barge_in_probe_seconds: float = 0.24,
         owned_action_close_grace_seconds: float = 1.0,
+        external_world_perception_hub: WorldPerceptionHub | None = None,
+        external_world_perception_disabled_reason: str = "not_configured",
     ) -> None:
         if not recipient_id or not canonical_user_id:
             raise ValueError("QQ C2C host requires recipient and canonical user ids")
@@ -269,6 +278,10 @@ class QQC2CHost:
         self._recipient_id = recipient_id
         self._canonical_user_id = canonical_user_id
         self._semantic_chat = semantic_chat
+        self._external_world_perception_hub = external_world_perception_hub
+        self._external_world_perception_disabled_reason = (
+            external_world_perception_disabled_reason
+        )
         self._ingress_store = ingress_store
         self._ingress_now = ingress_now or _utc_now
         self._ingress_sleep = ingress_sleep
@@ -1849,6 +1862,31 @@ class QQC2CHost:
         # clock projection or ActionPump; only immutable refs and local budget
         # counters cross it.
         async with self._scheduled_work_lock:
+            if (
+                self._external_world_perception_hub is not None
+                and background_remaining > 0
+                and not self._visible_turn_in_flight()
+            ):
+                try:
+                    perception_result = (
+                        await self._external_world_perception_hub.advance_once(
+                            observed_at=observed_at
+                        )
+                    )
+                except Exception:
+                    # The Hub owns durable retry and health state.  An
+                    # unexpected adapter/sidecar failure must not suppress
+                    # Action recovery, Life, or visible QQ work in this pass.
+                    _LOG.exception("external world perception scheduler unit failed")
+                    background_remaining -= 1
+                    pre_background.append("external-perception:technical-failure")
+                else:
+                    units = min(background_remaining, perception_result.progressed_units)
+                    background_remaining -= units
+                    if perception_result.status != "idle":
+                        pre_background.append(
+                            "external-perception:" + perception_result.status
+                        )
             if callable(due_projection_reader):
                 due_projection = await due_projection_reader()
                 retry_due_before_tick = min(
@@ -2108,6 +2146,33 @@ class QQC2CHost:
 
         return await self._host.world_health_diagnostics()
 
+    def external_world_perception_health(self) -> dict[str, object]:
+        """Read the optional Hub health projection without advancing it."""
+
+        hub = self._external_world_perception_hub
+        if hub is None:
+            return {
+                "enabled": False,
+                "state": "disabled",
+                "reason": self._external_world_perception_disabled_reason,
+            }
+        try:
+            snapshot = hub.health_snapshot()
+        except Exception:
+            _LOG.exception("external world perception health read failed")
+            return {
+                "enabled": True,
+                "state": "degraded",
+                "warning_reasons": ["health_read_failed"],
+            }
+        if hasattr(snapshot, "model_dump"):
+            payload = snapshot.model_dump(mode="json")
+        elif isinstance(snapshot, dict):
+            payload = dict(snapshot)
+        else:
+            raise TypeError("external world perception health is not serializable")
+        return {"enabled": True, **payload}
+
     def local_provider_capacity_health(self) -> dict[str, object]:
         """Expose the shared local-inference lease without touching the model."""
 
@@ -2288,6 +2353,8 @@ class QQC2CHost:
                         "during close count=%d",
                         len(still_pending),
                     )
+        if self._external_world_perception_hub is not None:
+            await self._external_world_perception_hub.aclose()
         close_world = getattr(self._host, "aclose", None)
         if callable(close_world):
             await close_world()
@@ -2404,6 +2471,9 @@ def build_qq_c2c_host(
     semantic_recall_embedding: RecallEmbedding | None = None,
     use_configured_recall_embedding: bool = True,
     interactive_turn_budget_policy: InteractiveTurnBudgetPolicy | None = None,
+    external_world_perception_hub: WorldPerceptionHub | None = None,
+    external_perception_channel_port: LiveAttentionChannelPort | None = None,
+    external_perception_authorized_search_profile: SourceProfile | None = None,
     _test_only_expression_episode_mode: Literal["on"] | None = None,
 ) -> QQC2CHost:
     """Compose the C2C lane without importing legacy chat/runtime code.
@@ -2567,6 +2637,19 @@ def build_qq_c2c_host(
         semantic_recall_embedding=resolved_recall_embedding,
         now=bootstrap_at or datetime.now(UTC),
     )
+    external_world_perception_disabled_reason = "not_configured"
+    if external_world_perception_hub is None:
+        perception_deployment = build_external_world_perception_deployment(
+            settings=settings,
+            world_id=qq_c2c_world_id(settings.primary_user_id),
+            actor_ref="agent:companion",
+            model=background_model,
+            life=application,
+            channel_port=external_perception_channel_port,
+            authorized_search_profile=external_perception_authorized_search_profile,
+        )
+        external_world_perception_hub = perception_deployment.hub
+        external_world_perception_disabled_reason = perception_deployment.reason
     return QQC2CHost(
         host=WorldV2PlatformHost(application=application),
         recipient_id=recipient_id,
@@ -2584,6 +2667,10 @@ def build_qq_c2c_host(
         action_due_now=scheduler_now,
         action_due_sleep=action_due_sleep,
         interactive_turn_budget_policy=interactive_turn_budget_policy,
+        external_world_perception_hub=external_world_perception_hub,
+        external_world_perception_disabled_reason=(
+            external_world_perception_disabled_reason
+        ),
         endpoint_controller=semantic_chat.text_endpoint_controller,
         recorded_cadence_mode=getattr(settings, "world_v2_recorded_cadence_mode", "off"),
         idle_heartbeat_seconds=settings.qq_c2c_idle_heartbeat_seconds,
