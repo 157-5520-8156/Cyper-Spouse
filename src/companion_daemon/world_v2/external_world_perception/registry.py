@@ -107,6 +107,12 @@ class ExternalPerceptionSourceRegistration(FrozenModel):
                 raise ValueError("RSSHub item hosts must be exact hostnames")
             if self.allow_undated_items and self.signal_kind != "platform_trend_observation":
                 raise ValueError("undated RSSHub fallback is restricted to trend observations")
+            if self.allow_undated_items and (
+                self.policy.may_expose_to_character_model or self.policy.may_freeze_durable_snapshot
+            ):
+                raise ValueError(
+                    "undated RSSHub observations cannot enter model or durable World state"
+                )
         elif self.adapter_kind == "rss_atom":
             if self.allow_undated_items:
                 raise ValueError("publisher RSS must retain source publication time")

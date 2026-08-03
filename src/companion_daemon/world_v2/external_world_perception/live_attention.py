@@ -61,10 +61,7 @@ def _reproduces_non_quotable_text(
         return False
     if len(protected) <= 32:
         return protected in candidate
-    return any(
-        protected[index : index + 32] in candidate
-        for index in range(len(protected) - 31)
-    )
+    return any(protected[index : index + 32] in candidate for index in range(len(protected) - 31))
 
 
 class SQLiteLiveAttentionCoordinator(SQLiteShadowAttentionCoordinator):
@@ -618,15 +615,19 @@ class SQLiteLiveAttentionCoordinator(SQLiteShadowAttentionCoordinator):
             authored_text = selection.subjective_summary + "\n" + selection.epistemic_notes
             for revision_ref in selection.exact_signal_revision_refs:
                 snapshot = snapshots.get(revision_ref)
-                reproduces_protected_source = snapshot is not None and not snapshot.may_quote and (
-                    _reproduces_non_quotable_text(
-                        output=authored_text,
-                        source=snapshot.headline,
-                        minimum_protected_characters=4,
-                    )
-                    or _reproduces_non_quotable_text(
-                        output=authored_text,
-                        source=snapshot.licensed_summary,
+                reproduces_protected_source = (
+                    snapshot is not None
+                    and not snapshot.may_quote
+                    and (
+                        _reproduces_non_quotable_text(
+                            output=authored_text,
+                            source=snapshot.headline,
+                            minimum_protected_characters=4,
+                        )
+                        or _reproduces_non_quotable_text(
+                            output=authored_text,
+                            source=snapshot.licensed_summary,
+                        )
                     )
                 )
                 if reproduces_protected_source:

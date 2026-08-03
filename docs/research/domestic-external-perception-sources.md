@@ -391,14 +391,19 @@ shadow，并把每个平台 route 当作可丢失的感知渠道；任何 route 
 
 ## 当前落地范围（2026-08-03）
 
-当前 registry 已通过本机固定版本 RSSHub 接入微博、抖音、快手、微信公众号、今日头条、
-贴吧、B 站、知乎、百度和酷安共 10 个趋势/热榜 transport。它们全部是
-`fetch-only`：可以进入隔离 sidecar 做可用性、稳定 ID、重复抑制和 TTL 观测，但没有
-`may_expose_to_character_model` 或 `may_freeze_durable_snapshot` 权限。TopHub 条目只表示
-聚合器在某次拉取时呈现过该榜单项，不证明平台或榜单内容中的事件属实；没有来源发布时间
-的条目保留 `published_at = null`，不能拿观测时间冒充发布时间。
+当前 registry 已登记微博、抖音、快手、微信公众号、今日头条、贴吧、B 站、知乎、百度和
+酷安共 10 个固定 RSSHub 趋势/热榜 transport；固定版本的本机 gateway 和适配器已完成
+一次性路由连通、解析、稳定 ID 与重复抑制验证。公开 route、RSSHub 的 AGPL 和普通网页
+可访问性都不能证明上游允许自动获取、缓存或输入模型，因此这些 source 当前统一标记为
+`disabled-unlicensed`：`may_fetch`、`may_cache_raw`、`may_expose_to_character_model` 和
+`may_freeze_durable_snapshot` 均为 false，生产调度不会拉取，也不保留社交榜单 sidecar
+内容。RSSHub gateway 只是已就绪的 transport，不代表角色已经获得这些感知渠道。
+
+若后续取得官方 API、书面许可或许可范围明确的商业聚合接口，应创建新的 source policy
+revision，再独立开放获取、缓存和角色注意权限。未带来源发布时间的趋势条目可在隔离适配
+测试中保留 `published_at = null`，但 registry 会阻止它进入模型或冻结成 World 事实，
+不能拿观测时间冒充发布时间。
 
 小红书没有发现无需登录、无需浏览器自动化且有明确使用边界的通用热榜 route，因此当前
 明确为 `unsupported`，未伪造一个空 source，也不能对外宣称已经覆盖全部国内主流平台。
-后续若取得官方 API、书面许可或许可范围明确的商业聚合接口，应创建新的 source policy
-revision 后再开放角色模型注意；不能原地修改历史权限记录。
+不能原地修改历史权限记录冒充一直有权限。

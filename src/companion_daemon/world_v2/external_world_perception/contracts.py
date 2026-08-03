@@ -62,6 +62,9 @@ class ExternalSignalSourceItem(FrozenModel):
     licensed_summary: str = Field(default="", max_length=8_000)
     canonical_url: str | None = Field(default=None, max_length=4_096)
     occurred_at: datetime | None = None
+    # Some ranking feeds expose only the gateway observation time. Keeping
+    # this nullable prevents the adapter from forging a publication time; an
+    # undated item is never eligible for model exposure or durable freezing.
     published_at: datetime | None = None
     updated_at: datetime | None = None
     expires_at: datetime | None = None
@@ -300,7 +303,7 @@ class LicensedEvidenceView(FrozenModel):
     headline: str = Field(min_length=1, max_length=1_000)
     licensed_summary: str = Field(default="", max_length=8_000)
     canonical_url: str | None = Field(default=None, max_length=4_096)
-    published_at: datetime | None = None
+    published_at: datetime
     updated_at: datetime | None = None
     expires_at: datetime
     source_provided_certainty: str | None = Field(default=None, max_length=256)

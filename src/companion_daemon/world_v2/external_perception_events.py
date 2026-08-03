@@ -53,7 +53,7 @@ class FrozenExternalSignalSnapshot(FrozenModel):
     licensed_summary: str = Field(default="", max_length=8_000)
     canonical_url: str | None = Field(default=None, max_length=4_096)
     occurred_at: datetime | None = None
-    published_at: datetime | None = None
+    published_at: datetime
     observed_at: datetime
     expires_at: datetime
     correction_lineage_refs: tuple[str, ...] = Field(default=(), max_length=64)

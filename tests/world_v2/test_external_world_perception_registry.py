@@ -250,6 +250,30 @@ def test_registry_rejects_nonlocal_or_open_ended_rsshub_authority(
         )
 
 
+def test_registry_rejects_undated_rsshub_items_crossing_the_world_boundary(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.json"
+    source = _rsshub_source()
+    source.update(
+        {
+            "signal_kind": "platform_trend_observation",
+            "allow_undated_items": True,
+        }
+    )
+    _write_registry(registry_path, _registry_value(sources=[source]))
+
+    with pytest.raises(
+        (ValueError, ValidationError),
+        match="undated RSSHub observations cannot enter model or durable World state",
+    ):
+        build_production_source_profiles(
+            deployment_mode="live",
+            registry_path=registry_path,
+            http_client=object(),  # type: ignore[arg-type]
+        )
+
+
 def test_registry_is_hash_bound_and_frozen(tmp_path: Path) -> None:
     value = _registry_value(sources=[_source()])
     registry = ExternalPerceptionSourceRegistry.model_validate_json(json.dumps(value))
@@ -392,12 +416,13 @@ def test_checked_in_production_registry_is_domestic_and_bounded() -> None:
     registry = load_external_perception_source_registry(path)
     enabled = tuple(item for item in registry.sources if item.enabled)
 
-    social = tuple(item for item in enabled if item.source_id.startswith("cn.social."))
+    social = tuple(item for item in registry.sources if item.source_id.startswith("cn.social."))
     publisher = tuple(item for item in enabled if item.adapter_kind == "rss_atom")
 
-    assert len(enabled) == 11
+    assert len(enabled) == 1
     assert len(publisher) == 1
     assert len(social) == 10
+    assert all(not item.enabled for item in social)
     assert all(item.source_id.startswith("cn.") for item in enabled)
     assert all(item.adapter_kind in {"rss_atom", "rsshub"} for item in enabled)
     assert sum(item.page_limit for item in publisher) <= 3
