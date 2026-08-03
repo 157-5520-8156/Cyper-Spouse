@@ -386,8 +386,11 @@ class ValidationTechnicalFailure(RuntimeError):
     This exception is deliberately distinct from an initial author failure.
     A truth reviewer may have exhausted its retry, or the role may have spent
     its one schema-correction choice and returned another invalid candidate.
-    Deliberation must never route either terminal condition into a new
-    role-author pass.
+    The failed candidate must not receive another candidate-local correction.
+    Deliberation may still use the one configured, independently audited role
+    recovery author defined by the Expression Reliability Lifecycle; that
+    recovery owns its own single correction budget and cannot erase this
+    candidate's terminal audit.
     """
 
     def __init__(
@@ -1748,6 +1751,7 @@ class Deliberation:
         # two-and-a-half-second budget.
         main_timeout_seconds: float = 6.0,
         quick_timeout_seconds: float = 2.5,
+        technical_recovery_enabled: bool = True,
         proposal_grammar: ProposalGrammar | None = None,
         recovery_mode: Literal["minimal_only", "proposal_grammar"] = "minimal_only",
         expression_episode_mode: Literal["off", "shadow", "on", "stream"] = "off",
@@ -1763,6 +1767,7 @@ class Deliberation:
         self._quick = quick_recovery
         self._main_timeout = main_timeout_seconds
         self._quick_timeout = quick_timeout_seconds
+        self._technical_recovery_enabled = technical_recovery_enabled
         self._proposal_grammar = proposal_grammar
         self._recovery_mode = recovery_mode
         self._expression_episode_mode = expression_episode_mode
@@ -2160,6 +2165,13 @@ class Deliberation:
                 status=main_status,
                 failure_code=failure_code,
             )
+            if not self._technical_recovery_enabled:
+                return self._result(
+                    trusted,
+                    proposal=None,
+                    audit=main_audit,
+                    attempt_audits=(main_audit,),
+                )
             quick_call_id = f"model-call:{_digest({**call_identity, 'lane': 'quick_recovery', 'main_failure': failure_code})}"
             quick_input = model_input.model_copy(update={"call_id": quick_call_id})
             quick_request_hash = _digest(quick_input.model_dump(mode="json"))
@@ -2626,6 +2638,8 @@ class Deliberation:
             nonlocal backup_task, backup_call_id, backup_input, backup_request_hash
             nonlocal backup_validation, corrective_claimed_before_backup, deadline_timer
             if backup_task is not None:
+                return False
+            if after_actual_failure and not self._technical_recovery_enabled:
                 return False
             hedge_available = getattr(self._quick, "has_hedge_provider", None)
             if (

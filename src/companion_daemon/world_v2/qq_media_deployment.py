@@ -231,37 +231,21 @@ def build_qq_media_preview_deployment(
 
     from companion_daemon import event_media
     from companion_daemon.image_generation import OpenAIImageGenerator
-    from companion_daemon.llm import (
-        DeepSeekChatModel,
-        FailoverChatModel,
-        OpenAICompatibleChatModel,
-    )
+    from companion_daemon.llm import DeepSeekChatModel
 
-    def routed_model(*, model: str, fallback_max_completion_tokens: int):
-        """Mirror the chat lane's Flash provider route (DeepSeek → proxy)."""
+    def routed_model(*, model: str):
+        """Use the same sole character-author provider as production chat."""
 
-        primary = DeepSeekChatModel(
+        return DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             model=model,
             thinking_enabled=False,
         )
-        fallback = OpenAICompatibleChatModel(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.world_v2_fallback_model,
-            reasoning_effort="none",
-            max_completion_tokens=fallback_max_completion_tokens,
-            proxy_url=settings.openai_proxy_url,
-        )
-        return FailoverChatModel(primary=primary, fallback=fallback)
 
-    selection_model = routed_model(
-        model=settings.deepseek_model, fallback_max_completion_tokens=200
-    )
+    selection_model = routed_model(model=settings.deepseek_model)
     planner_model = routed_model(
         model=settings.world_v2_media_planner_model or settings.deepseek_model,
-        fallback_max_completion_tokens=3_000,
     )
     # Module switches are explicit constructor facts here, not process
     # environment probes: this composition is the deployment decision.

@@ -3623,6 +3623,11 @@ def build_sqlite_world_v2_turn_application(
                         router=router,
                         main_model=proactive_adapter,
                         quick_recovery=proactive_adapter,
+                        # A proactive choice gets one DeepSeek-authored draft
+                        # and its one precise candidate-local correction.  A
+                        # terminal result is retried durably; do not ask a
+                        # second author to replace her intention immediately.
+                        technical_recovery_enabled=False,
                     ),
                     companion_actor_ref=config.companion_actor_ref,
                     budget_policy=config.interactive_turn_budget_policy,

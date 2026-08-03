@@ -517,6 +517,7 @@ def compose_production_deliberation(
     expression_action_kinds: frozenset[str] | None = None,
     main_timeout_seconds: float = 6.0,
     quick_timeout_seconds: float = 2.5,
+    technical_recovery_enabled: bool = True,
     expression_episode_mode: Literal["off", "shadow", "on", "stream"] = "off",
     expression_episode_diagnostics: ExpressionEpisodeDiagnostics | None = None,
 ):
@@ -535,6 +536,7 @@ def compose_production_deliberation(
         quick_recovery=quick_recovery,  # type: ignore[arg-type]
         main_timeout_seconds=main_timeout_seconds,
         quick_timeout_seconds=quick_timeout_seconds,
+        technical_recovery_enabled=technical_recovery_enabled,
         expression_episode_mode=expression_episode_mode,
         expression_episode_diagnostics=expression_episode_diagnostics,
         expression_episode_grammar=(

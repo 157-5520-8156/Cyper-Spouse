@@ -409,13 +409,12 @@ Minimal Proposal format is only a lossless representation of the exact
 single-immediate-text subset, never a host-imposed reply policy. The normal
 successful path retains its 12-second budget and 1.2-second
 acceptance/dispatch reserve. Only an observed invalid/exception/timeout or an
-actually elapsed candidate deadline may open one independent, bounded
-eight-second technical-recovery window; it is not a speculative hedge. A
-failed primary correction may still be followed by that configured role-model
-recovery. Because that recovery is a newly authored candidate rather than
-cached primary bytes, it may receive one source/shape correction of its own;
-when the primary already used its correction this is a rare fourth role call.
-It cannot open another recovery author or a fifth call.
+actually elapsed candidate deadline may open one bounded recovery attempt by
+the same configured role provider; production never switches to a second
+character-author provider. The proactive-contact route is stricter: the same
+pinned role author may receive its one precise source/shape correction, but an
+invalid corrected candidate is retried later through its durable 10/30/120-
+minute lifecycle rather than immediately reauthored as a new intention.
 _Avoid_: Forced reply, failure fallback text, silence inference
 
 The provider-visible request may include a compact hard-boundary manifest that

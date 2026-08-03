@@ -319,9 +319,7 @@ class Settings(BaseSettings):
         alias="WORLD_V2_SOURCE_REVIEW_SECONDARY_MODEL",
     )
     world_v2_source_review_fallback_model: str = Field(
-        # This reviewer is deliberately separate from WORLD_V2_FALLBACK_MODEL:
-        # the latter authors recovery speech and therefore cannot also judge
-        # the source closure of its own candidate.
+        # This is an independent truth boundary, not a character author.
         default="gpt-4.1-mini",
         alias="WORLD_V2_SOURCE_REVIEW_FALLBACK_MODEL",
     )
@@ -377,12 +375,9 @@ class Settings(BaseSettings):
         le=30.0,
         alias="WORLD_V2_SOURCE_REVIEW_DEADLINE_SECONDS",
     )
-    world_v2_fallback_model: str = Field(
-        default="gpt-5.6-luna", alias="WORLD_V2_FALLBACK_MODEL"
-    )
-    # Experimental third, local role-model lane after the ordinary primary
-    # and recovery providers both fail.  Keep disabled while reliability
-    # testing needs technical failures to remain directly observable.
+    # Experimental separately configured role-model failsafe. Production
+    # reliability testing keeps it disabled so primary failures remain
+    # directly observable; it is not an automatic backup author.
     world_v2_contextual_failsafe_enabled: bool = Field(
         default=False,
         alias="WORLD_V2_CONTEXTUAL_FAILSAFE_ENABLED",

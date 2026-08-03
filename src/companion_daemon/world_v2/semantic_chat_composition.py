@@ -19,7 +19,6 @@ from companion_daemon.character import load_character
 from companion_daemon.config import Settings
 from companion_daemon.llm import (
     DeepSeekChatModel,
-    FailoverChatModel,
     FakeCompanionModel,
     OpenAICompatibleChatModel,
     ProviderCapacityGate,
@@ -56,7 +55,6 @@ from .source_review_authority import (
 )
 from .structured_expression_reselection_model import (
     EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT,
-    StructuredExpressionReselectionModel,
 )
 from .text_turn_endpoint import (
     ChatSemanticEndpointModel,
@@ -367,15 +365,6 @@ def _preflight_production_source_review(
                 model=settings.deepseek_deep_appraisal_model,
             )
         )
-    if settings.openai_api_key:
-        authors.append(
-            _ConfiguredProviderLane(
-                provider="openai",
-                base_url=settings.openai_base_url,
-                model=settings.world_v2_fallback_model,
-            )
-        )
-
     if source_closure_model is not None:
         ordinary_reviewer = source_closure_model
         recovery_reviewer = source_closure_model
@@ -943,39 +932,6 @@ def build_semantic_chat_composition(
     owned_closeables: list[object] = []
     owned_task_owners: list[object] = []
 
-    def openai_recovery_leaf() -> StructuredExpressionReselectionModel:
-        """Build one role-identical remote leaf with isolated client/circuit state."""
-
-        if not settings.openai_api_key:
-            raise RuntimeError("OpenAI recovery leaf requires configured credentials")
-        return StructuredExpressionReselectionModel(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.world_v2_fallback_model,
-            reasoning_effort="none",
-            proxy_url=settings.openai_proxy_url,
-            circuit_breaker=ProviderCircuitBreaker(
-                failure_threshold=2,
-                cooldown_seconds=60.0,
-            ),
-        )
-
-    def provider_route(primary: DeepSeekChatModel) -> ChatCompletionModel:
-        if not settings.openai_api_key:
-            owned.append(primary)
-            return primary
-        fallback = openai_recovery_leaf()
-        # Interactive Deliberation owns the shared absolute deadline and the
-        # two provider slots.  Keep this wrapper as an adapter bundle only;
-        # it must not add an invisible serial fallback behind either slot.
-        route = FailoverChatModel(
-            primary=primary,
-            fallback=fallback,
-            implicit_failover=False,
-        )
-        owned.append(route)
-        return route
-
     auto_flash = flash_model is None
     if flash_model is None:
         if settings.deepseek_api_key:
@@ -985,7 +941,8 @@ def build_semantic_chat_composition(
                 model=settings.deepseek_model,
                 thinking_enabled=False,
             )
-            flash_model = provider_route(provider_flash)
+            flash_model = provider_flash
+            owned.append(provider_flash)
         else:
             flash_model = FakeCompanionModel()
     if (
@@ -1001,21 +958,8 @@ def build_semantic_chat_composition(
             thinking_enabled=True,
             reasoning_effort=settings.deepseek_deep_appraisal_reasoning_effort,
         )
-        thinking_model = provider_route(provider_thinking)
-
-    if (
-        expression_episode_observer_model is None
-        and settings.world_v2_expression_episode_mode == "shadow"
-        and auto_flash
-        and settings.openai_api_key
-        and isinstance(flash_model, FailoverChatModel)
-        and isinstance(flash_model.fallback, OpenAICompatibleChatModel)
-    ):
-        # Preserve the formal recovery checkpoint and role contract while
-        # isolating all mutable transport state. A stuck diagnostic request
-        # can open only this client gate/circuit, never the recovery lane.
-        expression_episode_observer_model = openai_recovery_leaf()
-        owned.append(expression_episode_observer_model)
+        thinking_model = provider_thinking
+        owned.append(provider_thinking)
 
     local_appraisal_model: ChatCompletionModel | None = None
     local_advisory_model: ChatCompletionModel | None = None
@@ -1134,12 +1078,7 @@ def build_semantic_chat_composition(
         and settings.deepseek_api_key
         and resolved_source_closure_model is None
     ):
-        provider_fallback = getattr(flash_model, "fallback", None)
-        resolved_source_closure_model = (
-            provider_fallback
-            if isinstance(provider_fallback, OpenAICompatibleChatModel)
-            else flash_model
-        )
+        resolved_source_closure_model = None
     recovery_source_closure_model = resolved_source_closure_model
     auto_inventory_model: ChatCompletionModel | None = None
     auto_inventory_requested_model: str | None = None
@@ -1153,8 +1092,7 @@ def build_semantic_chat_composition(
         and settings.world_v2_source_review_redundancy_enabled
         and settings.openrouter_api_key
         and settings.openai_api_key
-        and isinstance(flash_model, FailoverChatModel)
-        and isinstance(flash_model.primary, DeepSeekChatModel)
+        and isinstance(flash_model, DeepSeekChatModel)
     ):
         # Source truth is a hard boundary, but provider availability is not a
         # semantic vote. The structured OpenRouter lane and dedicated OpenAI
@@ -1336,9 +1274,9 @@ def build_semantic_chat_composition(
             source_review_authority.fork_isolated_runtime()
         )
         resolved_source_closure_model = source_review_authority
-        # The ordinary recovery author remains Luna. Its fact review is a
-        # different semantic role with the same independent provider ordering.
-        # The reserve is not a semantic vote or quorum.
+        # The same DeepSeek character owns any one permitted source-bound
+        # correction. This separately isolated authority reviews that fresh
+        # candidate; it is not a backup character author.
         recovery_source_closure_model = SourceReviewAuthority(
             primary=openai_recovery_source_reviewer,
             secondary=openrouter_recovery_source_reviewer,
@@ -1358,7 +1296,7 @@ def build_semantic_chat_composition(
         auto_inventory_model = inventory_availability_authority
     background_model = advisory_model or flash_model
     proactive_claim_binder_model: ChatCompletionModel = background_model
-    if auto_flash and settings.openai_api_key:
+    if auto_flash and settings.deepseek_api_key and settings.openai_api_key:
         # Claim binding is a mechanical factual-declaration job, not character
         # authorship.  Running its correction twice through the DeepSeek role
         # route made a malformed locator deterministically fail both the main
@@ -1521,23 +1459,10 @@ def build_semantic_chat_composition(
                 "source-closure reviewers for ordinary and recovery candidates"
             )
     source_reselection_author = (
-        recovery_role_author
+        flash_model
         if recovery_source_closure_model is not None
         else None
     )
-    if (
-        auto_flash
-        and source_review_authority is not None
-        and isinstance(recovery_role_author, StructuredExpressionReselectionModel)
-    ):
-        # A timed-out strict truth correction and the ordinary technical
-        # backup are separate provider attempts with separate stable audit
-        # identities. Keep their clients and circuits isolated so failure in
-        # either lane cannot make the other fail locally without reaching the
-        # remote multi-worker provider. Effect-once settlement still prevents
-        # duplicate delivery.
-        source_reselection_author = openai_recovery_leaf()
-        owned.append(source_reselection_author)
     # Inventory V5 is semantic decomposition, not character authorship. Every
     # installed inventory lane must promise V5, the visible authority must
     # promise verdict-only Coverage V5, and all possible ordinary/recovery
@@ -1774,12 +1699,7 @@ def build_semantic_chat_composition(
         report_relative_source_closure_model=proactive_reviewer,
         recovery_source_closure_model=recovery_source_closure_model,
         recovery_report_relative_source_closure_model=(recovery_source_closure_model),
-        discover_recovery_model=(
-            not auto_flash
-            or not settings.deepseek_api_key
-            or recovery_role_author is None
-            or recovery_source_closure_model is not None
-        ),
+        discover_recovery_model=not (auto_flash and settings.deepseek_api_key),
         # Inventory is a lightweight semantic decomposition; the configured
         # source-closure authority still makes the focused factual verdict.
         candidate_external_proposition_inventory_model=inventory_model,

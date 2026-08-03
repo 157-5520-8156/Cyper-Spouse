@@ -434,7 +434,7 @@ def _build_models(*, stub: bool, settings: Settings, fixture: dict[str, object])
                 fallback=OpenAICompatibleChatModel(
                     api_key=settings.openai_api_key,
                     base_url=settings.openai_base_url,
-                    model=settings.world_v2_fallback_model,
+                    model=settings.world_v2_source_review_fallback_model,
                     reasoning_effort="none",
                     proxy_url=settings.openai_proxy_url,
                 ),

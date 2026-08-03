@@ -3,8 +3,7 @@
 This is the one place that turns deployment ``Settings`` into the complete,
 explicit perception injection set for ``build_qq_c2c_host``:
 
-- the decision model mirrors the chat lane's Flash provider route
-  (DeepSeek primary, ``WORLD_V2_FALLBACK_MODEL`` through the OpenAI proxy)
+- the decision model uses the same sole DeepSeek character-author provider
   wrapped in :class:`QQPerceptionDecisionModel`, which owns the restrained
   trigger semantics (archived-image gate, exact-bytes dedupe, durable daily
   cap, one bounded look/skip confirmation);
@@ -127,27 +126,13 @@ def build_qq_perception_deployment(
         )
         return None
 
-    from companion_daemon.llm import (
-        DeepSeekChatModel,
-        FailoverChatModel,
-        OpenAICompatibleChatModel,
-    )
+    from companion_daemon.llm import DeepSeekChatModel
 
-    decision_model = FailoverChatModel(
-        primary=DeepSeekChatModel(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
-            model=settings.deepseek_model,
-            thinking_enabled=False,
-        ),
-        fallback=OpenAICompatibleChatModel(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.world_v2_fallback_model,
-            reasoning_effort="none",
-            max_completion_tokens=200,
-            proxy_url=settings.openai_proxy_url,
-        ),
+    decision_model = DeepSeekChatModel(
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+        model=settings.deepseek_model,
+        thinking_enabled=False,
     )
     archive = QQAttachmentArchive(Path(settings.attachment_cache_path) / "qq-c2c-v2")
     transport = SQLiteDurableVisionPerceptionTransport(

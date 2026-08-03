@@ -7,6 +7,7 @@ import pytest
 
 from companion_daemon.config import Settings
 from companion_daemon.llm import (
+    DeepSeekChatModel,
     FailoverChatModel,
     FakeCompanionModel,
     OpenAICompatibleChatModel,
@@ -31,10 +32,6 @@ from companion_daemon.world_v2.source_review_authority import (
 from companion_daemon.world_v2.structured_source_review_model import (
     InventoryAvailabilityAuthority,
     StructuredSourceReviewModel,
-)
-from companion_daemon.world_v2.structured_expression_reselection_model import (
-    EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT,
-    StructuredExpressionReselectionModel,
 )
 
 
@@ -195,7 +192,7 @@ def test_remote_production_rejects_unqualified_redundant_review_routes(
 
 
 @pytest.mark.asyncio
-async def test_world_v2_composition_installs_configured_openai_fallback_without_using_it_as_reviewer() -> None:
+async def test_world_v2_composition_uses_one_character_provider_and_independent_reviewers() -> None:
     settings = Settings(
         _env_file=None,
         DEEPSEEK_API_KEY="deepseek-test-key",
@@ -203,7 +200,6 @@ async def test_world_v2_composition_installs_configured_openai_fallback_without_
         OPENAI_API_KEY="openai-test-key",
         OPENROUTER_API_KEY="openrouter-test-key",
         OPENAI_PROXY_URL="http://127.0.0.1:7890",
-        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
     )
 
@@ -212,17 +208,11 @@ async def test_world_v2_composition_installs_configured_openai_fallback_without_
         model_id_prefix="test",
     )
 
-    assert isinstance(composition.flash_model, FailoverChatModel)
-    assert isinstance(composition.flash_model.fallback, OpenAICompatibleChatModel)
-    assert isinstance(composition.flash_model.fallback, StructuredSourceReviewModel)
-    assert isinstance(
-        composition.flash_model.fallback,
-        StructuredExpressionReselectionModel,
-    )
-    assert composition.flash_model.fallback.model == "gpt-5.6-luna"
-    assert composition.flash_model.fallback.proxy_url == "http://127.0.0.1:7890"
+    assert isinstance(composition.flash_model, DeepSeekChatModel)
+    assert composition.flash_model.model == "deepseek-v4-flash"
+    assert not hasattr(composition.flash_model, "fallback")
     assert isinstance(composition.source_closure_model, SourceReviewAuthority)
-    assert composition.source_closure_model is not composition.flash_model.fallback
+    assert composition.source_closure_model is not composition.flash_model
     assert composition.source_closure_model.supports_strict_output_contract(
         "report-relative-entailment-adjudication.3"
     )
@@ -236,24 +226,19 @@ async def test_world_v2_composition_installs_configured_openai_fallback_without_
     assert composition.recovery_source_closure_model.supports_strict_output_contract(
         "source-closure-review.7"
     )
-    assert composition.source_closure_reselection_lane is not None
-    assert composition.source_closure_reselection_lane.author is not (
-        composition.flash_model.fallback
-    )
+    assert composition.source_closure_reselection_lane is None
     assert composition.proactive_source_authority_health()["status"] == "ready"
     await composition.aclose()
 
 
 @pytest.mark.asyncio
-async def test_remote_recovery_leaves_do_not_install_local_serial_capacity_cooldown() -> None:
-    """A timed-out remote request must not locally veto the next user turn."""
+async def test_production_composition_has_no_backup_character_author() -> None:
 
     settings = Settings(
         _env_file=None,
         DEEPSEEK_API_KEY="deepseek-test-key",
         deepseek_model="deepseek-v4-flash",
         OPENAI_API_KEY="openai-test-key",
-        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
         OPENROUTER_API_KEY="openrouter-test-key",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
     )
@@ -263,62 +248,19 @@ async def test_remote_recovery_leaves_do_not_install_local_serial_capacity_coold
         model_id_prefix="test",
     )
 
-    assert isinstance(composition.flash_model, FailoverChatModel)
-    technical_recovery = composition.flash_model.fallback
-    source_reselection = composition.source_closure_reselection_lane
-    assert isinstance(technical_recovery, OpenAICompatibleChatModel)
-    assert source_reselection is not None
-    assert isinstance(source_reselection.author, OpenAICompatibleChatModel)
-    assert technical_recovery.client is not source_reselection.author.client
-    assert technical_recovery.circuit_breaker is not source_reselection.author.circuit_breaker
-
-    entered = asyncio.Event()
-    calls = 0
-
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            entered.set()
-            await asyncio.Event().wait()
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": "{}"}}]},
-        )
-
-    await technical_recovery.client.aclose()
-    technical_recovery.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler),
-    )
-    timed_out = asyncio.create_task(
-        technical_recovery.complete_json(
-            [{"role": "user", "content": "first remote recovery"}]
-        )
-    )
-    await entered.wait()
-    timed_out.cancel("provider_timeout")
-    with pytest.raises(asyncio.CancelledError):
-        await timed_out
-
-    assert (
-        await technical_recovery.complete_json(
-            [{"role": "user", "content": "next user turn"}]
-        )
-        == "{}"
-    )
-    assert calls == 2
+    assert composition.source_closure_reselection_lane is None
+    assert composition.main_model._owner._recovery_expression is None
     await composition.aclose()
 
 
 @pytest.mark.asyncio
-async def test_shadow_composition_uses_role_identical_but_resource_isolated_observer() -> None:
+async def test_shadow_composition_does_not_install_a_backup_character_observer() -> None:
     settings = Settings(
         _env_file=None,
         DEEPSEEK_API_KEY="deepseek-test-key",
         deepseek_model="deepseek-v4-flash",
         OPENAI_API_KEY="openai-test-key",
         OPENROUTER_API_KEY="openrouter-test-key",
-        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
         WORLD_V2_EXPRESSION_EPISODE_MODE="shadow",
         WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
     )
@@ -328,30 +270,11 @@ async def test_shadow_composition_uses_role_identical_but_resource_isolated_obse
         model_id_prefix="test",
     )
 
-    assert isinstance(composition.flash_model, FailoverChatModel)
-    recovery = composition.flash_model.fallback
-    observer = composition.expression_episode_observer_model
-    assert isinstance(recovery, OpenAICompatibleChatModel)
-    assert isinstance(observer, OpenAICompatibleChatModel)
-    assert observer is not recovery
-    assert observer.model == recovery.model == "gpt-5.6-luna"
-    assert observer.client is not recovery.client
-    assert observer.capacity_gate is None
-    assert recovery.capacity_gate is None
-    assert isinstance(observer.circuit_breaker, ProviderCircuitBreaker)
-    assert isinstance(recovery.circuit_breaker, ProviderCircuitBreaker)
-    assert observer.circuit_breaker is not recovery.circuit_breaker
-
-    observer.circuit_breaker.record_failure()
-    observer.circuit_breaker.record_failure()
-    try:
-        assert observer.circuit_breaker.snapshot().status == "open"
-        assert recovery.circuit_breaker.snapshot().status == "closed"
-    finally:
-        await composition.aclose()
-    assert composition.flash_model.primary.client.is_closed
-    assert recovery.client.is_closed
-    assert observer.client.is_closed
+    assert isinstance(composition.flash_model, DeepSeekChatModel)
+    assert composition.expression_episode_observer_model is None
+    assert composition.main_model.shadow_observer_provider_available(object()) is False
+    await composition.aclose()
+    assert composition.flash_model.client.is_closed
 
 
 @pytest.mark.asyncio
@@ -401,7 +324,6 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
         deepseek_model="deepseek-v4-flash",
         OPENAI_API_KEY="openai-test-key",
         OPENAI_PROXY_URL="http://127.0.0.1:7890",
-        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
         OPENROUTER_API_KEY="openrouter-test-key",
         OPENROUTER_BASE_URL="https://openrouter.ai/api/v1",
         WORLD_V2_SOURCE_INVENTORY_MODEL="nousresearch/hermes-test-inventory",
@@ -498,7 +420,8 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
     assert deployment_health["route_suppression"]["primary"]["active"] is True
 
     owner = composition.main_model._owner
-    recovery_authority = owner._recovery_expression._source_closure_reviewer
+    assert owner._recovery_expression is None
+    recovery_authority = composition.recovery_source_closure_model
     assert isinstance(recovery_authority, SourceReviewAuthority)
     assert recovery_authority is not main_authority
     assert recovery_authority.primary is not main_authority.primary
@@ -512,31 +435,11 @@ async def test_production_composition_keeps_unverified_inventory_out_of_every_ca
         )
         is False
     )
-    assert owner._recovery_expression._report_relative_reviewer is recovery_authority
-    assert owner._recovery_expression._candidate_external_proposition_inventory_model is None
-    assert isinstance(composition.flash_model.fallback, StructuredExpressionReselectionModel)
-    assert composition.flash_model.fallback.supports_strict_output_contract(
-        EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT
-    )
     reselection_lane = composition.source_closure_reselection_lane
-    assert reselection_lane is not None
-    assert isinstance(reselection_lane.author, StructuredExpressionReselectionModel)
-    assert reselection_lane.author is not composition.flash_model.fallback
-    assert reselection_lane.author.model == composition.flash_model.fallback.model
-    assert reselection_lane.author.capacity_gate is None
-    assert composition.flash_model.fallback.capacity_gate is None
-    assert reselection_lane.author.client is not composition.flash_model.fallback.client
-    assert (
-        reselection_lane.author.circuit_breaker
-        is not composition.flash_model.fallback.circuit_breaker
-    )
-    assert reselection_lane.reviewer is recovery_authority
-    assert reselection_lane.report_relative_reviewer is recovery_authority
-    assert reselection_lane.inventory_model is None
-    assert owner._source_closure_reselection_lane is reselection_lane
-    assert owner._flash_expression._source_closure_reselection_lane is reselection_lane
-    assert owner._fallback_expression._flash._source_closure_reselection_lane is reselection_lane
-    assert owner._recovery_expression._source_closure_reselection_lane is reselection_lane
+    assert reselection_lane is None
+    assert owner._source_closure_reselection_lane is None
+    assert owner._flash_expression._source_closure_reselection_lane is None
+    assert owner._fallback_expression._flash._source_closure_reselection_lane is None
 
     health = composition.proactive_source_authority_health()
     assert health["status"] == "ready"
@@ -590,7 +493,6 @@ async def test_production_composition_does_not_install_unverified_openrouter_inv
         DEEPSEEK_API_KEY="deepseek-test-key",
         deepseek_model="deepseek-v4-flash",
         OPENAI_API_KEY="openai-test-key",
-        WORLD_V2_FALLBACK_MODEL="gpt-5.6-luna",
         OPENROUTER_API_KEY="openrouter-test-key",
         OPENROUTER_BASE_URL="https://openrouter.ai/api/v1",
         WORLD_V2_SOURCE_INVENTORY_ENABLED=True,
@@ -1477,9 +1379,7 @@ async def test_production_source_authority_finishes_inside_its_22_second_caller(
         "terminal_completion_reserve_seconds"
     ] == 0.5
 
-    recovery_authority = (
-        composition.main_model._owner._recovery_expression._source_closure_reviewer
-    )
+    recovery_authority = composition.recovery_source_closure_model
     assert isinstance(recovery_authority, SourceReviewAuthority)
     assert recovery_authority.configured_deadline_seconds == 30.0
     assert recovery_authority.caller_timeout_seconds == 22.0
@@ -1510,10 +1410,27 @@ async def test_production_proactive_claim_binder_has_an_independent_json_provide
     await composition.aclose()
 
 
-def test_world_v2_fallback_model_defaults_to_official_high_volume_tier() -> None:
+@pytest.mark.asyncio
+async def test_fake_composition_does_not_install_a_networked_claim_binder() -> None:
+    composition = build_semantic_chat_composition(
+        settings=Settings(
+            _env_file=None,
+            DEEPSEEK_API_KEY=None,
+            OPENAI_API_KEY="unused-openai-test-key",
+            OPENROUTER_API_KEY=None,
+        ),
+        model_id_prefix="test",
+    )
+
+    assert isinstance(composition.background_model, FakeCompanionModel)
+    assert composition.proactive_claim_binder_model is composition.background_model
+    await composition.aclose()
+
+
+def test_world_v2_has_no_configured_backup_character_model() -> None:
     settings = Settings(_env_file=None)
 
-    assert settings.world_v2_fallback_model == "gpt-5.6-luna"
+    assert not hasattr(settings, "world_v2_fallback_model")
     assert settings.world_v2_contextual_failsafe_enabled is False
     assert settings.world_v2_source_review_redundancy_enabled is False
     assert settings.world_v2_source_review_secondary_model == "qwen/qwen-plus"

@@ -3673,7 +3673,7 @@ async def test_sqlite_production_composition_installs_proactive_budget_without_a
 
 
 @pytest.mark.asyncio
-async def test_production_proactive_lane_uses_its_configured_recovery_window(
+async def test_production_proactive_lane_does_not_reauthor_after_timeout(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     proactive = _SlowPrimaryThenSilentDraftModel(primary_delay_seconds=0.05)
@@ -3731,10 +3731,10 @@ async def test_production_proactive_lane_uses_its_configured_recovery_window(
         assert (await app.drain_background_once()).status == "opened"
         result = await app.drain_background_once()
 
-        assert result.status == "silent"
-        assert proactive.calls == 2
+        assert result.status == "failed_safe"
+        assert proactive.calls == 1
         assert proactive.primary_cancelled is True
-        assert proactive.second_call_started_after_primary_cancel is True
+        assert proactive.second_call_started_after_primary_cancel is False
     finally:
         app.close()
 
@@ -4383,7 +4383,7 @@ async def test_proactive_retry_wait_does_not_starve_ready_background_cognition(
         assert background is not None
         assert background.status == "processed"
         assert background.work_status == "accepted"
-        assert malformed.calls == 3
+        assert malformed.calls == 2
         health = await app.world_health_diagnostics()
         assert health["initiative_state"] == "retry_wait"
         assert health["initiative_next_consideration_at"] == retry_due.isoformat()
@@ -4464,12 +4464,14 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         assert health["initiative_cadence_reason_codes"] == ["technical_failure:retry"]
         assert health["initiative_consecutive_technical_failures"] == 1
         assert health["initiative_retry_ordinal"] == 1
-        assert health["initiative_last_failure_code"] == "backup_invalid"
+        assert health["initiative_last_failure_code"] == (
+            "authored_expression_reselection_invalid"
+        )
         waiting = await app.drain_background_once()
         # A future retry remains visible in health/timer projections, but is
         # not reported as work performed by this background pass.
         assert waiting is None
-        assert malformed.calls == 3
+        assert malformed.calls == 2
         await app.tick(
             tick_id="tick:backoff:retry-due",
             logical_time_from=second_epoch,
@@ -4486,7 +4488,7 @@ async def test_new_cadence_epoch_cannot_bypass_a_social_technical_backoff(
         assert considering["initiative_retry_ordinal"] == 1
         assert considering["initiative_next_consideration_at"] == retry_due.isoformat()
         assert (await app.drain_background_once()).status == "failed_safe"
-        assert malformed.calls == 6
+        assert malformed.calls == 4
         second_retry = await app.world_health_diagnostics()
         assert second_retry["initiative_state"] == "retry_wait"
         assert second_retry["initiative_retry_ordinal"] == 2
@@ -4709,7 +4711,7 @@ async def test_proactive_health_keeps_a_24_hour_failure_visible_after_a_newer_su
             "visible_delivery_rate": 0.5,
             "delivery_success_rate": 1.0,
             "technical_failure_codes": {
-                "backup_invalid": 1,
+                "authored_expression_reselection_invalid": 1,
             },
             "warning": True,
             "warning_reasons": ["technical_failures_24h"],
@@ -4723,7 +4725,7 @@ async def test_proactive_health_keeps_a_24_hour_failure_visible_after_a_newer_su
 
 
 @pytest.mark.asyncio
-async def test_same_consideration_role_recovery_is_not_a_visible_technical_failure(
+async def test_same_consideration_does_not_open_a_second_role_author(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     proactive = _ProactiveReplySequence(
@@ -4755,23 +4757,23 @@ async def test_same_consideration_role_recovery_is_not_a_visible_technical_failu
         runtime = app._turns._runtime._proactive_action_runtime  # noqa: SLF001
         assert runtime is not None
         assert (await runtime.drain_one()).status == "opened"
-        assert (await runtime.drain_one()).status == "authorized"
-        assert (await app.drain_actions_once()).status == "settled"
+        assert (await runtime.drain_one()).status == "failed_safe"
+        assert proactive.calls == 2
 
         health = await app.world_health_diagnostics()
         reliability = health["initiative_reliability_24h"]
 
         assert reliability["attempt_count"] == 1
         assert reliability["consideration_count"] == 1
-        assert reliability["technical_failure_attempt_count"] == 0
-        assert reliability["technical_failure_consideration_count"] == 0
-        assert reliability["technical_failure_rate"] == 0.0
-        assert reliability["technical_failure_attempt_rate"] == 0.0
-        assert reliability["authorized_count"] == 1
-        assert reliability["delivered_count"] == 1
-        assert reliability["warning"] is False
-        assert reliability["warning_reasons"] == []
-        assert health["initiative_warning"] is False
+        assert reliability["technical_failure_attempt_count"] == 1
+        assert reliability["technical_failure_consideration_count"] == 1
+        assert reliability["technical_failure_rate"] == 1.0
+        assert reliability["technical_failure_attempt_rate"] == 1.0
+        assert reliability["authorized_count"] == 0
+        assert reliability["delivered_count"] == 0
+        assert reliability["warning"] is True
+        assert reliability["warning_reasons"] == ["technical_failures_24h"]
+        assert health["initiative_warning"] is True
     finally:
         app.close()
 

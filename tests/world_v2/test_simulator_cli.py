@@ -105,7 +105,7 @@ async def test_simulator_cli_wires_an_independent_life_source_reviewer_when_conf
             openai_api_key="openai-test-key",
             openai_base_url="https://openai.example.invalid",
             openai_proxy_url=None,
-            world_v2_fallback_model="gpt-test-source-reviewer",
+            world_v2_source_review_fallback_model="gpt-test-source-reviewer",
         ),
     )
     monkeypatch.setattr(cli, "DeepSeekChatModel", lambda **_kwargs: author)
