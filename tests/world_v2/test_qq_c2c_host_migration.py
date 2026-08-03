@@ -131,9 +131,7 @@ async def test_qq_composition_wires_independent_proactive_source_authority(
         )
         assert development._source_closure_reviewer_is_independent is True  # noqa: SLF001
         assert host.proactive_source_authority_health()["status"] == "ready"
-        assert host.life_source_authority_health()["status"] == (
-            "operational_unqualified"
-        )
+        assert host.life_source_authority_health()["status"] == ("operational_unqualified")
     finally:
         await host.aclose()
 
@@ -648,10 +646,7 @@ async def test_qq_provider_ack_is_recorded_but_not_claimed_as_user_visible(
     assert result.status == "action_authorized"
     assert dispatch_ack_count == 1
     assert visible_reply_count == 0
-    assert not any(
-        "user_perceived_reply_ms=" in record.getMessage()
-        for record in caplog.records
-    )
+    assert not any("user_perceived_reply_ms=" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -697,10 +692,7 @@ async def test_qq_verified_scheduled_delivery_records_visibility_without_fake_la
 
     assert result.provider_status == "delivered"
     assert visible_reply_count == 1
-    assert not any(
-        "user_perceived_reply_ms=" in record.getMessage()
-        for record in caplog.records
-    )
+    assert not any("user_perceived_reply_ms=" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1095,9 +1087,7 @@ async def test_qq_scheduler_advances_exactly_to_proactive_technical_retry(
     finally:
         await host.aclose()
 
-    assert platform.tick_reasons == [
-        (retry_due, "qq_c2c_proactive_retry_wake")
-    ]
+    assert platform.tick_reasons == [(retry_due, "qq_c2c_proactive_retry_wake")]
     assert platform.background_logical_times == [retry_due]
     assert drained.background_statuses == ("proactive-technical-retry",)
 
@@ -1472,11 +1462,7 @@ class _StreamingExpressionModel(_OneExpressionModel):
                         "type": "beat",
                         "beat": {
                             "modality": "text",
-                            "text": (
-                                "第二条再跟上。"
-                                if ordinal == 1
-                                else f"第{ordinal}轮尾条。"
-                            ),
+                            "text": ("第二条再跟上。" if ordinal == 1 else f"第{ordinal}轮尾条。"),
                         },
                         "world_claims": [],
                     },
@@ -1985,16 +1971,16 @@ async def test_qq_stream_mode_sends_two_units_from_one_role_author_request(
         await host.drain(max_action_units=8, max_background_units=0)
         projection = host._host._application._ledger.project()  # type: ignore[attr-defined]
         stream_audits = [
-            item for item in projection.model_result_audits
-            if item.parent_model_call_id is not None
+            item for item in projection.model_result_audits if item.parent_model_call_id is not None
         ]
         physical_audits = [
             json.loads(item.audit_json)
             for item in projection.model_result_audits
-            if json.loads(item.audit_json)["route"]["router_version"]
-            == "physical-provider-audit.1"
+            if json.loads(item.audit_json)["route"]["router_version"] == "physical-provider-audit.1"
         ]
-        pending_tails = host._host._application._turns._runtime._pinned_turn._deliberation._episode_tail_tasks  # type: ignore[attr-defined]
+        pending_tails = (
+            host._host._application._turns._runtime._pinned_turn._deliberation._episode_tail_tasks
+        )  # type: ignore[attr-defined]
         rebuilt = host._host._application._ledger.rebuild()  # type: ignore[attr-defined]
         latency_segments = {sample.segment for sample in host.latency_samples()}
     finally:
@@ -3189,9 +3175,7 @@ def test_onebot_test_authority_injection_rejects_non_rr3_v7_reviewer(
                 NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
             ),
             _test_only_model=_NamedNoCallModel("isolated-explicit-author"),
-            _test_only_source_closure_model=_NamedStrictCoverageNoCallModel(
-                "unqualified-reviewer"
-            ),
+            _test_only_source_closure_model=_NamedStrictCoverageNoCallModel("unqualified-reviewer"),
         )
 
 
@@ -3852,7 +3836,13 @@ async def test_onebot_lifespan_consumes_host_shutdown_lease(
         await asyncio.Future()
 
     host = _LeasedHost()
-    monkeypatch.setattr(onebot_v2, "build_qq_c2c_host", lambda **_kwargs: host)
+    build_kwargs: dict[str, object] = {}
+
+    def _build_host(**kwargs: object) -> _LeasedHost:
+        build_kwargs.update(kwargs)
+        return host
+
+    monkeypatch.setattr(onebot_v2, "build_qq_c2c_host", _build_host)
     monkeypatch.setattr(
         onebot_v2,
         "backfill_missed_private_messages",
@@ -3873,6 +3863,7 @@ async def test_onebot_lifespan_consumes_host_shutdown_lease(
 
     assert events == ["close", "wait"]
     assert host.shutdown_pending_task_count == 0
+    assert build_kwargs["scheduler_interval_seconds"] == 15.0
 
 
 def test_napcat_v2_branch_never_builds_legacy_engine_and_normalizes_supported_shapes(

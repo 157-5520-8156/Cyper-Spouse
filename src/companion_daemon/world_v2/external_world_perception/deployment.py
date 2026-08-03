@@ -123,11 +123,19 @@ def build_external_world_perception_deployment(
     life: LifeEcologyWakePort,
     channel_port: LiveAttentionChannelPort | None = None,
     authorized_search_profile: SourceProfile | None = None,
+    scheduler_interval_seconds: float | None = None,
     wall_clock: Callable[[], datetime] = _utc_now,
 ) -> ExternalPerceptionDeployment:
     """Build no network/model authority unless every required input is explicit."""
 
     mode = settings.world_v2_external_perception_mode
+    actual_scheduler_interval = (
+        settings.qq_c2c_scheduler_interval_seconds
+        if scheduler_interval_seconds is None
+        else scheduler_interval_seconds
+    )
+    if actual_scheduler_interval <= 0:
+        raise ValueError("external perception scheduler interval must be positive")
     registry_path = settings.world_v2_external_perception_source_registry_path
     if mode == "off":
         return ExternalPerceptionDeployment(status="disabled", reason="mode_off")
@@ -162,7 +170,7 @@ def build_external_world_perception_deployment(
     )
     if mode == "live":
         merge_wait = settings.world_v2_external_perception_merge_wait_seconds
-        minimum_raw_lifetime = merge_wait + settings.qq_c2c_scheduler_interval_seconds
+        minimum_raw_lifetime = merge_wait + actual_scheduler_interval
         registry_retention_is_short = bool(
             registry is not None
             and any(

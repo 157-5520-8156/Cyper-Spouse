@@ -2414,6 +2414,7 @@ def build_qq_c2c_host(
     external_world_perception_hub: WorldPerceptionHub | None = None,
     external_perception_channel_port: LiveAttentionChannelPort | None = None,
     external_perception_authorized_search_profile: SourceProfile | None = None,
+    scheduler_interval_seconds: float | None = None,
     _test_only_expression_episode_mode: Literal["on"] | None = None,
 ) -> QQC2CHost:
     """Compose the C2C lane without importing legacy chat/runtime code.
@@ -2584,6 +2585,7 @@ def build_qq_c2c_host(
             life=application,
             channel_port=external_perception_channel_port,
             authorized_search_profile=external_perception_authorized_search_profile,
+            scheduler_interval_seconds=scheduler_interval_seconds,
         )
         external_world_perception_hub = perception_deployment.hub
         external_world_perception_disabled_reason = perception_deployment.reason

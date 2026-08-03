@@ -76,16 +76,13 @@ class QQC2CSchedulerDiagnostics:
         elif stale:
             status = "stale"
         elif self.last_error is not None and (
-            self.last_success_at is None
-            or self.last_completed_at > self.last_success_at
+            self.last_success_at is None or self.last_completed_at > self.last_success_at
         ):
             status = "failing"
         else:
             status = "running"
         world = world or {}
-        raw_initiative_warning_reasons = world.get(
-            "initiative_warning_reasons", []
-        )
+        raw_initiative_warning_reasons = world.get("initiative_warning_reasons", [])
         initiative_warning_reasons = [
             item
             for item in (
@@ -119,9 +116,9 @@ class QQC2CSchedulerDiagnostics:
             and now - due_at > timedelta(seconds=self.interval_seconds * 2)
         ):
             initiative_warning_reasons.append("consideration_overdue")
-        unexplained_initiative_warning = bool(
-            world.get("initiative_warning", False)
-        ) and not raw_initiative_warning_reasons
+        unexplained_initiative_warning = (
+            bool(world.get("initiative_warning", False)) and not raw_initiative_warning_reasons
+        )
         return {
             "status": status,
             "task_running": task_running,
@@ -129,79 +126,41 @@ class QQC2CSchedulerDiagnostics:
             "passes_started": self.passes_started,
             "passes_completed": self.passes_completed,
             "failures": self.failures,
-            "last_started_at": (
-                self.last_started_at.isoformat() if self.last_started_at else None
-            ),
+            "last_started_at": (self.last_started_at.isoformat() if self.last_started_at else None),
             "last_completed_at": (
                 self.last_completed_at.isoformat() if self.last_completed_at else None
             ),
-            "last_success_at": (
-                self.last_success_at.isoformat() if self.last_success_at else None
-            ),
+            "last_success_at": (self.last_success_at.isoformat() if self.last_success_at else None),
             "last_duration_ms": self.last_duration_ms,
             "last_error": self.last_error,
             "initiative": {
                 "last_status": world.get("initiative_last_status"),
                 "last_reason": world.get("initiative_last_reason"),
-                "pending_opportunity_count": world.get(
-                    "pending_proactive_opportunity_count", 0
-                ),
-                "pending_process_count": world.get(
-                    "pending_proactive_process_count", 0
-                ),
-                "pending_action_count": world.get(
-                    "pending_proactive_action_count", 0
-                ),
-                "spontaneous_candidate_due": world.get(
-                    "spontaneous_candidate_due", False
-                ),
+                "pending_opportunity_count": world.get("pending_proactive_opportunity_count", 0),
+                "pending_process_count": world.get("pending_proactive_process_count", 0),
+                "pending_action_count": world.get("pending_proactive_action_count", 0),
+                "spontaneous_candidate_due": world.get("spontaneous_candidate_due", False),
                 "state": world.get("initiative_state", "waiting_context"),
-                "last_considered_at": world.get(
-                    "initiative_last_considered_at"
-                ),
-                "last_model_decision": world.get(
-                    "initiative_last_model_decision"
-                ),
-                "last_decision_reason": world.get(
-                    "initiative_last_decision_reason"
-                ),
-                "last_impulse_summary": world.get(
-                    "initiative_last_impulse_summary"
-                ),
-                "last_grounding_outcome": world.get(
-                    "initiative_last_grounding_outcome"
-                ),
-                "grounding_corrected_count": world.get(
-                    "initiative_grounding_corrected_count", 0
-                ),
-                "grounding_rejected_count": world.get(
-                    "initiative_grounding_rejected_count", 0
-                ),
-                "stimulus_source_count": world.get(
-                    "initiative_stimulus_source_count", 0
-                ),
+                "last_considered_at": world.get("initiative_last_considered_at"),
+                "last_model_decision": world.get("initiative_last_model_decision"),
+                "last_decision_reason": world.get("initiative_last_decision_reason"),
+                "last_impulse_summary": world.get("initiative_last_impulse_summary"),
+                "last_grounding_outcome": world.get("initiative_last_grounding_outcome"),
+                "grounding_corrected_count": world.get("initiative_grounding_corrected_count", 0),
+                "grounding_rejected_count": world.get("initiative_grounding_rejected_count", 0),
+                "stimulus_source_count": world.get("initiative_stimulus_source_count", 0),
                 "stimulus_merge_window_seconds": world.get(
                     "initiative_stimulus_merge_window_seconds", 600
                 ),
-                "pending_expectation_count": world.get(
-                    "initiative_pending_expectation_count", 0
-                ),
-                "expectation_status_counts": world.get(
-                    "initiative_expectation_status_counts", {}
-                ),
-                "next_consideration_at": world.get(
-                    "initiative_next_consideration_at"
-                ),
-                "cadence_reason_codes": world.get(
-                    "initiative_cadence_reason_codes", []
-                ),
+                "pending_expectation_count": world.get("initiative_pending_expectation_count", 0),
+                "expectation_status_counts": world.get("initiative_expectation_status_counts", {}),
+                "next_consideration_at": world.get("initiative_next_consideration_at"),
+                "cadence_reason_codes": world.get("initiative_cadence_reason_codes", []),
                 "consecutive_technical_failures": world.get(
                     "initiative_consecutive_technical_failures", 0
                 ),
                 "retry_ordinal": world.get("initiative_retry_ordinal", 0),
-                "last_failure_code": world.get(
-                    "initiative_last_failure_code"
-                ),
+                "last_failure_code": world.get("initiative_last_failure_code"),
                 "reliability_24h": world.get(
                     "initiative_reliability_24h",
                     {
@@ -228,8 +187,7 @@ class QQC2CSchedulerDiagnostics:
                         "warning_reasons": [],
                     },
                 ),
-                "warning": bool(initiative_warning_reasons)
-                or unexplained_initiative_warning,
+                "warning": bool(initiative_warning_reasons) or unexplained_initiative_warning,
                 "warning_reasons": initiative_warning_reasons,
             },
             "world_activity": {
@@ -281,9 +239,7 @@ def create_qq_c2c_onebot_app(
             "QQ media preview deployment and durable transport must be supplied together"
         )
     recipient_ids = tuple(
-        item.strip()
-        for item in settings.napcat_allowed_private_user_ids.split(",")
-        if item.strip()
+        item.strip() for item in settings.napcat_allowed_private_user_ids.split(",") if item.strip()
     )
     if len(recipient_ids) != 1:
         raise ValueError(
@@ -353,9 +309,7 @@ def create_qq_c2c_onebot_app(
         perception_bundle = build_qq_perception_deployment(
             settings=settings,
             world_id=qq_c2c_world_id(settings.primary_user_id),
-            api_url=(
-                settings.napcat_api_url if adapter == "napcat" else settings.onebot_api_url
-            ),
+            api_url=(settings.napcat_api_url if adapter == "napcat" else settings.onebot_api_url),
             access_token=access_token,
         )
     host = build_qq_c2c_host(
@@ -367,9 +321,7 @@ def create_qq_c2c_onebot_app(
         life_source_closure_model=_test_only_life_source_closure_model,
         media_preview=media_preview,
         media_transport=media_transport,
-        perception_model=(
-            perception_bundle.model if perception_bundle is not None else None
-        ),
+        perception_model=(perception_bundle.model if perception_bundle is not None else None),
         perception_input_source=(
             perception_bundle.input_source if perception_bundle is not None else None
         ),
@@ -379,14 +331,11 @@ def create_qq_c2c_onebot_app(
         perception_budget_limit=(
             perception_bundle.budget_limit if perception_bundle is not None else 0
         ),
+        scheduler_interval_seconds=scheduler_interval_seconds,
     )
-    scheduler = QQC2CSchedulerDiagnostics(
-        interval_seconds=scheduler_interval_seconds
-    )
+    scheduler = QQC2CSchedulerDiagnostics(interval_seconds=scheduler_interval_seconds)
 
-    api_url = (
-        settings.napcat_api_url if adapter == "napcat" else settings.onebot_api_url
-    )
+    api_url = settings.napcat_api_url if adapter == "napcat" else settings.onebot_api_url
 
     async def _fetch_recent_history() -> list[dict[str, object]]:
         return await get_onebot_friend_msg_history(
@@ -484,9 +433,7 @@ def create_qq_c2c_onebot_app(
         try:
             fragment = normalize_onebot_qq_ingress(raw_event)
         except (TypeError, ValueError):
-            return JSONResponse(
-                {"status": "rejected_invalid_qq_ingress"}, status_code=400
-            )
+            return JSONResponse({"status": "rejected_invalid_qq_ingress"}, status_code=400)
         if fragment is None:
             return {"status": "ignored_qq_shape_v2_unsupported"}
         if fragment.recipient_id != recipient_id:
@@ -507,24 +454,16 @@ def create_qq_c2c_onebot_app(
     async def health():
         world = await host.world_health_diagnostics()
         scheduler_view = scheduler.snapshot(now=datetime.now(UTC), world=world)
-        scheduler_view["local_provider_capacity"] = (
-            host.local_provider_capacity_health()
-        )
+        scheduler_view["local_provider_capacity"] = host.local_provider_capacity_health()
         scheduler_view["text_turn_endpoint"] = host.text_endpoint_health()
-        scheduler_view["proactive_source_authority"] = (
-            host.proactive_source_authority_health()
-        )
-        scheduler_view["life_source_authority"] = (
-            host.life_source_authority_health()
-        )
+        scheduler_view["proactive_source_authority"] = host.proactive_source_authority_health()
+        scheduler_view["life_source_authority"] = host.life_source_authority_health()
         external_perception_health = host.external_world_perception_health()
         downstream = world.get("external_perception_downstream")
         if isinstance(downstream, dict):
             external_perception_health["downstream"] = downstream
         scheduler_view["external_world_perception"] = external_perception_health
-        scheduler_view["performance"] = production_latency_health_snapshot(
-            host.latency_samples()
-        )
+        scheduler_view["performance"] = production_latency_health_snapshot(host.latency_samples())
         # Rolling process-local reliability counters (24h window): provider
         # dispatch ACKs are reported separately from strongly evidenced
         # visible replies, alongside failsafe engagements and repairs.  The
@@ -565,7 +504,9 @@ def create_qq_c2c_onebot_app(
         configured = (settings.delivery_reconciliation_token or "").strip()
         if not configured:
             return JSONResponse(
-                {"error": "media observation surface is disabled until an operator token is configured"},
+                {
+                    "error": "media observation surface is disabled until an operator token is configured"
+                },
                 status_code=503,
             )
         if not token or not secrets.compare_digest(token, configured):
