@@ -1260,6 +1260,10 @@ class DeliberationModelAdapter(Protocol):
 class QuickRecoveryAdapter(Protocol):
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput: ...
 
+    async def recover_stream_head(
+        self, request: ModelInput, failure_code: str
+    ) -> ModelOutput: ...
+
 
 class ProposalGrammar(Protocol):
     """Composition-owned allow-list for otherwise inert proposal envelopes."""
@@ -2468,7 +2472,8 @@ class Deliberation:
             self._expression_episode_mode != "off"
             and callable(provisional_operation)
             and (
-                not callable(provisional_provider_available)
+                unit_stream_episode
+                or not callable(provisional_provider_available)
                 or provisional_provider_available(model_input)
             )
             # An authoritative provisional cannot bypass source closure.  A
@@ -2533,7 +2538,7 @@ class Deliberation:
                 candidate(
                     lambda: (
                         self._main.propose_stream_head(model_input)
-                        if unit_stream_episode and episode_enabled
+                        if unit_stream_episode
                         else self._main.propose(model_input)
                     ),
                     call_id=primary_call_id,
@@ -2639,6 +2644,13 @@ class Deliberation:
             nonlocal backup_validation, corrective_claimed_before_backup, deadline_timer
             if backup_task is not None:
                 return False
+            recovery_operation = (
+                getattr(self._quick, "recover_stream_head", None)
+                if unit_stream_episode
+                else getattr(self._quick, "recover", None)
+            )
+            if not callable(recovery_operation):
+                return False
             if after_actual_failure and not self._technical_recovery_enabled:
                 return False
             hedge_available = getattr(self._quick, "has_hedge_provider", None)
@@ -2696,7 +2708,7 @@ class Deliberation:
             try:
                 backup_task = asyncio.create_task(
                     candidate(
-                        lambda: self._quick.recover(backup_input, failure_code),
+                        lambda: recovery_operation(backup_input, failure_code),
                         call_id=backup_call_id,
                         minimal_only=self._recovery_mode == "minimal_only",
                         lane="quick",

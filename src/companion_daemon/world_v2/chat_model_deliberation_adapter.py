@@ -7599,6 +7599,14 @@ def _stream_first_expression(raw: str) -> str:
         events = value["events"]
         assert isinstance(events, list)
         return _expression_event_head(events[0], continuation=bool(events[1:-1]))
+    if "protocol" not in parsed:
+        parsed = _parse_canonical_stream_object(raw)
+        first, _tail = _canonical_stream_partition(parsed)
+        return json.dumps(
+            first,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     value = _normalized_stream_packaging(parsed)
     if set(value) != {"protocol", "first", "continuation"}:
         raise ValueError("expression unit stream envelope fields are invalid")
@@ -7680,7 +7688,11 @@ def _stream_tail_expression(raw: str) -> str:
                 "supersede_pending"
                 if first.get("turn_posture") == "supersede"
                 else "complete_without_more"
-            )
+        )
+        return json.dumps(tail, ensure_ascii=False, separators=(",", ":"))
+    if "protocol" not in parsed:
+        parsed = _parse_canonical_stream_object(raw)
+        _first, tail = _canonical_stream_partition(parsed)
         return json.dumps(tail, ensure_ascii=False, separators=(",", ":"))
     value = _normalized_stream_packaging(parsed)
     first_raw = _stream_first_expression(raw)
@@ -7719,6 +7731,216 @@ def _stream_tail_expression(raw: str) -> str:
             else "complete_without_more"
         )
     return json.dumps(tail, ensure_ascii=False, separators=(",", ":"))
+
+
+def _canonical_stream_partition(
+    value: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Partition one ordinary draft without changing its authored beat sequence."""
+
+    wrapped = value.get("expression_draft")
+    if set(value) == {"expression_draft"} and isinstance(wrapped, dict):
+        value = wrapped
+    beats = value.get("beats")
+    if not isinstance(beats, list):
+        raise ValueError("canonical stream ExpressionDraft requires a beats array")
+
+    draft = dict(value)
+    ordered_fields = tuple(draft)
+    beats_index = ordered_fields.index("beats")
+    prefix = {key: draft[key] for key in ordered_fields[:beats_index]}
+    claims = draft.get("world_claims")
+    first_visible_index = next(
+        (
+            index
+            for index, beat in enumerate(beats)
+            if isinstance(beat, dict) and beat.get("modality") != "typing"
+        ),
+        None,
+    )
+    prefix_was_incrementally_partitionable = (
+        prefix.get("timing_choice") == "now"
+        and prefix.get("turn_posture") != "supersede"
+        and prefix.get("world_claims") == []
+        and first_visible_index is not None
+    )
+    if prefix_was_incrementally_partitionable and beats_index != len(ordered_fields) - 1:
+        # An already released append-only prefix cannot be reinterpreted by a
+        # later top-level field. The head remains the character's frozen
+        # choice; the malformed physical tail is a technical failure.
+        raise ValueError("canonical fast stream beats must remain the final field")
+    incrementally_partitionable = (
+        prefix_was_incrementally_partitionable
+        and draft.get("timing_choice") == "now"
+        and draft.get("turn_posture") != "supersede"
+        and claims == []
+    )
+    if incrementally_partitionable:
+        assert first_visible_index is not None
+        head = dict(draft)
+        head["beats"] = beats[: first_visible_index + 1]
+        # The head is append-only even for a one-beat draft. The completed
+        # physical stream later closes it with a no-op terminal tail, so a
+        # partially observed array never guesses that the role has finished.
+        head["episode_disposition"] = "append"
+        tail = dict(draft)
+        for field in (
+            "delay_seconds",
+            "expires_after_seconds",
+            "response_expectation",
+            "response_expectation_assessment",
+            "turn_posture",
+        ):
+            tail.pop(field, None)
+        remaining = beats[first_visible_index + 1 :]
+        tail["timing_choice"] = "now" if remaining else "silent"
+        tail["beats"] = remaining
+        tail["world_claims"] = []
+        tail["episode_disposition"] = (
+            "append" if remaining else "complete_without_more"
+        )
+        return head, tail
+
+    draft["episode_disposition"] = (
+        "supersede_pending"
+        if draft.get("turn_posture") == "supersede"
+        else "complete_without_more"
+    )
+    tail = dict(draft)
+    for field in (
+        "delay_seconds",
+        "expires_after_seconds",
+        "response_expectation",
+        "response_expectation_assessment",
+        "turn_posture",
+    ):
+        tail.pop(field, None)
+    tail["timing_choice"] = "silent"
+    tail["beats"] = []
+    tail["world_claims"] = []
+    tail["episode_disposition"] = "complete_without_more"
+    return draft, tail
+
+
+def _unique_stream_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject last-key-wins ambiguity at every streamed JSON object depth."""
+
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"canonical expression stream duplicated field: {key}")
+        value[key] = item
+    return value
+
+
+_STRICT_STREAM_JSON_DECODER = json.JSONDecoder(
+    object_pairs_hook=_unique_stream_json_object
+)
+
+
+def _incremental_canonical_first_expression(
+    buffer: str, *, object_start: int
+) -> str | None:
+    """Extract a source-free first beat from an ordinary draft JSON prefix.
+
+    Production asks the provider to serialize ``beats`` last. That is only a
+    wire-order constraint: every semantic field and the complete beat sequence
+    remain authored by the role model. If the provider does not honor the
+    order, the safe fallback is the completed streamed object.
+    """
+
+    decoder = _STRICT_STREAM_JSON_DECODER
+    cursor = object_start + 1
+    fields: dict[str, object] = {}
+    while True:
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+        if cursor >= len(buffer) or buffer[cursor] == "}":
+            return None
+        try:
+            key, key_end = decoder.raw_decode(buffer, cursor)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(key, str) or key in fields:
+            raise ValueError("canonical expression stream fields must be unique")
+        cursor = key_end
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+        if cursor >= len(buffer) or buffer[cursor] != ":":
+            return None
+        cursor += 1
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+
+        if key == "beats":
+            if (
+                fields.get("timing_choice") != "now"
+                or fields.get("turn_posture") == "supersede"
+                or fields.get("world_claims") != []
+            ):
+                return None
+            if cursor >= len(buffer) or buffer[cursor] != "[":
+                return None
+            cursor += 1
+            head_beats: list[object] = []
+            while True:
+                while cursor < len(buffer) and buffer[cursor].isspace():
+                    cursor += 1
+                if cursor >= len(buffer) or buffer[cursor] == "]":
+                    return None
+                try:
+                    beat, beat_end = decoder.raw_decode(buffer, cursor)
+                except json.JSONDecodeError:
+                    return None
+                if not isinstance(beat, dict):
+                    raise ValueError("canonical expression stream beat must be an object")
+                head_beats.append(beat)
+                if beat.get("modality") != "typing":
+                    head = dict(fields)
+                    head["beats"] = head_beats
+                    head["episode_disposition"] = "append"
+                    return json.dumps(
+                        head,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                cursor = beat_end
+                while cursor < len(buffer) and buffer[cursor].isspace():
+                    cursor += 1
+                if cursor >= len(buffer) or buffer[cursor] != ",":
+                    return None
+                cursor += 1
+
+        try:
+            field_value, value_end = decoder.raw_decode(buffer, cursor)
+        except json.JSONDecodeError:
+            return None
+        fields[key] = field_value
+        cursor = value_end
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+        if cursor >= len(buffer) or buffer[cursor] != ",":
+            return None
+        cursor += 1
+
+
+def _parse_canonical_stream_object(raw: str) -> dict[str, object]:
+    """Parse a completed canonical stream without last-key-wins ambiguity."""
+
+    candidate = raw.strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if len(lines) < 3 or not lines[-1].strip().startswith("```"):
+            raise ValueError("chat model returned an unclosed JSON fence")
+        candidate = "\n".join(lines[1:-1]).strip()
+
+    try:
+        parsed = json.loads(candidate, object_pairs_hook=_unique_stream_json_object)
+    except json.JSONDecodeError as exc:
+        raise ValueError("canonical expression stream is not one JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("canonical expression stream is not one JSON object")
+    return parsed
 
 
 def _expression_event_envelope(value: dict[str, object]) -> dict[str, object]:
@@ -7760,21 +7982,32 @@ def _expression_event_head(event: object, *, continuation: bool | None) -> str:
 
     if not isinstance(event, dict) or event.get("type") != "head":
         raise ValueError("expression event head frame is invalid")
-    if "beats" in event or "episode_disposition" in event:
-        raise ValueError("expression event head must use singular beat transport fields")
     beat = event.get("beat")
     leading_typing = event.get("leading_typing_beat")
+    plural_beats = event.get("beats")
+    if plural_beats is not None and (beat is not None or leading_typing is not None):
+        raise ValueError("expression event head beat transports are ambiguous")
+    if plural_beats is not None and not isinstance(plural_beats, list):
+        raise ValueError("expression event head beats must be an array")
     timing = event.get("timing_choice", "now")
     if leading_typing is not None and (
         not isinstance(leading_typing, dict)
         or leading_typing.get("modality") != "typing"
     ):
         raise ValueError("expression event leading typing frame is invalid")
-    if timing == "now" and not isinstance(beat, dict):
+    visible_beats = (
+        list(plural_beats)
+        if isinstance(plural_beats, list)
+        else [item for item in (leading_typing, beat) if isinstance(item, dict)]
+    )
+    if timing == "now" and not any(
+        isinstance(item, dict) and item.get("modality") != "typing"
+        for item in visible_beats
+    ):
         raise ValueError("immediate expression event head requires one visible beat")
     if timing in {"later", "silent"} and leading_typing is not None:
         raise ValueError("deferred or silent event head cannot carry leading typing")
-    if timing == "silent" and beat is not None:
+    if timing == "silent" and visible_beats:
         raise ValueError("silent expression event head cannot carry a beat")
     if beat is not None and not isinstance(beat, dict):
         raise ValueError("expression event head beat is invalid")
@@ -7783,11 +8016,16 @@ def _expression_event_head(event: object, *, continuation: bool | None) -> str:
     draft = {
         key: value
         for key, value in event.items()
-        if key not in {"type", "beat", "leading_typing_beat"}
+        if key
+        not in {
+            "type",
+            "beat",
+            "beats",
+            "leading_typing_beat",
+            "episode_disposition",
+        }
     }
-    draft["beats"] = [
-        item for item in (leading_typing, beat) if isinstance(item, dict)
-    ]
+    draft["beats"] = visible_beats
     draft["episode_disposition"] = (
         "supersede_pending"
         if draft.get("turn_posture") == "supersede"
@@ -7836,7 +8074,7 @@ def _incremental_first_expression(buffer: str) -> str | None:
         return None
     if buffer[object_start] != "{":
         raise ValueError("expression stream must begin with an object")
-    decoder = json.JSONDecoder()
+    decoder = _STRICT_STREAM_JSON_DECODER
     key_start = object_start + 1
     while key_start < len(buffer) and buffer[key_start].isspace():
         key_start += 1
@@ -7845,7 +8083,20 @@ def _incremental_first_expression(buffer: str) -> str | None:
     except json.JSONDecodeError:
         return None
     if protocol_key != "protocol":
-        raise ValueError("expression stream must serialize protocol first")
+        incremental = _incremental_canonical_first_expression(
+            buffer,
+            object_start=object_start,
+        )
+        if incremental is not None:
+            return incremental
+        try:
+            complete, end = decoder.raw_decode(buffer, object_start)
+        except json.JSONDecodeError:
+            return None
+        if buffer[end:].strip() or not isinstance(complete, dict):
+            raise ValueError("canonical expression stream must contain one object")
+        first, _tail = _canonical_stream_partition(complete)
+        return json.dumps(first, ensure_ascii=False, separators=(",", ":"))
     protocol_colon = buffer.find(":", protocol_key_end)
     if protocol_colon < 0:
         return None
@@ -7883,7 +8134,7 @@ def _incremental_first_expression(buffer: str) -> str | None:
         while value_start < len(buffer) and buffer[value_start].isspace():
             value_start += 1
         try:
-            event, _ = json.JSONDecoder().raw_decode(buffer, value_start)
+            event, _ = _STRICT_STREAM_JSON_DECODER.raw_decode(buffer, value_start)
         except json.JSONDecodeError:
             return None
         return _expression_event_head(event, continuation=None)
@@ -7903,7 +8154,7 @@ def _incremental_first_expression(buffer: str) -> str | None:
     while key_start < len(buffer) and buffer[key_start].isspace():
         key_start += 1
     try:
-        first_key, key_end = json.JSONDecoder().raw_decode(buffer, key_start)
+        first_key, key_end = _STRICT_STREAM_JSON_DECODER.raw_decode(buffer, key_start)
     except json.JSONDecodeError:
         return None
     if first_key != "protocol":
@@ -7915,7 +8166,9 @@ def _incremental_first_expression(buffer: str) -> str | None:
     while protocol_start < len(buffer) and buffer[protocol_start].isspace():
         protocol_start += 1
     try:
-        protocol, protocol_end = json.JSONDecoder().raw_decode(buffer, protocol_start)
+        protocol, protocol_end = _STRICT_STREAM_JSON_DECODER.raw_decode(
+            buffer, protocol_start
+        )
     except json.JSONDecodeError:
         return None
     if protocol != "expression-units.1" or protocol_end > start:
@@ -7929,7 +8182,9 @@ def _incremental_first_expression(buffer: str) -> str | None:
     while second_key_start < len(buffer) and buffer[second_key_start].isspace():
         second_key_start += 1
     try:
-        second_key, _ = json.JSONDecoder().raw_decode(buffer, second_key_start)
+        second_key, _ = _STRICT_STREAM_JSON_DECODER.raw_decode(
+            buffer, second_key_start
+        )
     except json.JSONDecodeError:
         return None
     if second_key != "first" or second_key_start != start:
@@ -7941,7 +8196,7 @@ def _incremental_first_expression(buffer: str) -> str | None:
     while value_start < len(buffer) and buffer[value_start].isspace():
         value_start += 1
     try:
-        value, _ = json.JSONDecoder().raw_decode(buffer, value_start)
+        value, _ = _STRICT_STREAM_JSON_DECODER.raw_decode(buffer, value_start)
     except json.JSONDecodeError:
         return None
     if not isinstance(value, dict):
@@ -8293,6 +8548,24 @@ class ChatModelDeliberationAdapter:
             failure_code=failure_code[:64],
         )
 
+    async def recover_stream_head(
+        self, request: ModelInput, failure_code: str
+    ) -> ModelOutput:
+        """Retry a failed fast reply without crossing into complete-response I/O."""
+
+        if not failure_code:
+            raise ValueError("fast reply recovery requires a failure code")
+        self._cancel_unit_stream_for(request)
+        stream_generation = self._stream_generation(request)
+        return await self._complete_with_provider_audit(
+            request=request,
+            quick_recovery=True,
+            provisional=False,
+            failure_code=failure_code[:64],
+            stream_part="head",
+            stream_generation=stream_generation,
+        )
+
     async def _complete_with_provider_audit(
         self,
         *,
@@ -8538,33 +8811,10 @@ class ChatModelDeliberationAdapter:
             quick_recovery=quick_recovery,
             provisional=provisional,
             failure_code=failure_code,
+            stream_part=stream_part,
             source_ref_aliases=source_ref_aliases,
             source_closure_failure=inherited_source_failure,
         )
-        if stream_part is not None:
-            messages = [
-                {
-                    **messages[0],
-                    "content": messages[0]["content"]
-                    + "\n\nSTREAM PACKAGING CONTRACT (transport shape only; it does not choose your "
-                    "behavior): Return exactly one JSON object with protocol=expression-events.1 "
-                    "and events. Serialize protocol first and events second. events is an "
-                    "append-only array whose first item is a head frame, whose optional middle "
-                    "items are beat frames, and whose final item is exactly {\"type\":\"end\"}. "
-                    "The head frame contains type=head and the complete ExpressionDraft fields "
-                    "except beats and episode_disposition. Use the singular beat field for the "
-                    "first visible beat you choose; if you choose a leading typing beat, put that "
-                    "single typing object in leading_typing_beat. Put every additional chosen "
-                    "beat in its own "
-                    '{"type":"beat","beat":<one beat>,"world_claims":[<claims for only that beat>]} '
-                    "frame. For later, the head singular beat carries the deferred expression and "
-                    "there are no middle beat frames. For silent, omit the head beat and emit no "
-                    "middle beat frames. Do not emit beats or episode_disposition in the head. "
-                    "Do not shorten, add, reorder, or split messages merely because of this wire "
-                    "format; message count, content, timing, posture, and silence remain yours.",
-                },
-                *messages[1:],
-            ]
         temperature = 0.25 if quick_recovery else self._temperature
         repair_messages = messages
         initial_purpose = (
@@ -9794,6 +10044,7 @@ class ChatModelDeliberationAdapter:
         quick_recovery: bool,
         failure_code: str | None,
         provisional: bool = False,
+        stream_part: Literal["head", "tail"] | None = None,
         source_ref_aliases: SourceRefAliasTable | None = None,
         source_closure_failure: _SourceClosureRecoveryFailure | None = None,
     ) -> list[dict[str, str]]:
@@ -9802,6 +10053,7 @@ class ChatModelDeliberationAdapter:
             quick_recovery=quick_recovery,
             failure_code=failure_code,
             provisional=provisional,
+            stream_part=stream_part,
             source_ref_aliases=source_ref_aliases,
             source_closure_failure=source_closure_failure,
         )
@@ -9813,6 +10065,7 @@ class ChatModelDeliberationAdapter:
         quick_recovery: bool,
         failure_code: str | None,
         provisional: bool,
+        stream_part: Literal["head", "tail"] | None = None,
         source_ref_aliases: SourceRefAliasTable | None = None,
         source_closure_failure: _SourceClosureRecoveryFailure | None = None,
     ) -> list[dict[str, str]]:
@@ -9908,6 +10161,14 @@ class ChatModelDeliberationAdapter:
             "biographical_coordinate_authority, which proves no unlisted activity or occurrence. "
             "Return JSON only, without Markdown or a wrapper."
         )
+        if stream_part is not None:
+            system += (
+                " Fast transport serialization only: keep this same ordinary ExpressionDraft "
+                "contract, but serialize beats as the final top-level field and serialize every "
+                "other field you choose, including world_claims, before beats. Field order does "
+                "not change your timing, silence, posture, cadence, message count, modalities, "
+                "content, or any other character decision."
+            )
         if (
             request.trigger_message is not None
             and request.trigger_message.turn_attention_advisory is not None
@@ -10227,6 +10488,15 @@ class RoutedChatModelDeliberationAdapter:
 
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
         return await self._flash.recover(request, failure_code)
+
+    async def recover_stream_head(
+        self, request: ModelInput, failure_code: str
+    ) -> ModelOutput:
+        self._stream_generation_coordinator.advance_attention()
+        self._flash.cancel_expression_unit_streams()
+        if self._thinking is not None:
+            self._thinking.cancel_expression_unit_streams()
+        return await self._flash.recover_stream_head(request, failure_code)
 
 
 def _parse_json_object(raw: str) -> dict[str, object]:

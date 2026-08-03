@@ -174,6 +174,19 @@ A referencable experience derived from a settled activity or confirmed shared ev
 
 A traceable attempt to produce an observable online or external effect. An Action has one terminal outcome: delivered, failed, cancelled, expired, or unknown.
 
+## Fast Reply Interface
+
+The production interactive expression path. One Character Model request owns the
+complete choice and is incrementally exposed as validated expression units; transport
+packaging cannot change whether, what, or how many messages the character chose.
+
+## Delayed Attention Reply Interface
+
+A retained complete-response capability reserved for a future, explicit character-owned
+choice that the companion was unavailable or did not attend in time. It is disabled and
+not selected by current production routing; technical failure must never activate it or
+pretend the character was busy.
+
 ## External Result
 
 A recorded outcome from a model, random draw, media generator, tool, network, clock, or platform receipt that replay must not invoke again.

@@ -375,11 +375,15 @@ class Settings(BaseSettings):
         le=30.0,
         alias="WORLD_V2_SOURCE_REVIEW_DEADLINE_SECONDS",
     )
-    # ``stream`` exposes only a source-reviewed complete semantic unit from one
-    # role-author request. The historical two-author ``on`` mode remains
-    # test-only because its provisional author can disagree with the full one.
+    # ``stream`` is the production fast-reply interface: one role-author
+    # request is incrementally split into source-reviewed semantic units.
+    # ``off`` retains the complete-response interface for a future explicit
+    # delayed-attention capability (for example, the character was occupied
+    # and did not answer immediately). It is not selected by production now.
+    # The historical two-author ``on`` mode remains test-only because its
+    # provisional author can disagree with the full one.
     world_v2_expression_episode_mode: Literal["off", "shadow", "stream"] = Field(
-        default="shadow", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
+        default="stream", alias="WORLD_V2_EXPRESSION_EPISODE_MODE"
     )
     world_v2_recorded_cadence_mode: Literal["off", "shadow", "on"] = Field(
         default="shadow", alias="WORLD_V2_RECORDED_CADENCE_MODE"

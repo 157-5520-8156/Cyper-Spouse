@@ -1825,3 +1825,31 @@ class FakeCompanionModel:
                 ensure_ascii=False,
             )
         return "刚刚是不是忙完了？我在呢。"
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta: Callable[[str], None] | None = None,
+    ) -> tuple[str, dict[str, object]]:
+        """Expose the production fast-interface contract for offline fixtures."""
+
+        raw = await self.complete(messages, temperature=temperature)
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        material: dict[str, object] = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "token_provenance": "estimated",
+            "transport": "fake",
+            "provider": "fake-companion",
+            "provider_usage_ref": "usage:fake-companion:stream",
+        }
+        material["provider_usage_hash"] = hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return raw, material

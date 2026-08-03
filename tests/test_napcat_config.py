@@ -20,10 +20,10 @@ def test_settings_reject_unknown_qq_adapter_before_any_process_starts() -> None:
         Settings(QQ_ADAPTER="auto")
 
 
-def test_production_settings_keep_expression_episode_observational() -> None:
+def test_production_settings_use_fast_expression_interface() -> None:
     settings = Settings(_env_file=None)
 
-    assert settings.world_v2_expression_episode_mode == "shadow"
+    assert settings.world_v2_expression_episode_mode == "stream"
     with pytest.raises(ValidationError, match="WORLD_V2_EXPRESSION_EPISODE_MODE"):
         Settings(_env_file=None, WORLD_V2_EXPRESSION_EPISODE_MODE="on")
 

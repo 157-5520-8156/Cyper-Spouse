@@ -644,6 +644,34 @@ class SingleCallExpressionAdapter:
     async def propose_stream_tail(self, request: ModelInput) -> ModelOutput:
         return await self._owner._fallback_expression.propose_stream_tail(request)
 
+    async def recover_stream_head(
+        self, request: ModelInput, failure_code: str
+    ) -> ModelOutput:
+        """Keep fast-reply recovery on the streaming transport only."""
+
+        key = _cache_key(request)
+        self._owner._pending.pop(key, None)
+        recovery = self._owner._recovery_expression or self._owner._selected_expression(request)
+        operation = getattr(recovery, "recover_stream_head", None)
+        if not callable(operation):
+            raise RuntimeError("fast expression recovery transport is unavailable")
+        if (
+            key in self._owner._expression_recovery_attempted
+            or _provider_already_used_fallback(self._owner._selected_provider(request))
+        ):
+            raise RuntimeError("fast expression recovery already exhausted")
+        self._owner._expression_recovery_attempted.add(key)
+        recovery_timeout = _fit_role_model_recovery_timeout()
+        if recovery_timeout is None and has_provider_slot_coordinator():
+            output = await operation(request, failure_code)
+        else:
+            if recovery_timeout is None:
+                raise TimeoutError("fast expression recovery budget exhausted")
+            async with asyncio.timeout(recovery_timeout):
+                output = await operation(request, failure_code)
+        record_backup_recovery()
+        return output
+
     def advance_expression_attention(self, attention_ref: str) -> None:
         self._owner._fallback_expression.advance_expression_attention(attention_ref)
 

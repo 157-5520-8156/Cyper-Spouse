@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 import json
 
 import pytest
@@ -79,6 +80,32 @@ class _ReplyModel:
             },
             ensure_ascii=False,
         )
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ):
+        raw = await self.complete(messages, temperature=temperature)
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "thinking_tokens": 0,
+            "token_provenance": "estimated",
+            "transport": "fake",
+            "provider": "fixture",
+            "provider_usage_ref": "usage:fixture:production-same-turn-advisory",
+        }
+        material["provider_usage_hash"] = sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return raw, material
 
 
 class _AdvisoryModel:

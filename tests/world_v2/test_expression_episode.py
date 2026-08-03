@@ -14,6 +14,7 @@ from companion_daemon.world_v2.expression_episode import (
     EpisodePolicy,
     EpisodeReplaySnapshot,
     ExpressionEpisode,
+    ExpressionEpisodeDiagnostics,
     FullCognitionResult,
     InnerSeed,
 )
@@ -24,6 +25,13 @@ from companion_daemon.world_v2.schemas import Observation, ProjectionCursor
 
 
 NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+
+
+def test_delayed_attention_interface_health_is_truthful_when_explicitly_enabled() -> None:
+    snapshot = ExpressionEpisodeDiagnostics(mode="off").snapshot()
+
+    assert snapshot["active_reply_interface"] == "delayed_attention_complete"
+    assert snapshot["reserved_reply_interface"]["status"] == "active"  # type: ignore[index]
 
 
 class FakeClock:

@@ -110,6 +110,34 @@ class _FastReplyModel:
             ensure_ascii=False,
         )
 
+    async def complete_json_stream_with_usage(
+        self,
+        messages,  # type: ignore[no-untyped-def]
+        *,
+        temperature=0.8,  # type: ignore[no-untyped-def]
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ):
+        raw = await self.complete(messages, temperature=temperature)
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "thinking_tokens": 0,
+            "token_provenance": "estimated",
+            "transport": "fake",
+            "provider": "fixture",
+            "provider_usage_ref": "usage:fixture:fast-reply",
+        }
+        import hashlib
+
+        material["provider_usage_hash"] = hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return raw, material
+
 
 class _BlockingBackgroundModel:
     model = "fixture:blocking-background"

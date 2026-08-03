@@ -96,7 +96,7 @@ def _digest(value: object) -> str:
 
 
 class EpisodePolicy(FrozenModel):
-    """Operational mode; production defaults to shadow, never implicit send."""
+    """Library experiment mode; production Settings select the fast stream."""
 
     mode: Literal["off", "shadow", "on", "stream"] = "shadow"
     provisional_target_seconds: float = Field(default=3.0, gt=0.0, le=5.5)
@@ -104,7 +104,7 @@ class EpisodePolicy(FrozenModel):
 
 
 class ExpressionEpisodeDiagnostics:
-    """Process-local aggregate shadow evidence; never stores candidate text."""
+    """Process-local expression-interface evidence; never stores candidate text."""
 
     def __init__(
         self, *, mode: Literal["off", "shadow", "on", "stream"] = "shadow"
@@ -175,8 +175,23 @@ class ExpressionEpisodeDiagnostics:
             index = min(len(source) - 1, max(0, int((len(source) - 1) * fraction)))
             return round(source[index], 3)
 
+        active_reply_interface = {
+            "stream": "fast_stream",
+            "off": "delayed_attention_complete",
+            "shadow": "complete_response_shadow",
+            "on": "test_only_provisional",
+        }[self._mode]
         return {
             "mode": self._mode,
+            "active_reply_interface": active_reply_interface,
+            # Retained as an explicit dormant capability rather than a hidden
+            # fallback. A future character-owned availability decision may
+            # choose it; current production routing never does.
+            "reserved_reply_interface": {
+                "name": "delayed_attention_complete",
+                "status": "active" if self._mode == "off" else "disabled",
+                "reserved_for": "character_unavailable_or_delayed_attention",
+            },
             **counts,
             "candidate_ms_p50": percentile(values, 0.50),
             "candidate_ms_p95": percentile(values, 0.95),

@@ -10,6 +10,7 @@ before the main reply model is even consulted.
 from __future__ import annotations
 
 import asyncio
+from hashlib import sha256
 import json
 import time
 from datetime import UTC, datetime
@@ -846,6 +847,32 @@ class _HostExpressionModel:
             },
             ensure_ascii=False,
         )
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages,  # type: ignore[no-untyped-def]
+        *,
+        temperature=0.8,  # type: ignore[no-untyped-def]
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ):
+        raw = await self.complete(messages, temperature=temperature)
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "thinking_tokens": 0,
+            "token_provenance": "estimated",
+            "transport": "fake",
+            "provider": "fixture",
+            "provider_usage_ref": "usage:fixture:host-expression",
+        }
+        material["provider_usage_hash"] = sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return raw, material
 
 
 def _napcat_message_id_that_draws_act(*, world_id: str, recipient_id: str) -> str:

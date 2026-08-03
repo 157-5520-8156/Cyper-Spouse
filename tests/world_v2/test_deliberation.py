@@ -220,6 +220,53 @@ class _Quick:
         )
 
 
+@pytest.mark.asyncio
+async def test_fast_interface_never_falls_back_to_complete_response_when_stream_is_unavailable() -> None:
+    class StreamUnavailable(_Main):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stream_attempted = False
+            self.complete_attempted = False
+
+        def stream_provider_available(self, _request: ModelInput) -> bool:
+            return False
+
+        async def propose_stream_head(self, _request: ModelInput) -> ModelOutput:
+            self.stream_attempted = True
+            raise RuntimeError("stream transport unavailable")
+
+        async def propose_stream_tail(self, _request: ModelInput) -> ModelOutput:
+            raise RuntimeError("stream transport unavailable")
+
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.complete_attempted = True
+            return await super().propose(request)
+
+    main = StreamUnavailable()
+    quick = _Quick()
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=main,
+        quick_recovery=quick,
+        expression_episode_mode="stream",
+    )
+
+    result = await deliberation.deliberate(
+        _capsule(),
+        attempt_id="attempt:stream-unavailable-no-slow-fallback",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+
+    assert result.proposal is None
+    assert main.stream_attempted is True
+    assert main.complete_attempted is False
+    assert quick.requests == []
+
+
 class _EpisodeMain(_Main):
     def __init__(self, *, full_delay: float = 0, provisional_delay: float = 0) -> None:
         super().__init__(delay=full_delay)

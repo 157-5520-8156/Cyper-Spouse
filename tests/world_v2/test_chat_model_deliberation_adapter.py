@@ -17,6 +17,8 @@ from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     CompanionIdentityFrame,
     RoutedChatModelDeliberationAdapter,
     SourceClosureReselectionLane,
+    _incremental_first_expression,
+    _stream_first_expression,
     companion_identity_source_ref,
     expression_draft_shape_contract,
     review_candidate_external_proposition_coverage,
@@ -397,6 +399,54 @@ class _HeadOnlyEventFrameStreamingModel(_EventFrameStreamingModel):
     boundary_marker = ',{"type":"end"'
 
 
+class _CanonicalExpressionStreamingModel(_UnitStreamingModel):
+    """Return the ordinary semantic ExpressionDraft without transport framing."""
+
+    boundary_marker: str | None = None
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ) -> tuple[str, ModelUsageProvenance]:
+        self.calls.append((messages, temperature))
+        boundary = (
+            self._reply.index(self.boundary_marker)
+            if self.boundary_marker is not None
+            else len(self._reply)
+        )
+        if on_text_delta is not None:
+            on_text_delta(self._reply[:boundary])
+        if boundary < len(self._reply):
+            try:
+                await self.release_tail.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+            if on_text_delta is not None:
+                on_text_delta(self._reply[boundary:])
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 12,
+            "output_tokens": 8,
+            "thinking_tokens": 0,
+            "token_provenance": "provider_reported",
+            "transport": "provider_api",
+            "provider": "fake-provider",
+            "provider_usage_ref": "usage:fake:canonical-stream:1",
+        }
+        digest = sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return self._reply, ModelUsageProvenance(
+            **material,
+            provider_usage_hash=digest,
+        )
+
+
 class _BlockingStreamPrefetch:
     """Hold one old route before its stream operation can be entered."""
 
@@ -562,8 +612,9 @@ async def test_expression_event_stream_releases_one_singular_beat_frame_before_t
     )
 
     head = await asyncio.wait_for(head_task, timeout=0.5)
-    assert "protocol=expression-events.1" in model.calls[0][0][0]["content"]
-    assert "singular beat" in model.calls[0][0][0]["content"]
+    assert "Return one raw JSON ExpressionDraft" in model.calls[0][0][0]["content"]
+    assert "protocol=expression-units.1" not in model.calls[0][0][0]["content"]
+    assert "protocol=expression-events.1" not in model.calls[0][0][0]["content"]
     assert head.raw_proposal["episode_disposition"] == "append"
     head_payload = json.loads(
         head.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
@@ -578,6 +629,125 @@ async def test_expression_event_stream_releases_one_singular_beat_frame_before_t
         tail.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
     )
     assert [beat["inline_text"] for beat in tail_payload["beat_drafts"]] == ["第二帧随后到。"]
+
+
+@pytest.mark.asyncio
+async def test_fast_expression_interface_accepts_legacy_plural_beats_in_event_head() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-events.1",
+            "events": [
+                {
+                    "type": "head",
+                    "timing_choice": "now",
+                    "beats": [{"modality": "text", "text": "旧包装也不能失声。"}],
+                    "episode_disposition": "complete_without_more",
+                    "stance": "reply",
+                    "brief_rationale": "I chose one message.",
+                    "world_claims": [],
+                },
+                {"type": "end"},
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _HeadOnlyEventFrameStreamingModel(raw)
+    adapter = ChatModelDeliberationAdapter(
+        model=model,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+
+    head = await asyncio.wait_for(adapter.propose_stream_head(_qq_request()), timeout=0.5)
+    payload = json.loads(
+        head.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+
+    assert [beat["inline_text"] for beat in payload["beat_drafts"]] == ["旧包装也不能失声。"]
+
+
+@pytest.mark.asyncio
+async def test_fast_expression_interface_accepts_canonical_multi_beat_draft() -> None:
+    raw = json.dumps(
+        {
+            "timing_choice": "now",
+            "stance": "two_bubble_reply",
+            "brief_rationale": "I chose two messages.",
+            "world_claims": [],
+            # The ordinary semantic field is last for fast transport. The
+            # host, not the role model, partitions the authored beat sequence.
+            "beats": [
+                {"modality": "text", "text": "第一条。"},
+                {"modality": "text", "text": "第二条。"},
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    model = _CanonicalExpressionStreamingModel(raw)
+    model.boundary_marker = ',{"modality":"text","text":"第二条。"}'
+    adapter = ChatModelDeliberationAdapter(
+        model=model,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    )
+    request = _qq_request()
+
+    head_task = asyncio.create_task(adapter.propose_stream_head(request))
+    tail_task = asyncio.create_task(
+        adapter.propose_stream_tail(
+            request.model_copy(update={"call_id": "call:canonical-tail"})
+        )
+    )
+    head = await asyncio.wait_for(head_task, timeout=0.5)
+    payload = json.loads(
+        head.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+
+    assert [beat["inline_text"] for beat in payload["beat_drafts"]] == ["第一条。"]
+    assert head.episode_disposition == "append"
+    assert not tail_task.done()
+    assert "serialize beats as the final top-level field" in model.calls[0][0][0]["content"]
+
+    model.release_tail.set()
+    tail = await asyncio.wait_for(tail_task, timeout=0.5)
+    tail_payload = json.loads(
+        tail.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+    )
+    assert [beat["inline_text"] for beat in tail_payload["beat_drafts"]] == ["第二条。"]
+    assert tail.episode_disposition == "append"
+    assert len(model.calls) == 1
+
+
+def test_fast_canonical_prefix_cannot_be_overridden_after_beats() -> None:
+    raw = (
+        '{"timing_choice":"now","stance":"reply","brief_rationale":"chosen",'
+        '"world_claims":[],"beats":[{"modality":"text","text":"先发。"}],'
+        '"turn_posture":"supersede"}'
+    )
+
+    with pytest.raises(ValueError, match="beats must remain the final field"):
+        _stream_first_expression(raw)
+
+
+def test_fast_canonical_stream_rejects_duplicate_semantic_fields() -> None:
+    raw = (
+        '{"timing_choice":"now","timing_choice":"silent",'
+        '"world_claims":[],"beats":[]}'
+    )
+
+    with pytest.raises(ValueError, match="duplicated field: timing_choice"):
+        _stream_first_expression(raw)
+
+
+def test_fast_canonical_stream_rejects_duplicate_fields_inside_first_beat() -> None:
+    raw_prefix = (
+        '{"timing_choice":"now","stance":"reply","brief_rationale":"chosen",'
+        '"world_claims":[],"beats":['
+        '{"modality":"text","text":"甲","text":"乙"}'
+    )
+
+    with pytest.raises(ValueError, match="duplicated field: text"):
+        _incremental_first_expression(raw_prefix)
 
 
 @pytest.mark.asyncio

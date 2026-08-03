@@ -1363,7 +1363,37 @@ class _Delivery:
         return {"status": "ok", "data": {"message_id": f"typing-{len(self.sent)}"}}
 
 
-class _OneExpressionModel:
+class _CanonicalStreamingFixture:
+    async def complete_json_stream_with_usage(
+        self,
+        messages,  # type: ignore[no-untyped-def]
+        *,
+        temperature=0.8,  # type: ignore[no-untyped-def]
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+    ):
+        raw = await self.complete(messages, temperature=temperature)  # type: ignore[attr-defined]
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 10,
+            "output_tokens": 10,
+            "thinking_tokens": 0,
+            "token_provenance": "estimated",
+            "transport": "fake",
+            "provider": "fixture",
+            "provider_usage_ref": "usage:fixture:canonical-stream",
+        }
+        import hashlib
+
+        usage_hash = hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return raw, ModelUsageProvenance(**material, provider_usage_hash=usage_hash)
+
+
+class _OneExpressionModel(_CanonicalStreamingFixture):
     model = "fixture:one-expression"
 
     def __init__(self, beat: dict[str, str]) -> None:
@@ -1507,7 +1537,7 @@ class _StreamingExpressionModel(_OneExpressionModel):
         )
 
 
-class _SilentExpressionModel:
+class _SilentExpressionModel(_CanonicalStreamingFixture):
     model = "fixture:silent-expression"
 
     def __init__(self) -> None:
@@ -1532,7 +1562,7 @@ class _SilentExpressionModel:
         )
 
 
-class _WrappedExpressionModel:
+class _WrappedExpressionModel(_CanonicalStreamingFixture):
     model = "fixture:wrapped-expression"
 
     async def complete(self, _messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
@@ -1625,7 +1655,7 @@ class _DurableExpressionRetryModel:
         )
 
 
-class _IdentityAwareModel:
+class _IdentityAwareModel(_CanonicalStreamingFixture):
     model = "fixture:identity-aware"
 
     async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
@@ -3356,7 +3386,13 @@ def test_qq_public_health_forwards_expression_diagnostics_without_removing_old_f
     assert response.status_code == 200
     scheduler = response.json()["scheduler"]
     assert scheduler["expression_episode"] == {
-        "mode": "shadow",
+        "mode": "stream",
+        "active_reply_interface": "fast_stream",
+        "reserved_reply_interface": {
+            "name": "delayed_attention_complete",
+            "status": "disabled",
+            "reserved_for": "character_unavailable_or_delayed_attention",
+        },
         "turns": 0,
         "candidate_valid": 0,
         "candidate_rejected": 0,
