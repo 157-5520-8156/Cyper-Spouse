@@ -209,8 +209,8 @@ def test_live_freezable_source_raw_evidence_outlives_attention_merge(tmp_path: P
     _registry(registry)
     value = json.loads(registry.read_text(encoding="utf-8"))
     source = value["sources"][0]
-    source["raw_retention_seconds"] = 600
-    source["policy"]["maximum_raw_retention_seconds"] = 600
+    source["raw_retention_seconds"] = 630
+    source["policy"]["maximum_raw_retention_seconds"] = 630
     value["content_hash"] = canonical_source_registry_content_hash(value)
     registry.write_text(json.dumps(value), encoding="utf-8")
 
@@ -228,6 +228,36 @@ def test_live_freezable_source_raw_evidence_outlives_attention_merge(tmp_path: P
             actor_ref="agent:companion",
             model=Model(),
             life=Life(),
+        )
+
+
+def test_live_authorized_search_raw_evidence_outlives_attention_scheduler_handoff(
+    tmp_path: Path,
+) -> None:
+    profile = _authorized_search_profile()
+    short_profile = SourceProfile(
+        adapter=profile.adapter,
+        policy=profile.policy,
+        poll_interval_seconds=profile.poll_interval_seconds,
+        signal_ttl_seconds=profile.signal_ttl_seconds,
+        raw_retention_seconds=630,
+        normalized_retention_seconds=profile.normalized_retention_seconds,
+    )
+
+    with pytest.raises(ValueError, match="raw evidence must outlive live attention merge"):
+        build_external_world_perception_deployment(
+            settings=Settings(
+                _env_file=None,
+                DATABASE_PATH=tmp_path / "world.sqlite",
+                WORLD_V2_EXTERNAL_PERCEPTION_MODE="live",
+                WORLD_V2_EXTERNAL_PERCEPTION_SIDECAR_PATH=tmp_path / "sidecar.sqlite",
+                WORLD_V2_EXTERNAL_PERCEPTION_MERGE_WAIT_SECONDS=600,
+            ),
+            world_id="world:test",
+            actor_ref="agent:companion",
+            model=Model(),
+            life=Life(),
+            authorized_search_profile=short_profile,
         )
 
 

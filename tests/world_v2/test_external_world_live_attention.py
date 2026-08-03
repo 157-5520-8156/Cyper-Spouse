@@ -349,20 +349,35 @@ def _multi_revision_source():
     )
 
 
-def _profile(source):
+def _profile(source, *, raw_retention_seconds=86_400):
     return SourceProfile(
         adapter=source,
         policy=POLICY,
         poll_interval_seconds=86_400,
         signal_ttl_seconds=86_400,
-        raw_retention_seconds=86_400,
+        raw_retention_seconds=raw_retention_seconds,
     )
 
 
-def _hub(tmp_path, *, model, acceptance_port, context_port, clock, source=None):
+def _hub(
+    tmp_path,
+    *,
+    model,
+    acceptance_port,
+    context_port,
+    clock,
+    source=None,
+    raw_retention_seconds=86_400,
+    merge_wait_seconds=1,
+):
     return SQLiteWorldPerceptionHub(
         path=tmp_path / "external-perception-live.sqlite3",
-        sources=(_profile(source or _source()),),
+        sources=(
+            _profile(
+                source or _source(),
+                raw_retention_seconds=raw_retention_seconds,
+            ),
+        ),
         wall_clock=lambda: clock[0],
         live_attention=LiveAttentionRuntime(
             world_id=WORLD_ID,
@@ -373,7 +388,7 @@ def _hub(tmp_path, *, model, acceptance_port, context_port, clock, source=None):
             context_port=context_port,
             model=model,
             acceptance_port=acceptance_port,
-            merge_wait_seconds=1,
+            merge_wait_seconds=merge_wait_seconds,
         ),
     )
 
@@ -457,6 +472,39 @@ async def test_live_attention_uses_observation_time_without_forging_publication_
         assert acceptance.ledger.export_replay_evidence().projection == (
             acceptance.ledger.export_replay_evidence().replay
         )
+    finally:
+        await hub.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_attention_retains_raw_through_merge_and_scheduler_handoff(tmp_path):
+    clock = [NOW]
+    producer = ExternalPerceptionDeliveryProducer()
+    acceptance = ExternalPerceptionAcceptanceRuntime.in_memory(
+        world_id=WORLD_ID, delivery_producer=producer
+    )
+    port = _AcceptancePort(acceptance)
+    port.producer = producer
+    hub = _hub(
+        tmp_path,
+        model=_LiveModel(),
+        acceptance_port=port,
+        context_port=_LedgerContextPort(acceptance),
+        clock=clock,
+        raw_retention_seconds=631,
+        merge_wait_seconds=600,
+    )
+    try:
+        assert (await hub.advance_once(observed_at=clock[0])).status == "progressed"
+        clock[0] += timedelta(seconds=30)
+        assert (await hub.advance_once(observed_at=clock[0])).status == "window_wait"
+        clock[0] += timedelta(seconds=600)
+
+        result = await hub.advance_once(observed_at=clock[0])
+
+        assert result.status == "perception_committed"
+        replay = acceptance.ledger.export_replay_evidence()
+        assert replay.projection == replay.replay
     finally:
         await hub.aclose()
 

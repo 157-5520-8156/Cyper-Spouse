@@ -160,15 +160,25 @@ def build_external_world_perception_deployment(
         if registry is not None
         else None
     )
-    if mode == "live" and registry is not None:
+    if mode == "live":
         merge_wait = settings.world_v2_external_perception_merge_wait_seconds
-        if any(
-            source.enabled
-            and source.policy.may_freeze_durable_snapshot
-            and source.raw_retention_seconds <= merge_wait
-            for source in registry.sources
-        ):
-            raise ValueError("raw evidence must outlive live attention merge")
+        minimum_raw_lifetime = merge_wait + settings.qq_c2c_scheduler_interval_seconds
+        registry_retention_is_short = bool(
+            registry is not None
+            and any(
+                source.enabled
+                and source.policy.may_freeze_durable_snapshot
+                and source.raw_retention_seconds <= minimum_raw_lifetime
+                for source in registry.sources
+            )
+        )
+        search_retention_is_short = bool(
+            authorized_search_profile is not None
+            and authorized_search_profile.policy.may_freeze_durable_snapshot
+            and authorized_search_profile.raw_retention_seconds <= minimum_raw_lifetime
+        )
+        if registry_retention_is_short or search_retention_is_short:
+            raise ValueError("raw evidence must outlive live attention merge and scheduler handoff")
     if not registry_sources_enabled and authorized_search_profile is None:
         if registry is None:
             raise AssertionError("missing registry was handled before preflight")
