@@ -1250,6 +1250,12 @@ class SQLiteWorldLedger:
             dumped.pop("contextual_life_retries", None)
         if not state.pending_biographical_settlements:
             dumped.pop("pending_biographical_settlements", None)
+        if not state.external_signal_snapshots:
+            dumped.pop("external_signal_snapshots", None)
+        if not state.external_perceptions:
+            dumped.pop("external_perceptions", None)
+        if not state.external_perception_acceptance_manifests:
+            dumped.pop("external_perception_acceptance_manifests", None)
         return dumped
 
     @classmethod
@@ -2995,6 +3001,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.42",
                 "world-v2-reducers.43",
                 "world-v2-reducers.44",
+                "world-v2-reducers.46",
                 "world-v2-reducers.47",
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
@@ -3016,6 +3023,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.42",
                     "world-v2-reducers.43",
                     "world-v2-reducers.44",
+                    "world-v2-reducers.46",
                     "world-v2-reducers.47",
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
@@ -3065,6 +3073,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.37",
                     "world-v2-reducers.38",
                     "world-v2-reducers.39",
+                    PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     # .37 added optional non-factual reflection prose and .38
                     # adds optional reflection/audit lineage to the pending
@@ -3337,6 +3346,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.41",
                 "world-v2-reducers.43",
                 "world-v2-reducers.44",
+                "world-v2-reducers.46",
                 "world-v2-reducers.47",
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
             }:

@@ -223,13 +223,19 @@ class ScenarioVerificationError(AssertionError):
 # authorship and moves it to a separately audited post-authorship binder. The
 # frozen scenarios retain their explicit visible behavior predicates; prompt,
 # provider-subcall and proposal audit identities intentionally change.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.46"
+# ``.47`` records reducer .49 and its authenticated .48 head migration after
+# external-perception projections became part of the conditional World state.
+# The frozen corpus does not ingest external signals, so its explicit visible
+# behavior predicates remain unchanged; projection and replay identities move
+# because the reducer bundle is intentionally versioned rather than silently
+# changing the .48 state-hash protocol.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.47"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "b2bc41061852e1001650883b877eda8b4742072bcf716c6d3f949da2f2c5ef82"
+    "dfad1a97e7d60817073d9b112f6aaf802d934603f7cf6e79476a85561f6d0e28"
 )
 
 

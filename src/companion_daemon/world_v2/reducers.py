@@ -545,9 +545,10 @@ from .schemas import (
 
 _V43_REDUCER_BUNDLE_VERSION = "world-v2-reducers.43"
 _V44_REDUCER_BUNDLE_VERSION = "world-v2-reducers.44"
+_V46_REDUCER_BUNDLE_VERSION = "world-v2-reducers.46"
 _V47_REDUCER_BUNDLE_VERSION = "world-v2-reducers.47"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.46"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -596,6 +597,7 @@ def _experience_semantic_dump(
         "world-v2-reducers.24",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -620,6 +622,7 @@ def _actor_authority_transition_semantic_dump(
         "world-v2-reducers.21",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -644,6 +647,7 @@ def _life_arc_semantic_dump(
         "world-v2-reducers.42",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -661,6 +665,7 @@ def _npc_semantic_dump(
     if reducer_bundle_version not in {
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -685,6 +690,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         "world-v2-reducers.30",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -700,6 +706,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         "world-v2-reducers.30",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -708,6 +715,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
     if reducer_bundle_version not in {
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -732,6 +740,7 @@ def _expression_plan_semantic_dump(
         "world-v2-reducers.27",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -757,6 +766,7 @@ def _expression_beat_semantic_dump(
         "world-v2-reducers.27",
         _V43_REDUCER_BUNDLE_VERSION,
         _V44_REDUCER_BUNDLE_VERSION,
+        _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
@@ -1543,6 +1553,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.42",
             _V43_REDUCER_BUNDLE_VERSION,
             _V44_REDUCER_BUNDLE_VERSION,
+            _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
@@ -1691,6 +1702,7 @@ class ReducerState(FrozenModel):
                                 "world-v2-reducers.41",
                                 _V43_REDUCER_BUNDLE_VERSION,
                                 _V44_REDUCER_BUNDLE_VERSION,
+                                _V46_REDUCER_BUNDLE_VERSION,
                                 _V47_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
@@ -1768,7 +1780,11 @@ class ReducerState(FrozenModel):
                         mode="json",
                         exclude=(
                             None
-                            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                            if declared_reducer_bundle_version
+                            in {
+                                PREVIOUS_REDUCER_BUNDLE_VERSION,
+                                REDUCER_BUNDLE_VERSION,
+                            }
                             else {
                                 **(
                                     {}
@@ -1776,6 +1792,7 @@ class ReducerState(FrozenModel):
                                     in {
                                         _V43_REDUCER_BUNDLE_VERSION,
                                         _V44_REDUCER_BUNDLE_VERSION,
+                                        _V46_REDUCER_BUNDLE_VERSION,
                                         _V47_REDUCER_BUNDLE_VERSION,
                                         PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
@@ -1790,6 +1807,7 @@ class ReducerState(FrozenModel):
                                             in {
                                                 _V43_REDUCER_BUNDLE_VERSION,
                                                 _V44_REDUCER_BUNDLE_VERSION,
+                                                _V46_REDUCER_BUNDLE_VERSION,
                                                 _V47_REDUCER_BUNDLE_VERSION,
                                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                             }
@@ -1900,6 +1918,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.41",
             _V43_REDUCER_BUNDLE_VERSION,
             _V44_REDUCER_BUNDLE_VERSION,
+            _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
@@ -1927,6 +1946,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.41",
                 _V43_REDUCER_BUNDLE_VERSION,
                 _V44_REDUCER_BUNDLE_VERSION,
+                _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
@@ -1951,6 +1971,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.41",
             _V43_REDUCER_BUNDLE_VERSION,
             _V44_REDUCER_BUNDLE_VERSION,
+            _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
@@ -1974,6 +1995,7 @@ class ReducerState(FrozenModel):
                     "world-v2-reducers.41",
                     _V43_REDUCER_BUNDLE_VERSION,
                     _V44_REDUCER_BUNDLE_VERSION,
+                    _V46_REDUCER_BUNDLE_VERSION,
                     _V47_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
@@ -1999,6 +2021,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.41",
             _V43_REDUCER_BUNDLE_VERSION,
             _V44_REDUCER_BUNDLE_VERSION,
+            _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
@@ -2025,6 +2048,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.41",
                 _V43_REDUCER_BUNDLE_VERSION,
                 _V44_REDUCER_BUNDLE_VERSION,
+                _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
@@ -2213,6 +2237,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.41",
                 _V43_REDUCER_BUNDLE_VERSION,
                 _V44_REDUCER_BUNDLE_VERSION,
+                _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
@@ -2230,6 +2255,7 @@ class ReducerState(FrozenModel):
                 "world-v2-reducers.41",
                 _V43_REDUCER_BUNDLE_VERSION,
                 _V44_REDUCER_BUNDLE_VERSION,
+                _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,

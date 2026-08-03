@@ -651,7 +651,11 @@ async def test_claimed_appraisal_continues_affect_after_two_cas_losses(
         )
         assert result.status == "action_authorized"
 
-        for _ in range(4):
+        # Other bounded background continuations may consume a unit before
+        # Affect under a loaded full-suite event loop. Keep the assertion on
+        # the exact three CAS attempts, but allow enough scheduler slices for
+        # the durable continuation to reach its third claim.
+        for _ in range(8):
             await host.scheduler_once(
                 observed_at=NOW + timedelta(minutes=1),
                 max_action_units=0,

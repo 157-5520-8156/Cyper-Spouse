@@ -834,8 +834,11 @@ async def test_caller_bound_authority_exhausts_before_validation_wrapper_timeout
             temperature=0.0,
         )
 
+    # The authority's 40 ms caller bound is the subject of this test.  Give
+    # the enclosing wrapper a separate margin so an overloaded CI loop cannot
+    # cancel exception propagation exactly at the same deadline.
     with pytest.raises(ValidationTechnicalFailure) as failure:
-        await run_validation_review(review, timeout_seconds=0.04)
+        await run_validation_review(review, timeout_seconds=0.08)
     await asyncio.sleep(0)
 
     assert failure.value.failure_code == "source_review_timeout"

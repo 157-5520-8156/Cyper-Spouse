@@ -149,7 +149,9 @@ def test_wal_maintenance_is_thresholded_and_passive(tmp_path) -> None:
 def test_projection_performance_counters_distinguish_head_reads_from_history_replay(
     tmp_path,
 ) -> None:
-    ledger = SQLiteWorldLedger(path=tmp_path / "projection-shape.sqlite3", world_id="world-sqlite-test")
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "projection-shape.sqlite3", world_id="world-sqlite-test"
+    )
     startup = ledger.performance_counters()
     committed = ledger.commit(
         [event("event-perf-1", "obs-perf-1")],
@@ -255,10 +257,13 @@ def test_sqlite_migrates_verified_v35_head_without_rewriting_events(tmp_path) ->
             ("world-sqlite-test",),
         ).fetchone()
         assert migrated == (REDUCER_BUNDLE_VERSION,)
-        assert connection.execute(
-            "SELECT COUNT(*) FROM world_v2_events WHERE world_id = ?",
-            ("world-sqlite-test",),
-        ).fetchone()[0] == event_count
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM world_v2_events WHERE world_id = ?",
+                ("world-sqlite-test",),
+            ).fetchone()[0]
+            == event_count
+        )
 
 
 def test_sqlite_migrates_verified_v39_head_and_cold_replays_same_history(tmp_path) -> None:
@@ -369,6 +374,7 @@ def test_sqlite_migrates_verified_v39_head_and_cold_replays_same_history(tmp_pat
         "world-v2-reducers.44",
         "world-v2-reducers.46",
         "world-v2-reducers.47",
+        "world-v2-reducers.48",
     ),
 )
 def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_history(
@@ -395,6 +401,19 @@ def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_histor
     )
     legacy_state = ledger._state_from_projection(expected)  # noqa: SLF001
     legacy_state_json = ledger._encode_state(legacy_state)  # noqa: SLF001
+    if source_bundle == "world-v2-reducers.48":
+        legacy_state_value = json.loads(legacy_state_json)
+        for field in (
+            "external_signal_snapshots",
+            "external_perceptions",
+            "external_perception_acceptance_manifests",
+        ):
+            legacy_state_value.pop(field, None)
+        legacy_state_json = json.dumps(
+            legacy_state_value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     canonical_legacy_state = json.dumps(
         json.loads(legacy_state_json),
         ensure_ascii=False,
@@ -459,9 +478,7 @@ def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_histor
             ),
         )
 
-    tampered_state_path = tmp_path / (
-        f"world-v2-v{source_revision}-head-state-tampered.sqlite3"
-    )
+    tampered_state_path = tmp_path / (f"world-v2-v{source_revision}-head-state-tampered.sqlite3")
     with sqlite3.connect(path) as source, sqlite3.connect(tampered_state_path) as target:
         source.backup(target)
         target.execute(
@@ -485,7 +502,7 @@ def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_histor
 
     reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     migrated = reopened.project()
-    assert migrated.reducer_bundle_version == "world-v2-reducers.48"
+    assert migrated.reducer_bundle_version == REDUCER_BUNDLE_VERSION
     assert migrated.observation_refs == expected.observation_refs
     assert (
         migrated.world_revision,
@@ -750,7 +767,8 @@ def test_external_sidecar_write_does_not_replay_unchanged_ledger_history(tmp_pat
         expected_deliberation_revision=0,
     )
     assert ledger.lookup_event_commit("event-sidecar-version") == (
-        event("event-sidecar-version", "obs-sidecar-version"), committed,
+        event("event-sidecar-version", "obs-sidecar-version"),
+        committed,
     )
     before = ledger.performance_counters()
     with sqlite3.connect(path) as sidecar:
@@ -811,9 +829,7 @@ def test_lookup_event_commit_rejects_coordinated_predecessor_revision_tampering(
     ledger.close()
 
     with sqlite3.connect(path) as connection:
-        connection.execute(
-            "UPDATE world_v2_events SET world_revision = world_revision + 100"
-        )
+        connection.execute("UPDATE world_v2_events SET world_revision = world_revision + 100")
         connection.execute(
             """UPDATE world_v2_commits
                SET result_json = replace(result_json, '"world_revision":2',
@@ -1122,9 +1138,14 @@ def test_sqlite_atomically_migrates_verified_v3_head_to_appraisal_bundle(tmp_pat
         payload.pop("actor_authority_transitions")
         payload.pop("consumed_actor_root_nonces")
         for key in (
-            "capability_grants", "capability_transitions", "consent_grants",
-            "consent_transitions", "privacy_policies", "privacy_transitions",
-            "consumed_authorization_root_nonces", "consumed_authorization_challenge_ids",
+            "capability_grants",
+            "capability_transitions",
+            "consent_grants",
+            "consent_transitions",
+            "privacy_policies",
+            "privacy_transitions",
+            "consumed_authorization_root_nonces",
+            "consumed_authorization_challenge_ids",
             "consumed_authorization_source_ids",
         ):
             payload.pop(key)
@@ -1201,9 +1222,14 @@ def test_sqlite_migrates_v5_head_without_affect_projection_fields(tmp_path) -> N
         semantic.pop("actor_authority_transitions")
         semantic.pop("consumed_actor_root_nonces")
         for key in (
-            "capability_grants", "capability_transitions", "consent_grants",
-            "consent_transitions", "privacy_policies", "privacy_transitions",
-            "consumed_authorization_root_nonces", "consumed_authorization_challenge_ids",
+            "capability_grants",
+            "capability_transitions",
+            "consent_grants",
+            "consent_transitions",
+            "privacy_policies",
+            "privacy_transitions",
+            "consumed_authorization_root_nonces",
+            "consumed_authorization_challenge_ids",
             "consumed_authorization_source_ids",
         ):
             semantic.pop(key)
@@ -1377,9 +1403,14 @@ def test_sqlite_isolates_legacy_v3_unbound_acceptance_audit(
         semantic.pop("actor_authority_transitions")
         semantic.pop("consumed_actor_root_nonces")
         for key in (
-            "capability_grants", "capability_transitions", "consent_grants",
-            "consent_transitions", "privacy_policies", "privacy_transitions",
-            "consumed_authorization_root_nonces", "consumed_authorization_challenge_ids",
+            "capability_grants",
+            "capability_transitions",
+            "consent_grants",
+            "consent_transitions",
+            "privacy_policies",
+            "privacy_transitions",
+            "consumed_authorization_root_nonces",
+            "consumed_authorization_challenge_ids",
             "consumed_authorization_source_ids",
         ):
             semantic.pop(key)
