@@ -63,8 +63,8 @@ class ExternalSignalSourceItem(FrozenModel):
     canonical_url: str | None = Field(default=None, max_length=4_096)
     occurred_at: datetime | None = None
     # Some ranking feeds expose only the gateway observation time. Keeping
-    # this nullable prevents the adapter from forging a publication time; an
-    # undated item is never eligible for model exposure or durable freezing.
+    # this nullable prevents the adapter from forging a publication time;
+    # downstream evidence carries the independently recorded observation time.
     published_at: datetime | None = None
     updated_at: datetime | None = None
     expires_at: datetime | None = None

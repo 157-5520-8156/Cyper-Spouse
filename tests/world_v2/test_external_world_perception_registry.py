@@ -418,15 +418,15 @@ def test_checked_in_production_registry_is_domestic_and_bounded() -> None:
     social = tuple(item for item in registry.sources if item.source_id.startswith("cn.social."))
     publisher = tuple(item for item in enabled if item.adapter_kind == "rss_atom")
 
-    assert len(enabled) == 11
+    assert len(enabled) == 1
     assert len(publisher) == 1
     assert len(social) == 10
-    assert all(item.enabled for item in social)
+    assert all(not item.enabled for item in social)
     assert all(item.source_id.startswith("cn.") for item in enabled)
     assert all(item.adapter_kind in {"rss_atom", "rsshub"} for item in enabled)
     assert sum(item.page_limit for item in publisher) <= 3
     assert sum(item.page_limit for item in social) <= 200
     assert all(item.page_limit <= 20 for item in social)
     assert all(not item.policy.may_store_normalized_summary for item in publisher)
-    assert all(item.policy.may_store_normalized_summary for item in social)
+    assert all(not item.policy.may_store_normalized_summary for item in social)
     assert all(not item.policy.may_quote for item in enabled)

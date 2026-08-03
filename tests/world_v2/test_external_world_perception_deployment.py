@@ -204,6 +204,33 @@ def test_live_requires_an_explicit_source_bound_character_channel(tmp_path: Path
     assert ready.hub is not None
 
 
+def test_live_freezable_source_raw_evidence_outlives_attention_merge(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    _registry(registry)
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    source = value["sources"][0]
+    source["raw_retention_seconds"] = 600
+    source["policy"]["maximum_raw_retention_seconds"] = 600
+    value["content_hash"] = canonical_source_registry_content_hash(value)
+    registry.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="raw evidence must outlive live attention merge"):
+        build_external_world_perception_deployment(
+            settings=Settings(
+                _env_file=None,
+                DATABASE_PATH=tmp_path / "world.sqlite",
+                WORLD_V2_EXTERNAL_PERCEPTION_MODE="live",
+                WORLD_V2_EXTERNAL_PERCEPTION_SOURCE_REGISTRY_PATH=registry,
+                WORLD_V2_EXTERNAL_PERCEPTION_SIDECAR_PATH=tmp_path / "sidecar.sqlite",
+                WORLD_V2_EXTERNAL_PERCEPTION_MERGE_WAIT_SECONDS=600,
+            ),
+            world_id="world:test",
+            actor_ref="agent:companion",
+            model=Model(),
+            life=Life(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_live_auto_composes_channel_from_root_signed_public_information_capability(
     tmp_path: Path,
