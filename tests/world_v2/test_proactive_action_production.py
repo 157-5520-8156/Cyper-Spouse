@@ -248,6 +248,7 @@ async def test_proactive_role_receives_lived_context_without_audit_request_dupli
         "current_self_state",
         "expression_capabilities",
         "failure_code",
+        "hard_boundaries",
         "lived_context",
         "proactive_opportunity",
     }
@@ -256,6 +257,7 @@ async def test_proactive_role_receives_lived_context_without_audit_request_dupli
         == "深圳说实话不是很好玩哈哈哈哈"
     )
     assert supplied["current_self_state"]["contract"] == "current-self-state.1"
+    assert supplied["hard_boundaries"]["contract"] == "expression-hard-boundaries.8"
     assert "request" not in supplied
     assert "proactive_fact_authority" not in supplied
 
@@ -283,11 +285,11 @@ async def test_proactive_role_declares_claims_in_same_successful_authorship_call
             _proactive_draft(
                 "刚翻到一本《小王子》，突然想跟你说句话。",
                 claims=[
-                    {
-                        "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
-                        "scope": "past_world",
-                        "source_refs": [source_ref],
-                    }
+                        {
+                            "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
+                            "scope": "past_world",
+                            "source_refs": ["S1"],
+                        }
                 ],
             )
         ]
@@ -303,8 +305,12 @@ async def test_proactive_role_declares_claims_in_same_successful_authorship_call
 
     proposal = validate_proposal_envelope(output.raw_proposal)
     expression_change = proposal.proposed_changes[0].payload.value()
+    supplied = json.loads(role.messages[0][1]["content"])
     assert role.calls == 1
     assert reviewer.calls == 1
+    claim_refs = supplied["hard_boundaries"]["world_claim_source_refs"]["past_world"]
+    source_aliases = supplied["hard_boundaries"]["source_ref_aliases"]
+    assert any(source_aliases.get(ref, ref) == source_ref for ref in claim_refs)
     assert expression_change["world_claims"] == [
         {
             "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
@@ -4170,7 +4176,7 @@ async def test_retired_proactive_binder_failure_retries_immediately_after_upgrad
 
     assert (await runtime.drain_one()).status == "opened"
     assert (await runtime.drain_one()).status == "failed_safe"
-    monkeypatch.setattr(ProactiveDraftAdapter, "VERSION", "proactive-draft-adapter.2")
+    monkeypatch.setattr(ProactiveDraftAdapter, "VERSION", "proactive-draft-adapter.3")
     projection = ledger.project()
     current = projection.logical_time
     state = proactive_technical_retry_states(projection)[-1]
@@ -4222,6 +4228,7 @@ async def test_new_proactive_binder_failure_keeps_ordinary_backoff() -> None:
     [
         ("proactive-draft-adapter.1", True),
         ("proactive-draft-adapter.2", False),
+        ("proactive-draft-adapter.3", False),
         ("proactive-draft-adapter.future", False),
         (None, False),
     ],

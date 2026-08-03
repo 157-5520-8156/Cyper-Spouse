@@ -239,13 +239,17 @@ class ScenarioVerificationError(AssertionError):
 # decision and still crosses local closure plus independent truth review. The
 # fixed suite retains its explicit behavior predicates; prompt and provider
 # audit identities intentionally change.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.49"
+# ``.50`` gives proactive authors the same compact, source-alias hard-boundary
+# manifest already used by inbound expression and expands only those aliases
+# before local closure. The manifest selects no behavior; frozen visible
+# predicates remain unchanged while prompt/audit hashes intentionally move.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.50"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "767f063ce307896ee20fee0253da2412d05e3a979cb341f7fdfee507013c2f71"
+    "55ec22c308e6a13c467784b80f1191ef57b855b19f1338f9add7e38418b236d8"
 )
 
 

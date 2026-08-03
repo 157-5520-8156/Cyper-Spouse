@@ -63,8 +63,11 @@ from .expression_draft import (
     ExpressionDraft,
     ExpressionDraftCapabilities,
     PrivateTurnStateValidationError,
+    SourceRefAliasTable,
     TEXT_ONLY_EXPRESSION_CAPABILITIES,
     WorldClaimDraft,
+    build_source_ref_alias_table,
+    expand_expression_source_ref_aliases,
     expression_hard_boundary_manifest,
     materialize_expression_plan_beats,
     normalize_expression_draft_wire,
@@ -299,7 +302,7 @@ class _ProactiveSourceBindingError(ValueError):
 class ProactiveDraftAdapter:
     """Materialize a source-bound expression proposal from a model-only draft."""
 
-    VERSION = "proactive-draft-adapter.2"
+    VERSION = "proactive-draft-adapter.3"
 
     def __init__(
         self,
@@ -690,11 +693,23 @@ class ProactiveDraftAdapter:
                 "expression. After the recalled material arrives, you will make the final ExpressionDraft."
             )
         lived_context, current_self_state = _proactive_lived_context(request.model_content_json)
+        author_binding_request = _proactive_binding_request(
+            request=request,
+            lived_context=lived_context,
+        )
+        source_ref_aliases = build_source_ref_alias_table(
+            request=author_binding_request,
+            model_visible_context_json=author_binding_request.model_content_json,
+        )
         user = _canonical(
             {
                 "current_self_state": current_self_state,
                 "expression_capabilities": self._expression_capabilities.prompt_value(),
                 "failure_code": failure_code,
+                "hard_boundaries": expression_hard_boundary_manifest(
+                    request=author_binding_request,
+                    source_ref_aliases=source_ref_aliases,
+                ),
                 "lived_context": lived_context,
                 "proactive_opportunity": _proactive_source_frame(request.model_content_json),
             }
@@ -829,6 +844,18 @@ class ProactiveDraftAdapter:
                     job_token=prefetch_job_token,
                 )
                 raise ValidationTechnicalFailure("proactive_recall_execution_failed") from exc
+            followup_lived_context, _ = _proactive_lived_context(
+                request.model_content_json
+            )
+            followup_binding_request = _proactive_binding_request(
+                request=request,
+                lived_context=followup_lived_context,
+            )
+            source_ref_aliases = build_source_ref_alias_table(
+                request=followup_binding_request,
+                model_visible_context_json=followup_binding_request.model_content_json,
+                existing=source_ref_aliases,
+            )
             followup = [
                 *messages,
                 {"role": "assistant", "content": raw},
@@ -841,6 +868,13 @@ class ProactiveDraftAdapter:
                         "now, later, or silent and any permitted number of beats yourself.\n"
                         + recall_followup_evidence_json(
                             prefetch=prefetch_audit, character_pull=recall_audit
+                        )
+                        + "\nHard-boundary manifest for the augmented Context:\n"
+                        + _canonical(
+                            expression_hard_boundary_manifest(
+                                request=followup_binding_request,
+                                source_ref_aliases=source_ref_aliases,
+                            )
                         )
                     ),
                 },
@@ -903,7 +937,7 @@ class ProactiveDraftAdapter:
             prefetch_trace = None
         decision_origin: Literal["model", "local_failsafe"] = "model"
         try:
-            draft = self._parse(raw)
+            draft = self._parse(raw, source_ref_aliases=source_ref_aliases)
         except ValueError as exc:
             # Invalid JSON/shape is not a character decision. Give the same
             # role model one precise, source-neutral opportunity to reselect a
@@ -969,7 +1003,7 @@ class ProactiveDraftAdapter:
                 usage=structure_reselection.usage,
             )
             try:
-                draft = self._parse(raw)
+                draft = self._parse(raw, source_ref_aliases=source_ref_aliases)
             except ValueError as corrected_exc:
                 raise ValidationTechnicalFailure(
                     "authored_expression_reselection_invalid",
@@ -1193,7 +1227,10 @@ class ProactiveDraftAdapter:
                 usage=reselection.usage,
             )
             try:
-                corrected = self._parse(corrected_raw)
+                corrected = self._parse(
+                    corrected_raw,
+                    source_ref_aliases=source_ref_aliases,
+                )
             except ValueError as exc:
                 raise ValidationTechnicalFailure(
                     "authored_expression_reselection_invalid",
@@ -1478,7 +1515,12 @@ class ProactiveDraftAdapter:
             tuple(locator.text for locator in binding.unbound_claim_locators),
         )
 
-    def _parse(self, raw: str) -> ProactiveDraft:
+    def _parse(
+        self,
+        raw: str,
+        *,
+        source_ref_aliases: SourceRefAliasTable | None = None,
+    ) -> ProactiveDraft:
         if not isinstance(raw, str) or len(raw.encode()) > 32_768:
             raise ValueError("proactive draft output is not bounded text")
         value = raw.strip()
@@ -1506,6 +1548,11 @@ class ProactiveDraftAdapter:
         if "response_text" in decoded or "text" in decoded:
             raise ValueError("proactive ExpressionDraft uses beats, not response_text")
         try:
+            if source_ref_aliases is not None:
+                decoded = expand_expression_source_ref_aliases(
+                    decoded,
+                    aliases=source_ref_aliases,
+                )
             normalized = normalize_expression_draft_wire(decoded)
             draft = ProactiveDraft.model_validate_json(_canonical(normalized), strict=True)
         except Exception as exc:
@@ -2277,8 +2324,8 @@ class ProactiveActionRuntime:
     # Adapter-v1 instances emitted these codes through the retired production
     # post-authorship binder. Keeping their old 10/30/120 delay after the
     # dependency is removed would leave the exact outage waiting for hours.
-    # Only a pre-v2 audit receives one immediately due attempt; a compatibility
-    # injection under v2 still uses the ordinary retry policy.
+    # Only the exact retired v1 audit receives one immediately due attempt;
+    # compatibility injection under later adapters uses ordinary backoff.
     _RETIRED_BINDER_FAILURE_CODES = frozenset(
         {
             "proactive_claim_binding_invalid",
