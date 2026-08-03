@@ -60,6 +60,7 @@ from .replay_evidence import ReplayCommitEvidence, ReplayEvidence, ReplayEventEv
 from .reducers import (
     PREVIOUS_REDUCER_BUNDLE_VERSION,
     REDUCER_BUNDLE_VERSION,
+    V48_REDUCER_BUNDLE_VERSION,
     ReducerState,
     RevisionClass,
     _expression_beat_semantic_dump,
@@ -3003,6 +3004,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.44",
                 "world-v2-reducers.46",
                 "world-v2-reducers.47",
+                V48_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -3025,6 +3027,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.44",
                     "world-v2-reducers.46",
                     "world-v2-reducers.47",
+                    V48_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     canonical_legacy_state = json.dumps(
@@ -3073,6 +3076,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.37",
                     "world-v2-reducers.38",
                     "world-v2-reducers.39",
+                    V48_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     # .37 added optional non-factual reflection prose and .38
@@ -3348,6 +3352,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.44",
                 "world-v2-reducers.46",
                 "world-v2-reducers.47",
+                V48_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
             }:
                 state = ReducerState.model_validate_json(

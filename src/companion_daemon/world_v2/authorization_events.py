@@ -26,13 +26,19 @@ from .schemas import (
 )
 
 
-CAPABILITY_KINDS = frozenset(
+CAPABILITY_KINDS_V1 = frozenset(
     {
-        "message_send", "media_send", "reaction_send", "read_only_tool",
-        "media_planning", "media_render", "media_inspection", "media_repair",
+        "message_send",
+        "media_send",
+        "reaction_send",
+        "read_only_tool",
+        "media_planning",
+        "media_render",
+        "media_inspection",
+        "media_repair",
     }
 )
-TARGET_SCOPES = frozenset(
+TARGET_SCOPES_V1 = frozenset(
     {
         "channel:qq",
         "channel:wechat",
@@ -43,6 +49,8 @@ TARGET_SCOPES = frozenset(
         "provider:media",
     }
 )
+CAPABILITY_KINDS = CAPABILITY_KINDS_V1 | {"public_information_read"}
+TARGET_SCOPES = TARGET_SCOPES_V1 | {"channel:public_information"}
 ACTION_SCOPES = CAPABILITY_KINDS
 DATA_SCOPES = frozenset(
     {"data:message_content", "data:user_profile", "data:attachment", "data:location"}
@@ -50,16 +58,19 @@ DATA_SCOPES = frozenset(
 CHANNEL_SCOPES = frozenset({"channel:qq", "channel:wechat", "channel:http"})
 VIEWER_RULES = frozenset(
     {
-        "viewer:companion", "viewer:operator", "viewer:room_renderer",
-        "viewer:platform_adapter", "viewer:media_provider",
+        "viewer:companion",
+        "viewer:operator",
+        "viewer:room_renderer",
+        "viewer:platform_adapter",
+        "viewer:media_provider",
     }
 )
 MEDIA_RULES = frozenset(
     {"media:private_only", "media:share_allowed", "media:auto_delivery_allowed"}
 )
-RETENTION_RULES = frozenset(
-    {"retention:session", "retention:30d", "retention:persistent"}
-)
+RETENTION_RULES = frozenset({"retention:session", "retention:30d", "retention:persistent"})
+
+
 def _policy_digest(name: str, matrix: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -82,6 +93,10 @@ ENFORCEMENT_EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST = _policy_digest(
 
 CAPABILITY_POLICY_DIGEST = _policy_digest(
     "capability-policy.1",
+    {"kinds": sorted(CAPABILITY_KINDS_V1), "targets": sorted(TARGET_SCOPES_V1)},
+)
+CAPABILITY_POLICY_V2_DIGEST = _policy_digest(
+    "capability-policy.2",
     {"kinds": sorted(CAPABILITY_KINDS), "targets": sorted(TARGET_SCOPES)},
 )
 CONSENT_POLICY_DIGEST = _policy_digest(
@@ -123,12 +138,17 @@ class CapabilityMutationPayload(_AuthorizationMutationBase):
     operation: Literal["grant", "revise", "revoke", "compensate"]
     values_before: CapabilityGrantValues | None = None
     values_after: CapabilityGrantValues
-    policy_version: Literal["capability-policy.1"]
+    policy_version: Literal["capability-policy.1", "capability-policy.2"]
     policy_digest: str = Field(min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def validate_contract(self) -> CapabilityMutationPayload:
-        _validate_mutation(self, "capability", CAPABILITY_POLICY_DIGEST)
+        expected = (
+            CAPABILITY_POLICY_DIGEST
+            if self.policy_version == "capability-policy.1"
+            else CAPABILITY_POLICY_V2_DIGEST
+        )
+        _validate_mutation(self, "capability", expected)
         return self
 
 
@@ -238,9 +258,7 @@ def authorization_scope_hash(domain: str, values: object) -> str:
     else:
         raise ValueError("unknown authorization domain")
     return hashlib.sha256(
-        json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
 
@@ -255,9 +273,7 @@ def principal_action_evidence_hash(evidence: PrincipalActionEvidence) -> str:
     ).hexdigest()
 
 
-def principal_action_challenge_identity(
-    world_id: str, evidence: PrincipalActionEvidence
-) -> str:
+def principal_action_challenge_identity(world_id: str, evidence: PrincipalActionEvidence) -> str:
     material = {
         "world_id": world_id,
         "challenge_ref": evidence.challenge_ref,
@@ -267,9 +283,7 @@ def principal_action_challenge_identity(
     ).hexdigest()
 
 
-def principal_action_source_identity(
-    world_id: str, evidence: PrincipalActionEvidence
-) -> str:
+def principal_action_source_identity(world_id: str, evidence: PrincipalActionEvidence) -> str:
     material = {
         "world_id": world_id,
         "source_event_ref": evidence.source_event_ref,
@@ -289,9 +303,9 @@ def authorization_intent_hash(domain: str, payload: Mapping[str, Any]) -> str:
         "consent": ConsentGrantValues,
         "privacy": PrivacyPolicyValues,
     }[domain]
-    values_after = values_type.model_validate_json(
-        json.dumps(payload["values_after"])
-    ).model_dump(mode="json")
+    values_after = values_type.model_validate_json(json.dumps(payload["values_after"])).model_dump(
+        mode="json"
+    )
     material = {
         "world_id": payload.get("world_id"),
         "domain": domain,
@@ -313,9 +327,9 @@ def authorization_intent_hash(domain: str, payload: Mapping[str, Any]) -> str:
         "evidence": evidence,
     }
     return hashlib.sha256(
-        json.dumps(
-            material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
     ).hexdigest()
 
 
@@ -337,9 +351,9 @@ def authorization_mutation_hash(
     material["root_proof"] = proof
     canonical = _canonical_unsigned(domain, material)
     return hashlib.sha256(
-        json.dumps(
-            canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
     ).hexdigest()
 
 
@@ -390,11 +404,12 @@ def _validate_mutation(
         raise ValueError("authorization transition requires prior values")
     if payload.expected_entity_revision > 0 and payload.operation == "grant":
         raise ValueError("existing authorization must use revise")
-    if (payload.operation == "compensate") != (
-        payload.compensates_transition_id is not None
-    ):
+    if (payload.operation == "compensate") != (payload.compensates_transition_id is not None):
         raise ValueError("authorization compensation target is inconsistent")
-    if payload.principal_action_evidence.authenticated_principal_ref != payload.attested_principal_ref:
+    if (
+        payload.principal_action_evidence.authenticated_principal_ref
+        != payload.attested_principal_ref
+    ):
         raise ValueError("authorization evidence principal does not match attestation")
     expected_action = f"authorization:{domain}:{payload.operation}"
     if payload.principal_action_evidence.action_ref != expected_action:
@@ -427,8 +442,7 @@ def _validate_mutation(
     ):
         raise ValueError("authorization evidence is outside its validity window")
     if (
-        payload.principal_action_evidence.expires_at
-        - payload.principal_action_evidence.observed_at
+        payload.principal_action_evidence.expires_at - payload.principal_action_evidence.observed_at
     ).total_seconds() > 600:
         raise ValueError("authorization evidence validity exceeds maximum ttl")
     if domain == "consent" and not payload.values_after.revocable:
@@ -442,13 +456,25 @@ def _validate_mutation(
         elif values.capability_kind == "perception_tool":
             if not targets <= {"perception:vision", "perception:transcription"}:
                 raise ValueError("perception capability requires perception target scopes")
-        elif values.capability_kind in {"media_planning", "media_render", "media_inspection", "media_repair"}:
+        elif values.capability_kind in {
+            "media_planning",
+            "media_render",
+            "media_inspection",
+            "media_repair",
+        }:
             if targets != {"provider:media"}:
                 raise ValueError("provider media capability requires provider:media target scope")
+        elif values.capability_kind == "public_information_read":
+            if targets != {"channel:public_information"}:
+                raise ValueError("public information capability requires its exact channel target")
         elif not all(item.startswith("channel:") for item in targets):
             raise ValueError("communication capability requires channel target scopes")
         constraints = set(values.constraint_refs)
-        if "constraint:read-only" in constraints and values.capability_kind not in {"read_only_tool", "perception_tool"}:
+        if "constraint:read-only" in constraints and values.capability_kind not in {
+            "read_only_tool",
+            "perception_tool",
+            "public_information_read",
+        }:
             raise ValueError("read-only constraint requires non-mutating capability")
         if "constraint:text-only" in constraints and values.capability_kind != "message_send":
             raise ValueError("text-only constraint requires message capability")

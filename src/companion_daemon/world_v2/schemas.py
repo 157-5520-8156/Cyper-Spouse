@@ -5143,6 +5143,7 @@ class CapabilityGrantValues(FrozenModel):
         "media_render",
         "media_inspection",
         "media_repair",
+        "public_information_read",
     ]
     actor_ref: str = Field(min_length=1)
     target_scope_refs: tuple[
@@ -5156,6 +5157,7 @@ class CapabilityGrantValues(FrozenModel):
             "perception:vision",
             "perception:transcription",
             "provider:media",
+            "channel:public_information",
         ],
         ...,
     ] = Field(min_length=1)
@@ -5657,7 +5659,7 @@ from .external_perception_acceptance_manifest import (  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.49"
+    reducer_bundle_version: str = "world-v2-reducers.50"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)

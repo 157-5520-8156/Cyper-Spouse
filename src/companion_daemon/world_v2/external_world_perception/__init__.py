@@ -68,9 +68,10 @@ from .production_attention import (
     ChatCompletionShadowAttentionModel,
     LedgerPublicInformationChannelPort,
     LiveAttentionChannelPort,
-    PUBLIC_INFORMATION_CAPABILITY_ID,
+    PUBLIC_INFORMATION_CAPABILITY_ID_PREFIX,
     ProductionAttentionModelTrace,
     StaticLiveAttentionChannelPort,
+    public_information_capability_id,
 )
 from .registry import (
     ExternalPerceptionSourceRegistration,
@@ -127,7 +128,7 @@ __all__ = [
     "ProductionSourceFactoryResult",
     "ProductionAttentionModelTrace",
     "ProducerBackedExternalPerceptionAcceptance",
-    "PUBLIC_INFORMATION_CAPABILITY_ID",
+    "PUBLIC_INFORMATION_CAPABILITY_ID_PREFIX",
     "RecordedSignalSourceAdapter",
     "RssAtomSourceAdapter",
     "RssHubPullAdapter",
@@ -148,4 +149,5 @@ __all__ = [
     "build_external_world_perception_deployment",
     "canonical_source_registry_content_hash",
     "load_external_perception_source_registry",
+    "public_information_capability_id",
 ]

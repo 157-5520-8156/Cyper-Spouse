@@ -19,7 +19,7 @@ from .actor_authority_events import (
 )
 from .actor_authority_reducers import ACTOR_AUTHORITY_POLICY_DIGEST
 from .authorization_events import (
-    CAPABILITY_POLICY_DIGEST,
+    CAPABILITY_POLICY_V2_DIGEST,
     ENFORCEMENT_EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST,
     authorization_intent_hash,
     authorization_mutation_hash,
@@ -27,7 +27,7 @@ from .authorization_events import (
 )
 from .event_identity import domain_idempotency_key
 from .external_world_perception.production_attention import (
-    PUBLIC_INFORMATION_CAPABILITY_ID,
+    public_information_capability_id,
 )
 from .schemas import WorldEvent
 
@@ -60,6 +60,7 @@ class PublicInformationAuthorityProvisioner:
         ledger,
         signing_key_hex: str,
         companion_actor_ref: str,
+        registry_content_hash: str,
         operator_ref: str = "operator:girl-agent",
     ) -> None:
         if not companion_actor_ref or not operator_ref:
@@ -78,6 +79,7 @@ class PublicInformationAuthorityProvisioner:
         self._ledger = ledger
         self._companion_actor_ref = companion_actor_ref
         self._operator_ref = operator_ref
+        self._capability_id = public_information_capability_id(registry_content_hash)
 
     def ensure(self) -> PublicInformationAuthorityProvisioningResult:
         projection = self._ledger.project()
@@ -86,13 +88,10 @@ class PublicInformationAuthorityProvisioner:
         committed: list[str] = []
         present: list[str] = []
 
-        authority = next(
-            (
-                item
-                for item in projection.actor_authorities
-                if item.authority_id == PUBLIC_INFORMATION_OPERATOR_AUTHORITY_ID
-            ),
-            None,
+        authority = self._active_authority_for(
+            projection,
+            principal_ref=self._operator_ref,
+            required_operations=("capability_grant",),
         )
         if authority is None:
             committed.extend(self._commit_actor_authority())
@@ -104,35 +103,61 @@ class PublicInformationAuthorityProvisioner:
                 or "capability_grant" not in values.allowed_operations
             ):
                 raise ValueError("existing public information operator authority conflicts")
-            present.append(PUBLIC_INFORMATION_OPERATOR_AUTHORITY_ID)
+            present.append(authority.authority_id)
 
         projection = self._ledger.project()
+        authority = self._active_authority_for(
+            projection,
+            principal_ref=self._operator_ref,
+            required_operations=("capability_grant",),
+        )
+        if authority is None:
+            raise RuntimeError("public information operator authority was not committed")
         grant = next(
-            (
-                item
-                for item in projection.capability_grants
-                if item.grant_id == PUBLIC_INFORMATION_CAPABILITY_ID
-            ),
+            (item for item in projection.capability_grants if item.grant_id == self._capability_id),
             None,
         )
         if grant is None:
-            committed.extend(self._commit_capability())
+            committed.extend(
+                self._commit_capability(
+                    authority_id=authority.authority_id,
+                    authority_revision=authority.entity_revision,
+                )
+            )
         else:
             values = grant.values
             if (
                 values.state != "active"
                 or values.actor_ref != self._companion_actor_ref
-                or values.capability_kind != "read_only_tool"
-                or tuple(values.target_scope_refs) != ("tool:web_search",)
+                or values.capability_kind != "public_information_read"
+                or tuple(values.target_scope_refs) != ("channel:public_information",)
                 or tuple(values.constraint_refs) != ("constraint:read-only",)
                 or not grant.origin.enforcement_eligible
             ):
                 raise ValueError("existing public information capability conflicts")
-            present.append(PUBLIC_INFORMATION_CAPABILITY_ID)
+            present.append(self._capability_id)
         return PublicInformationAuthorityProvisioningResult(
             committed_event_ids=tuple(committed),
             already_present=tuple(present),
         )
+
+    @staticmethod
+    def _active_authority_for(
+        projection: object,
+        *,
+        principal_ref: str,
+        required_operations: tuple[str, ...],
+    ) -> object | None:
+        for item in projection.actor_authorities:  # type: ignore[attr-defined]
+            if (
+                item.values.principal_ref == principal_ref
+                and item.values.status == "active"
+                and all(
+                    operation in item.values.allowed_operations for operation in required_operations
+                )
+            ):
+                return item
+        return None
 
     def _commit_actor_authority(self) -> list[str]:
         logical_time = self._logical_time()
@@ -168,13 +193,13 @@ class PublicInformationAuthorityProvisioner:
             logical_time=logical_time,
         )
 
-    def _commit_capability(self) -> list[str]:
+    def _commit_capability(self, *, authority_id: str, authority_revision: int) -> list[str]:
         logical_time = self._logical_time()
-        transition_id = f"transition:{PUBLIC_INFORMATION_CAPABILITY_ID}"
+        transition_id = f"transition:{self._capability_id}"
         values: dict[str, object] = {
-            "capability_kind": "read_only_tool",
+            "capability_kind": "public_information_read",
             "actor_ref": self._companion_actor_ref,
-            "target_scope_refs": ["tool:web_search"],
+            "target_scope_refs": ["channel:public_information"],
             "constraint_refs": ["constraint:read-only"],
             "valid_from": logical_time.isoformat(),
             "expires_at": None,
@@ -182,14 +207,14 @@ class PublicInformationAuthorityProvisioner:
         }
         payload: dict[str, object] = {
             "world_id": self._ledger.world_id,
-            "entity_id": PUBLIC_INFORMATION_CAPABILITY_ID,
+            "entity_id": self._capability_id,
             "transition_id": transition_id,
             "operation": "grant",
             "expected_entity_revision": 0,
             "values_before": None,
             "values_after": values,
-            "authority_id": PUBLIC_INFORMATION_OPERATOR_AUTHORITY_ID,
-            "expected_authority_revision": 1,
+            "authority_id": authority_id,
+            "expected_authority_revision": authority_revision,
             "attested_principal_ref": self._operator_ref,
             "attestation_mode": "root_attested_external_principal_action.1",
             "attestation_environment": "enforcement",
@@ -206,8 +231,8 @@ class PublicInformationAuthorityProvisioner:
                 "authentication_policy_version": "external-principal-auth.enforcement.1",
                 "authentication_policy_digest": ENFORCEMENT_EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST,
             },
-            "policy_version": "capability-policy.1",
-            "policy_digest": CAPABILITY_POLICY_DIGEST,
+            "policy_version": "capability-policy.2",
+            "policy_digest": CAPABILITY_POLICY_V2_DIGEST,
             "changed_at": logical_time.isoformat(),
             "compensates_transition_id": None,
             "root_proof": self._unsigned_proof(transition_id),
@@ -219,7 +244,7 @@ class PublicInformationAuthorityProvisioner:
             "CapabilityGranted", payload
         )
         return self._commit_signed(
-            event_id=f"event:public-information-authority:{PUBLIC_INFORMATION_CAPABILITY_ID}",
+            event_id=f"event:public-information-authority:{self._capability_id}",
             event_type="CapabilityGranted",
             payload=payload,
             mutation_hash=authorization_mutation_hash("CapabilityGranted", payload),

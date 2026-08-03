@@ -211,6 +211,8 @@ async def test_live_auto_composes_channel_from_root_signed_public_information_ca
 ) -> None:
     monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
     database = tmp_path / "world.sqlite"
+    registry = tmp_path / "registry.json"
+    _registry(registry)
     ledger = SQLiteWorldLedger(path=database, world_id="world:test")
     try:
         ledger.commit(
@@ -238,12 +240,10 @@ async def test_live_auto_composes_channel_from_root_signed_public_information_ca
             ledger=ledger,
             signing_key_hex="11" * 32,
             companion_actor_ref="agent:companion",
+            registry_content_hash=json.loads(registry.read_text())["content_hash"],
         ).ensure()
     finally:
         ledger.close()
-    registry = tmp_path / "registry.json"
-    _registry(registry)
-
     deployment = build_external_world_perception_deployment(
         settings=Settings(
             _env_file=None,

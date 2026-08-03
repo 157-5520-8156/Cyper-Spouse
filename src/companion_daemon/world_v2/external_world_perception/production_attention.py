@@ -13,6 +13,7 @@ import asyncio
 from datetime import UTC, datetime
 import hashlib
 import json
+import re
 from typing import Protocol
 
 from pydantic import Field
@@ -58,7 +59,16 @@ _CONTEXT_SLICE_GROUPS = {
     ),
 }
 
-PUBLIC_INFORMATION_CAPABILITY_ID = "capability:world-v2:public-information-read"
+_REGISTRY_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
+PUBLIC_INFORMATION_CAPABILITY_ID_PREFIX = "capability:world-v2:public-information-read:"
+
+
+def public_information_capability_id(registry_content_hash: str) -> str:
+    """Bind source-list authority to the registry's complete semantic hash."""
+
+    if not _REGISTRY_HASH.fullmatch(registry_content_hash):
+        raise ValueError("public information capability requires a registry sha256")
+    return PUBLIC_INFORMATION_CAPABILITY_ID_PREFIX + registry_content_hash.removeprefix("sha256:")
 
 
 def _canonical(value: object) -> str:
@@ -113,8 +123,7 @@ class StaticLiveAttentionChannelPort:
         observed_at: datetime,
     ) -> tuple[PerceptionChannelProof, ...]:
         del world_id, actor_ref, cursor, capsule
-        if any(item.valid_until <= observed_at for item in self._channels):
-            raise ValueError("live attention channel authorization expired")
+        del observed_at
         return self._channels
 
 
@@ -127,19 +136,30 @@ class LedgerPublicInformationChannelPort:
     character noticed or believed any item.
     """
 
-    def __init__(self, *, ledger: LedgerPort, accessible_source_ids: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        *,
+        ledger: LedgerPort,
+        accessible_source_ids: tuple[str, ...],
+        registry_content_hash: str,
+    ) -> None:
         source_ids = tuple(sorted(set(accessible_source_ids)))
         if not source_ids or len(source_ids) != len(accessible_source_ids):
             raise ValueError("public information channel source ids must be nonempty and unique")
         self._ledger = ledger
         self._accessible_source_ids = source_ids
+        self._registry_content_hash = registry_content_hash
+        self._capability_id = public_information_capability_id(registry_content_hash)
 
-    def authority_is_available(self, *, actor_ref: str, observed_at: datetime) -> bool:
+    def authority_is_available(self, *, actor_ref: str) -> bool:
+        projection = self._ledger.project()
+        if projection.logical_time is None:
+            return False
         return (
             self._active_grant(
-                projection=self._ledger.project(),
+                projection=projection,
                 actor_ref=actor_ref,
-                observed_at=observed_at,
+                logical_time=projection.logical_time,
             )
             is not None
         )
@@ -167,14 +187,17 @@ class LedgerPublicInformationChannelPort:
         grant = self._active_grant(
             projection=projection,
             actor_ref=actor_ref,
-            observed_at=observed_at,
+            logical_time=projection.logical_time,
         )
         if grant is None:
             return ()
         values = grant.values
         return (
             PerceptionChannelProof(
-                channel_ref="channel:public-information",
+                channel_ref=(
+                    "channel:public-information:"
+                    + self._registry_content_hash.removeprefix("sha256:")
+                ),
                 channel_kind="public_information_feed",
                 evidence_refs=(grant.origin.event_ref,),
                 accessible_source_ids=self._accessible_source_ids,
@@ -182,14 +205,13 @@ class LedgerPublicInformationChannelPort:
             ),
         )
 
-    @staticmethod
     def _active_grant(
-        *, projection: object, actor_ref: str, observed_at: datetime
+        self, *, projection: object, actor_ref: str, logical_time: datetime
     ) -> object | None:
         matching = tuple(
             grant
             for grant in projection.capability_grants  # type: ignore[attr-defined]
-            if grant.grant_id == PUBLIC_INFORMATION_CAPABILITY_ID
+            if grant.grant_id == self._capability_id
         )
         if len(matching) > 1:
             raise ValueError("public information capability identity is ambiguous")
@@ -199,13 +221,13 @@ class LedgerPublicInformationChannelPort:
         values = grant.values
         if (
             values.state != "active"
-            or values.capability_kind != "read_only_tool"
+            or values.capability_kind != "public_information_read"
             or values.actor_ref != actor_ref
-            or tuple(values.target_scope_refs) != ("tool:web_search",)
+            or tuple(values.target_scope_refs) != ("channel:public_information",)
             or "constraint:read-only" not in values.constraint_refs
             or not grant.origin.enforcement_eligible
-            or values.valid_from > observed_at
-            or (values.expires_at is not None and values.expires_at <= observed_at)
+            or values.valid_from > logical_time
+            or (values.expires_at is not None and values.expires_at <= logical_time)
         ):
             return None
         return grant
@@ -260,7 +282,7 @@ class CapsuleBackedLiveAttentionContextPort:
             capsule=capsule,
             observed_at=observed_at,
         )
-        if any(item.valid_until <= observed_at for item in channels):
+        if any(item.valid_until <= projection.logical_time for item in channels):
             raise ValueError("live attention Context contains an expired channel")
         committed_event_refs = {item.event_id for item in projection.committed_world_event_refs}
         for channel in channels:
@@ -642,7 +664,8 @@ __all__ = [
     "ChatCompletionShadowAttentionModel",
     "LedgerPublicInformationChannelPort",
     "LiveAttentionChannelPort",
-    "PUBLIC_INFORMATION_CAPABILITY_ID",
+    "PUBLIC_INFORMATION_CAPABILITY_ID_PREFIX",
     "ProductionAttentionModelTrace",
     "StaticLiveAttentionChannelPort",
+    "public_information_capability_id",
 ]

@@ -24,8 +24,8 @@ from companion_daemon.world_v2.external_world_perception.production_attention im
     ChatCompletionLiveAttentionModel,
     ChatCompletionShadowAttentionModel,
     LedgerPublicInformationChannelPort,
-    PUBLIC_INFORMATION_CAPABILITY_ID,
     StaticLiveAttentionChannelPort,
+    public_information_capability_id,
 )
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.schemas import WorldEvent
@@ -33,6 +33,7 @@ from companion_daemon.world_v2.schemas import ProjectionCursor
 
 
 NOW = datetime(2026, 8, 3, 4, 0, tzinfo=UTC)
+REGISTRY_HASH = "sha256:" + "a" * 64
 
 
 def _hash_text(value: str) -> str:
@@ -173,15 +174,15 @@ async def test_context_port_rejects_channel_evidence_missing_from_pinned_world()
 @pytest.mark.asyncio
 async def test_public_information_channel_is_derived_from_exact_active_ledger_capability() -> None:
     capability = SimpleNamespace(
-        grant_id=PUBLIC_INFORMATION_CAPABILITY_ID,
+        grant_id=public_information_capability_id(REGISTRY_HASH),
         entity_revision=1,
         values=SimpleNamespace(
-            capability_kind="read_only_tool",
+            capability_kind="public_information_read",
             actor_ref="character:zhizhi",
-            target_scope_refs=("tool:web_search",),
+            target_scope_refs=("channel:public_information",),
             constraint_refs=("constraint:read-only",),
             valid_from=NOW - timedelta(minutes=1),
-            expires_at=None,
+            expires_at=NOW + timedelta(hours=1),
             state="active",
         ),
         origin=SimpleNamespace(
@@ -193,12 +194,14 @@ async def test_public_information_channel_is_derived_from_exact_active_ledger_ca
         world_revision=3,
         deliberation_revision=2,
         ledger_sequence=9,
+        logical_time=NOW,
         capability_grants=(capability,),
     )
     ledger = SimpleNamespace(world_id="world:attention-production", project=lambda: projection)
     port = LedgerPublicInformationChannelPort(
         ledger=ledger,
         accessible_source_ids=("cn.weibo.search.hot.v1", "cn.cctv.xwlb.v1"),
+        registry_content_hash=REGISTRY_HASH,
     )
 
     channels = await port.available_channels(
@@ -210,7 +213,7 @@ async def test_public_information_channel_is_derived_from_exact_active_ledger_ca
             ledger_sequence=9,
         ),
         capsule=SimpleNamespace(),
-        observed_at=NOW,
+        observed_at=NOW + timedelta(days=1),
     )
 
     assert len(channels) == 1
@@ -219,6 +222,12 @@ async def test_public_information_channel_is_derived_from_exact_active_ledger_ca
         "cn.cctv.xwlb.v1",
         "cn.weibo.search.hot.v1",
     )
+    changed_registry = LedgerPublicInformationChannelPort(
+        ledger=ledger,
+        accessible_source_ids=("cn.weibo.search.hot.v1",),
+        registry_content_hash="sha256:" + "c" * 64,
+    )
+    assert changed_registry.authority_is_available(actor_ref="character:zhizhi") is False
 
 
 @pytest.mark.asyncio
@@ -227,12 +236,12 @@ async def test_public_information_channel_fails_closed_without_active_authority(
     state: str,
 ) -> None:
     capability = SimpleNamespace(
-        grant_id=PUBLIC_INFORMATION_CAPABILITY_ID,
+        grant_id=public_information_capability_id(REGISTRY_HASH),
         entity_revision=1,
         values=SimpleNamespace(
-            capability_kind="read_only_tool",
+            capability_kind="public_information_read",
             actor_ref="character:zhizhi",
-            target_scope_refs=("tool:web_search",),
+            target_scope_refs=("channel:public_information",),
             constraint_refs=("constraint:read-only",),
             valid_from=NOW - timedelta(minutes=1),
             expires_at=NOW - timedelta(seconds=1) if state == "expired" else None,
@@ -247,11 +256,13 @@ async def test_public_information_channel_fails_closed_without_active_authority(
         world_revision=3,
         deliberation_revision=2,
         ledger_sequence=9,
+        logical_time=NOW,
         capability_grants=(capability,),
     )
     port = LedgerPublicInformationChannelPort(
         ledger=SimpleNamespace(world_id="world:attention-production", project=lambda: projection),
         accessible_source_ids=("cn.weibo.search.hot.v1",),
+        registry_content_hash=REGISTRY_HASH,
     )
 
     channels = await port.available_channels(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -172,15 +173,18 @@ def build_external_world_perception_deployment(
         if authorized_search_profile is not None:
             source_ids.append(authorized_search_profile.adapter.source_id)
         accessible_source_ids = tuple(sorted(set(source_ids)))
+        registry_authority_hash = (
+            registry.content_hash
+            if registry is not None
+            else "sha256:" + hashlib.sha256("\0".join(accessible_source_ids).encode()).hexdigest()
+        )
         world_ledger = SQLiteWorldLedger(path=Path(settings.database_path), world_id=world_id)
         automatic_channel = LedgerPublicInformationChannelPort(
             ledger=world_ledger,
             accessible_source_ids=accessible_source_ids,
+            registry_content_hash=registry_authority_hash,
         )
-        if not automatic_channel.authority_is_available(
-            actor_ref=actor_ref,
-            observed_at=wall_clock(),
-        ):
+        if not automatic_channel.authority_is_available(actor_ref=actor_ref):
             world_ledger.close()
             return ExternalPerceptionDeployment(status="disabled", reason="channel_not_configured")
         channel_port = automatic_channel
@@ -259,6 +263,7 @@ def build_external_world_perception_deployment(
                 channel_port = LedgerPublicInformationChannelPort(
                     ledger=world_ledger,
                     accessible_source_ids=tuple(item.adapter.source_id for item in source_profiles),
+                    registry_content_hash=registry_authority_hash,
                 )
         compiler = context_capsule_compiler_from_ledger(ledger=world_ledger)
         acceptance_port = LifeWakingExternalPerceptionAcceptance(

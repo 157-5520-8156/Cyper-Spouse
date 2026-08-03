@@ -17,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from companion_daemon.world_v2.public_information_authority_provisioning import (  # noqa: E402
     PublicInformationAuthorityProvisioner,
 )
+from companion_daemon.world_v2.external_world_perception.registry import (  # noqa: E402
+    load_external_perception_source_registry,
+)
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger  # noqa: E402
 
 
@@ -25,6 +28,7 @@ def main() -> int:
     parser.add_argument("--database", required=True)
     parser.add_argument("--world-id", required=True)
     parser.add_argument("--actor", required=True)
+    parser.add_argument("--registry", required=True)
     parser.add_argument("--operator", default="operator:girl-agent")
     args = parser.parse_args()
 
@@ -34,10 +38,12 @@ def main() -> int:
         return 2
     ledger = SQLiteWorldLedger(path=Path(args.database), world_id=args.world_id)
     try:
+        registry = load_external_perception_source_registry(Path(args.registry))
         result = PublicInformationAuthorityProvisioner(
             ledger=ledger,
             signing_key_hex=signing_key,
             companion_actor_ref=args.actor,
+            registry_content_hash=registry.content_hash,
             operator_ref=args.operator,
         ).ensure()
     finally:

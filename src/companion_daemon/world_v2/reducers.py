@@ -547,8 +547,9 @@ _V43_REDUCER_BUNDLE_VERSION = "world-v2-reducers.43"
 _V44_REDUCER_BUNDLE_VERSION = "world-v2-reducers.44"
 _V46_REDUCER_BUNDLE_VERSION = "world-v2-reducers.46"
 _V47_REDUCER_BUNDLE_VERSION = "world-v2-reducers.47"
-PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
+V48_REDUCER_BUNDLE_VERSION = "world-v2-reducers.48"
+PREVIOUS_REDUCER_BUNDLE_VERSION = "world-v2-reducers.49"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.50"
 _CONTEXTUAL_LIFE_SOURCE_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -599,6 +600,7 @@ def _experience_semantic_dump(
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     } and isinstance(experience, LegacyExperienceProjection):
@@ -624,6 +626,7 @@ def _actor_authority_transition_semantic_dump(
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -649,6 +652,7 @@ def _life_arc_semantic_dump(
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -667,6 +671,7 @@ def _npc_semantic_dump(
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -692,6 +697,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -708,6 +714,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -717,6 +724,7 @@ def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dic
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -742,6 +750,7 @@ def _expression_plan_semantic_dump(
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -768,6 +777,7 @@ def _expression_beat_semantic_dump(
         _V44_REDUCER_BUNDLE_VERSION,
         _V46_REDUCER_BUNDLE_VERSION,
         _V47_REDUCER_BUNDLE_VERSION,
+        V48_REDUCER_BUNDLE_VERSION,
         PREVIOUS_REDUCER_BUNDLE_VERSION,
         REDUCER_BUNDLE_VERSION,
     }:
@@ -1555,6 +1565,7 @@ class ReducerState(FrozenModel):
             _V44_REDUCER_BUNDLE_VERSION,
             _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
+            V48_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
         }:
             # .33-.36 only add current-generation conditional fields. Their
@@ -1704,6 +1715,7 @@ class ReducerState(FrozenModel):
                                 _V44_REDUCER_BUNDLE_VERSION,
                                 _V46_REDUCER_BUNDLE_VERSION,
                                 _V47_REDUCER_BUNDLE_VERSION,
+                                V48_REDUCER_BUNDLE_VERSION,
                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                 REDUCER_BUNDLE_VERSION,
                             }
@@ -1794,6 +1806,7 @@ class ReducerState(FrozenModel):
                                         _V44_REDUCER_BUNDLE_VERSION,
                                         _V46_REDUCER_BUNDLE_VERSION,
                                         _V47_REDUCER_BUNDLE_VERSION,
+                                        V48_REDUCER_BUNDLE_VERSION,
                                         PREVIOUS_REDUCER_BUNDLE_VERSION,
                                     }
                                     else {"settled_dynamic_life_direction_adopted": True}
@@ -1809,6 +1822,7 @@ class ReducerState(FrozenModel):
                                                 _V44_REDUCER_BUNDLE_VERSION,
                                                 _V46_REDUCER_BUNDLE_VERSION,
                                                 _V47_REDUCER_BUNDLE_VERSION,
+                                                V48_REDUCER_BUNDLE_VERSION,
                                                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                                             }
                                             else (
@@ -1920,6 +1934,7 @@ class ReducerState(FrozenModel):
             _V44_REDUCER_BUNDLE_VERSION,
             _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
+            V48_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -1948,6 +1963,7 @@ class ReducerState(FrozenModel):
                 _V44_REDUCER_BUNDLE_VERSION,
                 _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
+                V48_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -1973,6 +1989,7 @@ class ReducerState(FrozenModel):
             _V44_REDUCER_BUNDLE_VERSION,
             _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
+            V48_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -1997,6 +2014,7 @@ class ReducerState(FrozenModel):
                     _V44_REDUCER_BUNDLE_VERSION,
                     _V46_REDUCER_BUNDLE_VERSION,
                     _V47_REDUCER_BUNDLE_VERSION,
+                    V48_REDUCER_BUNDLE_VERSION,
                     PREVIOUS_REDUCER_BUNDLE_VERSION,
                     REDUCER_BUNDLE_VERSION,
                 }
@@ -2023,6 +2041,7 @@ class ReducerState(FrozenModel):
             _V44_REDUCER_BUNDLE_VERSION,
             _V46_REDUCER_BUNDLE_VERSION,
             _V47_REDUCER_BUNDLE_VERSION,
+            V48_REDUCER_BUNDLE_VERSION,
             PREVIOUS_REDUCER_BUNDLE_VERSION,
             REDUCER_BUNDLE_VERSION,
         }:
@@ -2050,6 +2069,7 @@ class ReducerState(FrozenModel):
                 _V44_REDUCER_BUNDLE_VERSION,
                 _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
+                V48_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2239,6 +2259,7 @@ class ReducerState(FrozenModel):
                 _V44_REDUCER_BUNDLE_VERSION,
                 _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
+                V48_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
@@ -2257,6 +2278,7 @@ class ReducerState(FrozenModel):
                 _V44_REDUCER_BUNDLE_VERSION,
                 _V46_REDUCER_BUNDLE_VERSION,
                 _V47_REDUCER_BUNDLE_VERSION,
+                V48_REDUCER_BUNDLE_VERSION,
                 PREVIOUS_REDUCER_BUNDLE_VERSION,
                 REDUCER_BUNDLE_VERSION,
             }:
