@@ -406,6 +406,64 @@ async def test_shadow_can_run_acquisition_without_gaining_v2_authority(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_shadow_to_live_rollout_uses_a_new_attention_policy_identity(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry.json"
+    sidecar = tmp_path / "sidecar.sqlite"
+    _registry(registry)
+    channel_port = StaticLiveAttentionChannelPort(
+        (
+            PerceptionChannelProof(
+                channel_ref="channel:public-alert",
+                channel_kind="public_alert",
+                evidence_refs=("event:channel-capability:1",),
+                accessible_source_ids=("usgs.earthquake.global.v1",),
+                valid_until=NOW + timedelta(days=1),
+            ),
+        )
+    )
+
+    shadow = build_external_world_perception_deployment(
+        settings=Settings(
+            _env_file=None,
+            DATABASE_PATH=tmp_path / "world.sqlite",
+            WORLD_V2_EXTERNAL_PERCEPTION_MODE="shadow",
+            WORLD_V2_EXTERNAL_PERCEPTION_SOURCE_REGISTRY_PATH=registry,
+            WORLD_V2_EXTERNAL_PERCEPTION_SIDECAR_PATH=sidecar,
+        ),
+        world_id="world:test",
+        actor_ref="agent:companion",
+        model=Model(),
+        life=Life(),
+        channel_port=channel_port,
+        wall_clock=lambda: NOW,
+    )
+    assert shadow.hub is not None
+    await shadow.hub.aclose()
+
+    live = build_external_world_perception_deployment(
+        settings=Settings(
+            _env_file=None,
+            DATABASE_PATH=tmp_path / "world.sqlite",
+            WORLD_V2_EXTERNAL_PERCEPTION_MODE="live",
+            WORLD_V2_EXTERNAL_PERCEPTION_SOURCE_REGISTRY_PATH=registry,
+            WORLD_V2_EXTERNAL_PERCEPTION_SIDECAR_PATH=sidecar,
+        ),
+        world_id="world:test",
+        actor_ref="agent:companion",
+        model=Model(),
+        life=Life(),
+        channel_port=channel_port,
+        wall_clock=lambda: NOW,
+    )
+
+    assert live.status == "ready"
+    assert live.hub is not None
+    await live.hub.aclose()
+
+
+@pytest.mark.asyncio
 async def test_settled_authorized_search_can_join_production_hub_without_external_registry(
     tmp_path: Path,
 ) -> None:

@@ -269,7 +269,11 @@ def build_external_world_perception_deployment(
         shadow_runtime = ShadowAttentionRuntime(
             world_id=world_id,
             actor_ref=actor_ref,
-            attention_policy_revision=f"external-attention:{revision_suffix}",
+            # Deployment mode changes the policy content (and authority), so
+            # it must also change the immutable policy identity. A shared
+            # revision made a legitimate shadow -> live rollout collide with
+            # the old sidecar row and fail every daemon restart.
+            attention_policy_revision=f"external-attention:shadow:{revision_suffix}",
             deployment_mode_revision=f"shadow:{registry_revision}",
             worker_id="worker:external-perception:shadow",
             context_port=CapsuleBackedShadowAttentionContextPort(
@@ -319,7 +323,7 @@ def build_external_world_perception_deployment(
         live_runtime = LiveAttentionRuntime(
             world_id=world_id,
             actor_ref=actor_ref,
-            attention_policy_revision=f"external-attention:{revision_suffix}",
+            attention_policy_revision=f"external-attention:live:{revision_suffix}",
             deployment_mode_revision=f"live:{registry_revision}",
             worker_id="worker:external-perception:live",
             context_port=CapsuleBackedLiveAttentionContextPort(
