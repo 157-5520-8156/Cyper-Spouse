@@ -957,7 +957,7 @@ async def test_validation_recovery_from_one_candidate_does_not_starve_the_next_c
 
 
 @pytest.mark.asyncio
-async def test_exhausted_source_review_does_not_fall_through_to_quick_author() -> None:
+async def test_exhausted_source_review_opens_configured_role_recovery() -> None:
     class ReviewFailingMain(_Main):
         def __init__(self) -> None:
             super().__init__()
@@ -997,14 +997,16 @@ async def test_exhausted_source_review_does_not_fall_through_to_quick_author() -
         ).start(marker=marks.append),
     )
 
-    assert result.proposal is None
-    assert result.audit.status == "main_timeout"
+    assert result.proposal is not None
+    assert result.attempt_audits[0].status == "main_timeout"
+    assert result.attempt_audits[0].failure_code == "source_review_timeout"
+    assert result.audit.status == "main_timeout_recovered"
     assert result.audit.failure_code == "source_review_timeout"
     assert main.author_calls == 1
     assert main.reviewer_calls == 2
-    assert quick.requests == []
+    assert len(quick.requests) == 1
     assert "validation_recovery_started" in marks
-    assert "technical_recovery_started" not in marks
+    assert "technical_recovery_started" in marks
 
 
 @pytest.mark.asyncio
@@ -1074,18 +1076,29 @@ async def test_terminal_validation_failure_mapping_is_budget_independent(
         **kwargs,
     )
 
-    assert result.proposal is None
-    assert result.audit.status == expected_status
-    assert result.audit.failure_code == failure_code
-    assert result.audit.slot == expected_slot
-    assert result.audit.outcome == expected_outcome
-    assert result.attempt_audits == (result.audit,)
+    assert (result.proposal is not None) is with_budget
+    main_audit = result.attempt_audits[0]
+    assert main_audit.status == expected_status
+    assert main_audit.failure_code == failure_code
+    assert main_audit.slot == expected_slot
+    assert main_audit.outcome == expected_outcome
+    if with_budget:
+        assert result.audit.status == (
+            "main_timeout_recovered"
+            if expected_status == "main_timeout"
+            else "main_exception_recovered"
+        )
+        assert result.audit.failure_code == failure_code
+        assert len(result.attempt_audits) == 2
+    else:
+        assert result.audit == main_audit
+        assert len(result.attempt_audits) == 1
     assert (
-        RecordedModelResultAudit.model_validate(result.audit.model_dump(mode="python")).failure_code
+        RecordedModelResultAudit.model_validate(main_audit.model_dump(mode="python")).failure_code
         == failure_code
     )
     assert len(main.requests) == 1
-    assert quick.requests == []
+    assert len(quick.requests) == int(with_budget)
 
 
 @pytest.mark.asyncio
@@ -1226,22 +1239,24 @@ async def test_invalid_recall_reselection_is_terminal_through_public_deliberatio
         ).start(),
     )
 
-    assert result.proposal is None
-    assert result.audit.status == "main_exception"
-    assert result.audit.failure_code == "recall_choice_reselection_invalid"
-    assert result.audit.slot == "corrective"
-    assert result.audit.outcome == "exception"
-    assert result.audit.attempted_model_id == provider.model
-    assert result.audit.attempted_model_version == ChatModelDeliberationAdapter.VERSION
-    assert result.audit.usage is not None
-    assert result.audit.usage.input_tokens == 23
-    assert result.audit.usage.output_tokens == 9
-    recorded = RecordedModelResultAudit.model_validate(result.audit.model_dump(mode="python"))
+    assert result.proposal is not None
+    main_audit = result.attempt_audits[0]
+    assert main_audit.status == "main_exception"
+    assert main_audit.failure_code == "recall_choice_reselection_invalid"
+    assert main_audit.slot == "corrective"
+    assert main_audit.outcome == "exception"
+    assert main_audit.attempted_model_id == provider.model
+    assert main_audit.attempted_model_version == ChatModelDeliberationAdapter.VERSION
+    assert main_audit.usage is not None
+    assert main_audit.usage.input_tokens == 23
+    assert main_audit.usage.output_tokens == 9
+    assert result.audit.status == "main_exception_recovered"
+    recorded = RecordedModelResultAudit.model_validate(main_audit.model_dump(mode="python"))
     assert recorded.attempted_model_id == provider.model
     assert recorded.usage is not None
     assert recorded.usage.input_tokens == 23
     assert len(provider.calls) == 2
-    assert quick.requests == []
+    assert len(quick.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -1720,7 +1735,7 @@ async def test_actual_failure_reuses_an_open_turn_recovery_window_without_extend
 
 
 @pytest.mark.asyncio
-async def test_terminal_character_reselection_failure_cancels_an_already_started_hedge() -> None:
+async def test_terminal_character_reselection_failure_uses_started_role_recovery() -> None:
     clock = _ManualClock()
     primary = _ControlledMain()
     fallback = _ControlledQuick()
@@ -1746,17 +1761,29 @@ async def test_terminal_character_reselection_failure_cancels_an_already_started
     await clock.advance(1.6)
     await fallback.started.wait()
     assert primary.result is not None
+    assert fallback.result is not None
+    fallback.result.set_result(
+        ModelOutput(
+            model_id="quick-role-recovery",
+            model_version="v1",
+            raw_proposal=_minimal_raw(text="我在，刚才那次没组织好。"),
+        )
+    )
     primary.result.set_exception(
         ValidationTechnicalFailure("authored_expression_reselection_invalid")
     )
 
     result = await running
 
-    assert result.proposal is None
-    assert len(result.attempt_audits) == 1
-    assert result.audit.status == "main_exception"
+    assert result.proposal is not None
+    assert len(result.attempt_audits) == 2
+    assert result.attempt_audits[0].status == "main_exception"
+    assert result.attempt_audits[0].failure_code == (
+        "authored_expression_reselection_invalid"
+    )
+    assert result.audit.status == "main_exception_recovered"
     assert result.audit.failure_code == "authored_expression_reselection_invalid"
-    assert fallback.result is not None and fallback.result.cancelled()
+    assert not fallback.result.cancelled()
 
 
 @pytest.mark.asyncio

@@ -659,6 +659,7 @@ class SemanticChatComposition:
     recovery_source_closure_model: ChatCompletionModel | None
     source_closure_reselection_lane: SourceClosureReselectionLane | None
     proactive_source_closure_model: ChatCompletionModel | None
+    proactive_claim_binder_model: ChatCompletionModel
     life_source_closure_model: ChatCompletionModel | None
     life_source_runtime_isolation: str
     candidate_external_proposition_inventory_model: ChatCompletionModel | None
@@ -1356,6 +1357,27 @@ def build_semantic_chat_composition(
             owned_task_owners.append(inventory_availability_authority)
         auto_inventory_model = inventory_availability_authority
     background_model = advisory_model or flash_model
+    proactive_claim_binder_model: ChatCompletionModel = background_model
+    if auto_flash and settings.openai_api_key:
+        # Claim binding is a mechanical factual-declaration job, not character
+        # authorship.  Running its correction twice through the DeepSeek role
+        # route made a malformed locator deterministically fail both the main
+        # and recovery authors.  Give this hard-boundary helper its own small,
+        # JSON-capable provider so a role-model retry is not coupled to the
+        # same parser weakness.  It never chooses timing, silence or wording.
+        proactive_claim_binder_model = OpenAICompatibleChatModel(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.world_v2_source_review_fallback_model,
+            reasoning_effort="none",
+            max_completion_tokens=1_200,
+            proxy_url=settings.openai_proxy_url,
+            circuit_breaker=ProviderCircuitBreaker(
+                failure_threshold=2,
+                cooldown_seconds=60.0,
+            ),
+        )
+        owned.append(proactive_claim_binder_model)
     ordinary_expression_authors = tuple(
         author
         for author in (background_model, flash_model, thinking_model)
@@ -1784,6 +1806,7 @@ def build_semantic_chat_composition(
         recovery_source_closure_model=recovery_source_closure_model,
         source_closure_reselection_lane=source_closure_reselection_lane,
         proactive_source_closure_model=proactive_reviewer,
+        proactive_claim_binder_model=proactive_claim_binder_model,
         life_source_closure_model=resolved_life_source_closure_model,
         life_source_runtime_isolation=life_source_runtime_isolation,
         candidate_external_proposition_inventory_model=inventory_model,

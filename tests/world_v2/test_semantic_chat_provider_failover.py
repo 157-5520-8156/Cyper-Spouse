@@ -1487,6 +1487,29 @@ async def test_production_source_authority_finishes_inside_its_22_second_caller(
     await composition.aclose()
 
 
+@pytest.mark.asyncio
+async def test_production_proactive_claim_binder_has_an_independent_json_provider() -> None:
+    settings = Settings(
+        _env_file=None,
+        DEEPSEEK_API_KEY="deepseek-test-key",
+        OPENAI_API_KEY="openai-test-key",
+        OPENROUTER_API_KEY="openrouter-test-key",
+        WORLD_V2_SOURCE_REVIEW_REDUNDANCY_ENABLED=True,
+    )
+
+    composition = build_semantic_chat_composition(
+        settings=settings,
+        model_id_prefix="test",
+    )
+
+    binder = composition.proactive_claim_binder_model
+    assert isinstance(binder, OpenAICompatibleChatModel)
+    assert binder is not composition.background_model
+    assert binder.model == settings.world_v2_source_review_fallback_model
+    assert binder.max_completion_tokens == 1_200
+    await composition.aclose()
+
+
 def test_world_v2_fallback_model_defaults_to_official_high_volume_tier() -> None:
     settings = Settings(_env_file=None)
 

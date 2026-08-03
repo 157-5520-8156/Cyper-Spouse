@@ -326,6 +326,7 @@ class RecordedModelResultAudit(FrozenModel):
                 "main_timeout",
                 "primary_timeout",
                 "corrective_timeout",
+                "source_review_timeout",
                 "authored_subcall_timeout",
             },
             "main_invalid_recovered": {
@@ -336,7 +337,14 @@ class RecordedModelResultAudit(FrozenModel):
             "main_exception_recovered": {
                 "main_exception",
                 "primary_exception",
+                "source_review_exception",
                 "authored_subcall_exception",
+                "recall_choice_reselection_invalid",
+                "authored_expression_reselection_invalid",
+                "proactive_claim_binding_invalid",
+                "affect_target_reselection_invalid",
+                "inventory_invalid",
+                "coverage_invalid",
             },
         }.get(self.status)
         provider_failure_type, separator, provider_failure_detail = (
@@ -735,6 +743,7 @@ def validate_recorded_attempt_lineage(
                         "main_timeout",
                         "primary_timeout",
                         "corrective_timeout",
+                        "source_review_timeout",
                         "authored_subcall_timeout",
                     },
                     "main_timeout_recovered",
@@ -747,7 +756,14 @@ def validate_recorded_attempt_lineage(
                     {
                         "main_exception",
                         "primary_exception",
+                        "source_review_exception",
                         "authored_subcall_exception",
+                        "recall_choice_reselection_invalid",
+                        "authored_expression_reselection_invalid",
+                        "proactive_claim_binding_invalid",
+                        "affect_target_reselection_invalid",
+                        "inventory_invalid",
+                        "coverage_invalid",
                     },
                     "main_exception_recovered",
                 ),

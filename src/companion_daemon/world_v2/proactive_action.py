@@ -164,8 +164,12 @@ class ProactiveDraft(ExpressionDraft):
 
 class _ProactiveUnboundClaimLocator(FrozenModel):
     beat_index: int = Field(ge=0, le=15)
-    char_start: int = Field(ge=0, le=4_096)
-    char_end: int = Field(ge=1, le=4_096)
+    # Character offsets are a transport coordinate, not a semantic choice.
+    # Let the host derive them when the exact copied substring is unique;
+    # requiring a model to count Unicode code points made otherwise correct
+    # factual-declaration results fail repeatedly in production.
+    char_start: int | None = Field(default=None, ge=0, le=4_096)
+    char_end: int | None = Field(default=None, ge=1, le=4_096)
     text: str = Field(min_length=1, max_length=1_024)
 
 
@@ -1100,24 +1104,6 @@ class ProactiveDraftAdapter:
                         "including impulse_summary"
                     ),
                 )
-            elif self._proactive_claim_binder_model is not None:
-                correction_instruction = _canonical(
-                    {
-                        "contract": "proactive-source-boundary-rechoice.1",
-                        "authority": "factual_boundary_only_not_behavior",
-                        "wire_contract": _proactive_expression_shape_contract(),
-                        "rejected_candidate_sha256": hashlib.sha256(raw.encode()).hexdigest(),
-                        "failure": "visible_factual_content_not_closed_by_selected_evidence",
-                        "task": (
-                            "Choose one complete replacement proactive expression from the same "
-                            "lived Context. The previous visible factual content could not be "
-                            "supported by the selected evidence. You own whether to preserve only "
-                            "supported parts, qualify uncertainty, say something else, defer, or "
-                            "remain silent, and you own every beat and word. Return expression "
-                            "fields only; factual declarations are generated downstream."
-                        ),
-                    }
-                )
             elif (
                 semantic_review is not None
                 and getattr(semantic_review, "decision", None) == "unsupported"
@@ -1352,8 +1338,10 @@ class ProactiveDraftAdapter:
             "hard_boundaries whose selected evidence semantically supports it. Subjective feelings, questions, "
             "uncertain conjectures, and world-unbound generalizations have no claim. For every factual proposition "
             "that has no exact supporting ref, add one unbound_claim_locators entry with beat_index, "
-            "char_start, char_end, and exact text copied from that visible beat instead of omitting it or "
-            "inventing a ref. Never use unlisted refs."
+            "and exact text copied from that visible beat instead of omitting it or inventing a ref. "
+            "The host derives character offsets when that substring occurs once. Only include char_start "
+            "and char_end when the same exact substring occurs more than once in that beat. Never use "
+            "unlisted refs."
         )
         messages = [
             {"role": "system", "content": system},
@@ -1412,11 +1400,37 @@ class ProactiveDraftAdapter:
                         raise ValueError("unbound claim locator beat is absent")
                     beat = draft.beats[locator.beat_index]
                     beat_text = getattr(beat, "text", None)
+                    if not isinstance(beat_text, str):
+                        raise ValueError(
+                            "unbound claim locator must reference a visible text beat"
+                        )
+                    if (locator.char_start is None) != (locator.char_end is None):
+                        raise ValueError(
+                            "unbound claim locator offsets must be both present or both omitted"
+                        )
+                    if locator.char_start is None:
+                        starts: list[int] = []
+                        search_from = 0
+                        while True:
+                            found = beat_text.find(locator.text, search_from)
+                            if found < 0:
+                                break
+                            starts.append(found)
+                            search_from = found + 1
+                        if len(starts) != 1:
+                            raise ValueError(
+                                "offset-free unbound claim text must occur exactly once in its beat"
+                            )
+                        char_start = starts[0]
+                        char_end = char_start + len(locator.text)
+                    else:
+                        assert locator.char_end is not None
+                        char_start = locator.char_start
+                        char_end = locator.char_end
                     if (
-                        not isinstance(beat_text, str)
-                        or locator.char_end > len(beat_text)
-                        or locator.char_start >= locator.char_end
-                        or beat_text[locator.char_start : locator.char_end] != locator.text
+                        char_end > len(beat_text)
+                        or char_start >= char_end
+                        or beat_text[char_start:char_end] != locator.text
                     ):
                         raise ValueError(
                             "unbound claim locator must exactly match visible beat text"
@@ -1446,6 +1460,13 @@ class ProactiveDraftAdapter:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _LOG.warning(
+                "proactive claim binder exhausted correction attempts=%s failure=%s",
+                invocation_count,
+                _expression_draft_validation_failure(
+                    invalid_failure if invalid_failure is not None else exc
+                ),
+            )
             raise ValidationTechnicalFailure(
                 "proactive_claim_binding_invalid",
             ) from exc

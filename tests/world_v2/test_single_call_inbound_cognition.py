@@ -680,7 +680,7 @@ class _InvalidRecallPayloadCombinedProvider(_CombinedProvider):
 
 
 class _InvalidRecallThenInvalidFinalCombinedProvider(_CombinedProvider):
-    """Expose a third-call bug after the bounded Recall-choice reselection."""
+    """Let the configured recovery author follow an exhausted primary correction."""
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         del temperature
@@ -712,13 +712,13 @@ class _InvalidRecallThenInvalidFinalCombinedProvider(_CombinedProvider):
             else {
                 "private_turn_state": {
                     "contract": "private-turn-state.1",
-                    "inner_state_summary": "第三次调用不应该发生。",
+                    "inner_state_summary": "前一次没组织好，但我仍然想回应。",
                     "attended_source_refs": [],
                 },
                 "timing_choice": "now",
-                "beats": [{"modality": "text", "text": "不应发送这条。"}],
-                "stance": "unexpected_third_call",
-                "brief_rationale": "This fixture proves a forbidden third call.",
+                "beats": [{"modality": "text", "text": "嗯，我在听。"}],
+                "stance": "present",
+                "brief_rationale": "The configured role recovery owns its response.",
                 "world_claims": [],
             }
         )
@@ -2848,7 +2848,7 @@ async def test_combined_invalid_recall_final_cannot_trigger_another_shape_repair
 
 
 @pytest.mark.asyncio
-async def test_public_combined_invalid_recall_final_stops_before_a_third_role_call(
+async def test_public_combined_invalid_recall_final_uses_configured_role_recovery(
     tmp_path,
 ) -> None:
     provider = _InvalidRecallThenInvalidFinalCombinedProvider()
@@ -2887,17 +2887,24 @@ async def test_public_combined_invalid_recall_final_stops_before_a_third_role_ca
     finally:
         app.close()
 
-    assert outcome.status == "deferred"
-    assert len(provider.calls) == 2
-    assert evidence.projection.actions == ()
+    assert outcome.status == "action_authorized"
+    assert len(provider.calls) == 3
+    assert len(evidence.projection.actions) == 1
     audits = [
         json.loads(item.event.payload()["audit_json"])
         for item in evidence.events
         if item.event.event_type == "ModelResultRecorded"
     ]
     failed_audits = [audit for audit in audits if audit["failure_code"] is not None]
-    failure_codes = [audit["failure_code"] for audit in failed_audits]
-    assert failure_codes.count("recall_choice_reselection_invalid") == 1
+    recall_lineage = [
+        audit
+        for audit in failed_audits
+        if audit["failure_code"] == "recall_choice_reselection_invalid"
+    ]
+    assert [audit["status"] for audit in recall_lineage] == [
+        "main_exception",
+        "main_exception_recovered",
+    ]
 
 
 @pytest.mark.asyncio

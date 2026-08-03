@@ -934,7 +934,7 @@ def build_http_v2_capture_host(
         proactive_candidate_external_proposition_inventory_model=(
             semantic_chat.candidate_external_proposition_inventory_model
         ),
-        proactive_claim_binder_model=background_model,
+        proactive_claim_binder_model=semantic_chat.proactive_claim_binder_model,
         # A scheduler-only, bounded selection over already legal activities.
         # Invalid provider output terminates the ecology wake fail-safe.
         activity_lifecycle_model=background_model,

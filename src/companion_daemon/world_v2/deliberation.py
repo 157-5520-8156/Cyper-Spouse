@@ -356,18 +356,6 @@ ValidationTechnicalFailureCode = Literal[
     "inventory_invalid",
     "coverage_invalid",
 ]
-_NON_RECOVERABLE_VALIDATION_FAILURE_CODES = frozenset(
-    {
-        "source_review_timeout",
-        "source_review_exception",
-        "recall_choice_reselection_invalid",
-        "authored_expression_reselection_invalid",
-        "proactive_claim_binding_invalid",
-        "affect_target_reselection_invalid",
-        "inventory_invalid",
-        "coverage_invalid",
-    }
-)
 _SOURCE_VALIDATION_INVALID_FAILURE_CODES = frozenset(
     {
         "inventory_invalid",
@@ -1513,6 +1501,7 @@ class ModelResultAudit(_FrozenModel):
                 "main_timeout",
                 "primary_timeout",
                 "corrective_timeout",
+                "source_review_timeout",
                 "authored_subcall_timeout",
             },
             "main_invalid_recovered": {
@@ -1523,7 +1512,14 @@ class ModelResultAudit(_FrozenModel):
             "main_exception_recovered": {
                 "main_exception",
                 "primary_exception",
+                "source_review_exception",
                 "authored_subcall_exception",
+                "recall_choice_reselection_invalid",
+                "authored_expression_reselection_invalid",
+                "proactive_claim_binding_invalid",
+                "affect_target_reselection_invalid",
+                "inventory_invalid",
+                "coverage_invalid",
             },
         }.get(self.status)
         provider_failure_type, separator, provider_failure_detail = (
@@ -1670,6 +1666,7 @@ class DeliberationResult(_FrozenModel):
                             "main_timeout",
                             "primary_timeout",
                             "corrective_timeout",
+                            "source_review_timeout",
                             "authored_subcall_timeout",
                         },
                         "main_timeout_recovered",
@@ -1682,7 +1679,14 @@ class DeliberationResult(_FrozenModel):
                         {
                             "main_exception",
                             "primary_exception",
+                            "source_review_exception",
                             "authored_subcall_exception",
+                            "recall_choice_reselection_invalid",
+                            "authored_expression_reselection_invalid",
+                            "proactive_claim_binding_invalid",
+                            "affect_target_reselection_invalid",
+                            "inventory_invalid",
+                            "coverage_invalid",
                         },
                         "main_exception_recovered",
                     ),
@@ -3178,28 +3182,6 @@ class Deliberation:
                                 (loser_audit, final) if loser_audit is not None else (final,)
                             ),
                         )
-                    if failure in _NON_RECOVERABLE_VALIDATION_FAILURE_CODES:
-                        # The candidate has already consumed its bounded
-                        # validation/reselection lane.  A new role author would
-                        # be a forbidden third semantic choice, not technical
-                        # recovery for an initial author failure.
-                        if backup_task is not None:
-                            if not backup_task.done():
-                                backup_task.cancel()
-                                await asyncio.gather(backup_task, return_exceptions=True)
-                            discard_candidate = getattr(
-                                self._quick,
-                                "discard_candidate",
-                                None,
-                            )
-                            if callable(discard_candidate) and backup_input is not None:
-                                discard_candidate(backup_input)
-                            backup_task = None
-                            backup_result = None
-                            backup_call_id = None
-                            backup_request_hash = None
-                        primary_failure_for_recovery = failure
-                        break
                     primary_failure_for_recovery = (
                         failure
                         if failure
@@ -3396,10 +3378,26 @@ class Deliberation:
                             "primary_exception": "main_exception_recovered",
                             "primary_timeout": "main_timeout_recovered",
                             "corrective_timeout": "main_timeout_recovered",
+                            "source_review_timeout": "main_timeout_recovered",
                             "authored_subcall_timeout": "main_timeout_recovered",
+                            "source_review_exception": "main_exception_recovered",
                             "authored_subcall_exception": (
                                 "main_exception_recovered"
                             ),
+                            "recall_choice_reselection_invalid": (
+                                "main_exception_recovered"
+                            ),
+                            "authored_expression_reselection_invalid": (
+                                "main_exception_recovered"
+                            ),
+                            "proactive_claim_binding_invalid": (
+                                "main_exception_recovered"
+                            ),
+                            "affect_target_reselection_invalid": (
+                                "main_exception_recovered"
+                            ),
+                            "inventory_invalid": "main_exception_recovered",
+                            "coverage_invalid": "main_exception_recovered",
                         }[main_failure_code]
                         assert backup_call_id is not None and backup_request_hash is not None
                         winner_slot = (
