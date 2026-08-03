@@ -375,37 +375,6 @@ class Settings(BaseSettings):
         le=30.0,
         alias="WORLD_V2_SOURCE_REVIEW_DEADLINE_SECONDS",
     )
-    # Experimental separately configured role-model failsafe. Production
-    # reliability testing keeps it disabled so primary failures remain
-    # directly observable; it is not an automatic backup author.
-    world_v2_contextual_failsafe_enabled: bool = Field(
-        default=False,
-        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_ENABLED",
-    )
-    world_v2_contextual_failsafe_base_url: str = Field(
-        default="http://127.0.0.1:8188/v1",
-        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_BASE_URL",
-    )
-    world_v2_contextual_failsafe_model: str = Field(
-        default="mlx-community/Qwen3-4B-Instruct-4bit",
-        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_MODEL",
-    )
-    world_v2_contextual_failsafe_api_key: str = Field(
-        default="local",
-        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_API_KEY",
-    )
-    world_v2_contextual_failsafe_reviewer_base_url: str = Field(
-        default="http://127.0.0.1:8288/v1",
-        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_BASE_URL",
-    )
-    world_v2_contextual_failsafe_reviewer_model: str = Field(
-        default="mlx-community/Qwen3-1.7B-Instruct-4bit",
-        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_MODEL",
-    )
-    world_v2_contextual_failsafe_reviewer_api_key: str = Field(
-        default="local",
-        alias="WORLD_V2_CONTEXTUAL_FAILSAFE_REVIEWER_API_KEY",
-    )
     # ``stream`` exposes only a source-reviewed complete semantic unit from one
     # role-author request. The historical two-author ``on`` mode remains
     # test-only because its provisional author can disagree with the full one.

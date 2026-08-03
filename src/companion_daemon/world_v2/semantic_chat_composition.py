@@ -872,8 +872,6 @@ def build_semantic_chat_composition(
     life_source_closure_model: ChatCompletionModel | None = None,
     candidate_external_proposition_inventory_model: ChatCompletionModel | None = None,
     expression_episode_observer_model: ChatCompletionModel | None = None,
-    contextual_failsafe_model: ChatCompletionModel | None = None,
-    contextual_failsafe_reviewer_model: ChatCompletionModel | None = None,
     model_id_prefix: str,
     expression_capabilities: ExpressionDraftCapabilities = TEXT_ONLY_EXPRESSION_CAPABILITIES,
 ) -> SemanticChatComposition:
@@ -1016,29 +1014,6 @@ def build_semantic_chat_composition(
                 capacity_gate=local_provider_capacity,
             )
             owned.append(local_endpoint_model)
-
-    if settings.world_v2_contextual_failsafe_enabled and contextual_failsafe_model is None:
-        # This is an explicitly dormant-by-default third provider, not a
-        # local template.  A separately configured role checkpoint keeps its
-        # expression capability distinct from the appraisal extractor; its
-        # output still passes the ordinary ExpressionDraft source-closure gate.
-        contextual_failsafe_model = OpenAICompatibleChatModel(
-            api_key=settings.world_v2_contextual_failsafe_api_key,
-            base_url=settings.world_v2_contextual_failsafe_base_url,
-            model=settings.world_v2_contextual_failsafe_model,
-            reasoning_effort="none",
-            max_completion_tokens=384,
-        )
-        owned.append(contextual_failsafe_model)
-    if settings.world_v2_contextual_failsafe_enabled and contextual_failsafe_reviewer_model is None:
-        contextual_failsafe_reviewer_model = OpenAICompatibleChatModel(
-            api_key=settings.world_v2_contextual_failsafe_reviewer_api_key,
-            base_url=settings.world_v2_contextual_failsafe_reviewer_base_url,
-            model=settings.world_v2_contextual_failsafe_reviewer_model,
-            reasoning_effort="none",
-            max_completion_tokens=256,
-        )
-        owned.append(contextual_failsafe_reviewer_model)
 
     catalog = default_matrix_catalog()
     character = load_character(str(settings.character_path))
@@ -1307,7 +1282,9 @@ def build_semantic_chat_composition(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
             model=settings.world_v2_source_review_fallback_model,
-            reasoning_effort="none",
+            reasoning_effort=_direct_source_review_reasoning_effort(
+                settings.world_v2_source_review_fallback_model
+            ),
             max_completion_tokens=1_200,
             proxy_url=settings.openai_proxy_url,
             circuit_breaker=ProviderCircuitBreaker(
@@ -1705,9 +1682,9 @@ def build_semantic_chat_composition(
         candidate_external_proposition_inventory_model=inventory_model,
         source_closure_reselection_lane=source_closure_reselection_lane,
         expression_episode_observer_model=expression_episode_observer_model,
-        contextual_failsafe_model=contextual_failsafe_model,
-        contextual_failsafe_reviewer_model=contextual_failsafe_reviewer_model,
-        contextual_failsafe_enabled=settings.world_v2_contextual_failsafe_enabled,
+        contextual_failsafe_model=None,
+        contextual_failsafe_reviewer_model=None,
+        contextual_failsafe_enabled=False,
         flash_model_id=str(getattr(flash_model, "model", f"{model_id_prefix}-flash")),
         thinking_model_id=(
             str(getattr(thinking_model, "model", f"{model_id_prefix}-thinking"))

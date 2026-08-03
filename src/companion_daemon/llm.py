@@ -1402,12 +1402,16 @@ class OpenAICompatibleChatModel(DeepSeekChatModel):
         payload: dict[str, object] = {
             "model": self.model,
             "messages": messages,
-            "reasoning_effort": self.reasoning_effort,
             # World-v2 expression drafts are deliberately compact JSON.  A
             # bounded completion prevents a fallback provider from spending
             # latency/tokens exploring prose that the materializer will reject.
             "max_completion_tokens": self.max_completion_tokens,
         }
+        # GPT-4.1/4o Chat Completions reject the reasoning parameter rather
+        # than accepting an empty/disabled value.  An empty configured value
+        # means the route deliberately omits this optional capability.
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         if json_object:
             payload["response_format"] = {"type": "json_object"}
         return payload

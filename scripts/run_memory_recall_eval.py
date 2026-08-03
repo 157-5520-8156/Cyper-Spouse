@@ -412,8 +412,6 @@ def _build_models(*, stub: bool, settings: Settings, fixture: dict[str, object])
     if not stub:
         from companion_daemon.llm import (
             DeepSeekChatModel,
-            FailoverChatModel,
-            OpenAICompatibleChatModel,
         )
 
         if not settings.deepseek_api_key:
@@ -428,18 +426,6 @@ def _build_models(*, stub: bool, settings: Settings, fixture: dict[str, object])
             thinking_enabled=False,
         )
         inner: object = primary
-        if settings.openai_api_key:
-            inner = FailoverChatModel(
-                primary=primary,
-                fallback=OpenAICompatibleChatModel(
-                    api_key=settings.openai_api_key,
-                    base_url=settings.openai_base_url,
-                    model=settings.world_v2_source_review_fallback_model,
-                    reasoning_effort="none",
-                    proxy_url=settings.openai_proxy_url,
-                ),
-                implicit_failover=False,
-            )
         recorder = RecordingModel(inner)
 
         async def close() -> None:
@@ -506,9 +492,6 @@ async def run(
         # An offline provider-free run supplies every model seam itself. A developer
         # machine's optional local endpoint must not leak into the result.
         LOCAL_APPRAISAL_ENABLED=False if stub else ambient_settings.local_appraisal_enabled,
-        WORLD_V2_CONTEXTUAL_FAILSAFE_ENABLED=(
-            False if stub else ambient_settings.world_v2_contextual_failsafe_enabled
-        ),
     )
     flash_model, advisory_model, close_models, recorder = _build_models(
         stub=stub, settings=settings, fixture=document

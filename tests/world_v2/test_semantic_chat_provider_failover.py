@@ -1407,6 +1407,11 @@ async def test_production_proactive_claim_binder_has_an_independent_json_provide
     assert binder is not composition.background_model
     assert binder.model == settings.world_v2_source_review_fallback_model
     assert binder.max_completion_tokens == 1_200
+    assert "reasoning_effort" not in binder.request_payload(
+        [{"role": "user", "content": "{}"}],
+        temperature=0.0,
+        json_object=True,
+    )
     await composition.aclose()
 
 
@@ -1431,7 +1436,6 @@ def test_world_v2_has_no_configured_backup_character_model() -> None:
     settings = Settings(_env_file=None)
 
     assert not hasattr(settings, "world_v2_fallback_model")
-    assert settings.world_v2_contextual_failsafe_enabled is False
     assert settings.world_v2_source_review_redundancy_enabled is False
     assert settings.world_v2_source_review_secondary_model == "qwen/qwen-plus"
     assert settings.world_v2_source_review_fallback_model == "gpt-4.1-mini"
@@ -1445,13 +1449,10 @@ def test_world_v2_has_no_configured_backup_character_model() -> None:
     assert settings.world_v2_source_review_deadline_seconds == 30.0
 
 
-def test_contextual_failsafe_requires_an_explicit_deployment_switch() -> None:
-    settings = Settings(
-        _env_file=None,
-        WORLD_V2_CONTEXTUAL_FAILSAFE_ENABLED="true",
-    )
+def test_world_v2_has_no_configured_contextual_backup_character() -> None:
+    settings = Settings(_env_file=None)
 
-    assert settings.world_v2_contextual_failsafe_enabled is True
+    assert not hasattr(settings, "world_v2_contextual_failsafe_enabled")
 
 
 @pytest.mark.asyncio

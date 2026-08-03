@@ -1135,7 +1135,6 @@ def _daemon_environment(
             "QQ_C2C_IDLE_HEARTBEAT_SECONDS": "600",
             "WORLD_V2_RECALL_SEMANTIC_ENABLED": "false",
             "LOCAL_APPRAISAL_ENABLED": "false",
-            "WORLD_V2_CONTEXTUAL_FAILSAFE_ENABLED": "false",
             # The legacy loopback provider fixture returns ordinary JSON and
             # does not implement the expression-units SSE contract. Streaming
             # has its own transport + production-host acceptance tests; keep
