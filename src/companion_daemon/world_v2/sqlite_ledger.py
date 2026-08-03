@@ -3077,7 +3077,6 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.38",
                     "world-v2-reducers.39",
                     V48_REDUCER_BUNDLE_VERSION,
-                    PREVIOUS_REDUCER_BUNDLE_VERSION,
                 }:
                     # .37 added optional non-factual reflection prose and .38
                     # adds optional reflection/audit lineage to the pending
@@ -3088,7 +3087,11 @@ class SQLiteWorldLedger:
                     # ordinary cold-history verifier still streams every
                     # immutable event immediately after migration; this only
                     # avoids reducing the same 52k-event production ledger
-                    # twice during one startup.
+                    # twice during one startup. Reducer .50 is deliberately
+                    # excluded: .51 derives immutable NPC registration and
+                    # provisional-promotion edges from their original events,
+                    # so merely decoding the .50 head would omit authority
+                    # that cold replay must reproduce.
                     legacy_state = ReducerState.model_validate_json(
                         legacy_state_json,
                         context={"source_reducer_bundle": installed},

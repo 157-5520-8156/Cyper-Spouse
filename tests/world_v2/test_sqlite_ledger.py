@@ -375,6 +375,7 @@ def test_sqlite_migrates_verified_v39_head_and_cold_replays_same_history(tmp_pat
         "world-v2-reducers.46",
         "world-v2-reducers.47",
         "world-v2-reducers.48",
+        "world-v2-reducers.50",
     ),
 )
 def test_sqlite_migrates_recent_verified_head_without_rewriting_immutable_history(
