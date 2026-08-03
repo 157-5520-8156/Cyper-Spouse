@@ -1388,7 +1388,7 @@ async def test_production_source_authority_finishes_inside_its_22_second_caller(
 
 
 @pytest.mark.asyncio
-async def test_production_proactive_claim_binder_has_an_independent_json_provider() -> None:
+async def test_production_proactive_authorship_has_no_post_authorship_binder() -> None:
     settings = Settings(
         _env_file=None,
         DEEPSEEK_API_KEY="deepseek-test-key",
@@ -1402,21 +1402,12 @@ async def test_production_proactive_claim_binder_has_an_independent_json_provide
         model_id_prefix="test",
     )
 
-    binder = composition.proactive_claim_binder_model
-    assert isinstance(binder, OpenAICompatibleChatModel)
-    assert binder is not composition.background_model
-    assert binder.model == settings.world_v2_source_review_fallback_model
-    assert binder.max_completion_tokens == 1_200
-    assert "reasoning_effort" not in binder.request_payload(
-        [{"role": "user", "content": "{}"}],
-        temperature=0.0,
-        json_object=True,
-    )
+    assert not hasattr(composition, "proactive_claim_binder_model")
     await composition.aclose()
 
 
 @pytest.mark.asyncio
-async def test_fake_composition_does_not_install_a_networked_claim_binder() -> None:
+async def test_fake_composition_does_not_install_a_claim_binder() -> None:
     composition = build_semantic_chat_composition(
         settings=Settings(
             _env_file=None,
@@ -1428,7 +1419,7 @@ async def test_fake_composition_does_not_install_a_networked_claim_binder() -> N
     )
 
     assert isinstance(composition.background_model, FakeCompanionModel)
-    assert composition.proactive_claim_binder_model is composition.background_model
+    assert not hasattr(composition, "proactive_claim_binder_model")
     await composition.aclose()
 
 

@@ -414,7 +414,12 @@ the same configured role provider; production never switches to a second
 character-author provider. The proactive-contact route is stricter: the same
 pinned role author may receive its one precise source/shape correction, but an
 invalid corrected candidate is retried later through its durable 10/30/120-
-minute lifecycle rather than immediately reauthored as a new intention.
+minute lifecycle rather than immediately reauthored as a new intention. For
+proactive contact, the role includes factual permission metadata in that same
+structured Character Decision; production must not insert a second synchronous
+claim-binding model between a valid `now` decision and independent truth
+review. Local source-lane closure and the independently qualified truth
+reviewer remain mandatory, but neither may author or replace the expression.
 _Avoid_: Forced reply, failure fallback text, silence inference
 
 The provider-visible request may include a compact hard-boundary manifest that
@@ -578,12 +583,11 @@ Inventory contributes semantic decomposition only, and the independent RR.3 /
 V7 authority receives those locators and still owns every factual verdict. If
 Inventory is unavailable, the system falls back to full V7 and reports the
 degraded route rather than treating a technical failure as a semantic result.
-Production composition must prove that every possible character-author lane
+Production composition must prove that the character-author lane
 has a different exact semantic authority for source review before startup.
 An unqualified or self-reviewing ordinary route is a deployment error, not a
-per-message fallback. When the OpenAI recovery role authors a candidate, both
-possible reviewer transports must still be independently qualified and
-semantically distinct from every author lane. The old non-redundant
+per-message fallback. Reviewer transport redundancy is availability protection
+for a non-authoring truth boundary, never a backup character model. The old
 role-reversal topology is no longer production-admissible; inability to prove
 this boundary fails startup before provider clients are allocated.
 _Avoid_: Configuration as evidence, timeout as schema success, Inventory as a

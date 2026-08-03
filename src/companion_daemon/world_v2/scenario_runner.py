@@ -234,13 +234,18 @@ class ScenarioVerificationError(AssertionError):
 # families kept visible output, event types, Action states, model-call counts,
 # room views and explicit predicates unchanged; only authenticated replay
 # hashes move with the reducer identity.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.48"
+# ``.49`` removes the synchronous post-authorship proactive claim binder.
+# Factual permission metadata now travels in the role's original structured
+# decision and still crosses local closure plus independent truth review. The
+# fixed suite retains its explicit behavior predicates; prompt and provider
+# audit identities intentionally change.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.49"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "124d98072cc2a5066c26dd3767142880119ecdbf2f131f15ca0b852770266dee"
+    "767f063ce307896ee20fee0253da2412d05e3a979cb341f7fdfee507013c2f71"
 )
 
 

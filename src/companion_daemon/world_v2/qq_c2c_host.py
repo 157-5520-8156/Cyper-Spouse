@@ -2561,7 +2561,6 @@ def build_qq_c2c_host(
         proactive_candidate_external_proposition_inventory_model=(
             semantic_chat.candidate_external_proposition_inventory_model
         ),
-        proactive_claim_binder_model=semantic_chat.proactive_claim_binder_model,
         memory_model=background_model,
         activity_lifecycle_model=background_model,
         life_world_author_model=life_world_author,

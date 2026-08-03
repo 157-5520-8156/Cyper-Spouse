@@ -21,11 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from companion_daemon.llm import (  # noqa: E402
-    DeepSeekChatModel,
-    FailoverChatModel,
-    OpenAICompatibleChatModel,
-)
+from companion_daemon.llm import DeepSeekChatModel  # noqa: E402
 from companion_daemon.world_v2.fact_draft_adapter import (  # noqa: E402
     FactObservationProposalAdapter,
 )
@@ -82,27 +78,13 @@ async def main() -> None:
     args = parser.parse_args()
 
     env = _load_env(Path(".env"))
-    # Mirror the production background route: DeepSeek flash primary with the
-    # OpenAI-compatible fallback used by semantic_chat_composition.
-    primary = DeepSeekChatModel(
+    # Mirror the sole production character-author route. Offline audit failure
+    # stays visible instead of silently changing which model authored a draft.
+    model = DeepSeekChatModel(
         api_key=env["DEEPSEEK_API_KEY"],
         base_url="https://api.deepseek.com",
         model="deepseek-v4-flash",
         thinking_enabled=False,
-    )
-    model = (
-        FailoverChatModel(
-            primary=primary,
-            fallback=OpenAICompatibleChatModel(
-                api_key=env["OPENAI_API_KEY"],
-                base_url="https://api.openai.com/v1",
-                model="gpt-5.6-luna",
-                reasoning_effort="none",
-                proxy_url=env.get("OPENAI_PROXY_URL") or None,
-            ),
-        )
-        if env.get("OPENAI_API_KEY")
-        else primary
     )
     adapter = FactObservationProposalAdapter(model=model)
     pairs = _observations()

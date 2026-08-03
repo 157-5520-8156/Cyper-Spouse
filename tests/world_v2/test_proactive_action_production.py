@@ -240,7 +240,8 @@ async def test_proactive_role_receives_lived_context_without_audit_request_dupli
     assert "not a message outline" in system
     assert "Always return private_turn_state" not in system
     assert "Always return" not in system
-    assert "world_claims" not in system
+    assert "world_claims is an array" in system
+    assert "independent post-authorship process" not in system
 
     supplied = json.loads(model.messages[0][1]["content"])
     assert set(supplied) == {
@@ -257,6 +258,60 @@ async def test_proactive_role_receives_lived_context_without_audit_request_dupli
     assert supplied["current_self_state"]["contract"] == "current-self-state.1"
     assert "request" not in supplied
     assert "proactive_fact_authority" not in supplied
+
+
+@pytest.mark.asyncio
+async def test_proactive_role_declares_claims_in_same_successful_authorship_call() -> None:
+    source_ref = "event:life-content:experience:visible"
+    request = _proactive_model_request()
+    context = json.loads(request.model_content_json)
+    context["slices"]["recent_experiences"] = {
+        "availability": "available",
+        "items": [
+            {
+                "item_ref": "experience:visible",
+                "source_bindings": [{"ref": source_ref}],
+                "value": {"summary": "在旧书交换活动里翻到一本《小王子》。"},
+            }
+        ],
+    }
+    request = request.model_copy(
+        update={"model_content_json": json.dumps(context, ensure_ascii=False)}
+    )
+    role = _ProactiveReplySequence(
+        [
+            _proactive_draft(
+                "刚翻到一本《小王子》，突然想跟你说句话。",
+                claims=[
+                    {
+                        "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
+                        "scope": "past_world",
+                        "source_refs": [source_ref],
+                    }
+                ],
+            )
+        ]
+    )
+    reviewer = _supporting_source_reviewer()
+
+    output = await ProactiveDraftAdapter(
+        model=role,
+        target="user:primary",
+        source_closure_reviewer=reviewer,
+        proactive_claim_binder_model=None,
+    ).propose(request)
+
+    proposal = validate_proposal_envelope(output.raw_proposal)
+    expression_change = proposal.proposed_changes[0].payload.value()
+    assert role.calls == 1
+    assert reviewer.calls == 1
+    assert expression_change["world_claims"] == [
+        {
+            "claim_text": "沈知栀在旧书交换活动里翻到一本《小王子》",
+            "scope": "past_world",
+            "source_refs": [source_ref],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -2875,12 +2930,14 @@ def _make_proactive_runtime(
     identity_frame=None,
     social_initiative=None,
     expression_capabilities=TEXT_ONLY_EXPRESSION_CAPABILITIES,
+    proactive_claim_binder_model=None,
 ):  # type: ignore[no-untyped-def]
     adapter = ProactiveDraftAdapter(
         model=model,
         target="user:primary",
         identity_frame=identity_frame,
         expression_capabilities=expression_capabilities,
+        proactive_claim_binder_model=proactive_claim_binder_model,
     )
     turn = ProactiveDeliberationTurn(
         ledger=ledger,
@@ -4088,6 +4145,98 @@ async def test_technical_failures_retry_at_ten_thirty_then_capped_one_twenty_min
         assert (await runtime.drain_one()).status == "failed_safe"
 
     assert malformed.calls == 10
+
+
+@pytest.mark.asyncio
+async def test_retired_proactive_binder_failure_retries_immediately_after_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _AlwaysInvalidBinder:
+        model = "retired-proactive-binder"
+
+        async def complete(self, _messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+            del temperature
+            return "{}"
+
+    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
+    monkeypatch.setattr(ProactiveDraftAdapter, "VERSION", "proactive-draft-adapter.1")
+    runtime, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
+        model=_DraftModel("now"),
+        owner="worker:proactive:retired-binder-retry",
+        proactive_claim_binder_model=_AlwaysInvalidBinder(),
+    )
+
+    assert (await runtime.drain_one()).status == "opened"
+    assert (await runtime.drain_one()).status == "failed_safe"
+    monkeypatch.setattr(ProactiveDraftAdapter, "VERSION", "proactive-draft-adapter.2")
+    projection = ledger.project()
+    current = projection.logical_time
+    state = proactive_technical_retry_states(projection)[-1]
+
+    assert current is not None
+    assert state.last_failure_code in {
+        "proactive_claim_binding_invalid",
+        "backup_proactive_claim_binding_invalid",
+    }
+    assert state.next_retry_at == current
+    assert next_proactive_retry_due(projection) == current
+    assert (await runtime.drain_one()).status == "opened"
+
+
+@pytest.mark.asyncio
+async def test_new_proactive_binder_failure_keeps_ordinary_backoff() -> None:
+    class _AlwaysInvalidBinder:
+        model = "compatibility-proactive-binder"
+
+        async def complete(self, _messages, *, temperature=0.0):  # type: ignore[no-untyped-def]
+            del temperature
+            return "{}"
+
+    ledger, _model, _runtime_value, _turn = _runtime(choice="silent")
+    runtime, _ = _make_proactive_runtime(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001
+        model=_DraftModel("now"),
+        owner="worker:proactive:new-binder-backoff",
+        proactive_claim_binder_model=_AlwaysInvalidBinder(),
+    )
+
+    assert (await runtime.drain_one()).status == "opened"
+    assert (await runtime.drain_one()).status == "failed_safe"
+    projection = ledger.project()
+    current = projection.logical_time
+    state = proactive_technical_retry_states(projection)[-1]
+
+    assert current is not None
+    assert state.last_failure_code == "proactive_claim_binding_invalid"
+    assert state.next_retry_at == current + timedelta(minutes=10)
+    waiting = await runtime.drain_one()
+    assert waiting.status == "retry_wait"
+    assert waiting.next_retry_at == state.next_retry_at
+
+
+@pytest.mark.parametrize(
+    ("attempted_model_version", "expected"),
+    [
+        ("proactive-draft-adapter.1", True),
+        ("proactive-draft-adapter.2", False),
+        ("proactive-draft-adapter.future", False),
+        (None, False),
+    ],
+)
+def test_only_exact_retired_binder_version_bypasses_backoff(
+    attempted_model_version: str | None,
+    expected: bool,
+) -> None:
+    assert (
+        ProactiveActionRuntime._is_retired_binder_failure(  # noqa: SLF001
+            failure_code="proactive_claim_binding_invalid",
+            attempted_model_version=attempted_model_version,
+        )
+        is expected
+    )
 
 
 def test_proactive_retry_timer_tracks_newest_unresolved_consideration(

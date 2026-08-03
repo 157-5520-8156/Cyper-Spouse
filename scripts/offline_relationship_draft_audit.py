@@ -20,11 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from companion_daemon.llm import (  # noqa: E402
-    DeepSeekChatModel,
-    FailoverChatModel,
-    OpenAICompatibleChatModel,
-)
+from companion_daemon.llm import DeepSeekChatModel  # noqa: E402
 from companion_daemon.world_v2.relationship_evaluation_draft import (  # noqa: E402
     RelationshipEvaluationDraftAdapter,
     RelationshipEvaluationDraftCapsule,
@@ -125,25 +121,13 @@ def _dialogue_before(messages: list[tuple[str, str]], at: str, count: int = 8) -
 
 async def main() -> None:
     env = _load_env(Path(".env"))
-    primary = DeepSeekChatModel(
+    # Keep offline authorship identical to production: one DeepSeek role
+    # author, with failures reported instead of switching persona/model.
+    model = DeepSeekChatModel(
         api_key=env["DEEPSEEK_API_KEY"],
         base_url="https://api.deepseek.com",
         model="deepseek-v4-flash",
         thinking_enabled=False,
-    )
-    model = (
-        FailoverChatModel(
-            primary=primary,
-            fallback=OpenAICompatibleChatModel(
-                api_key=env["OPENAI_API_KEY"],
-                base_url="https://api.openai.com/v1",
-                model="gpt-5.6-luna",
-                reasoning_effort="none",
-                proxy_url=env.get("OPENAI_PROXY_URL") or None,
-            ),
-        )
-        if env.get("OPENAI_API_KEY")
-        else primary
     )
     adapter = RelationshipEvaluationDraftAdapter(model=model)
     appraisals = _appraisals()
