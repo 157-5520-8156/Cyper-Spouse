@@ -2100,11 +2100,14 @@ class QQC2CHost:
             snapshot = hub.health_snapshot()
         except Exception:
             _LOG.exception("external world perception health read failed")
-            return {
+            payload = {
                 "enabled": True,
                 "state": "degraded",
                 "warning_reasons": ["health_read_failed"],
             }
+            if self._external_world_perception_registry_health is not None:
+                payload["registry"] = self._external_world_perception_registry_health
+            return payload
         if hasattr(snapshot, "model_dump"):
             payload = snapshot.model_dump(mode="json")
         elif isinstance(snapshot, dict):

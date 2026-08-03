@@ -193,3 +193,33 @@ async def test_external_perception_failure_does_not_block_other_scheduler_work()
         "state": "degraded",
         "warning_reasons": ["health_read_failed"],
     }
+
+
+def test_failed_hub_health_does_not_hide_static_registry_coverage() -> None:
+    registry_health = {
+        "registry_revision": "registry:test:1",
+        "coverage_states": [
+            {
+                "source_id": "cn.social.xiaohongshu.general.v1",
+                "acquisition_state": "unsupported",
+                "character_visibility": False,
+            }
+        ],
+    }
+    host = QQC2CHost(
+        host=_PlatformHost(),  # type: ignore[arg-type]
+        recipient_id="10001",
+        canonical_user_id="geoff",
+        external_world_perception_hub=_FailingPerceptionHub(
+            PerceptionAdvanceResult(status="idle", progressed_units=0)
+        ),
+        external_world_perception_registry_health=registry_health,
+        ingress_now=lambda: NOW,
+    )
+
+    assert host.external_world_perception_health() == {
+        "enabled": True,
+        "state": "degraded",
+        "warning_reasons": ["health_read_failed"],
+        "registry": registry_health,
+    }
