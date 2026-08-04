@@ -51,6 +51,7 @@ from .occurrence_content_coordinator import (
 )
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 from .schemas import DueWindow, EvidenceRef, ProjectionCursor, WorldEvent, WorldOccurrenceProjection
 
 _POLICY = "policy:npc-initiative.1"
@@ -381,7 +382,8 @@ class NpcInitiativeRuntime:
         """The life author's exact bounded select/no_op JSON contract."""
 
         try:
-            raw = await self._model.complete(
+            raw = await complete_json_object(
+                self._model,
                 [
                     {"role": "system", "content": (
                         "You are the final semantic confirmation for one reviewed NPC-initiated moment. "

@@ -75,6 +75,7 @@ from .proposal_envelope import (
 )
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 from .schemas import ExternalObservation, Observation, ProjectionCursor, WorldEvent
 from .settlement import SettlementPlanner
 
@@ -315,7 +316,11 @@ class QuickReactionSemanticGate:
 
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                raw = await self._model.complete(self.messages(text=text), temperature=0.0)
+                raw = await complete_json_object(
+                    self._model,
+                    self.messages(text=text),
+                    temperature=0.0,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

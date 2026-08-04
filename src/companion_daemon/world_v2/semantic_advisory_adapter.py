@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from companion_daemon.llm import model_call_scope
 
 from .advisory_compiler import AdvisoryAdapterInput
+from .structured_completion import complete_json_object
 from .matrix_catalog import (
     CandidateDistribution,
     ClassificationCandidate,
@@ -136,8 +137,10 @@ class SemanticAdvisoryAdapter:
         self, request: AdvisoryAdapterInput
     ) -> tuple[CandidateDistribution, ...]:
         with model_call_scope("world_v2_semantic_advisory"):
-            raw = await self._model.complete(
-                self._messages(request), temperature=self._temperature
+            raw = await complete_json_object(
+                self._model,
+                self._messages(request),
+                temperature=self._temperature,
             )
         parsed = _parse_bounded_result(raw)
         allowed_sources = frozenset(binding.ref for binding in request.source_authorities)

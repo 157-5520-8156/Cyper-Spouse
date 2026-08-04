@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
@@ -23,11 +24,30 @@ class _Model:
         self.model = "test-npc-role"
         self.payload = payload
         self.calls: list[list[dict[str, str]]] = []
+        self.json_calls: list[list[dict[str, str]]] = []
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.2) -> str:
+        del messages, temperature
+        raise AssertionError("NPC ecology must use the provider JSON-output interface")
+
+    async def complete_json(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.2
+    ) -> str:
         del temperature
         self.calls.append(messages)
+        self.json_calls.append(messages)
         return json.dumps(self.payload, ensure_ascii=False)
+
+
+class _HttpFailureModel(_Model):
+    async def complete_json(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.2
+    ) -> str:
+        del temperature
+        self.calls.append(messages)
+        request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+        response = httpx.Response(503, request=request)
+        raise httpx.HTTPStatusError("busy", request=request, response=response)
 
 
 def _actor(decision: str) -> dict[str, object]:
@@ -78,7 +98,12 @@ def _world_plan() -> dict[str, object]:
     }
 
 
-def _runtime(actor_payload: dict[str, object], world_payload: dict[str, object]):
+def _runtime(
+    actor_payload: dict[str, object],
+    world_payload: dict[str, object],
+    *,
+    actor_model: _Model | None = None,
+):
     ledger = WorldLedger.in_memory(
         world_id=WORLD_ID,
         accepted_batch_issuer=AcceptedLedgerBatchIssuer(),
@@ -94,7 +119,7 @@ def _runtime(actor_payload: dict[str, object], world_payload: dict[str, object])
             text=descriptor,
         )
     )
-    actor = _Model(actor_payload)
+    actor = actor_model or _Model(actor_payload)
     world = _Model(world_payload)
     runtime = NpcEcology(
         ledger=ledger,
@@ -105,6 +130,25 @@ def _runtime(actor_payload: dict[str, object], world_payload: dict[str, object])
         protagonist_actor_ref="actor:companion",
     )
     return ledger, store, actor, world, runtime
+
+
+@pytest.mark.asyncio
+async def test_npc_provider_503_is_not_reported_as_invalid_output() -> None:
+    unavailable = _HttpFailureModel(_actor("no_op"))
+    _ledger, _store, actor, world, runtime = _runtime(
+        _actor("no_op"),
+        {"decision": "no_op"},
+        actor_model=unavailable,
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref="clock-life", trace_id="trace", correlation_id="correlation"
+    )
+
+    assert result.status == "technical_failure"
+    assert result.reason_code == "npc_ecology.actor_provider_http_503"
+    assert len(actor.calls) == 1
+    assert world.calls == []
 
 
 @pytest.mark.asyncio
@@ -126,6 +170,8 @@ async def test_npc_no_op_still_advances_private_state_effect_once() -> None:
     assert actor_context["authority"]["selected_npc_ref"] == "npc:lin"
     assert "identities" not in actor_context["public_world"]
     assert "protagonist_affect_context_json" not in actor.calls[0][1]["content"]
+    assert '"json_schema"' in actor.calls[0][0]["content"]
+    assert '"example_json"' not in actor.calls[0][0]["content"]
     state = ledger.project().npcs[0].subjective_state
     assert state is not None
     assert state.relationship_to_subject.closeness_bp == 4300

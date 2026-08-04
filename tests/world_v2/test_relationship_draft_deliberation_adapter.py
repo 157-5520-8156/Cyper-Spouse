@@ -337,12 +337,12 @@ async def test_missing_optional_slices_still_produce_a_draft() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recovery_returns_no_change_without_model_or_relationship_mutation() -> None:
-    model = _Model('{"decision":"signal"}')
+async def test_recovery_asks_the_relationship_model_to_reselect() -> None:
+    model = _CapturingModel()
     output = await RelationshipDraftDeliberationAdapter(model=model).recover(
-        _request(relationships=({"subject_ref": "user:geoff"},)), "timeout"
+        _request(), "timeout"
     )
     proposal = DecisionProposal.model_validate_json(json.dumps(output.raw_proposal))
 
-    assert model.calls == 0
+    assert "timeout" in model.messages[0][-1]["content"]
     assert proposal.proposed_changes == ()

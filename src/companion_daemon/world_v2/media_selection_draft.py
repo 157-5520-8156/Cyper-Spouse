@@ -16,6 +16,7 @@ from pydantic import Field, model_validator
 from companion_daemon.llm import model_call_scope
 
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 
 
 def _hash(value: str) -> str:
@@ -75,7 +76,8 @@ class MediaSelectionDraftAdapter:
         if not capsule.candidates:
             return MediaSelectionDraft(decision="no_op")
         with model_call_scope("world_v2_media_selection"):
-            raw = await self._model.complete(
+            raw = await complete_json_object(
+                self._model,
                 [
                     {"role": "system", "content": (
                         "Choose one offered candidate token or decline. Return exactly JSON: "

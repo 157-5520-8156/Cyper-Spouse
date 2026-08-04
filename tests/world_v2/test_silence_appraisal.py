@@ -229,6 +229,21 @@ class _SilenceAppraisalModel(_NoChangeAppraisalModel):
         )
 
 
+class _UnavailableAppraisalModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        del request
+        self.calls += 1
+        raise ConnectionError("provider unavailable")
+
+    async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+        del request, failure_code
+        self.calls += 1
+        raise ConnectionError("provider unavailable")
+
+
 class _Transport:
     provider = "platform:test"
 
@@ -584,6 +599,10 @@ async def test_silence_appraisal_end_to_end_accepts_and_opens_affect_trigger() -
     assert model.requests and model.requests[0].trigger_ref == receipt_ref
     assert model.requests[0].trigger_message is None
     assert model.requests[0].trigger_evidence[0].evidence_kind == "committed_world_event"
+    assert '"unanswered_silence"' in model.requests[0].model_content_json
+    assert receipt_ref in model.requests[0].model_content_json
+    assert "no newer user message" in model.requests[0].model_content_json
+    assert "120 minutes" in model.requests[0].model_content_json
     projection = ledger.project()
     appraisal = projection.appraisals[0]
     assert appraisal.subject_ref == "agent:companion"
@@ -638,3 +657,48 @@ async def test_silence_appraisal_no_change_still_completes_the_trigger() -> None
         if item.process_kind == "silence_appraisal"
     )
     assert silence.state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_silence_appraisal_provider_failure_remains_retryable() -> None:
+    model = _UnavailableAppraisalModel()
+    runtime, ledger, worker, turn = _delivered_reply_world(
+        appraisal_model=model,
+        silence_idle_seconds=IDLE_THRESHOLD,
+    )
+    assert worker is not None and turn is not None
+    await _deliver_reply(runtime)
+    await _advance(runtime, ledger, seconds=IDLE_THRESHOLD * 2, tick_id="tick-idle")
+    opener = SilenceAppraisalTriggerOpener(
+        ledger=ledger,
+        owner_id="worker:appraisal",
+        idle_seconds_threshold=IDLE_THRESHOLD,
+    )
+    assert await opener.open_once() is not None
+    trigger = SilenceAppraisalTriggerRuntime(
+        ledger=ledger,
+        turn=turn,
+        worker=worker,
+        owner_id="worker:appraisal",
+        lease_seconds=120,
+    )
+
+    failed = await trigger.drain_one()
+    duplicate = await trigger.drain_one()
+
+    assert failed.work_status == "technical_failure"
+    assert duplicate.status == "owned_elsewhere"
+    process = next(
+        item for item in ledger.project().trigger_processes if item.process_kind == "silence_appraisal"
+    )
+    assert process.state == "claimed"
+    first_attempt_ids = process.attempt_ids
+
+    await _advance(runtime, ledger, seconds=121, tick_id="tick-retry")
+    retried = await trigger.drain_one()
+
+    assert retried.work_status == "technical_failure"
+    process = next(
+        item for item in ledger.project().trigger_processes if item.process_kind == "silence_appraisal"
+    )
+    assert len(process.attempt_ids) == len(first_attempt_ids) + 1

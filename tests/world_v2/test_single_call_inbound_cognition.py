@@ -41,7 +41,6 @@ from companion_daemon.world_v2.proposal_envelope import (
     DecisionProposal,
     MinimalProposal,
     ProposalEvidenceRef,
-    validate_proposal_envelope,
 )
 from companion_daemon.world_v2.isolated_source_closure_trace import (
     BoundedSourceClosureTraceCollector,
@@ -6784,8 +6783,8 @@ async def test_double_provider_failure_records_recovery_failure_without_fake_ack
 
 
 @pytest.mark.asyncio
-async def test_inbound_appraisal_recovery_falls_closed_for_a_settled_world_trigger() -> None:
-    """A background settlement has no message cache key to recover through."""
+async def test_inbound_appraisal_recovery_does_not_fake_no_change_for_settled_world() -> None:
+    """A malformed second role result remains technical failure, not character calm."""
 
     cognition = SingleCallInboundCognition(flash_model=_OrdinaryCombinedProvider())
     settlement_request = _request(revision=3, call="call:settled-world-appraisal").model_copy(
@@ -6795,16 +6794,11 @@ async def test_inbound_appraisal_recovery_falls_closed_for_a_settled_world_trigg
         }
     )
 
-    recovered = await cognition.appraisal.recover(
-        settlement_request,
-        "main_invalid_output",
-    )
-
-    assert recovered.model_version == "appraisal-draft-adapter.4"
-    proposal = validate_proposal_envelope(recovered.raw_proposal)
-    assert isinstance(proposal, DecisionProposal)
-    assert proposal.trigger_ref == "event:world-occurrence:settled:1"
-    assert proposal.proposed_changes == ()
+    with pytest.raises(ValueError, match="AppraisalDraft appraise must be boolean"):
+        await cognition.appraisal.recover(
+            settlement_request,
+            "main_invalid_output",
+        )
 
 
 @pytest.mark.asyncio

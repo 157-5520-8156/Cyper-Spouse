@@ -63,6 +63,11 @@ class RelationshipDraftDeliberationAdapter:
         )
 
     async def propose(self, request: ModelInput) -> ModelOutput:
+        return await self._propose(request=request, correction_failure=None)
+
+    async def _propose(
+        self, *, request: ModelInput, correction_failure: str | None
+    ) -> ModelOutput:
         material = _capsule(request)
         context = _context_summaries(material=material, trigger_ref=request.trigger_ref)
         evaluation = _relationship_evaluation(material=material, trigger_ref=request.trigger_ref)
@@ -82,7 +87,8 @@ class RelationshipDraftDeliberationAdapter:
                     relationship_summary=evaluation["relationship_summary_json"],
                     **source_summary,
                     **context,
-                )
+                ),
+                correction_failure=correction_failure,
             )
             return self._output(
                 _proposal_from_draft(draft=draft, request=request, subject_ref=subject_ref)
@@ -114,14 +120,18 @@ class RelationshipDraftDeliberationAdapter:
                 interaction_summary=interaction_summary,
                 context=context,
             )
-        draft = await self._draft_adapter.deliberate(capsule=capsule)
+        draft = await self._draft_adapter.deliberate(
+            capsule=capsule,
+            correction_failure=correction_failure,
+        )
         return self._output(_proposal_from_draft(draft=draft, request=request, subject_ref=subject_ref))
 
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
-        """A failed background interpretation may not invent a relationship trace."""
+        """Give the same relationship authority one bounded fresh choice."""
 
-        return self._output(
-            _no_change(request=request, rationale=f"relationship_model_unavailable:{failure_code[:96]}")
+        return await self._propose(
+            request=request,
+            correction_failure=failure_code[:256],
         )
 
     def _output(self, raw_proposal: dict[str, object]) -> ModelOutput:

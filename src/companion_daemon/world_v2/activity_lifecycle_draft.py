@@ -17,6 +17,7 @@ from typing import Literal, Protocol
 from pydantic import Field, model_validator
 
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 
 
 def _sha256(value: str) -> str:
@@ -174,7 +175,11 @@ class ActivityLifecycleDraftAdapter:
     async def deliberate(self, *, capsule: ActivityLifecycleDraftCapsule) -> ActivityLifecycleModelDraft:
         if not capsule.openings:
             return ActivityLifecycleModelDraft(decision="no_op")
-        raw = await self._model.complete(self._messages(capsule), temperature=self._temperature)
+        raw = await complete_json_object(
+            self._model,
+            self._messages(capsule),
+            temperature=self._temperature,
+        )
         return materialize_activity_lifecycle_draft(raw=raw, capsule=capsule, model=self._model_id)
 
     @staticmethod

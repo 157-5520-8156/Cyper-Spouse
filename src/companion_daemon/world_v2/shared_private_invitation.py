@@ -46,6 +46,7 @@ from .life_author_seed import ReviewedLifeSeedCatalog, ReviewedLifeSeedFutureCan
 from .life_events import ActivityPlannedPayload, ActivityTransitionPayload
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 from .schemas import DueWindow, EvidenceRef, PlanStateProjection, ProjectionCursor, WorldEvent
 
 
@@ -379,7 +380,8 @@ class SharedPrivateInvitationRuntime:
         """The life author's exact bounded select/no_op JSON contract."""
 
         try:
-            raw = await self._model.complete(
+            raw = await complete_json_object(
+                self._model,
                 [
                     {"role": "system", "content": (
                         "You are the final semantic confirmation for one reviewed private shared "

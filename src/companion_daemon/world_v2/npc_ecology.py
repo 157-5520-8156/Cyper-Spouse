@@ -40,6 +40,7 @@ from .occurrence_content_coordinator import (
     OutcomeCandidateContent,
 )
 from .schema_core import FrozenModel, PrivacyClass
+from .structured_completion import complete_json_object
 from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
@@ -63,7 +64,7 @@ from .schemas import (
 )
 
 
-_POLICY = "policy:npc-ecology.1"
+_POLICY = "policy:npc-ecology.2"
 _RELEVANT_EVENT_TYPES = frozenset(
     {
         "ObservationRecorded",
@@ -113,6 +114,13 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
 
 
+def _provider_failure_reason(*, invalid_reason: str, failure_code: str) -> str:
+    """Keep provider availability failures distinct from invalid model output."""
+
+    stem = invalid_reason.removesuffix("_invalid_after_repair")
+    return f"{stem}_{failure_code}"
+
+
 def _cursor(projection: object) -> ProjectionCursor:
     return ProjectionCursor(
         world_revision=getattr(projection, "world_revision"),
@@ -125,6 +133,10 @@ class NpcEcologyModel(Protocol):
     model: str
 
     async def complete(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.2
+    ) -> str: ...
+
+    async def complete_json(
         self, messages: list[dict[str, str]], *, temperature: float = 0.2
     ) -> str: ...
 
@@ -367,6 +379,33 @@ class NpcEcology:
             recent_occurrence_refs=recent_occurrences,
             protagonist_affect_source_refs=affect_refs,
             protagonist_affect_context_json=affect_context_json,
+        )
+
+    def has_due_work(self, *, projection: object) -> bool:
+        """Read whether an already-authored NPC effect is exactly due.
+
+        Ordinary ambient consideration obeys Life Ecology's recorded cadence.
+        This read-only exception covers only effect completion already present
+        in authority: a pending actor decision awaiting World adjudication or
+        an NPC-owned Plan whose committed opening time has arrived.
+        """
+
+        if self._pending_actor_event_ref(projection) is not None:
+            return True
+        logical_time = getattr(projection, "logical_time", None)
+        if logical_time is None:
+            return False
+        active_npc_refs = {
+            f"npc:{item.npc_id}"
+            for item in getattr(projection, "npcs", ())
+            if item.status == "active"
+        }
+        return any(
+            item.status == "planned"
+            and item.owner_actor_ref in active_npc_refs
+            and item.scheduled_window is not None
+            and item.scheduled_window.opens_at <= logical_time
+            for item in getattr(projection, "plans", ())
         )
 
     async def advance(self, stimulus: NpcEcologyStimulus) -> NpcEcologyResult:
@@ -628,6 +667,9 @@ class NpcEcology:
                 ),
             },
         }
+        output_contract = {
+            "json_schema": NpcActorDecision.model_json_schema(mode="validation"),
+        }
         prompt = (
             "Act as the exact selected NPC in this source-bound social world. Freely decide "
             "what they currently feel and want, and whether they propose doing anything. "
@@ -638,7 +680,10 @@ class NpcEcology:
             "current_goal_summaries and proposal. If proposing, the proposal must contain "
             "the NPC's own concrete timing (now/later), premise, participants, location, "
             "duration, visibility and, for later, free activity/timing/importance. The World "
-            "Author cannot invent these choices. Exact refs must come from the supplied world."
+            "Author cannot invent these choices. Exact refs must come from the supplied world. "
+            "The following contract controls only JSON shape and authority closure; it does not "
+            "prefer no_op, propose, any motive, or any relationship value: "
+            + _canonical(output_contract)
         )
         return prompt, payload
 
@@ -688,13 +733,17 @@ class NpcEcology:
                 "protagonist_affect_context": json.loads(snapshot.protagonist_affect_context_json),
             },
         }
+        output_contract = {
+            "json_schema": NpcWorldDecision.model_json_schema(mode="validation"),
+        }
         prompt = (
             "You are World Author, not the NPC. Adjudicate the exact NPC-owned proposal without "
             "rewriting its motive, timing, people, place, activity or importance. Return no_op when "
             "the world does not permit it, or accept. For an immediate proposal, accept must include "
             "2-4 genuinely uncertain possible external outcomes. For a future plan, accept has no "
             "outcomes because the eventual occurrence remains unsettled. Return only "
-            "NpcWorldDecision JSON with decision and outcomes."
+            "NpcWorldDecision JSON with decision and outcomes. The following contract controls "
+            "only the JSON wire, not the adjudication: " + _canonical(output_contract)
         )
         return prompt, payload
 
@@ -727,7 +776,8 @@ class NpcEcology:
             )
             request_json = _canonical(messages)
             try:
-                raw = await model.complete(
+                raw = await complete_json_object(
+                    model,
                     messages,
                     temperature=0.75 if ordinal == 0 else 0.55,
                 )
@@ -740,7 +790,30 @@ class NpcEcology:
                         failure_code="main_timeout",
                     )
                 )
-                raise _NpcModelRunFailed(tuple(attempts), failure_reason) from None
+                raise _NpcModelRunFailed(
+                    tuple(attempts),
+                    _provider_failure_reason(
+                        invalid_reason=failure_reason,
+                        failure_code="provider_timeout",
+                    ),
+                ) from None
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                attempts.append(
+                    _ModelAttempt(
+                        request_json=request_json,
+                        raw=None,
+                        status="main_exception",
+                        failure_code="main_exception",
+                    )
+                )
+                raise _NpcModelRunFailed(
+                    tuple(attempts),
+                    _provider_failure_reason(
+                        invalid_reason=failure_reason,
+                        failure_code=f"provider_http_{status_code}",
+                    ),
+                ) from None
             except (ConnectionError, OSError, httpx.HTTPError):
                 attempts.append(
                     _ModelAttempt(
@@ -750,7 +823,13 @@ class NpcEcology:
                         failure_code="main_exception",
                     )
                 )
-                raise _NpcModelRunFailed(tuple(attempts), failure_reason) from None
+                raise _NpcModelRunFailed(
+                    tuple(attempts),
+                    _provider_failure_reason(
+                        invalid_reason=failure_reason,
+                        failure_code="provider_unavailable",
+                    ),
+                ) from None
             try:
                 parsed = parser(raw)
                 failure = validator(parsed) or ""

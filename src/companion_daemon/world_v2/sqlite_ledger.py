@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import hmac
 import json
@@ -5342,6 +5343,39 @@ class SQLiteWorldLedger:
             if event is None:
                 raise LedgerIntegrityError("event is absent from its owning commit")
             return event, result
+
+    def recent_events_by_type(
+        self,
+        *,
+        event_types: frozenset[str],
+        since: datetime,
+        limit: int,
+    ) -> tuple[WorldEvent, ...]:
+        """Return verified recent events without depending on compact head refs."""
+
+        if not event_types or not 1 <= limit <= 65_536:
+            return ()
+        ordered_types = tuple(sorted(event_types))
+        placeholders = ",".join("?" for _ in ordered_types)
+        with self._thread_lock:
+            self._refresh_verified_external_history_locked()
+            rows = tuple(
+                self._connection.execute(
+                    f"""SELECT event_id FROM world_v2_events
+                        WHERE world_id = ?
+                          AND json_extract(event_json, '$.event_type') IN ({placeholders})
+                          AND json_extract(event_json, '$.logical_time') >= ?
+                        ORDER BY ledger_sequence DESC
+                        LIMIT ?""",  # noqa: S608 - placeholders are generated, not user input
+                    (self._world_id, *ordered_types, since.isoformat(), limit),
+                )
+            )
+        verified = []
+        for row in reversed(rows):
+            located = self.lookup_event_commit(str(row["event_id"]))
+            if located is not None:
+                verified.append(located[0])
+        return tuple(verified)
 
     def recent_fact_transition_events(
         self,

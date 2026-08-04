@@ -23,6 +23,7 @@ from .proposal_envelope import (
     TypedChange,
 )
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 
 
 def _canonical_json(value: object) -> str:
@@ -89,7 +90,9 @@ class SocialActionDraftDeliberationAdapter:
             raise ValueError("social action draft requires a verified current message")
         messages = self._messages(request=request, recovery=recovery, failure_code=failure_code)
         temperature = 0.2 if recovery else self._temperature
-        metered = getattr(self._model, "complete_with_usage", None)
+        metered = getattr(self._model, "complete_json_with_usage", None)
+        if not callable(metered):
+            metered = getattr(self._model, "complete_with_usage", None)
         usage: ModelUsageProvenance | None = None
         if callable(metered):
             raw, usage_raw = await metered(messages, temperature=temperature)
@@ -97,7 +100,11 @@ class SocialActionDraftDeliberationAdapter:
                 raise ValueError("metered social action model must return text")
             usage = ModelUsageProvenance.model_validate(usage_raw)
         else:
-            raw = await self._model.complete(messages, temperature=temperature)
+            raw = await complete_json_object(
+                self._model,
+                messages,
+                temperature=temperature,
+            )
         draft = self._parse(raw)
         proposal = self._materialize(draft=draft, request=request)
         return ModelOutput(

@@ -31,6 +31,7 @@ from .memory_reducers import (
     MEMORY_POLICY_VERSION,
 )
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 from .schemas import (
     ClaimLease,
     MemoryCandidateOrigin,
@@ -97,7 +98,8 @@ class MemoryWithdrawalReviewAdapter:
         withdrawal_payload_hash: str,
         can_revise: bool,
     ) -> MemoryWithdrawalReviewDecision:
-        raw = await self._model.complete(
+        raw = await complete_json_object(
+            self._model,
             [
                 {
                     "role": "system",

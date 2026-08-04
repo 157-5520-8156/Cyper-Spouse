@@ -26,6 +26,7 @@ from .open_world_event_draft import (
 )
 from .schema_core import FrozenModel
 from .schemas import DueWindow, EvidenceRef, ProjectionCursor, WorldEvent, WorldOccurrenceProjection
+from .structured_completion import complete_json_object
 
 
 _LOG = logging.getLogger(__name__)
@@ -181,7 +182,11 @@ class OpenWorldEventRuntime:
                 )
             try:
                 draft = parse_open_world_event_draft(
-                    raw=await self._model.complete(self._messages(situations), temperature=0.4),
+                    raw=await complete_json_object(
+                        self._model,
+                        self._messages(situations),
+                        temperature=0.4,
+                    ),
                     offered=situations,
                     model=self._model_id,
                 )

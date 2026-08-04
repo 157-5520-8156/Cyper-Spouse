@@ -26,6 +26,7 @@ from .proposal_envelope import (
     validate_proposal_envelope,
 )
 from .schemas import ProjectionCursor, TriggerProcess, WorldEvent
+from .structured_completion import complete_json_object
 
 
 class ExpressionReconsiderationChatModel(Protocol):
@@ -58,7 +59,8 @@ class ExpressionReconsiderationChatModelAdapter:
         cursor: ProjectionCursor,
         conversation_context: dict[str, object] | None = None,
     ) -> ExpressionReconsiderationDecision:
-        raw = await self._model.complete(
+        raw = await complete_json_object(
+            self._model,
             self._messages(
                 process=process,
                 observation_event=observation_event,

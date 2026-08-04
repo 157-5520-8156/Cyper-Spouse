@@ -720,6 +720,45 @@ async def test_npc_ecology_technical_failure_uses_shared_10_30_120_retry_lane() 
 
 
 @pytest.mark.asyncio
+async def test_npc_ecology_does_not_spend_tokens_before_shared_schedule_is_due() -> None:
+    event = _event("clock-npc-ecology-before-retry")
+    ledger = _Ledger(event)
+    ledger._projection.life_ecology_schedule = LifeEcologyScheduleProjection(
+        last_trigger_id="trigger:prior",
+        last_wake_event_ref="event:prior",
+        last_outcome_ref=(
+            "life-ecology:technical_failure.npc_ecology.actor_invalid_after_repair"
+        ),
+        last_completed_at=NOW - timedelta(minutes=10),
+        next_consideration_at=NOW + timedelta(minutes=20),
+        consecutive_failures=2,
+        last_failure_code="npc_ecology.actor_invalid_after_repair",
+    )
+    trigger_store, media = _TriggerStore(), _Media()
+    development = _LifeDevelopment("no_op", reason_code="quiet")
+    npc_ecology = _LifeDevelopment("state_advanced", reason_code="considered")
+    runtime = LifeEcologyRuntime(
+        ledger=ledger,
+        trigger_store=trigger_store,
+        media_followup=media,
+        life_development_followup=development,
+        npc_initiative_followup=npc_ecology,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id,
+        trace_id="trace:npc-before-retry",
+        correlation_id="correlation:npc-before-retry",
+    )
+
+    assert result.status == "idle"
+    assert development.calls == []
+    assert npc_ecology.calls == []
+    assert trigger_store.completed[0][2] == "cooldown"
+
+
+@pytest.mark.asyncio
 async def test_aftermath_model_failure_keeps_its_precise_technical_retry_code() -> None:
     event = _event("clock-aftermath-technical-failure")
     trigger_store, media = _TriggerStore(), _Media()

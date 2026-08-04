@@ -35,6 +35,7 @@ from ..proposal_audit_schemas import (
 )
 from ..schema_core import FrozenModel
 from ..schemas import LedgerProjection, ProjectionCursor
+from ..structured_completion import complete_json_object
 from .contracts import (
     AuditedLiveCharacterAttentionResult,
     CharacterAttentionContext,
@@ -427,7 +428,11 @@ class ChatCompletionLiveAttentionModel:
     async def consider_attention(self, request: LiveCharacterAttentionRequest) -> object:
         messages = self._messages(request)
         request_json = _canonical(messages)
-        raw = await self._model.complete(messages, temperature=self._temperature)
+        raw = await complete_json_object(
+            self._model,
+            messages,
+            temperature=self._temperature,
+        )
         if not isinstance(raw, str):
             raise TypeError("live attention provider returned non-text output")
         response_hash = sha256(raw)
@@ -608,7 +613,11 @@ class ChatCompletionShadowAttentionModel:
 
     async def consider_attention(self, request: CharacterAttentionRequest) -> object:
         messages = self._messages(request)
-        raw = await self._model.complete(messages, temperature=self._temperature)
+        raw = await complete_json_object(
+            self._model,
+            messages,
+            temperature=self._temperature,
+        )
         if not isinstance(raw, str):
             raise TypeError("shadow attention provider returned non-text output")
         try:

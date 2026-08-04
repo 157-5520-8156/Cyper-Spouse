@@ -98,6 +98,7 @@ from .recall_runtime import (
     verify_trusted_recall_trace,
 )
 from .schema_core import FrozenModel, PrivacyClass
+from .structured_completion import complete_json_object
 from .schemas import (
     BiographicalCoordinateReplacement,
     DueWindow,
@@ -4134,7 +4135,8 @@ class LifeDevelopmentRuntime:
         for ordinal in range(2):
             request_hash = _messages_hash(messages)
             try:
-                review_raw = await completion_critic.complete(
+                review_raw = await complete_json_object(
+                    completion_critic,
                     messages,
                     temperature=0.0,
                 )
@@ -4257,7 +4259,8 @@ class LifeDevelopmentRuntime:
         for ordinal in range(2):
             request_hash = _messages_hash(messages)
             try:
-                review_raw = await completion_reviewer.complete(
+                review_raw = await complete_json_object(
+                    completion_reviewer,
                     messages,
                     temperature=0.0,
                 )
@@ -4488,7 +4491,8 @@ class LifeDevelopmentRuntime:
         for ordinal in range(2):
             request_hash = _messages_hash(messages)
             try:
-                rewritten_raw = await completion_rewriter.complete(
+                rewritten_raw = await complete_json_object(
+                    completion_rewriter,
                     messages,
                     temperature=0.6,
                 )
@@ -4709,7 +4713,11 @@ class LifeDevelopmentRuntime:
         for ordinal in range(2):
             request_hash = _messages_hash(messages)
             try:
-                raw = await self._world_author.complete(messages, temperature=0.6)
+                raw = await complete_json_object(
+                    self._world_author,
+                    messages,
+                    temperature=0.6,
+                )
             except (
                 TimeoutError,
                 ConnectionError,
@@ -5077,7 +5085,8 @@ class LifeDevelopmentRuntime:
         for ordinal in range(2):
             request_hash = _messages_hash(messages)
             try:
-                raw = await self._character_model.complete(
+                raw = await complete_json_object(
+                    self._character_model,
                     messages,
                     temperature=0.6,
                 )

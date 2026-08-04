@@ -68,6 +68,7 @@ def test_npc_health_reports_identity_calls_no_ops_reappearance_and_failures() ->
                     "route": {"reason_code": "npc_ecology_actor"},
                     "status": "proposal_validated",
                     "outcome": "winner",
+                    "model_version": "policy:npc-ecology.2",
                 }
             )
         },
@@ -83,6 +84,7 @@ def test_npc_health_reports_identity_calls_no_ops_reappearance_and_failures() ->
                     "status": "main_timeout",
                     "outcome": "timeout",
                     "failure_code": "provider_timeout",
+                    "attempted_model_version": "policy:npc-ecology.2",
                 }
             )
         },
@@ -200,6 +202,12 @@ def test_npc_health_reports_identity_calls_no_ops_reappearance_and_failures() ->
     assert health["world_completed_call_count"] == 1
     assert health["actor_model_attempt_count"] == 1
     assert health["world_model_attempt_count"] == 1
+    assert health["actor_consideration_success_rate_24h"]["value_bp"] == 10_000
+    assert health["actor_first_attempt_success_rate_24h"]["value_bp"] == 10_000
+    assert health["world_consideration_success_rate_24h"]["value_bp"] == 0
+    assert health["world_first_attempt_success_rate_24h"]["value_bp"] == 0
+    assert health["warning"] is True
+    assert "world_consideration_success_below_90_percent" in health["warning_reasons"]
     assert health["world_failed_model_attempt_count"] == 1
     assert health["provider_attempt_evidence"] == "model_result_recorded"
     assert health["world_no_op_count"] == 1

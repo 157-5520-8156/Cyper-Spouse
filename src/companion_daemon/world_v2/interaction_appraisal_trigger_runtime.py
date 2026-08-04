@@ -51,7 +51,11 @@ class AppraisalTriggerRunResult(FrozenModel):
     trigger_id: str
     status: Literal["idle", "owned_elsewhere", "completed_existing", "processed"]
     work_status: Literal[
-        "no_proposal", "no_change", "accepted", "advisory_validation_rejected"
+        "no_proposal",
+        "no_change",
+        "accepted",
+        "advisory_validation_rejected",
+        "technical_failure",
     ] | None = None
 
 

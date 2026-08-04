@@ -111,6 +111,14 @@ class LedgerPort(Protocol):
 
     def lookup_event_commit(self, event_id: str) -> tuple[WorldEvent, CommitResult] | None: ...
 
+    def recent_events_by_type(
+        self,
+        *,
+        event_types: frozenset[str],
+        since: datetime,
+        limit: int,
+    ) -> tuple[WorldEvent, ...]: ...
+
     def recent_fact_transition_events(
         self,
         *,
@@ -791,6 +799,22 @@ class WorldLedger:
             if event_id in commit.result.event_ids:
                 return stored.event, commit.result
         raise RuntimeError(f"event {event_id!r} has no owning commit")
+
+    def recent_events_by_type(
+        self,
+        *,
+        event_types: frozenset[str],
+        since: datetime,
+        limit: int,
+    ) -> tuple[WorldEvent, ...]:
+        if not event_types or not 1 <= limit <= 65_536:
+            return ()
+        output = [
+            stored.event
+            for stored in reversed(self._events)
+            if stored.event.event_type in event_types and stored.event.logical_time >= since
+        ]
+        return tuple(reversed(output[:limit]))
 
     def recent_fact_transition_events(
         self,

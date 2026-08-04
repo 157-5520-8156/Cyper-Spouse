@@ -172,11 +172,16 @@ class FactMemoryDraftAdapter:
             return draft
 
     async def _complete(self, messages: list[dict[str, str]]) -> str:
-        # Some OpenAI-compatible providers reject response_format=json_object
-        # even though they can return JSON text normally.  This adapter already
-        # owns a strict local parser and one bounded corrective pass, so
-        # provider-side JSON mode adds no authority and only reduces
-        # compatibility.
+        complete_json = getattr(self._model, "complete_json", None)
+        if callable(complete_json):
+            try:
+                return await complete_json(messages, temperature=self._temperature)
+            except Exception as exc:
+                # A few OpenAI-compatible local providers explicitly reject
+                # response_format. Preserve that narrow compatibility case;
+                # transport and model failures must remain technical failures.
+                if "response_format" not in str(exc):
+                    raise
         return await self._model.complete(
             messages,
             temperature=self._temperature,

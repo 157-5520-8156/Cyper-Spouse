@@ -118,6 +118,42 @@ class _SequencedModel:
         return self.replies.pop(0)
 
 
+class _JsonOnlyModel:
+    model = "test-affect-json"
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+        self.json_calls = []
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        raise AssertionError("affect must use JSON output")
+
+    async def complete_json(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        self.json_calls.append(messages)
+        return self.reply
+
+
+@pytest.mark.asyncio
+async def test_affect_uses_json_output_and_recovery_is_model_owned() -> None:
+    model = _JsonOnlyModel(
+        '{"affect":"open","brief_rationale":"The waiting still weighs on her.",'
+        '"behavior_tendency":"reflect","stance":"attend",'
+        '"display_strategy":"withhold","confidence":6200,'
+        '"components":[{"dimension":"loneliness","target_intensity_bp":2600}]}'
+    )
+    adapter = AffectDraftDeliberationAdapter(model=model)
+
+    output = await adapter.recover(_request(), "main_invalid_output")
+
+    proposal = DecisionProposal.model_validate_json(json.dumps(output.raw_proposal))
+    assert len(model.json_calls) == 1
+    assert "main_invalid_output" in model.json_calls[0][-1]["content"]
+    assert proposal.proposed_changes
+    assert "example_json" not in model.json_calls[0][0]["content"]
+
+
 @pytest.mark.asyncio
 async def test_adapter_asks_the_same_model_to_reselect_a_target_below_the_pinned_bound() -> None:
     model = _SequencedModel(

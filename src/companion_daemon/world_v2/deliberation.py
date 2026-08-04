@@ -2065,6 +2065,7 @@ class Deliberation:
                 stream_attention_epoch=stream_attention_epoch,
             )
         failure_code: str | None = None
+        recovery_failure_reason: str | None = None
         recovered_status: AuditStatus | None = None
         output: ModelOutput | None = None
         slot_coordinator = _ProviderSlotCoordinator()
@@ -2132,9 +2133,13 @@ class Deliberation:
             )
         except TimeoutError:
             failure_code = "main_timeout"
+            recovery_failure_reason = failure_code
             recovered_status = "main_timeout_recovered"
         except (ValueError, TypeError) as exc:
             failure_code = "main_invalid_output"
+            recovery_failure_reason = (
+                f"{failure_code}:{type(exc).__name__}:{str(exc)[:384]}"
+            )
             recovered_status = "main_invalid_recovered"
             _LOG.warning(
                 "deliberation main attempt invalid call=%s trigger=%s error=%s: %s",
@@ -2145,6 +2150,7 @@ class Deliberation:
             )
         except Exception as exc:
             failure_code = "main_exception"
+            recovery_failure_reason = failure_code
             recovered_status = "main_exception_recovered"
             _LOG.warning(
                 "deliberation main attempt raised call=%s trigger=%s error=%s: %s",
@@ -2198,7 +2204,9 @@ class Deliberation:
                             await self._with_deadline(
                                 self._quick.recover(
                                     quick_input,
-                                    failure_code or "main_failure",
+                                    recovery_failure_reason
+                                    or failure_code
+                                    or "main_failure",
                                 ),
                                 timeout=self._quick_timeout,
                                 label=quick_call_id,
@@ -2306,6 +2314,7 @@ class Deliberation:
         """Race at most two fully validated candidates under one absolute deadline."""
 
         terminal_validation_failures: dict[str, ValidationTechnicalFailure] = {}
+        candidate_failure_details: dict[str, str] = {}
 
         async def candidate(
             operation: Callable[[], Awaitable[ModelOutput]],
@@ -2383,6 +2392,9 @@ class Deliberation:
             except TimeoutError:
                 return None, output, "timeout"
             except (TypeError, ValueError) as exc:
+                candidate_failure_details[call_id] = (
+                    f"main_invalid_output:{type(exc).__name__}:{str(exc)[:384]}"
+                )
                 _LOG.warning(
                     "deliberation candidate invalid call=%s trigger=%s error=%s: %s",
                     call_id,
@@ -2639,7 +2651,12 @@ class Deliberation:
 
             isolated_shadow_task.add_done_callback(finish_isolated_shadow)
 
-        def start_backup(failure_code: str, *, after_actual_failure: bool) -> bool:
+        def start_backup(
+            failure_code: str,
+            *,
+            after_actual_failure: bool,
+            recovery_failure_detail: str | None = None,
+        ) -> bool:
             nonlocal backup_task, backup_call_id, backup_input, backup_request_hash
             nonlocal backup_validation, corrective_claimed_before_backup, deadline_timer
             if backup_task is not None:
@@ -2708,7 +2725,10 @@ class Deliberation:
             try:
                 backup_task = asyncio.create_task(
                     candidate(
-                        lambda: recovery_operation(backup_input, failure_code),
+                        lambda: recovery_operation(
+                            backup_input,
+                            recovery_failure_detail or failure_code,
+                        ),
                         call_id=backup_call_id,
                         minimal_only=self._recovery_mode == "minimal_only",
                         lane="quick",
@@ -3235,6 +3255,9 @@ class Deliberation:
                     start_backup(
                         primary_failure_for_recovery,
                         after_actual_failure=True,
+                        recovery_failure_detail=candidate_failure_details.get(
+                            primary_call_id
+                        ),
                     )
                     if (
                         self._expression_episode_mode == "shadow"

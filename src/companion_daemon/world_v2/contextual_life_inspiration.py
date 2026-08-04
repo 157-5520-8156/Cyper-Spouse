@@ -41,6 +41,7 @@ from .life_author_runtime import (
     compile_life_decision_context,
 )
 from .schema_core import FrozenModel, PrivacyClass
+from .structured_completion import complete_json_object
 from .schemas import (
     AspirationProjection,
     CommittedWorldEventRef,
@@ -516,7 +517,7 @@ class ContextualLifeInspirationRuntime:
 
     async def _complete(self, messages: list[dict[str, str]]) -> str:
         try:
-            raw = await self._model.complete(messages, temperature=0.3)
+            raw = await complete_json_object(self._model, messages, temperature=0.3)
         except (TimeoutError, ConnectionError, OSError, httpx.HTTPError) as exc:
             _LOG.warning("contextual life inspiration model unavailable: %s", exc)
             raise LifeAuthorModelFailure("contextual life inspiration model unavailable") from exc

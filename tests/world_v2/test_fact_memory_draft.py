@@ -130,7 +130,7 @@ class _ProviderRejectsStructuredJsonChat:
 
 
 @pytest.mark.asyncio
-async def test_memory_classification_uses_locally_validated_plain_completion() -> None:
+async def test_memory_classification_falls_back_only_when_provider_rejects_json_mode() -> None:
     model = _ProviderRejectsStructuredJsonChat()
 
     result = await ExperienceMemoryDraftAdapter(model=model).classify(
@@ -140,7 +140,7 @@ async def test_memory_classification_uses_locally_validated_plain_completion() -
 
     assert result is None
     assert model.complete_calls == 1
-    assert model.complete_json_calls == 0
+    assert model.complete_json_calls == 1
 
 
 @pytest.mark.asyncio

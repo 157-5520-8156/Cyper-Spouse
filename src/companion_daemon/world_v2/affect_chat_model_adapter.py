@@ -26,6 +26,7 @@ from .proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
+from .structured_completion import complete_json_object
 
 
 _DIMENSIONS = frozenset(
@@ -70,8 +71,17 @@ class AffectDraftDeliberationAdapter:
         self._temperature = temperature
 
     async def propose(self, request: ModelInput) -> ModelOutput:
-        messages = self._messages(request)
-        raw = await self._model.complete(messages, temperature=self._temperature)
+        return await self._propose(request=request, correction_failure=None)
+
+    async def _propose(
+        self, *, request: ModelInput, correction_failure: str | None
+    ) -> ModelOutput:
+        messages = self._messages(request, correction_failure=correction_failure)
+        raw = await complete_json_object(
+            self._model,
+            messages,
+            temperature=self._temperature,
+        )
         usage = None
         winning_model_call_id = None
         winning_request_hash = None
@@ -113,15 +123,16 @@ class AffectDraftDeliberationAdapter:
         )
 
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
-        return ModelOutput(
-            model_id=self._model_id,
-            model_version=self.VERSION,
-            raw_proposal=_no_change(request=request, rationale=f"Affect model unavailable: {failure_code[:96]}"),
+        return await self._propose(
+            request=request,
+            correction_failure=failure_code[:256],
         )
 
     @staticmethod
-    def _messages(request: ModelInput) -> list[dict[str, str]]:
-        return [
+    def _messages(
+        request: ModelInput, *, correction_failure: str | None = None
+    ) -> list[dict[str, str]]:
+        messages = [
             {
                 "role": "system",
                 "content": (
@@ -136,7 +147,8 @@ class AffectDraftDeliberationAdapter:
                     "decay policies, Actions, memories, or world mutations. An affect is fallible and not a fact "
                     "about the user; choose no_change when it should not persist. The supplied "
                     "affect_target_bounds are pinned hard numeric minima, not emotion advice; each selected "
-                    "target must be at or above its dimension's minimum_target_intensity_bp."
+                    "target must be at or above its dimension's minimum_target_intensity_bp. "
+                    "Do not infer a preferred affect, behavior, stance, or display choice from this wire contract."
                 ),
             },
             {
@@ -148,6 +160,19 @@ class AffectDraftDeliberationAdapter:
                 ),
             },
         ]
+        if correction_failure is not None:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your preceding result failed this exact boundary: "
+                        + correction_failure
+                        + ". Re-select once as the same character affect authority, using only "
+                        "the unchanged pinned evidence and JSON contract above."
+                    ),
+                }
+            )
+        return messages
 
 
 def _proposal_from_draft(*, raw: str, request: ModelInput) -> dict[str, object]:

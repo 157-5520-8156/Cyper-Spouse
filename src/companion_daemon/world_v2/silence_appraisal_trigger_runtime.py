@@ -23,6 +23,7 @@ from .affect_trigger import affect_deliberation_trigger_events, affect_deliberat
 from .relationship_trigger import relationship_deliberation_trigger_events, relationship_deliberation_trigger_id
 from .appraisal_proposal_worker import AppraisalProposalWorker
 from .context_capsule import ContextCapsuleCompiler
+from .context_capsule import InnerAdvisoryCandidate, InnerAdvisoryProjection
 from .context_resolver import query_from_projection
 from .deliberation import Deliberation
 from .errors import ConcurrencyConflict, IdempotencyConflict
@@ -108,23 +109,71 @@ class SilenceAppraisalTurn:
         expectation = pending_response_expectation(
             projection, anchor_event_ref=receipt_event.event_id
         )
-        try:
-            if expectation is None:
-                capsule = await asyncio.to_thread(
-                    self._capsules.compile_for_deliberation, query
+        logical_time = projection.logical_time or receipt_event.logical_time
+        clock_ref = max(
+            (
+                item
+                for item in projection.committed_world_event_refs
+                if item.event_type == "ClockAdvanced"
+                and item.logical_time <= logical_time
+            ),
+            key=lambda item: item.world_revision,
+            default=None,
+        )
+        silence_sources = tuple(
+            dict.fromkeys(
+                (
+                    receipt_event.event_id,
+                    *(() if clock_ref is None else (clock_ref.event_id,)),
                 )
-            else:
-                capsule = await asyncio.to_thread(
-                    self._capsules.compile_for_deliberation_with_advisories,
-                    query,
-                    (
-                        response_expectation_advisory(
-                            expectation,
-                            source_ref=receipt_event.event_id,
-                            logical_time=projection.logical_time or receipt_event.logical_time,
-                        ),
+            )
+        )
+        elapsed_seconds = max(0, int((logical_time - receipt_event.logical_time).total_seconds()))
+        silence_candidate_ref = "unanswered-silence:" + _digest(
+            {"sources": silence_sources, "cursor": cursor.model_dump(mode="json")}
+        )
+        silence_advisory = InnerAdvisoryProjection(
+            advisory_id="advisory:unanswered-silence:" + _digest(silence_sources),
+            kind="unanswered_silence",
+            source_refs=silence_sources,
+            candidate_refs=(silence_candidate_ref,),
+            candidates=(
+                InnerAdvisoryCandidate(
+                    candidate_ref=silence_candidate_ref,
+                    value=(
+                        "Her visible message was delivered about "
+                        f"{elapsed_seconds // 60} minutes ago; at this pinned ledger cursor "
+                        "no newer user message has arrived. This absence is context she may "
+                        "interpret, not proof of the user's motive."
+                    )[:256],
+                    weight_bp=10_000,
+                    confidence_bp=10_000,
+                ),
+            ),
+            confidence_bp=10_000,
+            expiry=logical_time + timedelta(days=1),
+            producer_version="silence-appraisal-turn.2",
+        )
+        advisories = (
+            silence_advisory,
+            *(
+                ()
+                if expectation is None
+                else (
+                    response_expectation_advisory(
+                        expectation,
+                        source_ref=receipt_event.event_id,
+                        logical_time=logical_time,
                     ),
                 )
+            ),
+        )
+        try:
+            capsule = await asyncio.to_thread(
+                self._capsules.compile_for_deliberation_with_advisories,
+                query,
+                advisories,
+            )
         except ValueError as exc:
             await self._raise_if_stale(cursor, exc)
             raise
@@ -265,14 +314,13 @@ class SilenceAppraisalTriggerRuntime:
         if audit is None:
             audited = await self._turn.audit_silence(receipt_event=receipt, cursor=cursor)
             if audited.proposal_id is None:
-                await self._complete(
-                    process=active,
-                    source_event=receipt,
-                    cursor=audited.cursor,
-                    outcome_ref=f"outcome:{active.trigger_id}:no-proposal",
-                )
+                # A missing proposal means both bounded role attempts failed;
+                # it is not a character decision.  Leave the durable claim
+                # non-terminal so lease expiry opens a fresh recovery attempt.
                 return AppraisalTriggerRunResult(
-                    trigger_id=active.trigger_id, status="processed", work_status="no_proposal"
+                    trigger_id=active.trigger_id,
+                    status="processed",
+                    work_status="technical_failure",
                 )
             audit = next(
                 (
@@ -345,7 +393,7 @@ class SilenceAppraisalTriggerRuntime:
         at = projection.logical_time or source_event.logical_time
         if process.state == "claimed" and process.claim_lease is not None:
             if process.claim_lease.owner_id == self._owner_id and at <= process.claim_lease.expires_at:
-                return process
+                return None
             if at < process.claim_lease.expires_at:
                 return None
         attempt_id = "attempt:silence-appraisal:" + _digest(

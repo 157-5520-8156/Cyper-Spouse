@@ -52,6 +52,7 @@ from .life_author_seed import ReviewedAspirationSeed, ReviewedLifeSeedCatalog
 from .life_events import ActivityPlannedPayload
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 from .schemas import (
     AspirationProjection,
     DueWindow,
@@ -677,7 +678,8 @@ class AspirationRuntime:
         """The life author's exact bounded select/no_op JSON contract."""
 
         try:
-            raw = await self._model.complete(
+            raw = await complete_json_object(
+                self._model,
                 [
                     {"role": "system", "content": (
                         "You are the final semantic confirmation for crystallizing one long-held, "
@@ -1209,7 +1211,8 @@ class AspirationRuntime:
         """The life author's exact bounded select/no_op JSON contract."""
 
         try:
-            raw = await self._model.complete(
+            raw = await complete_json_object(
+                self._model,
                 [
                     {"role": "system", "content": (
                         "You are the final semantic confirmation for one reviewed aspiration seed — "

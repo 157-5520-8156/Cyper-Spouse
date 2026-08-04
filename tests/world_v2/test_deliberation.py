@@ -2647,14 +2647,35 @@ async def test_main_timeout_uses_only_minimal_quick_recovery() -> None:
     ],
 )
 async def test_invalid_main_output_recovers_without_accepting_unfrozen_claims(raw: object) -> None:
+    quick = _Quick()
     result = await Deliberation(
-        router=_Router(), main_model=_Main(raw), quick_recovery=_Quick()
+        router=_Router(), main_model=_Main(raw), quick_recovery=quick
     ).deliberate(_capsule(), attempt_id="attempt:invalid")
 
     assert isinstance(result.proposal, MinimalProposal)
     assert result.audit.status == "main_invalid_recovered"
     assert result.audit.failure_code == "main_invalid_output"
     assert result.attempt_audits[0].status == "main_invalid"
+    assert quick.failure_codes[0].startswith("main_invalid_output:")
+
+
+@pytest.mark.asyncio
+async def test_budgeted_invalid_main_passes_precise_diagnostic_to_recovery() -> None:
+    quick = _Quick()
+
+    result = await Deliberation(
+        router=_Router(),
+        main_model=_Main({"proposal_kind": "decision"}),
+        quick_recovery=quick,
+    ).deliberate(
+        _capsule(),
+        attempt_id="attempt:budgeted-invalid-detail",
+        budget=InteractiveTurnBudgetPolicy(hedge_after_seconds=10.0).start(),
+    )
+
+    assert result.audit.status == "main_invalid_recovered"
+    assert result.audit.failure_code == "primary_invalid"
+    assert quick.failure_codes[0].startswith("main_invalid_output:ValidationError:")
 
 
 @pytest.mark.asyncio

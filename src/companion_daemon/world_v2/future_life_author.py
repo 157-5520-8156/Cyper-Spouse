@@ -41,6 +41,7 @@ from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
 from .schemas import DueWindow, EvidenceRef, PlanStateProjection, ProjectionCursor, WorldEvent
 from .context_resolver import query_from_projection
+from .structured_completion import complete_json_object
 
 
 def _digest(value: object) -> str:
@@ -426,7 +427,8 @@ class FutureLifeAuthorRuntime:
         decision_context: dict[str, object],
     ) -> tuple["_FutureDecision", str]:
         try:
-            raw = await self._model.complete(
+            raw = await complete_json_object(
+                self._model,
                 [
                 {"role": "system", "content": (
                     "You are the final semantic veto for one reviewed future life commitment. The host "

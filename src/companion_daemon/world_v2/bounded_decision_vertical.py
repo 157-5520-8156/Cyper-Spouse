@@ -75,6 +75,7 @@ from .proposal_audit import ProposalAuditContext, ProposalAuditRecorder
 from .proposal_envelope import DecisionProposal
 from .random_authority import RandomAuthority, RandomDrawRecordedPayload
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 from .schemas import (
     ClaimLease,
     LedgerProjection,
@@ -383,7 +384,11 @@ async def run_bounded_model_step(
     for attempt in range(attempts):
         try:
             async with asyncio.timeout(step.timeout_seconds):
-                raw_value = await model.complete(messages, temperature=step.temperature)
+                raw_value = await complete_json_object(
+                    model,
+                    messages,
+                    temperature=step.temperature,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

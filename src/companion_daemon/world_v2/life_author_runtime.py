@@ -19,6 +19,7 @@ from .life_events import ActivityPlannedPayload
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
 from .schemas import DueWindow, EvidenceRef, PlanStateProjection, ProjectionCursor, WorldEvent
+from .structured_completion import complete_json_object
 
 
 def _digest(value: object) -> str:
@@ -681,7 +682,8 @@ class LifeAuthorRuntime:
         decision_context: dict[str, object],
     ) -> tuple[_Decision, str]:
         try:
-            raw = await self._model.complete(
+            raw = await complete_json_object(
+                self._model,
                 [
                     {
                         "role": "system",

@@ -128,6 +128,45 @@ class _JsonOnlyModel:
 
 
 @pytest.mark.asyncio
+async def test_full_appraisal_uses_provider_json_output_interface() -> None:
+    model = _JsonOnlyModel(
+        '{"appraise":false,"brief_rationale":"The quiet can remain ordinary.",'
+        '"behavior_tendency":"observe","stance":"wait",'
+        '"display_strategy":"withhold","confidence":3000}'
+    )
+
+    output = await AppraisalDraftDeliberationAdapter(model=model).propose(_request())
+
+    assert model.json_calls
+    assert (
+        DecisionProposal.model_validate_json(json.dumps(output.raw_proposal)).affect_decision
+        == "no_change"
+    )
+    assert "example_json" not in model.json_calls[0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_full_appraisal_recovery_is_a_real_model_reselection() -> None:
+    model = _JsonOnlyModel(
+        '{"appraise":true,"brief_rationale":"Waiting now feels uncertain.",'
+        '"behavior_tendency":"reflect","stance":"attend",'
+        '"display_strategy":"withhold","confidence":6500,'
+        '"meanings":[{"meaning":"uncertainty","confidence":6500}],'
+        '"attribution":"situation","severity":3200}'
+    )
+
+    output = await AppraisalDraftDeliberationAdapter(model=model).recover(
+        _request(), "main_invalid_output"
+    )
+
+    proposal = DecisionProposal.model_validate_json(json.dumps(output.raw_proposal))
+    assert len(model.json_calls) == 1
+    assert "main_invalid_output" in model.json_calls[0][-1]["content"]
+    assert proposal.proposed_changes
+    assert "model unavailable" not in proposal.brief_rationale.lower()
+
+
+@pytest.mark.asyncio
 async def test_full_appraisal_reselects_instead_of_clamping_a_below_bound_affect_target() -> None:
     model = _SequencedModel(
         [

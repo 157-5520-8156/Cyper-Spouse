@@ -18,6 +18,7 @@ from typing import Any
 _ACTOR_PROPOSAL_KIND = "npc_ecology"
 _WORLD_PROPOSAL_KIND = "npc_ecology_world_adjudication"
 _TECHNICAL_FAILURE_PREFIX = "life-ecology:technical_failure.npc_ecology."
+_CURRENT_POLICY = "policy:npc-ecology.2"
 
 
 def _rate(*, numerator: int, denominator: int) -> dict[str, object]:
@@ -44,15 +45,29 @@ def _unknown_usage() -> dict[str, object]:
 def _exact_events(*, projection: object, ledger: object) -> tuple[object, ...]:
     """Read exact interesting events and reject mismatched lookup results."""
 
-    events: list[object] = []
-    for authority in getattr(projection, "committed_world_event_refs", ()):
-        if authority.event_type not in {
+    interesting = frozenset(
+        {
             "ProposalRecorded",
             "ModelResultRecorded",
             "TriggerProcessCompleted",
             "NpcStatusChanged",
             "NpcStateChanged",
-        }:
+        }
+    )
+    logical_time = getattr(projection, "logical_time", None)
+    recent_reader = getattr(ledger, "recent_events_by_type", None)
+    if isinstance(logical_time, datetime) and callable(recent_reader):
+        return tuple(
+            recent_reader(
+                event_types=interesting,
+                since=logical_time - timedelta(hours=24),
+                limit=16_384,
+            )
+        )
+
+    events: list[object] = []
+    for authority in getattr(projection, "committed_world_event_refs", ()):
+        if authority.event_type not in interesting:
             continue
         located = ledger.lookup_event_commit(authority.event_id)
         if located is None:
@@ -295,6 +310,49 @@ def npc_ecology_health_snapshot(
     unattributed_failures = sum(item[2] is None for item in technical_failures)
     actor_attempts = tuple(item for item in model_attempts if item[1] == "actor")
     world_attempts = tuple(item for item in model_attempts if item[1] == "world")
+
+    def success_rates(role: str) -> tuple[dict[str, object], dict[str, object]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event, audit in raw_model_attempts:
+            route = audit.get("route")
+            if not isinstance(route, dict) or route.get("reason_code") != f"npc_ecology_{role}":
+                continue
+            policy_version = audit.get("model_version") or audit.get(
+                "attempted_model_version"
+            )
+            if policy_version != _CURRENT_POLICY:
+                continue
+            if not _in_last_day(event, logical_time=logical_time):
+                continue
+            attempt_id = audit.get("attempt_id")
+            if not isinstance(attempt_id, str):
+                attempt_id = str(audit.get("model_call_id") or event.event_id)
+            grouped.setdefault(attempt_id, []).append(audit)
+        first_pass = sum(
+            bool(audits) and audits[0].get("status") == "proposal_validated"
+            for audits in grouped.values()
+        )
+        eventually_valid = sum(
+            any(audit.get("status") in successful_statuses for audit in audits)
+            for audits in grouped.values()
+        )
+        return (
+            _rate(numerator=eventually_valid, denominator=len(grouped)),
+            _rate(numerator=first_pass, denominator=len(grouped)),
+        )
+
+    actor_success_rate, actor_first_pass_rate = success_rates("actor")
+    world_success_rate, world_first_pass_rate = success_rates("world")
+    warning_reasons = []
+    for name, rate in (
+        ("actor_consideration_success_below_90_percent", actor_success_rate),
+        ("actor_first_attempt_success_below_90_percent", actor_first_pass_rate),
+        ("world_consideration_success_below_90_percent", world_success_rate),
+        ("world_first_attempt_success_below_90_percent", world_first_pass_rate),
+    ):
+        value = rate.get("value_bp")
+        if isinstance(value, int) and value < 9_000:
+            warning_reasons.append(name)
     return {
         "dynamic_count": len(dynamic_refs),
         "promotion_closed_count": len(closed_dynamic_refs),
@@ -317,11 +375,15 @@ def npc_ecology_health_snapshot(
             _in_last_day(item[0], logical_time=logical_time) for item in actor_attempts
         ),
         "actor_failed_model_attempt_count": sum(item[2] for item in actor_attempts),
+        "actor_consideration_success_rate_24h": actor_success_rate,
+        "actor_first_attempt_success_rate_24h": actor_first_pass_rate,
         "world_model_attempt_count": len(world_attempts),
         "world_model_attempt_count_24h": sum(
             _in_last_day(item[0], logical_time=logical_time) for item in world_attempts
         ),
         "world_failed_model_attempt_count": sum(item[2] for item in world_attempts),
+        "world_consideration_success_rate_24h": world_success_rate,
+        "world_first_attempt_success_rate_24h": world_first_pass_rate,
         "scene_reappearance_count": total_scene_reappearances,
         "reappeared_npc_count": sum(int(item["scene_reappearance_count"] > 0) for item in per_npc),
         "lifecycle_reactivation_count": total_lifecycle_reactivations,
@@ -334,7 +396,10 @@ def npc_ecology_health_snapshot(
             sorted(Counter(item[1] for item in technical_failures).items())
         ),
         "audit_read_failure_count": unreadable_audit_count,
+        "warning": bool(warning_reasons),
+        "warning_reasons": warning_reasons,
         "provider_attempt_evidence": "model_result_recorded",
+        "success_rate_policy_version": _CURRENT_POLICY,
         "actor_usage": _unknown_usage(),
         "world_usage": _unknown_usage(),
         "per_npc": per_npc,

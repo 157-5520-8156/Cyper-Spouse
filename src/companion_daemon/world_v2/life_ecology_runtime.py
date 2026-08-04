@@ -527,8 +527,14 @@ class LifeEcologyRuntime:
         # claimed this wake.  Unlike the retired reviewed-candidate lane it is
         # also valid beside open Life Development; both share the ordinary
         # occurrence/aftermath event machine, so only one may materialize.
+        npc_has_due_work = False
+        if self._npc_initiative_followup is not None:
+            due_reader = getattr(self._npc_initiative_followup, "has_due_work", None)
+            if callable(due_reader):
+                npc_has_due_work = bool(due_reader(projection=projection))
         if (
             self._npc_initiative_followup is not None
+            and (development_due or npc_has_due_work)
             and author_status != "planned"
             and activity_status != "transitioned"
             and future_author_status != "planned"

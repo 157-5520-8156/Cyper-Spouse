@@ -20,6 +20,7 @@ from pydantic import Field, model_validator
 
 from .chat_model_deliberation_adapter import ChatCompletionModel
 from .schema_core import FrozenModel
+from .structured_completion import complete_json_object
 
 
 _CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
@@ -275,16 +276,28 @@ class RelationshipEvaluationDraftAdapter:
         self._temperature = temperature
 
     async def deliberate(
-        self, *, capsule: RelationshipEvaluationDraftCapsule
+        self,
+        *,
+        capsule: RelationshipEvaluationDraftCapsule,
+        correction_failure: str | None = None,
     ) -> RelationshipEvaluationDraft:
-        raw = await self._model.complete(self._messages(capsule), temperature=self._temperature)
+        messages = self._messages(capsule, correction_failure=correction_failure)
+        raw = await complete_json_object(
+            self._model,
+            messages,
+            temperature=self._temperature,
+        )
         return materialize_relationship_evaluation_draft(
             raw=raw, capsule=capsule, model=self._model_id
         )
 
     @staticmethod
-    def _messages(capsule: RelationshipEvaluationDraftCapsule) -> list[dict[str, str]]:
-        return [
+    def _messages(
+        capsule: RelationshipEvaluationDraftCapsule,
+        *,
+        correction_failure: str | None = None,
+    ) -> list[dict[str, str]]:
+        messages = [
             {
                 "role": "system",
                 "content": (
@@ -322,6 +335,19 @@ class RelationshipEvaluationDraftAdapter:
                 ),
             },
         ]
+        if correction_failure is not None:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your preceding result failed this exact boundary: "
+                        + correction_failure
+                        + ". Re-select once as the same relationship authority, using only the "
+                        "unchanged pinned capsule and JSON contract above."
+                    ),
+                }
+            )
+        return messages
 
 
 __all__ = [

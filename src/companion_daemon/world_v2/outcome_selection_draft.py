@@ -14,6 +14,7 @@ from typing import Literal, Protocol
 from pydantic import Field, field_validator
 
 from .schema_core import FrozenModel, PrivacyClass
+from .structured_completion import complete_json_object
 
 
 class OutcomeSelectionModel(Protocol):
@@ -278,7 +279,8 @@ class OutcomeSelectionDraftAdapter:
         )
         initial_request_hash = _messages_hash(messages)
         try:
-            raw = await self._model.complete(
+            raw = await complete_json_object(
+                self._model,
                 messages,
                 temperature=self._temperature,
             )
@@ -343,7 +345,8 @@ class OutcomeSelectionDraftAdapter:
             ]
             correction_request_hash = _messages_hash(correction_messages)
             try:
-                corrected = await self._model.complete(
+                corrected = await complete_json_object(
+                    self._model,
                     correction_messages,
                     temperature=self._temperature,
                 )
