@@ -1054,8 +1054,8 @@ commit：hash
   node。当前已加入的 public-host 场景覆盖 deferred reply/Commitment/Action、proactive silent 与技术退避、
   expression multibeat/interjection、platform receipt unknown→late conflict，以及 affect decay/silence
   aftermath 的重启、effect-once 和冷重放；测试明确排除真实 provider 自主性、OneBot callback 归一化和 24h
-  soak。Life occurrence、NPC/reflection、memory consolidation、perception/media 仍按 limited/dormant 事实
-  标注，不得因为 catalog 有行就激活。
+  soak。Life occurrence 的活动生命周期已有独立 public-host 场景；NPC/reflection、memory consolidation、
+  perception/media 仍按 limited/dormant 事实标注，不得因为 catalog 有行就激活。
 - 本轮当前工作树的定向回归均已通过（覆盖结构化角色、LLM、表达式校正、主动联系与延迟触发主机证据）；
   后续完整套件回归为 `4871 passed, 1 warning`（矩阵声明门禁另行通过）。ruff、语法检查和
   `git diff --check` 也通过。这仍不是真实 provider qualification 或生产上线证明，具体资格缺口保持
@@ -1076,11 +1076,11 @@ commit：hash
   provider request identity 绑定 canonical/provider schema 与当前 source capability。没有 required-tool 能力
   的历史 strict JSON lane 仍可用于 replay/隔离 fixture，但不授予生产资格。
 - 已验证：contract public seam 的互斥/无损解包、DeepSeek-compatible HTTP body、真实 ExpressionDraft public
-  proposal seam 的一次校正与无 plain fallback，以及相关结构化/入站回归和 ruff/diff-check。真实 DeepSeek
-  forced-tool/stream/receipt 样本、每 purpose first-attempt 统计、QQ 自由对聊及 24h soak 仍保持
-  `qualification_incomplete`，不能以 MockTransport 或 fixture 结果替代。现有隔离 daemon 验收脚本的
-  `forced_tool_request_hashes` 只重建 `character_inbound_*`，尚未把 `character_expression_reselection_v1`
-  纳入因果证据；若场景触发该校正，它会安全地不计入 hash，而不是伪造通过，待后续资格包补齐。
+  proposal seam 的一次校正与无 plain fallback，以及相关结构化/入站回归和 ruff/diff-check。隔离 daemon
+  验收脚本现可用 canonical source-closure envelope 或 `expression-reselection-transport.1` carrier
+  重建 `character_expression_reselection_v1` 的本地 identity；缺失/嵌套/重复/边界不完整时安全不计入。
+  这只修复证据关联，真实 DeepSeek forced-tool/stream/receipt 样本、每 purpose first-attempt 统计、QQ
+  自由对聊及 24h soak 仍保持 `qualification_incomplete`，不能以 MockTransport 或 fixture 结果替代。
 
 ### 2026-08-09：ambient proactive public-host 资格场景薄片
 
@@ -1113,7 +1113,8 @@ commit：hash
   效果、cold replay 与 live head 一致，第二条入站在第一条 provider 请求仍在途时成功提交，三条 burst 保留
   全部 source event 并合并为一个 Action。该结果是 transport/daemon/CAS/回执连续性的人工证据，不是措辞、
   自主性或生产成功率证明。
-- 最终定向回归为 `533 passed`，ruff 与 `git diff --check` 通过。真实 provider 证据仍严格标记
+- 当时最终定向回归为 `533 passed`，ruff 与 `git diff --check` 通过；之后的表达式 carrier/证据边界回归另行
+  通过（表达式/入站/验收相关 506 项，Delayed Trigger Matrix/host 44 项）。真实 provider 证据仍严格标记
   `manual_only`/`qualification_incomplete`：当前未满足 100 次 forced-tool/stream/QQ 回执样本、自由对聊
   质量观察和 24 小时 soak 的发布门；旧生产 daemon 也未在本轮被替换或重启。
 
@@ -1130,9 +1131,22 @@ commit：hash
   内容生成资格。真实 provider、自主生活选择、OneBot 回执和 24 小时 soak 继续排除；Matrix 仍为
   `declaration_only`。本薄片及既有延迟触发场景回归共 `44 passed`，静态 verifier 仍报告
   `28 delayed trigger mechanisms`。
-- 当前仍有三个 `release_status: active` 机制没有独立 host 场景：`proactive.post_silent`、
-  `life.activity_lifecycle`、`life.aftermath_outcome`。它们保持现状，不用空测试或降级状态伪造资格；其中
-  `proactive.post_silent` 的公开关系/节奏材料仍需后续隔离场景或明确 release 取舍。
+- 当前仍有两个 `release_status: active` 机制没有独立 host 场景：`proactive.post_silent` 与
+  `life.aftermath_outcome`。它们保持现状，不用空测试或降级状态伪造资格；其中 `proactive.post_silent` 的
+  公开关系/节奏材料、以及 aftermath 的真实 outcome-author 路径，仍需后续隔离场景或明确 release 取舍。
+
+### 2026-08-09：Life activity lifecycle public-host 调度资格薄片
+
+- 为 `life.activity_lifecycle` 增加一条真正从生产公开宿主入口运行的隔离场景：第一次
+  `QQC2CHost.tick(run_life_ecology=True)` 让 World Author 在已提交的 Clock wake 上提出一项动态、来源绑定的
+  生活可能性；下一次公开 tick 让同一个 `CharacterInterior` 以 `activity_lifecycle_choice` 选择或不选择
+  已提供的 opening token。系统只负责 catalog、权限、CAS、接受和 occurrence effect，未预置具体行为剧本。
+- 场景仅使用 `tick`、`drain`、`export_replay_evidence`、`world_health_diagnostics` 与 `aclose` 等公开宿主
+  seam，并检查 `ActivityLifecycleProposalRecorded`、`WorldOccurrenceActivated`、同一角色模型调用和
+  `effect-once` 终态。没有直调 Life worker、ledger 私有写入口或 trigger mutator。
+- 该证据使用 scripted typed World Author/CharacterInterior fixture，只证明公开调度、角色选择绑定和接受链路；
+  Matrix 仍是 `declaration_only`，明确排除真实 DeepSeek、自主内容质量、OneBot 回执和 24 小时 soak。
+  新增场景与 Life Ecology/Matrix 定向回归共 `31 passed`，静态 verifier 仍报告 `28 delayed trigger mechanisms`。
 
 ### 2026-08-09：隔离验收证据的精确上下文边界
 
