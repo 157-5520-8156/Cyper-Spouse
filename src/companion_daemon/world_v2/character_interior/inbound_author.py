@@ -36,6 +36,7 @@ from .inbound_appraisal_wire import (
     _appraisal_draft_messages,
     _proposal_from_draft as materialize_appraisal_draft,
 )
+from .inbound_tool_contract import InboundToolContracts
 from .inbound_wire import (
     _ExpressionDraftWire,
     _ProviderSubcallAuditCapture,
@@ -160,215 +161,6 @@ _APPRAISAL_AFFECT_FIELDS = {
 logger = logging.getLogger(__name__)
 
 
-def _combined_cognition_tool() -> dict[str, object]:
-    """The single forced tool for the main character call.
-
-    Function calling makes the outer envelope structure a server-side
-    guarantee: the model fills field values instead of hand-serializing the
-    combined JSON envelope, which eliminates the wire-invalid envelope class
-    (missing keys, extra keys, wrong outer shape). The arguments JSON is the
-    same ``{"appraisal_draft": ..., "expression_draft": ...}`` envelope the
-    rest of the pipeline already parses.
-    """
-
-    return {
-        "type": "function",
-        "function": {
-            "name": "combined_cognition",
-            "description": (
-                "Produce the character's inner appraisal and visible expression together. "
-                "Return exactly one tool call with both appraisal_draft and expression_draft."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "appraisal_draft": {
-                        "type": "object",
-                        "properties": {
-                            "appraise": {"type": "boolean"},
-                            "affect": {
-                                "type": "string",
-                                "enum": ["no_change", "open", "update", "resolve", "supersede"],
-                            },
-                            "brief_rationale": {"type": "string", "maxLength": 240},
-                            "behavior_tendency": {"type": "string", "maxLength": 128},
-                            "stance": {"type": "string", "maxLength": 128},
-                            "display_strategy": {"type": "string", "maxLength": 128},
-                            "confidence": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 10000,
-                            },
-                            "meanings": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "meaning": {"type": "string", "maxLength": 64},
-                                        "confidence": {
-                                            "type": "integer",
-                                            "minimum": 0,
-                                            "maximum": 10000,
-                                        },
-                                    },
-                                    "required": ["meaning", "confidence"],
-                                    "additionalProperties": False,
-                                },
-                                "maxItems": 3,
-                            },
-                            "attribution": {
-                                "type": "string",
-                                "enum": [
-                                    "user",
-                                    "companion",
-                                    "npc",
-                                    "situation",
-                                    "third_party",
-                                    "unknown",
-                                ],
-                            },
-                            "severity": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 10000,
-                            },
-                            "components": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "component_id": {"type": "string"},
-                                        "dimension": {
-                                            "type": "string",
-                                            "enum": [
-                                                "hurt",
-                                                "anger",
-                                                "sadness",
-                                                "loneliness",
-                                                "anxiety",
-                                                "resentment",
-                                                "warmth",
-                                                "joy",
-                                            ],
-                                        },
-                                        "target_intensity_bp": {
-                                            "type": "integer",
-                                            "minimum": 1,
-                                            "maximum": 10000,
-                                        },
-                                    },
-                                    "required": ["dimension", "target_intensity_bp"],
-                                    "additionalProperties": False,
-                                },
-                                "maxItems": 8,
-                            },
-                            "episode_id": {"type": "string"},
-                            "resolution_summary": {"type": "string", "maxLength": 1200},
-                        },
-                        "required": [
-                            "appraise",
-                            "brief_rationale",
-                            "behavior_tendency",
-                            "stance",
-                            "display_strategy",
-                            "confidence",
-                        ],
-                        "additionalProperties": False,
-                    },
-                    "expression_draft": {
-                        "type": "object",
-                        "properties": {
-                            "private_turn_state": {
-                                "type": "object",
-                                "properties": {
-                                    "contract": {"type": "string"},
-                                    "inner_state_summary": {"type": "string", "maxLength": 140},
-                                    "attended_source_refs": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                        "maxItems": 8,
-                                    },
-                                },
-                                "required": [
-                                    "contract",
-                                    "inner_state_summary",
-                                    "attended_source_refs",
-                                ],
-                                "additionalProperties": False,
-                            },
-                            "timing_choice": {
-                                "type": "string",
-                                "enum": ["now", "later", "silent"],
-                            },
-                            "turn_posture": {
-                                "type": "string",
-                                "enum": ["yield", "continue", "interject", "supersede"],
-                            },
-                            "cadence": {
-                                "type": "string",
-                                "enum": ["rapid", "conversational", "hesitant", "escalating"],
-                            },
-                            "beats": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "modality": {
-                                            "type": "string",
-                                            "enum": ["text", "typing"],
-                                        },
-                                        "text": {"type": "string"},
-                                    },
-                                    "required": ["modality"],
-                                    "additionalProperties": False,
-                                },
-                                "maxItems": 8,
-                            },
-                            "stance": {"type": "string", "maxLength": 128},
-                            "brief_rationale": {"type": "string", "maxLength": 240},
-                            "confidence": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 10000,
-                            },
-                            "world_claims": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "claim_text": {"type": "string", "maxLength": 512},
-                                        "scope": {"type": "string"},
-                                        "source_refs": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                            "maxItems": 8,
-                                        },
-                                    },
-                                    "required": ["claim_text", "scope", "source_refs"],
-                                    "additionalProperties": False,
-                                },
-                                "maxItems": 8,
-                            },
-                        },
-                        "required": [
-                            "timing_choice",
-                            "beats",
-                            "stance",
-                            "brief_rationale",
-                            "confidence",
-                        ],
-                        "additionalProperties": False,
-                    },
-                },
-                "required": ["appraisal_draft", "expression_draft"],
-                "additionalProperties": False,
-            },
-        },
-    }
-
-
-def _combined_cognition_tool_choice() -> dict[str, object]:
-    return {"type": "function", "function": {"name": "combined_cognition"}}
 
 
 class _InboundRecallRequested(RuntimeError):
@@ -2602,6 +2394,7 @@ class _InboundCharacterAuthor:
                 separators=(",", ":"),
             ),
         }
+        recall_context_available = model_content_allows_recall(request.model_content_json)
         recall_available = self._recall_available(request)
         recall_choice_envelope = (
             '{"private_turn_state":{...},"recall_request":{...}}'
@@ -2694,8 +2487,17 @@ class _InboundCharacterAuthor:
             )
         provider = transport_provider or self._selected_provider(request)
         model_id = self._model_id_for_provider(request, provider)
-        cognition_tools = [_combined_cognition_tool()]
-        cognition_tool_choice = _combined_cognition_tool_choice()
+        cognition_contract = InboundToolContracts().contract_for(
+            phase=("initial" if recall_context_available else "after_recall"),
+            capabilities=self._capabilities,
+            recall_allowed=recall_available,
+            require_turn_posture=(
+                provider_request.trigger_message is not None
+                and provider_request.trigger_message.turn_attention_advisory is not None
+            ),
+        )
+        cognition_tools = list(cognition_contract.provider_tools)
+        cognition_tool_choice = cognition_contract.provider_tool_choice
         metered = (
             None
             if transport_provider is not None
@@ -2706,6 +2508,26 @@ class _InboundCharacterAuthor:
         use_forced_tool = callable(metered) and bool(
             getattr(provider, "supports_required_tool_choice", False)
         )
+        if use_forced_tool:
+            messages[0]["content"] += (
+                "\n\nFORCED TOOL TRANSPORT (overrides only the outer JSON envelope above): "
+                "call the required function exactly once. Its arguments must include "
+                "result_kind. For result_kind=decision include appraisal_draft and "
+                "expression_draft exactly as specified above. "
+                + (
+                    "For result_kind=recall include recall_request"
+                    + (
+                        " and private_turn_state"
+                        if self._capabilities.private_turn_state_mode == "required"
+                        else " (private_turn_state may also be included)"
+                    )
+                    + "."
+                    if cognition_contract.recall_allowed
+                    else "Recall is unavailable on this call; use result_kind=decision."
+                )
+                + " result_kind is transport-only and does not choose your appraisal, affect, "
+                "timing, expression, or silence."
+            )
         winning_provider_identity = _provider_invocation_identity(
             parent_call_id=provider_request.call_id,
             purpose="paired_cognition_initial",
@@ -2713,8 +2535,14 @@ class _InboundCharacterAuthor:
             temperature=self._temperature,
             tools=(cognition_tools if use_forced_tool else None),
             tool_choice=(cognition_tool_choice if use_forced_tool else None),
+            tool_contract_identity=(
+                cognition_contract.identity.request_identity_material()
+                if use_forced_tool
+                else None
+            ),
         )
         usage: ModelUsageProvenance | None = None
+        forced_transport_error: ValueError | None = None
         exact_request_emission = bool(
             getattr(provider, "reports_exact_request_emission", False)
         )
@@ -2763,6 +2591,14 @@ class _InboundCharacterAuthor:
                         if callable(complete_json)
                         else provider.complete(messages, temperature=self._temperature)
                     )
+            if use_forced_tool:
+                try:
+                    raw = cognition_contract.unwrap(raw)
+                except ValueError as exc:
+                    # Preserve the candidate for the existing bounded
+                    # same-role envelope correction below; a transport error
+                    # must not become an immediate visible-turn failure.
+                    forced_transport_error = exc
             if not exact_request_emission:
                 mark_first_role_provider_completion(
                     winning_provider_identity.model_call_id
@@ -2822,6 +2658,7 @@ class _InboundCharacterAuthor:
                 raise
             usage = _combine_usage(usage, corrected_result.usage, request.call_id)
             raw = corrected_result.raw
+            forced_transport_error = None
             if (
                 corrected_result.winning_model_call_id is None
                 or corrected_result.winning_request_hash is None
@@ -3047,7 +2884,10 @@ class _InboundCharacterAuthor:
             winning_provider_identity = followup_identity
         else:
             provider_expression_request = provider_request
+        envelope_corrective_spent = False
         try:
+            if forced_transport_error is not None:
+                raise forced_transport_error
             value = _parse_combined(raw)
         except (TypeError, ValueError) as exc:
             failed_key = _failed_cache_key(expression_request)
@@ -3089,18 +2929,35 @@ class _InboundCharacterAuthor:
                 value = _parse_combined(corrected.raw)
             except (TypeError, ValueError):
                 raise
+            envelope_corrective_spent = True
         key = _cache_key(request)
-        appraisal_raw = json.dumps(
-            value["appraisal_draft"], ensure_ascii=False, separators=(",", ":")
-        )
-        appraisal_proposal: dict[str, object] | None = None
-        corrective_spent = recall_choice_corrective_spent
-        try:
-            appraisal_proposal = materialize_appraisal_draft(
-                raw=appraisal_raw,
+
+        def materialize_live_appraisal(raw_value: dict[str, object]) -> dict[str, object]:
+            if use_forced_tool and "affect" not in raw_value:
+                # Historical/plain appraisal bytes retain the omitted
+                # no_change compatibility default. Every candidate descended
+                # from a live forced result must state this role-owned
+                # lifecycle choice, including its one bounded correction.
+                raise ValueError("forced AppraisalDraft must explicitly include affect")
+            return materialize_appraisal_draft(
+                raw=json.dumps(raw_value, ensure_ascii=False, separators=(",", ":")),
                 request=request,
             )
+
+        appraisal_proposal: dict[str, object] | None = None
+        corrective_spent = recall_choice_corrective_spent or envelope_corrective_spent
+        try:
+            appraisal_proposal = materialize_live_appraisal(value["appraisal_draft"])
         except AffectTargetBelowMinimumError as target_error:
+            if corrective_spent:
+                raise ValidationTechnicalFailure(
+                    "affect_target_reselection_invalid",
+                    model_call_id=winning_provider_identity.model_call_id,
+                    request_hash=winning_provider_identity.request_hash,
+                    attempted_model_id=model_id,
+                    attempted_model_version=self.VERSION,
+                    usage=usage,
+                ) from target_error
             repair_timeout = fit_secondary_call_timeout(_CLAIM_REPAIR_TIMEOUT_SECONDS)
             if repair_timeout is None:
                 raise TimeoutError("paired Affect target reselection budget exhausted")
@@ -3127,15 +2984,7 @@ class _InboundCharacterAuthor:
             )
             try:
                 value = _parse_combined(corrected.raw)
-                appraisal_raw = json.dumps(
-                    value["appraisal_draft"],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                appraisal_proposal = materialize_appraisal_draft(
-                    raw=appraisal_raw,
-                    request=request,
-                )
+                appraisal_proposal = materialize_live_appraisal(value["appraisal_draft"])
             except (TypeError, ValueError) as second_error:
                 raise ValidationTechnicalFailure(
                     "affect_target_reselection_invalid",
@@ -3196,15 +3045,7 @@ class _InboundCharacterAuthor:
             corrected_usage = _combine_usage(usage, corrected.usage, request.call_id)
             try:
                 value = _parse_combined(corrected.raw)
-                appraisal_raw = json.dumps(
-                    value["appraisal_draft"],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                appraisal_proposal = materialize_appraisal_draft(
-                    raw=appraisal_raw,
-                    request=request,
-                )
+                appraisal_proposal = materialize_live_appraisal(value["appraisal_draft"])
             except (TypeError, ValueError) as second_error:
                 raise ValidationTechnicalFailure(
                     "appraisal_reselection_invalid",

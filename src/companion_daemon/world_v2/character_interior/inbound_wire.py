@@ -68,6 +68,7 @@ from ..expression_draft import (
     materialize_expression_draft,
     normalize_expression_draft_wire,
     request_requires_response_expectation_assessment,
+    required_authored_expression_fields,
     single_report_epistemic_scope_boundary,
     validate_expression_private_turn_state,
     world_claim_source_ref_aliases_by_scope,
@@ -1202,6 +1203,7 @@ def _provider_invocation_identity(
     temperature: float,
     tools: list[dict[str, object]] | None = None,
     tool_choice: object | None = None,
+    tool_contract_identity: dict[str, str] | None = None,
 ) -> _ProviderInvocationIdentity:
     """Bind one adapter sub-call to the exact payload supplied to its provider."""
 
@@ -1212,6 +1214,8 @@ def _provider_invocation_identity(
     if tools is not None:
         identity_payload["tools"] = tools
         identity_payload["tool_choice"] = tool_choice
+    if tool_contract_identity is not None:
+        identity_payload["tool_contract_identity"] = tool_contract_identity
     request_hash = _digest(identity_payload)
     return _ProviderInvocationIdentity(
         model_call_id=(
@@ -10709,17 +10713,10 @@ def _require_explicit_authored_expression_fields(
     # not borrow them for effect-bearing choices.  In particular, omitting
     # ``timing_choice`` cannot silently authorize an immediate visible effect.
     # One bounded same-role correction owns recovery from an incomplete wire.
-    required = {
-        "beats",
-        "confidence",
-        "stance",
-        "brief_rationale",
-        "timing_choice",
-    }
-    if capabilities.recorded_cadence_mode == "on":
-        required.add("cadence")
-    if require_turn_posture:
-        required.add("turn_posture")
+    required = required_authored_expression_fields(
+        capabilities=capabilities,
+        require_turn_posture=require_turn_posture,
+    )
     missing = tuple(sorted(required.difference(value)))
     if missing:
         raise _AuthoredExpressionDraftShapeError(missing)

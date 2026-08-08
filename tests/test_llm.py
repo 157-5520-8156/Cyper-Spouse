@@ -20,6 +20,10 @@ from companion_daemon.llm import (
     model_turn_scope,
 )
 from companion_daemon.world_v2.deliberation import ModelUsageProvenance
+from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
+    InboundToolContracts,
+)
+from companion_daemon.world_v2.expression_draft import QQ_NAPCAT_EXPRESSION_CAPABILITIES
 
 
 def _claim_stale_capacity_marker_in_process(
@@ -342,6 +346,62 @@ def test_deepseek_json_payload_requests_one_object() -> None:
     )
 
     assert payload["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_deepseek_http_request_preserves_inbound_forced_tool_contract() -> None:
+    captured: dict[str, object] = {}
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": contract.identity.tool_name,
+                                        "arguments": '{"result_kind":"recall","recall_request":{"query_text":"x"}}',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        raw, _usage = await model.complete_json_with_usage(
+            [{"role": "user", "content": "choose"}],
+            tools=list(contract.provider_tools),
+            tool_choice=contract.provider_tool_choice,
+        )
+    finally:
+        await model.aclose()
+
+    assert raw == '{"result_kind":"recall","recall_request":{"query_text":"x"}}'
+    assert captured["tools"] == list(contract.provider_tools)
+    assert captured["tool_choice"] == contract.provider_tool_choice
+    parameters = captured["tools"][0]["function"]["parameters"]
+    assert parameters["anyOf"]
 
 
 @pytest.mark.asyncio

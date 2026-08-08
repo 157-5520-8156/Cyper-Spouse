@@ -975,3 +975,24 @@ commit：hash
 - 仍未宣称生产资格完成：当前生产账本保留 24 小时历史技术失败 warning，语义 embedding 8190 未部署时 Recall
   会降级到本地索引，Perception enforcement authority 与独立事实 reviewer 仍是明确 degraded 能力；这些不被
   结构化封套修复冒充为角色选择。真实 QQ 自由对聊、冷重放和 24 小时稳定性样本仍是 qualification gate。
+
+### L1 第一个生产薄片：non-stream inbound initial（2026-08-08）
+
+- 仅将当前非流式的 inbound combined initial 角色调用迁入版本化 forced-tool contract；stream、
+  recall follow-up、各类 correction 与其他 CharacterInterior purpose 仍未迁移，因此 L1 状态仍是
+  `partial / qualification_incomplete`，不把这一薄片写成全局完成。
+- 新的 `InboundToolContracts` 从 canonical typed Appraisal/Expression/Recall wire 与当前 QQ capability
+  派生 provider schema，保留 `now/later/silent/recall`、多 Beat、reaction/sticker、expectation、
+  relationship signal 与 Affect lifecycle；删除了会缩减合法选择的手写 combined tool 字段表。
+- forced envelope 必须明确且互斥地选择 decision 或 recall；缺少/mismatch 不由宿主重解释，
+  而是进入同一角色模型的一次有界纠正。该纠正预算按整个 turn 共享；envelope 纠正后再出现
+  appraisal、Affect floor 或 expression 错误会终结为技术失败，不会打开第三次语义重选。
+- live forced 候选与其纠正必须显式选择 Affect lifecycle；open/update/resolve/supersede 的结构必需字段
+  由同一 canonical 定义同时驱动 typed validator 和 provider schema。Prompt 的数量、长度与显式
+  `affect` 要求也从同一边界生成，不再存在两套矛盾数字。
+- tool name/version、canonical/provider schema digest 与 capability profile 绑定 provider request identity；它们不作为
+  非标准字段发给 provider。可读 contract audit 与冷重放 fixture 仍列入下一包，不由 opaque hash
+  的存在冒充完成。
+- 当前本地证据：直接相关与扩展 CharacterInterior/LLM/registry 回归合计 `589 passed`；相关
+  ruff 与 `git diff --check` 通过。真实 DeepSeek ordinary function-call 样本、流式工具碎片、每 purpose
+  first-attempt 统计与真实 daemon 资格测试仍未完成。

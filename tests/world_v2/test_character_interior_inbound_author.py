@@ -1526,6 +1526,248 @@ async def test_forced_tool_internal_type_error_never_retries_plain_request() -> 
     assert provider.plain_calls == 0
 
 
+class _ToolIdentityCombinedProvider(_CombinedProvider):
+    """Explicit provider-capable fixture for the public inbound author seam."""
+
+    supports_required_tool_choice = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tool_calls: list[tuple[list[dict[str, object]] | None, object | None]] = []
+        self.tool_messages: list[list[dict[str, str]]] = []
+
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        self.tool_calls.append((tools, tool_choice))
+        self.tool_messages.append(messages)
+        raw = await self.complete(messages, temperature=temperature)
+        parsed = json.loads(raw)
+        if "AppraisalDraft" in parsed:
+            parsed["appraisal_draft"] = parsed.pop("AppraisalDraft")
+        if "ExpressionDraft" in parsed:
+            parsed["expression_draft"] = parsed.pop("ExpressionDraft")
+        return (
+            json.dumps({"result_kind": "decision", **parsed}, ensure_ascii=False),
+            _metered_usage(ref="usage:tool-identity", input_tokens=20, output_tokens=5),
+        )
+
+
+@pytest.mark.asyncio
+async def test_inbound_forced_tool_request_identity_binds_versioned_schema() -> None:
+    """The visible author call carries one versioned schema in both seams."""
+
+    provider = _ToolIdentityCombinedProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+
+    await author.propose(_request(revision=3, call="call:tool-contract-identity"))
+
+    assert len(provider.tool_calls) == 1
+    tools, tool_choice = provider.tool_calls[0]
+    assert tools is not None
+    function = tools[0]["function"]
+    assert function["name"] == "character_inbound_initial_v1"
+    assert set(function) == {"name", "description", "parameters"}
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_inbound_initial_v1"},
+    }
+    assert "FORCED TOOL TRANSPORT" in provider.tool_messages[0][0]["content"]
+    assert "result_kind=decision" in provider.tool_messages[0][0]["content"]
+
+
+class _ForcedMissingAffectProvider(_ToolIdentityCombinedProvider):
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        raw, usage = await super().complete_json_with_usage(
+            messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        parsed = json.loads(raw)
+        if len(self.tool_calls) == 1:
+            parsed["appraisal_draft"].pop("affect")
+            return json.dumps(parsed, ensure_ascii=False), usage
+        parsed.pop("result_kind", None)
+        return json.dumps(parsed, ensure_ascii=False), usage
+
+
+@pytest.mark.asyncio
+async def test_forced_missing_affect_uses_the_existing_same_role_correction() -> None:
+    provider = _ForcedMissingAffectProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+
+    await author.propose(_request(revision=3, call="call:forced-missing-affect"))
+
+    assert len(provider.tool_calls) == 2
+    assert provider.tool_calls[0][0] is not None
+    assert provider.tool_calls[1][0] is None
+
+
+class _ForcedRepeatedMissingAffectProvider(_ForcedMissingAffectProvider):
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        raw, usage = await super().complete_json_with_usage(
+            messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        parsed = json.loads(raw)
+        if isinstance(parsed.get("appraisal_draft"), dict):
+            parsed["appraisal_draft"].pop("affect", None)
+        return json.dumps(parsed, ensure_ascii=False), usage
+
+
+@pytest.mark.asyncio
+async def test_forced_repeated_missing_affect_is_a_typed_terminal_failure() -> None:
+    provider = _ForcedRepeatedMissingAffectProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+
+    with pytest.raises(ValidationTechnicalFailure, match="appraisal_reselection_invalid"):
+        await author.propose(_request(revision=3, call="call:forced-repeated-missing-affect"))
+
+    assert len(provider.tool_calls) == 2
+
+
+class _MalformedForcedEnvelopeProvider(_ToolIdentityCombinedProvider):
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        raw, usage = await super().complete_json_with_usage(
+            messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        parsed = json.loads(raw)
+        if len(self.tool_calls) == 1:
+            parsed.pop("result_kind")
+            return json.dumps(parsed, ensure_ascii=False), usage
+        parsed.pop("result_kind", None)
+        return json.dumps(parsed, ensure_ascii=False), usage
+
+
+@pytest.mark.asyncio
+async def test_forced_envelope_mismatch_uses_existing_same_role_correction() -> None:
+    provider = _MalformedForcedEnvelopeProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+
+    await author.propose(_request(revision=3, call="call:forced-envelope-mismatch"))
+
+    assert len(provider.tool_calls) == 2
+
+
+class _MalformedEnvelopeThenInvalidAppraisalProvider(_MalformedForcedEnvelopeProvider):
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        raw, usage = await super().complete_json_with_usage(
+            messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        parsed = json.loads(raw)
+        if len(self.tool_calls) == 2:
+            parsed["appraisal_draft"].pop("brief_rationale", None)
+        return json.dumps(parsed, ensure_ascii=False), usage
+
+
+@pytest.mark.asyncio
+async def test_envelope_correction_consumes_the_turn_corrective_budget() -> None:
+    provider = _MalformedEnvelopeThenInvalidAppraisalProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+
+    with pytest.raises(ValidationTechnicalFailure, match="appraisal_reselection_invalid"):
+        await author.propose(_request(revision=3, call="call:envelope-budget-consumed"))
+
+    assert len(provider.tool_calls) == 2
+
+
+class _MalformedEnvelopeThenBelowAffectFloorProvider(_MalformedForcedEnvelopeProvider):
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        raw, usage = await super().complete_json_with_usage(
+            messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        parsed = json.loads(raw)
+        if len(self.tool_calls) == 2:
+            parsed["appraisal_draft"] = {
+                "appraise": True,
+                "affect": "open",
+                "brief_rationale": "The slight still matters.",
+                "behavior_tendency": "pause",
+                "stance": "guarded",
+                "display_strategy": "restrained",
+                "confidence": 7000,
+                "meanings": [{"meaning": "disappointment", "confidence": 7000}],
+                "attribution": "user",
+                "severity": 6000,
+                "components": [
+                    {
+                        "dimension": "hurt",
+                        "target_intensity_bp": 100,
+                    }
+                ],
+            }
+        return json.dumps(parsed, ensure_ascii=False), usage
+
+
+@pytest.mark.asyncio
+async def test_envelope_correction_cannot_open_a_second_affect_floor_correction() -> None:
+    provider = _MalformedEnvelopeThenBelowAffectFloorProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+
+    with pytest.raises(ValidationTechnicalFailure, match="affect_target_reselection_invalid"):
+        await author.propose(
+            _request(
+                revision=3,
+                call="call:envelope-budget-before-affect-floor",
+                hurt_minimum_bp=4200,
+            )
+        )
+
+    assert len(provider.tool_calls) == 2
+
+
 class _MeteredSourceClosureReviewer(_SourceClosureReviewer):
     async def complete_with_usage(
         self, messages: list[dict[str, str]], *, temperature: float = 0.8

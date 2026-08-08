@@ -13,6 +13,7 @@ from companion_daemon.world_v2.affect_target_bounds import (
 from companion_daemon.world_v2.character_interior.inbound_appraisal_wire import (
     _appraisal_draft_messages,
     _proposal_from_draft,
+    canonicalize_appraisal_draft_wire,
 )
 from companion_daemon.world_v2.deliberation import (
     ModelInput,
@@ -157,6 +158,13 @@ def _appraisal(**changes: object) -> dict[str, object]:
     }
 
 
+def _affect_component() -> dict[str, object]:
+    return {
+        "dimension": "hurt",
+        "target_intensity_bp": 2400,
+    }
+
+
 def test_appraisal_prompt_is_an_inert_compiler_for_the_unified_author() -> None:
     messages = _appraisal_draft_messages(_request())
 
@@ -167,6 +175,38 @@ def test_appraisal_prompt_is_an_inert_compiler_for_the_unified_author() -> None:
     assert "no message count" in messages[0]["content"]
     assert "may still choose appraise=false" in messages[0]["content"]
     assert '"trigger_evidence"' in messages[1]["content"]
+
+
+def test_appraisal_prompt_matches_the_canonical_live_wire_bounds() -> None:
+    prompt = _appraisal_draft_messages(_request())[0]["content"]
+
+    assert "brief_rationale (1-240 characters)" in prompt
+    assert "each 1-128 characters" in prompt
+    assert "1-3 objects" in prompt
+    assert "1-128 characters" in prompt
+    assert "affect must be explicit on every live result" in prompt
+    assert "omitting affect means no_change" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("affect", "changes"),
+    [
+        ("open", {}),
+        ("update", {"components": [_affect_component()]}),
+        ("update", {"episode_id": "affect:existing:1"}),
+        ("resolve", {"episode_id": "affect:existing:1"}),
+        ("supersede", {"components": [_affect_component()]}),
+        ("supersede", {"episode_id": "affect:existing:1"}),
+    ],
+)
+def test_canonical_appraisal_rejects_incomplete_affect_lifecycle(
+    affect: str,
+    changes: dict[str, object],
+) -> None:
+    draft = _appraisal(affect=affect, **changes)
+
+    with pytest.raises(ValueError, match="AppraisalDraft wire is invalid"):
+        canonicalize_appraisal_draft_wire(draft)
 
 
 def test_appraisal_prompt_keeps_values_but_omits_capsule_proof_noise() -> None:

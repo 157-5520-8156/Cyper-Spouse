@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal
+
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from ..affect_target_bounds import (
     STANDARD_DECAY_OBJECT_REF,
@@ -28,6 +31,7 @@ from ..proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
+from ..schema_core import FrozenModel
 
 
 _ATTRIBUTIONS = frozenset({"user", "companion", "npc", "situation", "third_party", "unknown"})
@@ -56,6 +60,217 @@ _RELATIONSHIP_DELTA_FIELDS = frozenset(
         "repair_confidence_bp",
     }
 )
+_APPRAISAL_RATIONALE_MAX = 240
+_APPRAISAL_LABEL_MAX = 128
+_APPRAISAL_MEANING_MAX = 128
+_APPRAISAL_MEANINGS_MAX = 3
+_AFFECT_LIFECYCLE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "no_change": (),
+    "open": ("components",),
+    "update": ("episode_id", "components"),
+    "resolve": ("episode_id", "resolution_summary"),
+    "supersede": ("episode_id", "components"),
+}
+
+
+class AppraisalMeaningWire(FrozenModel):
+    meaning: str = Field(min_length=1, max_length=_APPRAISAL_MEANING_MAX)
+    confidence: int | float
+
+    @field_validator("confidence")
+    @classmethod
+    def normalize_probability_confidence(cls, value: int | float) -> int:
+        # Keep the long-standing [0, 1] provider spelling as a wire
+        # compatibility normalization; proposal materialization has always
+        # converted it to basis points.
+        if isinstance(value, float):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError("AppraisalDraft meaning is invalid")
+            return int(round(value * 10_000))
+        if not 0 <= value <= 10_000:
+            raise ValueError("AppraisalDraft meaning is invalid")
+        return value
+
+    @field_validator("meaning")
+    @classmethod
+    def meaning_is_trimmed(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("AppraisalDraft meaning is invalid")
+        return value
+
+
+class AppraisalAffectComponentWire(FrozenModel):
+    component_id: str | None = Field(default=None, min_length=1, max_length=256)
+    dimension: Literal[
+        "hurt", "anger", "sadness", "loneliness", "anxiety", "resentment", "warmth", "joy"
+    ]
+    target_intensity_bp: int = Field(ge=1, le=10_000)
+
+
+class RelationshipSuggestedDeltasWire(FrozenModel):
+    trust_bp: int = Field(ge=-10_000, le=10_000)
+    closeness_bp: int = Field(ge=-10_000, le=10_000)
+    respect_bp: int = Field(ge=-10_000, le=10_000)
+    reliability_bp: int = Field(ge=-10_000, le=10_000)
+    mutuality_bp: int = Field(ge=-10_000, le=10_000)
+    repair_confidence_bp: int = Field(ge=-10_000, le=10_000)
+
+
+class RelationshipSignalWire(FrozenModel):
+    signal_code: str = Field(min_length=1, max_length=128)
+    confidence_bp: int = Field(ge=1, le=10_000)
+    persistence: Literal["session", "durable"]
+    rationale_code: str = Field(min_length=1, max_length=128)
+    suggested_deltas: RelationshipSuggestedDeltasWire
+
+
+class AppraisalDraftWire(FrozenModel):
+    """Authoritative provider wire for one inbound private appraisal.
+
+    Context-bound checks (offered episode IDs, affect floors and verified
+    counterpart binding) remain in the materializer.  This model owns only
+    the transport-stable, role-authored vocabulary.
+    """
+
+    appraise: bool
+    affect: Literal["no_change", "open", "update", "resolve", "supersede"] = "no_change"
+    brief_rationale: str = Field(min_length=1, max_length=_APPRAISAL_RATIONALE_MAX)
+    behavior_tendency: str = Field(min_length=1, max_length=_APPRAISAL_LABEL_MAX)
+    stance: str = Field(min_length=1, max_length=_APPRAISAL_LABEL_MAX)
+    display_strategy: str = Field(min_length=1, max_length=_APPRAISAL_LABEL_MAX)
+    confidence: int = Field(ge=0, le=10_000)
+    meanings: tuple[AppraisalMeaningWire, ...] | None = Field(
+        default=None, max_length=_APPRAISAL_MEANINGS_MAX
+    )
+    attribution: Literal[
+        "user", "companion", "npc", "situation", "third_party", "unknown"
+    ] | None = None
+    severity: int | None = Field(default=None, ge=0, le=10_000)
+    components: tuple[AppraisalAffectComponentWire, ...] | None = Field(default=None, max_length=8)
+    episode_id: str | None = Field(default=None, min_length=1, max_length=256)
+    resolution_summary: str | None = Field(default=None, min_length=1, max_length=1_200)
+    relationship_signal: RelationshipSignalWire | None = None
+
+    @model_validator(mode="after")
+    def appraisal_fields_match_selected_lifecycle(self) -> "AppraisalDraftWire":
+        if self.affect != "no_change" and not self.appraise:
+            raise ValueError("Affect lifecycle change requires appraise=true")
+        if self.appraise and (
+            not self.meanings or self.attribution is None or self.severity is None
+        ):
+            raise ValueError("appraisal requires meanings, attribution and severity")
+        for field in _AFFECT_LIFECYCLE_REQUIRED_FIELDS[self.affect]:
+            if not getattr(self, field):
+                raise ValueError(f"selected affect lifecycle requires {field}")
+        return self
+
+    @classmethod
+    def provider_lifecycle_branches(cls) -> list[dict[str, object]]:
+        """Transport-visible discriminated closure for the typed lifecycle."""
+
+        appraisal = ["meanings", "attribution", "severity"]
+        return [
+            {
+                "properties": {
+                    "appraise": {"enum": [False]},
+                    "affect": {"enum": ["no_change"]},
+                },
+                "required": ["appraise", "affect"],
+            },
+            {
+                "properties": {
+                    "appraise": {"enum": [True]},
+                    "affect": {"enum": ["no_change"]},
+                },
+                "required": ["appraise", "affect", *appraisal],
+            },
+            *[
+                {
+                    "properties": {
+                        "appraise": {"enum": [True]},
+                        "affect": {"enum": [affect]},
+                    },
+                    "required": ["appraise", "affect", *appraisal, *required],
+                }
+                for affect, required in _AFFECT_LIFECYCLE_REQUIRED_FIELDS.items()
+                if affect != "no_change"
+            ],
+        ]
+
+
+def _normalize_legacy_appraisal_wire(draft: dict[str, object]) -> dict[str, object]:
+    """Adapt ignored legacy fields before the one canonical wire validation.
+
+    The old materializer deliberately ignored appraisal-only coordinates when
+    ``appraise`` was false and ignored irrelevant affect fields for several
+    lifecycle choices.  Preserve that compatibility once here; no caller may
+    bypass the typed wire after this adapter.
+    """
+
+    normalized = dict(draft)
+    appraise = normalized.get("appraise")
+    affect = normalized.get("affect", "no_change")
+    if appraise is False:
+        for field in (
+            "meanings",
+            "attribution",
+            "severity",
+            "components",
+            "episode_id",
+            "resolution_summary",
+        ):
+            normalized.pop(field, None)
+    elif affect == "no_change":
+        for field in ("components", "episode_id", "resolution_summary"):
+            normalized.pop(field, None)
+    elif affect == "open":
+        for field in ("episode_id", "resolution_summary"):
+            normalized.pop(field, None)
+    elif affect == "update":
+        normalized.pop("resolution_summary", None)
+    elif affect == "resolve":
+        normalized.pop("components", None)
+    return normalized
+
+
+def _appraisal_wire_validation_error(exc: ValidationError) -> ValueError:
+    """Keep the legacy materializer's field-level public diagnostics stable."""
+
+    locations = {
+        str(item)
+        for error in exc.errors(include_url=False, include_context=False, include_input=False)
+        for item in error.get("loc", ())
+        if isinstance(item, str)
+    }
+    if "meanings" in locations:
+        return ValueError("AppraisalDraft meaning is invalid")
+    if "components" in locations:
+        return ValueError("AppraisalDraft affect component is invalid")
+    if "attribution" in locations:
+        return ValueError("AppraisalDraft appraisal fields are invalid")
+    message = str(exc)
+    if "requires appraise=true" in message:
+        return ValueError("AppraisalDraft Affect lifecycle change requires appraise=true")
+    return ValueError("AppraisalDraft wire is invalid")
+
+
+def canonicalize_appraisal_draft_wire(draft: object) -> dict[str, object]:
+    """Normalize legacy-compatible bytes and validate the one appraisal wire."""
+
+    if not isinstance(draft, dict):
+        raise ValueError("AppraisalDraft wire is invalid")
+    try:
+        normalized_wire = AppraisalDraftWire.model_validate_json(
+            json.dumps(
+                _normalize_legacy_appraisal_wire(draft),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            strict=True,
+        )
+    except ValidationError as exc:
+        raise _appraisal_wire_validation_error(exc) from exc
+    return normalized_wire.model_dump(mode="json", exclude_none=True)
 
 
 def _digest(value: object) -> str:
@@ -232,14 +447,17 @@ def _appraisal_draft_messages(
         "and relationship context before the visible reply. "
         "Return exactly one top-level JSON object, never Markdown. The top-level object itself is "
         "the AppraisalDraft; do not wrap it inside an AppraisalDraft key. Return these fields: "
-        "appraise (boolean), brief_rationale (1-120 characters), behavior_tendency (1-120 characters), "
-        "stance, display_strategy (1-120 characters), and confidence "
-        "(0-10000). If appraise is true, also return meanings (1-2 objects with meaning and confidence), "
+        f"appraise (boolean), affect, brief_rationale (1-{_APPRAISAL_RATIONALE_MAX} characters), "
+        f"behavior_tendency, stance, and display_strategy (each 1-{_APPRAISAL_LABEL_MAX} "
+        "characters), and confidence (0-10000). If appraise is true, also return meanings "
+        f"(1-{_APPRAISAL_MEANINGS_MAX} objects with meaning and confidence), "
         "attribution, and severity (0-10000). Each meaning is the character's own short, tentative, "
-        "source-bound interpretation in 1-64 characters; it is free text, not an enum or a fact about "
+        f"source-bound interpretation in 1-{_APPRAISAL_MEANING_MAX} characters; it is free text, "
+        "not an enum or a fact about "
         "the user, and must not have leading or trailing whitespace. Attribution must be user, companion, "
         "npc, situation, third_party, or unknown. Also choose affect as no_change, open, update, resolve, "
-        "or supersede; omitting affect means no_change. Every lifecycle change requires appraise=true. "
+        "or supersede; affect must be explicit on every live result. Every lifecycle change requires "
+        "appraise=true. "
         "For open, components must contain 1-8 unique objects with dimension one of: "
         + ", ".join(sorted(_AFFECT_DIMENSIONS))
         + ", and target_intensity_bp (1-10000), the absolute intensity that component should have "
@@ -315,6 +533,9 @@ def _proposal_from_draft(*, raw: str, request: ModelInput) -> dict[str, object]:
     wrapped = draft.get("AppraisalDraft")
     if isinstance(wrapped, dict) and len(draft) == 1:
         draft = wrapped
+    # Every caller, including legacy/plain and forced-tool routes, now enters
+    # the same typed wire before context-bound materialization below.
+    draft = canonicalize_appraisal_draft_wire(draft)
     appraise = draft.get("appraise")
     if not isinstance(appraise, bool):
         raise ValueError("AppraisalDraft appraise must be boolean")

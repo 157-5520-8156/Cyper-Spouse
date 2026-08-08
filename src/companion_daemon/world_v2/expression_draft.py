@@ -160,6 +160,25 @@ class ExpressionDraftCapabilities(FrozenModel):
         return value
 
 
+def required_authored_expression_fields(
+    *,
+    capabilities: ExpressionDraftCapabilities,
+    require_turn_posture: bool = False,
+) -> frozenset[str]:
+    """Fields a newly authored expression must state rather than inherit.
+
+    Historical replay may use typed defaults.  A live provider result cannot:
+    omission must not silently decide timing, visible shape or confidence.
+    """
+
+    required = {"beats", "confidence", "stance", "brief_rationale", "timing_choice"}
+    if capabilities.recorded_cadence_mode == "on":
+        required.add("cadence")
+    if require_turn_posture:
+        required.add("turn_posture")
+    return frozenset(required)
+
+
 TEXT_ONLY_EXPRESSION_CAPABILITIES = ExpressionDraftCapabilities(
     profile_id="expression:http-text-only.1",
     modalities=("text",),
