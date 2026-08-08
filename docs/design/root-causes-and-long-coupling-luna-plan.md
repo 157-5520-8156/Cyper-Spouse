@@ -1,8 +1,8 @@
 # Luna 执行计划：因果基底、统一内心与长程涌现生产化
 
-状态：进行中（L0 已完成；L1–L3 仍为 partial。L2 durable turn 主体与 L3 第一批阻断修复已落地并完成一次
-daemon 重启和全量测试，但 2026-08-08 审计仍发现 world-stimulus terminal recovery 饥饿 P1；逐 purpose
-资格、冷重放、真实自由对聊、延迟触发全覆盖和 24 小时 soak 尚未闭合）。本文是施工顺序、验证门槛和
+状态：进行中（L0 已完成；L1–L3 仍为 partial。L2 durable turn 主体与 L3 第一批阻断修复已落地；
+2026-08-08 审计发现的 world-stimulus terminal recovery 饥饿 P1 已用公共 `drain_one` 红绿回归闭合，
+但逐 purpose 资格、冷重放、真实自由对聊、延迟触发全覆盖和 24 小时 soak 尚未闭合）。本文是施工顺序、验证门槛和
 交接契约，不替代架构设计。
 
 执行者：Luna；架构复核：Sol；建立：2026-08-08。
@@ -934,6 +934,12 @@ commit：hash
   inbound/Action 工作，也不会在同一轮立即重选同一个坏 trigger。
 - 已补充从原始世界变化 → AppraisalAccepted → ReflectionScheduler → CharacterInterior reflection 的
   集成回归，以及双 runtime sidecar claim/recovery、world-scoped prune 测试。
+- 后续独立审查发现 terminalized source 已有 immutable audit、但 Affect/relationship/experience aftermath
+  仍 pending 时，恢复异常不会进入原有 defer，因而可在固定优先级中持续抢占。修复后任何已选 trigger 的
+  未捕获异常都只在当前 runtime 进入 monotonic technical defer；其他 trigger 可继续，fresh runtime 仍从
+  durable audit 恢复原 trigger。回归用两个 terminal/audited recovery 证明第二个可推进、重启后第一个可
+  继续，且 recovery role model 调用数为零。相关测试 `38 passed`，指定文件 ruff 与 `git diff --check` 通过；
+  Standards/Spec 双路审查均无阻断项。
 
 ### 当前证据与未完成门（早期记录，已由下方补充核验更新）
 

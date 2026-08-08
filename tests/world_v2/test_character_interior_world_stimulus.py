@@ -386,14 +386,20 @@ class _CrashOnceWorker:
 
 
 class _CrashAfterAppraisalWorker:
-    def __init__(self, delegate: ImmediateEmotionProposalWorker) -> None:
+    def __init__(
+        self,
+        delegate: ImmediateEmotionProposalWorker,
+        *,
+        crash_calls: tuple[int, ...] = (1,),
+    ) -> None:
         self._delegate = delegate
         self.ledger = delegate.ledger
+        self._crash_calls = crash_calls
         self.calls = 0
 
     def process(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls += 1
-        if self.calls == 1:
+        if self.calls in self._crash_calls:
             audit_cursor = kwargs["audit_cursor"]
             current_cursor = kwargs.get("current_cursor")
             appraisal = self._delegate._appraisal  # noqa: SLF001 - crash seam fixture
@@ -929,10 +935,23 @@ async def test_restart_reuses_durable_character_result_without_calling_provider_
 
     with pytest.raises(RuntimeError, match="simulated crash"):
         await runtime.drain_one()
-    recovered = await runtime.drain_one()
+    issuer = ledger._accepted_batch_issuer  # noqa: SLF001 - fixture authority
+    assert issuer is not None
+    recovery_model = _RoleModel(
+        failure=AssertionError("recovery must reuse the durable character result")
+    )
+    restarted, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=recovery_model,
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+    )
+    recovered = await restarted.drain_one()
 
     assert recovered.work_status == "accepted"
     assert model.calls == 1
+    assert recovery_model.calls == 0
     assert len(ledger.project().appraisals) == 1
 
 
@@ -986,10 +1005,23 @@ async def test_restart_does_not_duplicate_an_aspiration_settled_before_later_sta
     interrupted = ledger.project()
     assert len(interrupted.aspirations) == 1
 
-    recovered = await runtime.drain_one()
+    issuer = ledger._accepted_batch_issuer  # noqa: SLF001 - fixture authority
+    assert issuer is not None
+    recovery_model = _RoleModel(
+        failure=AssertionError("recovery must not duplicate the settled aspiration")
+    )
+    restarted, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=recovery_model,
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+    )
+    recovered = await restarted.drain_one()
 
     assert recovered.work_status == "accepted"
     assert model.calls == 1
+    assert recovery_model.calls == 0
     assert len(ledger.project().aspirations) == 1
     assert ledger.rebuild() == ledger.project()
 
@@ -1078,10 +1110,23 @@ async def test_restart_finishes_authored_affect_after_appraisal_terminalized_sou
     assert source_process.state == "terminal"
     assert ledger.project().affect_episodes == ()
 
-    recovered = await runtime.drain_one()
+    issuer = ledger._accepted_batch_issuer  # noqa: SLF001 - fixture authority
+    assert issuer is not None
+    recovery_model = _RoleModel(
+        failure=AssertionError("terminal recovery must not re-author the Affect transition")
+    )
+    restarted, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=recovery_model,
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+    )
+    recovered = await restarted.drain_one()
 
     assert recovered.work_status == "accepted"
     assert model.calls == 1
+    assert recovery_model.calls == 0
     assert len(ledger.project().affect_episodes) == 1
     assert (await runtime.drain_one()).status == "idle"
 
@@ -1137,6 +1182,93 @@ async def test_cold_restart_finishes_authored_affect_without_reauthoring(tmp_pat
     assert len(reopened.project().affect_episodes) == 1
     assert reopened.rebuild() == reopened.project()
     reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_recovery_failure_defers_only_this_runtime_and_allows_another_recovery() -> None:
+    """One failed terminal aftermath cannot monopolize later recovery work.
+
+    The two triggers are both already terminal because their immutable
+    CharacterInterior audits crossed Appraisal acceptance before their Affect
+    aftermath crashed.  A fresh runtime then crashes while resuming the first
+    one: its next public ``drain_one`` must advance the independent terminal
+    recovery, while another fresh runtime can still resume the deferred first
+    trigger without re-authoring either decision.
+    """
+    model = _RoleModel(decision="activate", include_affect=True)
+    setup_runtime, ledger, setup_projection = _runtime(
+        model=model,
+        worker_wrapper=lambda delegate: _CrashAfterAppraisalWorker(
+            delegate,
+            crash_calls=(1, 2),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="after Appraisal acceptance"):
+        await setup_runtime.drain_one()
+    first_trigger_id = next(
+        item.trigger_id
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "npc_world_appraisal"
+    )
+    accepted_ref = ledger.project().appraisals[0].origin.accepted_event_ref
+
+    from companion_daemon.world_v2.reflection_scheduler import ReflectionScheduler
+
+    assert ReflectionScheduler(ledger=ledger, actor="worker:reflection").open_once(
+        trace_id="trace:terminal-recovery-isolation",
+        correlation_id="correlation:terminal-recovery-isolation",
+    ).opened == 1
+    model.source_ref = accepted_ref
+    setup_projection.source_ref = accepted_ref
+    with pytest.raises(RuntimeError, match="after Appraisal acceptance"):
+        await setup_runtime.drain_one()
+    reflection_trigger_id = next(
+        item.trigger_id
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "life_reflection"
+    )
+    assert all(
+        item.state == "terminal"
+        for item in ledger.project().trigger_processes
+        if item.trigger_id in {first_trigger_id, reflection_trigger_id}
+    )
+
+    issuer = ledger._accepted_batch_issuer  # noqa: SLF001 - fixture authority
+    assert issuer is not None
+    recovery_model = _RoleModel(
+        failure=AssertionError("terminal aftermath recovery must not re-author")
+    )
+    failing_runtime, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=recovery_model,
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+        worker_wrapper=_CrashOnceWorker,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated crash after durable author audit"):
+        await failing_runtime.drain_one()
+    advanced = await failing_runtime.drain_one()
+
+    assert advanced.trigger_id == reflection_trigger_id
+    assert advanced.work_status == "accepted"
+    assert recovery_model.calls == 0
+
+    restarted_runtime, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=issuer,
+        model=recovery_model,
+        source_ref=SOURCE_REF,
+        companion_actor_ref="actor:companion",
+    )
+    resumed = await restarted_runtime.drain_one()
+
+    assert resumed.trigger_id == first_trigger_id
+    assert resumed.work_status == "accepted"
+    assert recovery_model.calls == 0
+    assert (await restarted_runtime.drain_one()).status == "idle"
 
 
 @pytest.mark.asyncio

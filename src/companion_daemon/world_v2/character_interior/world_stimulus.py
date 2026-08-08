@@ -1149,32 +1149,12 @@ class CharacterInteriorWorldStimulusRuntime:
             trigger_id = _CURRENT_TRIGGER_ID.get()
             if trigger_id:
                 # A crash before the runtime can return its typed technical
-                # result must receive the same scheduler isolation.  Preserve
-                # terminal recovery immediately: a source trigger already
-                # terminalized may still need its accepted downstream effect.
-                try:
-                    projection = await self._project()
-                    process = next(
-                        (
-                            item
-                            for item in projection.trigger_processes
-                            if item.trigger_id == trigger_id
-                        ),
-                        None,
-                    )
-                    terminal = process is not None and process.state == "terminal"
-                    authored = bool(
-                        process is not None
-                        and process.source_evidence_ref
-                        and self._existing_audit(
-                            projection,
-                            source_ref=process.source_evidence_ref,
-                        )
-                    )
-                except Exception:
-                    terminal = authored = False
-                if not terminal and not authored:
-                    self._defer_technical_failure(trigger_id)
+                # result must receive the same scheduler isolation, including
+                # a terminal source whose authored aftermath is still pending.
+                # The defer is process-local and non-durable: it lets another
+                # recovery proceed now while a restarted runtime can resume
+                # this immutable aftermath from its audit.
+                self._defer_technical_failure(trigger_id)
             raise
         finally:
             _CURRENT_TRIGGER_ID.set(None)
