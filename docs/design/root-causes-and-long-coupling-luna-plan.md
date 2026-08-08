@@ -963,15 +963,24 @@ commit：hash
 - 本次直接相关回归（主动联系与 world stimulus）：`84 passed`；全套：`4735 passed, 1 warning in 358.81s`；
   `uv run ruff check .`
   与 `git diff --check` 均通过。
-- 最新代码已以前台方式重启到 PID `12121`，SQLite application bootstrap 约 17.8 秒；观察到 3 个 scheduler
-  周期完成且 `failures=0`、`last_error=null`。此前真实运行暴露的 proactive situation window 证据超过
-  deliberation 的 8 条上限，已改为按已声明刺激事件去重并保留窗口锚点与最新 7 条；因此不会再因
-  `trigger evidence must be a bounded unique tuple` 令整轮 scheduler 失败。期间主动联系真实走通
-  `ExpressionPlan -> send_private_msg`。
-  Health 显示 fast stream 为活动回复接口、delayed attention 接口保持禁用；sidecar
-  暴露 `scope/expired_claim_count/recovered_attempt_count`，不再用未绑定 actor 的空查询伪装成 scoped ready。
-- 真实运行仍保留历史过期 sidecar claim，scheduler 会按预算逐个回收；这不是重复发送授权。world-stimulus
-  仍可能对单个坏 trigger 记录技术失败并延后，不再把该异常扩散成 scheduler crash loop。
+- 早期记录曾把 PID `12121` 记为“最新代码重启后”，但 2026-08-09 复核发现该进程启动时间早于
+  `93e2f9fb` 的 terminal-recovery 修复及当前 `02e0a01f`，因此这条运行态不能作为当前 HEAD 的证据。
+  现场只读 `/health` 连续三次均可返回（约 2.6–3.7 秒），但在本次观测窗口（2026-08-09
+  01:41–01:47，Asia/Shanghai）仍显示 `scheduler=failing`、`last_error=ValueError`，失败计数也在
+  增长；旧日志仍出现旧版的 `settling appraisal-only` 分支。`accepted world stimulus did not
+  terminalize its source trigger` 仍保留为当前源码的防御性不变量错误，但旧进程反复触发它。这证明
+  旧进程需要在人工发布门后重启，不能据此否定当前源码，也不能宣称生产恢复完成。当前未执行重启或
+  生产替换。
+- 当前源码已将 proactive situation window 证据按已声明刺激事件去重并保留窗口锚点与最新 7 条；
+  这避免 `trigger evidence must be a bounded unique tuple` 令整轮 scheduler 失败。该行为与
+  `ExpressionPlan -> send_private_msg` 的主动联系回归均已有隔离测试，但仍需重启后的真实 daemon
+  观察确认。上段旧 PID 的 health 还显示 fast stream 为活动回复接口、delayed attention 接口保持禁用；
+  sidecar 暴露 `scope/expired_claim_count/recovered_attempt_count`，不再用未绑定 actor 的空查询伪装成
+  scoped ready，这些字段同样不能当作当前 HEAD 已重启的运行证明。
+- 最新源码对单个坏 trigger 使用进程内 technical defer；world-stimulus 定向回归证明其他 trigger
+  可以继续推进、重启后仍能从 durable audit 恢复，且不重新调用角色模型。这是源码/隔离测试证据，
+  不是旧 PID 的生产运行证明；旧进程仍有历史过期 sidecar claim 和 scheduler failure，必须重启后再
+  验证不会扩散成 crash loop。sidecar 回收也不等同于重复发送授权。
 - 仍未宣称生产资格完成：当前生产账本保留 24 小时历史技术失败 warning，语义 embedding 8190 未部署时 Recall
   会降级到本地索引，Perception enforcement authority 与独立事实 reviewer 仍是明确 degraded 能力；这些不被
   结构化封套修复冒充为角色选择。真实 QQ 自由对聊、冷重放和 24 小时稳定性样本仍是 qualification gate。
