@@ -248,6 +248,144 @@ async def test_public_host_event_driven_silence_is_effect_once(
 
 
 @pytest.mark.asyncio
+async def test_public_host_ambient_consideration_survives_restart_and_is_effect_once(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    _host_scenario(
+        "proactive.ambient-restart-effect-once.1",
+        request.node.nodeid,
+        mechanism_ids=("proactive.ambient",),
+        qualification_scope="public_host_proactive_ambient_lifecycle",
+    )
+    model = _ProactiveRoleScript((_silent(),))
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "proactive-public-host-ambient.sqlite",
+        PRIMARY_USER_ID="geoff",
+        WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
+    )
+    delivery = _DeliveredQQ()
+    due = NOW + timedelta(hours=12, seconds=1)
+    host = build_qq_c2c_host(
+        settings=settings,
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=model,
+        world_support_model=FakeCompanionModel(),
+        delivery=delivery,
+        use_configured_recall_embedding=False,
+    )
+    try:
+        await host.inbound_text(
+            message_id="message:public-host-ambient-source",
+            recipient_id="10001",
+            text="我先去忙一会儿。",
+            observed_at=NOW,
+        )
+        await host.tick(
+            tick_id="tick:public-host-ambient:due",
+            logical_time_from=NOW,
+            logical_time_to=due,
+            observed_at=due,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+
+        assert model.proactive_calls == 1
+        assert _proactive_action_count(host) == 0
+        assert _proactive_terminal_outcomes(host) == ("proactive:silent",)
+        projection = host.export_replay_evidence().projection
+        process = next(
+            item
+            for item in projection.trigger_processes
+            if item.process_kind == "proactive_action_deliberation"
+        )
+        source_ref = next(
+            item
+            for item in projection.committed_world_event_refs
+            if item.event_id == process.source_evidence_ref
+        )
+        assert source_ref.event_type == "ClockAdvanced"
+    finally:
+        await host.aclose()
+
+    restarted = build_qq_c2c_host(
+        settings=settings,
+        recipient_id="10001",
+        bootstrap_at=due,
+        model=model,
+        world_support_model=FakeCompanionModel(),
+        delivery=delivery,
+        use_configured_recall_embedding=False,
+    )
+    restarted_evidence = None
+    restarted_processes: tuple[tuple[object, ...], ...] = ()
+    try:
+        restarted_tick_to = due + timedelta(seconds=1)
+        await restarted.tick(
+            tick_id="tick:public-host-ambient:restart",
+            logical_time_from=due,
+            logical_time_to=restarted_tick_to,
+            observed_at=restarted_tick_to,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await restarted.drain(max_action_units=8, max_background_units=16)
+        assert model.proactive_calls == 1
+        assert _proactive_action_count(restarted) == 0
+        assert _proactive_terminal_outcomes(restarted) == ("proactive:silent",)
+        restarted_evidence = restarted.export_replay_evidence()
+        restarted_processes = tuple(
+            (
+                process.trigger_id,
+                process.trigger_ref,
+                process.source_evidence_ref,
+                process.runtime_outcome_ref,
+                process.state,
+            )
+            for process in restarted_evidence.projection.trigger_processes
+            if process.process_kind == "proactive_action_deliberation"
+        )
+    finally:
+        await restarted.aclose()
+
+    assert restarted_evidence is not None
+    cold = build_qq_c2c_host(
+        settings=settings,
+        recipient_id="10001",
+        bootstrap_at=due + timedelta(seconds=1),
+        model=model,
+        world_support_model=FakeCompanionModel(),
+        delivery=delivery,
+        use_configured_recall_embedding=False,
+    )
+    try:
+        cold_evidence = cold.export_replay_evidence()
+        assert (
+            restarted_evidence.projection.semantic_hash
+            == restarted_evidence.replay.semantic_hash
+            == cold_evidence.projection.semantic_hash
+            == cold_evidence.replay.semantic_hash
+        )
+        cold_processes = tuple(
+            (
+                process.trigger_id,
+                process.trigger_ref,
+                process.source_evidence_ref,
+                process.runtime_outcome_ref,
+                process.state,
+            )
+            for process in cold_evidence.projection.trigger_processes
+            if process.process_kind == "proactive_action_deliberation"
+        )
+        assert cold_processes == restarted_processes
+    finally:
+        await cold.aclose()
+
+
+@pytest.mark.asyncio
 async def test_public_host_technical_retry_survives_restart_and_is_effect_once(
     tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:

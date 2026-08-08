@@ -1056,8 +1056,9 @@ commit：hash
   aftermath 的重启、effect-once 和冷重放；测试明确排除真实 provider 自主性、OneBot callback 归一化和 24h
   soak。Life occurrence、NPC/reflection、memory consolidation、perception/media 仍按 limited/dormant 事实
   标注，不得因为 catalog 有行就激活。
-- 本轮当前工作树的定向回归均已通过（覆盖结构化角色、LLM、表达式校正、主动联系与延迟触发主机证据）；完整
-  套件为 `4867 passed, 1 warning`。ruff、语法检查和 `git diff --check` 也通过。这仍不是真实 provider
+- 本轮当前工作树的定向回归均已通过（覆盖结构化角色、LLM、表达式校正、主动联系与延迟触发主机证据）；ambient
+  薄片后的完整套件累计为 `4868 passed, 1 warning`（首次全套运行时矩阵声明仍在编辑，产生的两个静态门禁
+  已在修正后单独重跑通过）。ruff、语法检查和 `git diff --check` 也通过。这仍不是真实 provider
   qualification 或生产上线证明，具体资格缺口保持 `qualification_incomplete`。
 
 ### 2026-08-09：表达式专用校正的 required-tool 薄片
@@ -1080,3 +1081,16 @@ commit：hash
   `qualification_incomplete`，不能以 MockTransport 或 fixture 结果替代。现有隔离 daemon 验收脚本的
   `forced_tool_request_hashes` 只重建 `character_inbound_*`，尚未把 `character_expression_reselection_v1`
   纳入因果证据；若场景触发该校正，它会安全地不计入 hash，而不是伪造通过，待后续资格包补齐。
+
+### 2026-08-09：ambient proactive public-host 资格场景薄片
+
+- 为仍只有静态声明的 `proactive.ambient` 增加了真实公开宿主场景：通过
+  `QQC2CHost.inbound_text → tick → drain` 将逻辑时间推进到 ambient 窗口，确认刺激来源是已提交的
+  `ClockAdvanced`，模型只被调用一次并选择 `silent`，没有生成 proactive Action；关闭并重建宿主后再次公开
+  `tick/drain`，不会重复调用模型、不会新增 Action 或终态。
+- 先以缺失 Matrix 场景注册和重复 tick 幂等边界得到 RED，再补上唯一 scenario/node 绑定；相关延迟触发、
+  Matrix、冷启动与回执场景回归为 `43 passed`，`verify_delayed_trigger_catalog.py` 输出
+  `static declarations verified: 28 delayed trigger mechanisms`，ruff 与 `git diff --check` 通过。
+- 这只证明当前隔离数据库和 scripted role 在生产公开上游 seam 上的调度、重启和 effect-once 语义；Matrix
+  仍是 `declaration_only`，真实 DeepSeek/QQ transport、自主措辞、24 小时 soak 及生产 daemon 重启均
+  明确排除，不能把本场景写成上线或模型成功率资格证明。

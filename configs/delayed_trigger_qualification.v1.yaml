@@ -24,6 +24,12 @@ host_scenario_evidence:
     qualification_scope: public_host_proactive_silent_lifecycle
     excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
 
+  - scenario_id: proactive.ambient-restart-effect-once.1
+    mechanism_ids: [proactive.ambient]
+    test_nodeid: tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::test_public_host_ambient_consideration_survives_restart_and_is_effect_once
+    qualification_scope: public_host_proactive_ambient_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
   - scenario_id: proactive.technical-retry-restart-effect-once.1
     mechanism_ids: [proactive.technical_retry]
     test_nodeid: tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::test_public_host_technical_retry_survives_restart_and_is_effect_once
@@ -109,7 +115,7 @@ mechanisms:
     release_status: active
     upstream_authority: [persisted ClockAdvanced opportunity]
     due_identity: {coordinates: [world_id, actor_ref, epoch, retry_ordinal], logical_deadline: next_consideration_at, merge_dedup_key: proactive_ambient_epoch}
-    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [logical Clock advance]}
+    controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [accepted user Observation, logical Clock advance]}
     expected_path: [scheduler discovery, TriggerProcess claim/CAS, CharacterInterior decision, typed proposal, Action/receipt]
     legal_terminals: [now accepted, later scheduled, role silent, superseded, technical failure/retry]
     visible_effect: qq
@@ -121,7 +127,7 @@ mechanisms:
     action_kinds: [proactive_message]
     model_contract: {purpose: proactive_contact, contract_identity: character-interior-proactive-contact-decision.1}
     retry_policy: {policy_id: technical-retry-10-30-120.1, seconds: [600, 1800, 7200]}
-    activation_note: Active sparse fallback opportunity; no Clock event supplies motive or wording.
+    activation_note: Active sparse fallback opportunity; an accepted Observation establishes the actor context, while Clock only opens the consideration and supplies neither motive nor wording.
 
   - mechanism_id: proactive.post_silent
     purpose: Reconsideration after one role-authored proactive silence
