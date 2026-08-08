@@ -937,6 +937,31 @@ async def test_restart_reuses_durable_character_result_without_calling_provider_
 
 
 @pytest.mark.asyncio
+async def test_crash_before_typed_failure_also_defers_nonterminal_trigger(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    model = _RoleModel(decision="activate")
+    runtime, ledger, _projection = _runtime(
+        model=model,
+    )
+
+    async def crash_before_source_event(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("simulated source crash")
+
+    monkeypatch.setattr(runtime, "_source_event", crash_before_source_event)
+
+    with pytest.raises(RuntimeError, match="simulated source crash"):
+        await runtime.drain_one()
+
+    assert (await runtime.drain_one()).status == "idle"
+    monkeypatch.undo()
+    runtime._technical_failure_deferred_until.clear()  # noqa: SLF001 - clock seam fixture
+    recovered = await runtime.drain_one()
+
+    assert recovered.work_status == "accepted"
+    assert model.calls == 1
+    assert any(item.state == "terminal" for item in ledger.project().trigger_processes)
+
+
+@pytest.mark.asyncio
 async def test_restart_does_not_duplicate_an_aspiration_settled_before_later_state_work() -> None:
     model = _RoleModel(
         decision="activate",

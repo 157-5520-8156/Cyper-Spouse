@@ -861,13 +861,18 @@ commit：hash
   物化并发送；这是生产轨迹证据，不是固定 fixture 推断。
 - 冻结场景完整 120 案例的可见事件族、输出、Action 状态和调用数未改变；结构化提示/审计身份变化按既有规则
   升级 offline mechanism baseline 到 `.53`。完整场景测试通过。
-- 相关回归：`149 passed, 1 warning`；全套：`4731 passed, 1 warning in 338.08s`；`uv run ruff check .`
+- 本次直接相关回归（主动联系与 world stimulus）：`84 passed`；全套：`4735 passed, 1 warning in 358.81s`；
+  `uv run ruff check .`
   与 `git diff --check` 均通过。
-- 最新代码已以前台方式重启到 PID `91125`，应用 bootstrap 约 16 秒；首轮 scheduler 完成、`failures=0`、
-  `last_duration_ms=33783`。Health 显示 fast stream 为活动回复接口、delayed attention 接口保持禁用；sidecar
+- 最新代码已以前台方式重启到 PID `12121`，SQLite application bootstrap 约 17.8 秒；观察到 3 个 scheduler
+  周期完成且 `failures=0`、`last_error=null`。此前真实运行暴露的 proactive situation window 证据超过
+  deliberation 的 8 条上限，已改为按已声明刺激事件去重并保留窗口锚点与最新 7 条；因此不会再因
+  `trigger evidence must be a bounded unique tuple` 令整轮 scheduler 失败。期间主动联系真实走通
+  `ExpressionPlan -> send_private_msg`。
+  Health 显示 fast stream 为活动回复接口、delayed attention 接口保持禁用；sidecar
   暴露 `scope/expired_claim_count/recovered_attempt_count`，不再用未绑定 actor 的空查询伪装成 scoped ready。
-- 真实运行仍保留 28 个历史过期 sidecar claim，scheduler 会按预算逐个回收；这不是重复发送授权。此前已观察到
-  world-stimulus appraisal/affect 成功提交和一次 proactive 纠正后成功发送；本次重启未观察到新的 scheduler 异常。
+- 真实运行仍保留历史过期 sidecar claim，scheduler 会按预算逐个回收；这不是重复发送授权。world-stimulus
+  仍可能对单个坏 trigger 记录技术失败并延后，不再把该异常扩散成 scheduler crash loop。
 - 仍未宣称生产资格完成：当前生产账本保留 24 小时历史技术失败 warning，语义 embedding 8190 未部署时 Recall
   会降级到本地索引，Perception enforcement authority 与独立事实 reviewer 仍是明确 degraded 能力；这些不被
   结构化封套修复冒充为角色选择。真实 QQ 自由对聊、冷重放和 24 小时稳定性样本仍是 qualification gate。

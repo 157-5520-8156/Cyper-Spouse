@@ -789,6 +789,35 @@ class ProactiveOpportunity(FrozenModel):
     stimulus_event_refs: tuple[str, ...] = ()
 
 
+def _unique_committed_stimulus_refs(
+    projection: object,
+    stimulus_event_refs: tuple[str, ...],
+) -> tuple[object, ...]:
+    """Resolve a stimulus list into stable, unique committed authorities.
+
+    A situation window is assembled from durable projection rows, and older
+    projections can contain the same event authority more than once after a
+    recovery or migration.  Deliberation's evidence contract is intentionally
+    strict about uniqueness; normalizing the already-declared event ids here
+    is structural hygiene, not a semantic choice about what the character
+    should say.
+    """
+
+    unique_ids = tuple(dict.fromkeys(stimulus_event_refs))
+    # Deliberation deliberately accepts at most eight trigger authorities.
+    # Keep the window's anchor (the source trigger) and the newest seven
+    # authorities when a busy ten-minute window contains more rows.  The
+    # complete pinned projection remains available to the role/context
+    # resolver; this is only the bounded causal-evidence transport.
+    wanted = unique_ids if len(unique_ids) <= 8 else (unique_ids[0], *unique_ids[-7:])
+    by_event_id: dict[str, object] = {}
+    for ref in getattr(projection, "committed_world_event_refs", ()):
+        event_id = getattr(ref, "event_id", None)
+        if isinstance(event_id, str) and event_id in wanted:
+            by_event_id.setdefault(event_id, ref)
+    return tuple(by_event_id[event_id] for event_id in wanted if event_id in by_event_id)
+
+
 class ProactiveDeliberationTurn:
     """Compile one non-message proactive opportunity at an exact cursor."""
 
@@ -1043,11 +1072,19 @@ class ProactiveDeliberationTurn:
         query = query_from_projection(
             projection, actor_ref=self._actor, trigger_ref=opportunity.source_event_ref
         )
+        if opportunity.source_kind == "situation_change":
+            evidence_refs = _unique_committed_stimulus_refs(
+                projection, opportunity.stimulus_event_refs
+            )
+            bounded_stimulus_event_refs = tuple(ref.event_id for ref in evidence_refs)
+        else:
+            evidence_refs = (committed_ref,)
+            bounded_stimulus_event_refs = ()
         advisory = InnerAdvisoryProjection(
             advisory_id="advisory:proactive:" + _digest(opportunity.model_dump(mode="json")),
             kind="proactive_opportunity",
             source_refs=(
-                opportunity.stimulus_event_refs
+                bounded_stimulus_event_refs
                 if opportunity.source_kind == "situation_change"
                 else (opportunity.source_event_ref,)
             ),
@@ -1098,15 +1135,7 @@ class ProactiveDeliberationTurn:
                     source_world_revision=ref.world_revision,
                     immutable_hash="sha256:" + ref.payload_hash,
                 )
-                for ref in (
-                    tuple(
-                        item
-                        for item in projection.committed_world_event_refs
-                        if item.event_id in opportunity.stimulus_event_refs
-                    )
-                    if opportunity.source_kind == "situation_change"
-                    else (committed_ref,)
-                )
+                for ref in evidence_refs
             ),
             budget=(self._budget_policy.start() if self._budget_policy is not None else None),
         )

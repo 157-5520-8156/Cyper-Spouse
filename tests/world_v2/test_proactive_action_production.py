@@ -50,6 +50,7 @@ from companion_daemon.world_v2.proactive_action import (
     ProactiveDeliberationTurn,
     ProactiveOpportunity,
     ProactiveTechnicalRetryState,
+    _unique_committed_stimulus_refs,
     next_proactive_retry_due,
     proactive_technical_retry_states,
 )
@@ -91,6 +92,41 @@ from companion_daemon.world_v2.thread_events import ThreadChangedPayload, thread
 
 NOW = datetime(2026, 7, 16, 8, 0, tzinfo=UTC)
 WORLD = "world:proactive-production"
+
+
+def test_proactive_stimulus_evidence_deduplicates_replayed_projection_rows() -> None:
+    first = SimpleNamespace(event_id="event:stimulus:1", world_revision=4)
+    replayed = SimpleNamespace(event_id="event:stimulus:1", world_revision=4)
+    second = SimpleNamespace(event_id="event:stimulus:2", world_revision=5)
+    projection = SimpleNamespace(committed_world_event_refs=(first, replayed, second))
+
+    resolved = _unique_committed_stimulus_refs(
+        projection,
+        ("event:stimulus:1", "event:stimulus:1", "event:stimulus:2"),
+    )
+
+    assert resolved == (first, second)
+
+
+def test_proactive_stimulus_evidence_keeps_anchor_and_newest_rows_within_contract() -> None:
+    refs = tuple(SimpleNamespace(event_id=f"event:stimulus:{index}") for index in range(10))
+    projection = SimpleNamespace(committed_world_event_refs=refs)
+
+    resolved = _unique_committed_stimulus_refs(
+        projection,
+        tuple(item.event_id for item in refs),
+    )
+
+    assert tuple(item.event_id for item in resolved) == (
+        "event:stimulus:0",
+        "event:stimulus:3",
+        "event:stimulus:4",
+        "event:stimulus:5",
+        "event:stimulus:6",
+        "event:stimulus:7",
+        "event:stimulus:8",
+        "event:stimulus:9",
+    )
 
 
 def _application_config(**kwargs):  # type: ignore[no-untyped-def]

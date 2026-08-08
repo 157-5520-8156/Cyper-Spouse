@@ -10,6 +10,7 @@ appraisal and what that appraisal means.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
@@ -128,6 +129,10 @@ _EVIDENCE_KIND = {
 
 _PERCEPTION_RESULT_CONTEXT_LIMIT = 720
 _TECHNICAL_FAILURE_DEFER_SECONDS = 30.0
+_CURRENT_TRIGGER_ID: ContextVar[str | None] = ContextVar(
+    "world_stimulus_current_trigger_id",
+    default=None,
+)
 
 
 def _canonical(value: object) -> str:
@@ -1138,20 +1143,58 @@ class CharacterInteriorWorldStimulusRuntime:
         self._technical_failure_deferred_until: dict[str, float] = {}
 
     async def drain_one(self) -> CharacterInteriorRunResult:
-        result = await self._drain_one_impl()
+        try:
+            result = await self._drain_one_impl()
+        except Exception:
+            trigger_id = _CURRENT_TRIGGER_ID.get()
+            if trigger_id:
+                # A crash before the runtime can return its typed technical
+                # result must receive the same scheduler isolation.  Preserve
+                # terminal recovery immediately: a source trigger already
+                # terminalized may still need its accepted downstream effect.
+                try:
+                    projection = await self._project()
+                    process = next(
+                        (
+                            item
+                            for item in projection.trigger_processes
+                            if item.trigger_id == trigger_id
+                        ),
+                        None,
+                    )
+                    terminal = process is not None and process.state == "terminal"
+                    authored = bool(
+                        process is not None
+                        and process.source_evidence_ref
+                        and self._existing_audit(
+                            projection,
+                            source_ref=process.source_evidence_ref,
+                        )
+                    )
+                except Exception:
+                    terminal = authored = False
+                if not terminal and not authored:
+                    self._defer_technical_failure(trigger_id)
+            raise
+        finally:
+            _CURRENT_TRIGGER_ID.set(None)
         if result.work_status == "technical_failure" and result.trigger_id:
-            self._technical_failure_deferred_until[result.trigger_id] = (
-                time.monotonic() + _TECHNICAL_FAILURE_DEFER_SECONDS
-            )
+            self._defer_technical_failure(result.trigger_id)
         elif result.trigger_id:
             self._technical_failure_deferred_until.pop(result.trigger_id, None)
         return result
+
+    def _defer_technical_failure(self, trigger_id: str) -> None:
+        self._technical_failure_deferred_until[trigger_id] = (
+            time.monotonic() + _TECHNICAL_FAILURE_DEFER_SECONDS
+        )
 
     async def _drain_one_impl(self) -> CharacterInteriorRunResult:
         projection = await self._project()
         process = self._next_process(projection)
         if process is None:
             return CharacterInteriorRunResult(trigger_id="", status="idle")
+        _CURRENT_TRIGGER_ID.set(process.trigger_id)
         source_event = await self._source_event(process, cursor=_cursor(projection))
         terminal_recovery = process.state == "terminal"
         if terminal_recovery:
