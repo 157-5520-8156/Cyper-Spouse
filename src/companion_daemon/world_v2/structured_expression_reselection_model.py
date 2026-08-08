@@ -10,6 +10,8 @@ social-behaviour policy.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from copy import deepcopy
+from dataclasses import dataclass
 import hashlib
 import json
 from typing import Final
@@ -23,6 +25,10 @@ from .structured_source_review_model import StructuredSourceReviewModel
 
 
 EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT: Final[str] = "expression-source-reselection-direct.1"
+EXPRESSION_SOURCE_RESELECTION_TOOL_CONTRACT: Final[str] = (
+    "expression-source-reselection-tool.1"
+)
+_EXPRESSION_RESELECTION_TOOL_NAME: Final[str] = "character_expression_reselection_v1"
 
 _CADENCE_PROFILES: Final[tuple[str, ...]] = (
     "rapid",
@@ -81,6 +87,32 @@ def _canonical_json(value: object) -> str:
 
 def _schema_digest(schema: dict[str, object]) -> str:
     return f"sha256:{hashlib.sha256(_canonical_json(schema).encode('utf-8')).hexdigest()}"
+
+
+def _inline_schema_refs(schema: object, definitions: dict[str, object]) -> object:
+    """Inline local definitions for the provider function-schema dialect.
+
+    The strict JSON response route keeps ``$defs`` for its installed contract,
+    while the required-tool route receives one self-contained parameters
+    object.  Both shapes are derived from the same canonical expression
+    schema; this helper is transport-only and carries no semantic defaults.
+    """
+
+    if isinstance(schema, list):
+        return [_inline_schema_refs(item, definitions) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        target = definitions.get(ref.removeprefix("#/$defs/"))
+        if target is None:
+            raise ValueError(f"unresolved expression schema ref: {ref}")
+        return _inline_schema_refs(target, definitions)
+    return {
+        key: _inline_schema_refs(value, definitions)
+        for key, value in schema.items()
+        if key not in {"$defs", "title", "default"}
+    }
 
 
 def _bounded_unique_strings(
@@ -613,6 +645,8 @@ def _validated_contract_from_messages(
 def _validate_contract(contract: dict[str, object]) -> None:
     if set(contract) != _CONTRACT_FIELDS:
         raise ValueError("invalid expression reselection contract fields")
+    if contract.get("contract") != EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT:
+        raise ValueError("invalid expression reselection contract identity")
     profile_id = contract["profile_id"]
     if not isinstance(profile_id, str) or not profile_id or len(profile_id) > 128:
         raise ValueError("invalid expression capability profile")
@@ -698,6 +732,106 @@ def _validate_contract(contract: dict[str, object]) -> None:
     expected_digest = _schema_digest(_expression_schema(contract))
     if contract["schema_sha256"] != expected_digest:
         raise ValueError("expression reselection schema digest mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class ExpressionReselectionToolIdentity:
+    """Local audit identity for the expression-only required-tool route."""
+
+    contract_id: str
+    tool_name: str
+    version: str
+    canonical_schema_sha256: str
+    provider_schema_sha256: str
+    output_contract_sha256: str
+
+    def request_identity_material(self) -> dict[str, str]:
+        """Return local-only coordinates to bind into the provider audit hash."""
+
+        return {
+            "contract_id": self.contract_id,
+            "tool_name": self.tool_name,
+            "version": self.version,
+            "canonical_schema_sha256": self.canonical_schema_sha256,
+            "provider_schema_sha256": self.provider_schema_sha256,
+            "output_contract_sha256": self.output_contract_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExpressionReselectionToolContract:
+    """One lossless required function for an expression-only correction."""
+
+    provider_tools: tuple[dict[str, object], ...]
+    provider_tool_choice: dict[str, object]
+    identity: ExpressionReselectionToolIdentity
+
+    def unwrap(self, raw_arguments: str) -> str:
+        """Remove only the tool transport; never fill or reinterpret fields."""
+
+        try:
+            value = json.loads(raw_arguments)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("expression reselection tool must return one JSON object") from exc
+        if not isinstance(value, dict) or set(value) != {
+            "expression_draft",
+            "episode_disposition",
+        }:
+            raise ValueError("expression reselection tool envelope is invalid")
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def expression_reselection_tool_contract(
+    output_contract: dict[str, object],
+) -> ExpressionReselectionToolContract:
+    """Compile the canonical direct expression contract into one function tool.
+
+    ``output_contract`` is the existing source-closure/reselection contract;
+    no provider-only field inventory is maintained here.  The returned
+    decoder is intentionally structural only.  Existing realtime
+    normalization, capability validation, and source review remain the next
+    hard boundaries.
+    """
+
+    contract = deepcopy(output_contract)
+    _validate_contract(contract)
+    canonical_schema = _expression_schema(contract)
+    definitions = canonical_schema.get("$defs")
+    if not isinstance(definitions, dict):
+        definitions = {}
+    provider_parameters = _inline_schema_refs(canonical_schema, definitions)
+    if not isinstance(provider_parameters, dict):
+        raise ValueError("expression reselection provider schema must be an object")
+    provider_schema_sha256 = _schema_digest(provider_parameters)
+    output_contract_sha256 = (
+        "sha256:" + hashlib.sha256(_canonical_json(contract).encode("utf-8")).hexdigest()
+    )
+    function = {
+        "name": _EXPRESSION_RESELECTION_TOOL_NAME,
+        "description": (
+            "Return the complete role-authored expression correction for the pinned "
+            "context. Choose timing, beats, private state, and any "
+            "episode disposition yourself; do not add unsupported facts."
+        ),
+        "parameters": provider_parameters,
+    }
+    provider_tools = ({"type": "function", "function": function},)
+    identity = ExpressionReselectionToolIdentity(
+        contract_id=EXPRESSION_SOURCE_RESELECTION_TOOL_CONTRACT,
+        tool_name=_EXPRESSION_RESELECTION_TOOL_NAME,
+        version="1",
+        canonical_schema_sha256=str(contract["schema_sha256"]),
+        provider_schema_sha256=provider_schema_sha256,
+        output_contract_sha256=output_contract_sha256,
+    )
+    return ExpressionReselectionToolContract(
+        provider_tools=provider_tools,
+        provider_tool_choice={
+            "type": "function",
+            "function": {"name": _EXPRESSION_RESELECTION_TOOL_NAME},
+        },
+        identity=identity,
+    )
 
 
 def _position_within_closed_interval(
@@ -881,7 +1015,11 @@ class StructuredExpressionReselectionModel(StructuredSourceReviewModel):
             tools=tools,
             tool_choice=tool_choice,
         )
-        if not json_object:
+        # A required function-tool response is already the structured
+        # transport.  DeepSeek rejects a response_format alongside tools, and
+        # sending both would make a provider that supports both capabilities
+        # fail before the role gets its one bounded correction.
+        if not json_object or tools:
             return payload
         contract = _validated_contract_from_messages(messages)
         if contract is None:
@@ -899,8 +1037,12 @@ class StructuredExpressionReselectionModel(StructuredSourceReviewModel):
 
 __all__ = [
     "EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT",
+    "EXPRESSION_SOURCE_RESELECTION_TOOL_CONTRACT",
+    "ExpressionReselectionToolContract",
+    "ExpressionReselectionToolIdentity",
     "StructuredExpressionReselectionModel",
     "expression_reselection_output_contract",
+    "expression_reselection_tool_contract",
     "normalize_expression_reselection_output",
     "normalize_realtime_expression_reselection_output",
 ]

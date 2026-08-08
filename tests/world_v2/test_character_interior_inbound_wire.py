@@ -294,6 +294,112 @@ class _JsonMeteredModel(_MeteredModel):
         )
 
 
+class _ForcedToolExpressionCorrectionModel(_JsonMeteredModel):
+    supports_required_tool_choice = True
+
+    def __init__(self, invalid: str, corrected: str) -> None:
+        super().__init__(invalid)
+        self._corrected = corrected
+        self.tool_calls: list[tuple[list[dict[str, object]] | None, object | None]] = []
+
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        self.calls.append((messages, temperature))
+        self.tool_calls.append((tools, tool_choice))
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 12,
+            "output_tokens": 4,
+            "thinking_tokens": 0,
+            "token_provenance": "provider_reported",
+            "transport": "provider_api",
+            "provider": "fake-provider",
+            "provider_usage_ref": "usage:fake:expression-tool:1",
+        }
+        digest = sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if tools is not None:
+            assert tool_choice == {
+                "type": "function",
+                "function": {"name": "character_expression_reselection_v1"},
+            }
+            raw = self._corrected
+        else:
+            raw = self._reply
+        return raw, ModelUsageProvenance(**material, provider_usage_hash=digest)
+
+
+@pytest.mark.asyncio
+async def test_expression_structural_correction_uses_required_tool_without_plain_fallback() -> None:
+    invalid = json.dumps(
+        {
+            "timing_choice": "now",
+            "beats": [],
+            "world_claims": [],
+        },
+        ensure_ascii=False,
+    )
+    corrected = json.dumps(
+        {
+            "expression_draft": {
+                "private_turn_state": {
+                    "contract": "private-turn-state.1",
+                    "inner_state_summary": "我想把这一句说清楚。",
+                    "attended_source_refs": [],
+                },
+                "timing_choice": "now",
+                "cadence": "conversational",
+                "beats": [
+                    {
+                        "modality": "text",
+                        "text": "我在，刚才那句我看到了。",
+                        "reaction_id": None,
+                        "sticker_id": None,
+                    }
+                ],
+                "delay_position_bp": None,
+                "expires_after_seconds": None,
+                "stance": "present",
+                "brief_rationale": "回到当前这句。",
+                "impulse_summary": None,
+                "confidence": 8000,
+                "variation_profile": None,
+                "response_expectation": None,
+                "response_expectation_assessment": None,
+                "world_claims": [],
+            },
+            "episode_disposition": "complete_without_more",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    provider = _ForcedToolExpressionCorrectionModel(invalid, corrected)
+
+    output = await _ExpressionDraftWire(
+        model=provider,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+    ).propose(_qq_request())
+
+    assert len(provider.tool_calls) == 2
+    assert provider.tool_calls[0] == (None, None)
+    tools, tool_choice = provider.tool_calls[1]
+    assert tools is not None
+    assert tools[0]["function"]["name"] == "character_expression_reselection_v1"
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_expression_reselection_v1"},
+    }
+    assert output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
+
+
 class _EventFrameStreamingModel(_Model):
     """Release one complete expression event before the remaining event array."""
 

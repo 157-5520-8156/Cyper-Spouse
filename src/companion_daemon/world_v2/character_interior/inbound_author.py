@@ -54,6 +54,7 @@ from .inbound_wire import (
     _stream_unit_identity,
     _trace_source_reselection_materialization_failure,
     _combine_usage,
+    _expression_tool_reselection_kwargs,
     parse_character_recall_request,
     claim_repair_instruction,
     complete_bounded_validation_reselection,
@@ -2122,6 +2123,17 @@ class _InboundCharacterAuthor:
             if reselection_lane is not None
             else self._model_id_for_provider(request, provider)
         )
+        expression_tool_kwargs = (
+            _expression_tool_reselection_kwargs(
+                request=request,
+                provider=reselection_provider,
+                capabilities=self._capabilities,
+                stable_identity_source_refs=self._stable_identity_source_refs,
+                source_ref_aliases=effective_source_ref_aliases,
+            )
+            if not combined
+            else {}
+        )
         try:
             reselection = await complete_bounded_validation_reselection(
                 model=reselection_provider,
@@ -2140,7 +2152,7 @@ class _InboundCharacterAuthor:
                         provider=reselection_provider,
                     )
                     if combined and reselection_lane is None
-                    else {}
+                    else expression_tool_kwargs
                 ),
             )
         except asyncio.CancelledError:
@@ -2173,7 +2185,7 @@ class _InboundCharacterAuthor:
         corrected_raw = reselection.raw
         episode_disposition: str | None = None
         try:
-            if source_closure_review is not None:
+            if source_closure_review is not None or expression_tool_kwargs:
                 corrected_raw = normalize_realtime_expression_reselection_output(corrected_raw)
             if combined:
                 corrected = _parse_combined(corrected_raw)

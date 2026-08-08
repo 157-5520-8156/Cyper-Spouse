@@ -1035,8 +1035,11 @@ commit：hash
 
 - 入站 combined 路径的强制工具已继续覆盖到生产 stream、recall-final 和同角色 correction；stream 仍保持一
   次物理 provider 调用、head/tail 语义拆分、旧 SSE 纠正前真实退休，以及工具参数乱序时只在 transport 与
-  source closure 闭合后释放可见 head。表达式专用的 source-closure correction 仍是独立 strict wire，未被
-  错套 combined contract；因此不能把“所有 CharacterInterior purpose 已 forced-tool 化”写成完成。
+  source closure 闭合后释放可见 head。表达式专用的 source-closure/结构校正现在复用同一 canonical
+  `ExpressionDraft` reselection schema，并在具备 required-tool 能力的角色 provider 上走版本化
+  `character_expression_reselection_v1`；历史严格 JSON 只保留给未具备该能力的隔离兼容 lane，不能把它当成
+  生产成功证明。它仍未与 combined contract 混用，也不能把“所有 CharacterInterior purpose 已
+  forced-tool 化”写成完成。
 - `proactive_contact` 现在使用由 `ExpressionDraft`/`ProactiveDraft` 派生的版本化 required tool。契约缓存按
   capability profile 与 recall phase 复用，`now/later/silent`、多 Beat、typing/reaction/sticker 与有来源事实
   声明均保留；schema 会在 provider 侧拒绝空 impulse、空 later 到期字段、模态载荷不一致和 grounded claim
@@ -1053,6 +1056,27 @@ commit：hash
   aftermath 的重启、effect-once 和冷重放；测试明确排除真实 provider 自主性、OneBot callback 归一化和 24h
   soak。Life occurrence、NPC/reflection、memory consolidation、perception/media 仍按 limited/dormant 事实
   标注，不得因为 catalog 有行就激活。
-- 本轮当前工作树的定向回归均已通过（覆盖结构化角色、LLM、主动联系与延迟触发主机证据）；最终完整套件为
-  `4860 passed, 1 warning`，ruff、语法检查和 `git diff --check` 也通过。这仍不是真实 provider
+- 本轮当前工作树的定向回归均已通过（覆盖结构化角色、LLM、表达式校正、主动联系与延迟触发主机证据）；完整
+  套件为 `4867 passed, 1 warning`。ruff、语法检查和 `git diff --check` 也通过。这仍不是真实 provider
   qualification 或生产上线证明，具体资格缺口保持 `qualification_incomplete`。
+
+### 2026-08-09：表达式专用校正的 required-tool 薄片
+
+- 设计候选曾有三条：复用 combined cognition tool（会错误要求 appraisal，缩窄表达式 wire）；继续只用
+  strict JSON response-format（无法闭合 DeepSeek 的 required-tool 首次协议）；或在既有
+  `structured_expression_reselection_model` 深模块内由 canonical expression schema 派生独立 function tool。
+  选择第三条，原因是它保留 source-closure correction 的独立语义，又不复制字段清单或建立新的行为旁路。
+- `expression_reselection_tool_contract` 只负责编译 provider-visible parameters、版本化 tool name、schema/
+  capability/contract identity 与 transport-only unwrap。`now/later/silent`、多 beat、typing/reaction/sticker、
+  private turn state、expectation/assessment、world claims 和 episode disposition 仍由角色模型选择；本地
+  normalize、Expression materializer、source reviewer、Action/CAS 边界未放宽。工具参数缺失、混合 envelope
+  或 provider 不支持 required tool 时不会补默认/伪造沉默；同一角色最多一次受约束校正，仍失败为技术失败。
+- `_ExpressionDraftWire` 与 paired `InboundCharacterAuthor` 的 expression-only correction 现在共享该编译器；
+  provider request identity 绑定 canonical/provider schema 与当前 source capability。没有 required-tool 能力
+  的历史 strict JSON lane 仍可用于 replay/隔离 fixture，但不授予生产资格。
+- 已验证：contract public seam 的互斥/无损解包、DeepSeek-compatible HTTP body、真实 ExpressionDraft public
+  proposal seam 的一次校正与无 plain fallback，以及相关结构化/入站回归和 ruff/diff-check。真实 DeepSeek
+  forced-tool/stream/receipt 样本、每 purpose first-attempt 统计、QQ 自由对聊及 24h soak 仍保持
+  `qualification_incomplete`，不能以 MockTransport 或 fixture 结果替代。现有隔离 daemon 验收脚本的
+  `forced_tool_request_hashes` 只重建 `character_inbound_*`，尚未把 `character_expression_reselection_v1`
+  纳入因果证据；若场景触发该校正，它会安全地不计入 hash，而不是伪造通过，待后续资格包补齐。

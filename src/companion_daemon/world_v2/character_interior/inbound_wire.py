@@ -115,6 +115,7 @@ from ..source_review_authority import (
 from ..source_closure_lane import SourceClosureReselectionLane
 from ..structured_expression_reselection_model import (
     expression_reselection_output_contract,
+    expression_reselection_tool_contract,
     normalize_realtime_expression_reselection_output,
 )
 from ..recall_index import RecallCursor
@@ -8479,6 +8480,74 @@ def _incremental_first_expression(
     raise ValueError("expression stream protocol is invalid")
 
 
+def _expression_tool_reselection_kwargs(
+    *,
+    request: ModelInput,
+    provider: ChatCompletionModel,
+    capabilities: ExpressionDraftCapabilities,
+    stable_identity_source_refs: frozenset[str],
+    source_ref_aliases: SourceRefAliasTable | None,
+) -> dict[str, object]:
+    """Compile the one required-tool route for an expression-only repair.
+
+    Both the paired author and the leaf expression wire use this seam.  The
+    caller supplies only the current capability/source coordinates; schema,
+    tool choice, identity, and lossless unwrapping stay in the canonical
+    expression compiler.
+    """
+
+    if not bool(getattr(provider, "supports_required_tool_choice", False)):
+        return {}
+    aliases = (
+        tuple(
+            sorted(
+                source_ref_aliases.alias_for(source_ref) or source_ref
+                for source_ref in source_ref_aliases.canonical_refs
+            )
+        )
+        if source_ref_aliases is not None
+        else ()
+    )
+    source_scopes = (
+        world_claim_source_ref_aliases_by_scope(
+            request=request,
+            stable_identity_source_refs=stable_identity_source_refs,
+            source_ref_aliases=source_ref_aliases,
+        )
+        if source_ref_aliases is not None
+        else {
+            scope: ()
+            for scope in (
+                "current_world",
+                "past_world",
+                "counterpart_history",
+                "shared_history",
+                "stable_identity",
+            )
+        }
+    )
+    output_contract = expression_reselection_output_contract(
+        capabilities=capabilities,
+        allowed_source_ref_aliases=aliases,
+        world_claim_source_ref_aliases_by_scope=source_scopes,
+        response_expectation_assessment_required=(
+            request_requires_response_expectation_assessment(request)
+        ),
+        provider_message_bound=bool(
+            request.trigger_message is not None
+            and request.trigger_message.platform_message_id
+        ),
+        combined=False,
+    )
+    compiled = expression_reselection_tool_contract(output_contract)
+    return {
+        "tools": list(compiled.provider_tools),
+        "tool_choice": compiled.provider_tool_choice,
+        "tool_contract_identity": compiled.identity.request_identity_material(),
+        "unwrap_tool_result": compiled.unwrap,
+    }
+
+
 class _ExpressionDraftWire:
     """Materialize the expression portion of one Interior-authored result.
 
@@ -10230,6 +10299,13 @@ class _ExpressionDraftWire:
         reselection_model_id = (
             reselection_lane.model_id if reselection_lane is not None else self._model_id
         )
+        expression_tool_kwargs = _expression_tool_reselection_kwargs(
+            request=request,
+            provider=reselection_model,
+            capabilities=self._expression_capabilities,
+            stable_identity_source_refs=self._stable_identity_source_refs,
+            source_ref_aliases=effective_source_ref_aliases,
+        )
         corrected = await complete_bounded_validation_reselection(
             model=reselection_model,
             messages=messages,
@@ -10251,6 +10327,7 @@ class _ExpressionDraftWire:
             model_id=reselection_model_id,
             model_version=self.VERSION,
             source_closure_lane_used=reselection_lane is not None,
+            **expression_tool_kwargs,
         )
         _capture_authored_candidate(
             identity=_required_reselection_identity(corrected),
@@ -10260,7 +10337,7 @@ class _ExpressionDraftWire:
             purpose="validation_reselection",
             usage=corrected.usage,
         )
-        if source_closure_review is not None:
+        if source_closure_review is not None or expression_tool_kwargs:
             try:
                 normalized_reselection_raw = normalize_realtime_expression_reselection_output(
                     corrected.raw

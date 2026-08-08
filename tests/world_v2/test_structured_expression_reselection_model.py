@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 
+from companion_daemon.llm import DeepSeekChatModel
 from companion_daemon.world_v2.biographical_claim_authority import (
     biographical_coordinate_authorities,
 )
@@ -19,6 +20,7 @@ from companion_daemon.world_v2.structured_expression_reselection_model import (
     EXPRESSION_SOURCE_RESELECTION_DIRECT_CONTRACT,
     StructuredExpressionReselectionModel,
     expression_reselection_output_contract,
+    expression_reselection_tool_contract,
     normalize_expression_reselection_output,
     normalize_realtime_expression_reselection_output,
 )
@@ -297,6 +299,194 @@ def test_expression_reselection_contract_binds_current_capabilities() -> None:
     assert contract["schema_sha256"].startswith("sha256:")
 
 
+def test_expression_reselection_tool_contract_is_lossless_and_strict() -> None:
+    capabilities = qq_expression_capabilities("napcat", recorded_cadence_mode="shadow")
+    output_contract = expression_reselection_output_contract(
+        capabilities=capabilities,
+        allowed_source_ref_aliases=("s1", "s2"),
+        world_claim_source_ref_aliases_by_scope=_WORLD_CLAIM_ALIASES,
+        response_expectation_assessment_required=False,
+        combined=False,
+    )
+
+    compiled = expression_reselection_tool_contract(output_contract)
+
+    assert compiled.provider_tool_choice == {
+        "type": "function",
+        "function": {"name": "character_expression_reselection_v1"},
+    }
+    assert len(compiled.provider_tools) == 1
+    function = compiled.provider_tools[0]["function"]
+    assert isinstance(function, dict)
+    assert function["name"] == "character_expression_reselection_v1"
+    parameters = function["parameters"]
+    assert isinstance(parameters, dict)
+    assert parameters["type"] == "object"
+    assert "$defs" not in parameters
+    _assert_closed_objects_are_fully_required(parameters)
+
+    authored = {
+        "expression_draft": {
+            "private_turn_state": {
+                "contract": "private-turn-state.1",
+                "inner_state_summary": "我想把这一句说清楚。",
+                "attended_source_refs": ["s1"],
+            },
+            "timing_choice": "silent",
+            "cadence": "conversational",
+            "beats": [],
+            "delay_position_bp": None,
+            "expires_after_seconds": None,
+            "stance": "quiet",
+            "brief_rationale": "这次先不打扰。",
+            "impulse_summary": None,
+            "confidence": 7000,
+            "variation_profile": None,
+            "response_expectation": None,
+            "response_expectation_assessment": None,
+            "world_claims": [],
+        },
+        "episode_disposition": "complete_without_more",
+    }
+    raw = json.dumps(authored, ensure_ascii=False, separators=(",", ":"))
+    assert json.loads(compiled.unwrap(raw)) == authored
+    with pytest.raises(ValueError, match="expression reselection tool"):
+        compiled.unwrap(json.dumps({"expression_draft": authored["expression_draft"]}))
+    with pytest.raises(ValueError, match="expression reselection tool"):
+        compiled.unwrap(
+            json.dumps(
+                {
+                    **authored,
+                    "unexpected": True,
+                }
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_expression_reselection_tool_contract_survives_deepseek_http_adapter() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_expression_reselection_v1",
+                                        "arguments": '{"expression_draft":{},"episode_disposition":null}',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    capabilities = qq_expression_capabilities("napcat", recorded_cadence_mode="shadow")
+    output_contract = expression_reselection_output_contract(
+        capabilities=capabilities,
+        allowed_source_ref_aliases=("s1",),
+        world_claim_source_ref_aliases_by_scope={
+            **_WORLD_CLAIM_ALIASES,
+            "stable_identity": (),
+        },
+        response_expectation_assessment_required=False,
+        combined=False,
+    )
+    compiled = expression_reselection_tool_contract(output_contract)
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com/v1",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+
+    raw = await model.complete_json(
+        [{"role": "user", "content": "return the tool result"}],
+        temperature=0.0,
+        tools=list(compiled.provider_tools),
+        tool_choice=compiled.provider_tool_choice,
+    )
+
+    assert json.loads(raw) == {
+        "expression_draft": {},
+        "episode_disposition": None,
+    }
+    assert captured["tools"] == list(compiled.provider_tools)
+    assert captured["tool_choice"] == compiled.provider_tool_choice
+    assert "response_format" not in captured
+    await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_structured_reselection_tool_route_omits_json_response_format() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "character_expression_reselection_v1",
+                                        "arguments": "{\"expression_draft\":{},\"episode_disposition\":null}",
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    capabilities = qq_expression_capabilities("napcat", recorded_cadence_mode="shadow")
+    output_contract = expression_reselection_output_contract(
+        capabilities=capabilities,
+        allowed_source_ref_aliases=("s1",),
+        world_claim_source_ref_aliases_by_scope={
+            **_WORLD_CLAIM_ALIASES,
+            "stable_identity": (),
+        },
+        response_expectation_assessment_required=False,
+        combined=False,
+    )
+    compiled = expression_reselection_tool_contract(output_contract)
+    model = StructuredExpressionReselectionModel(
+        "key",
+        "https://api.openai.com/v1",
+        "role-reselector",
+        transport=httpx.MockTransport(handler),
+    )
+
+    raw = await model.complete_json(
+        _contract_messages(output_contract),
+        temperature=0.0,
+        tools=list(compiled.provider_tools),
+        tool_choice=compiled.provider_tool_choice,
+    )
+
+    assert json.loads(raw) == {"expression_draft": {}, "episode_disposition": None}
+    assert captured["tools"] == list(compiled.provider_tools)
+    assert captured["tool_choice"] == compiled.provider_tool_choice
+    assert "response_format" not in captured
+    await model.aclose()
+
+
 def test_provider_advertised_biographical_coordinate_is_valid_private_attention() -> None:
     context = {
         "world_id": "world:strict-reselection-biography",
@@ -467,6 +657,24 @@ def test_reselection_contract_digest_rejects_tampered_capabilities() -> None:
             temperature=0.0,
             json_object=True,
         )
+
+
+def test_reselection_tool_contract_rejects_tampered_contract_identity() -> None:
+    capabilities = qq_expression_capabilities("napcat", recorded_cadence_mode="shadow")
+    contract = expression_reselection_output_contract(
+        capabilities=capabilities,
+        allowed_source_ref_aliases=("s1",),
+        world_claim_source_ref_aliases_by_scope={
+            **_WORLD_CLAIM_ALIASES,
+            "stable_identity": (),
+        },
+        response_expectation_assessment_required=False,
+        combined=False,
+    )
+    contract["contract"] = "expression-source-reselection-direct.legacy"
+
+    with pytest.raises(ValueError, match="contract identity"):
+        expression_reselection_tool_contract(contract)
 
 
 def test_direct_contract_fails_closed_for_combined_cognition_wire() -> None:

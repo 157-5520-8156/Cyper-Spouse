@@ -1472,14 +1472,23 @@ class StructuredSourceReviewModel(OpenAICompatibleChatModel):
         messages: list[dict[str, str]],
         *,
         temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> str:
         contract = _explicit_output_contract(messages)
         try:
-            result = await super().complete_json(messages, temperature=temperature)
+            result = await super().complete_json(
+                messages,
+                temperature=temperature,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
         except BaseException as exc:
-            self._record_strict_runtime_failure(contract=contract, exc=exc)
+            if not tools:
+                self._record_strict_runtime_failure(contract=contract, exc=exc)
             raise
-        self._record_strict_runtime_success(contract=contract)
+        if not tools:
+            self._record_strict_runtime_success(contract=contract)
         return result
 
     async def complete_json_with_usage(
@@ -1487,17 +1496,23 @@ class StructuredSourceReviewModel(OpenAICompatibleChatModel):
         messages: list[dict[str, str]],
         *,
         temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> tuple[str, dict[str, object]]:
         contract = _explicit_output_contract(messages)
         try:
             result = await super().complete_json_with_usage(
                 messages,
                 temperature=temperature,
+                tools=tools,
+                tool_choice=tool_choice,
             )
         except BaseException as exc:
-            self._record_strict_runtime_failure(contract=contract, exc=exc)
+            if not tools:
+                self._record_strict_runtime_failure(contract=contract, exc=exc)
             raise
-        self._record_strict_runtime_success(contract=contract)
+        if not tools:
+            self._record_strict_runtime_success(contract=contract)
         return result
 
     def _record_strict_runtime_success(self, *, contract: str | None) -> None:
