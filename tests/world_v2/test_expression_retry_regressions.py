@@ -783,6 +783,7 @@ async def test_fact_batch_settles_ordered_slot_updates_without_a_second_model_ca
         # second slot update must recover the recorded batch decision rather
         # than ask the model again under the first member's new Fact Context.
         await host.aclose()
+        await host.wait_for_shutdown_quiescence()
         host = build_qq_c2c_host(
             settings=Settings(
                 database_path=tmp_path / "fact-batch-slot-update.sqlite",

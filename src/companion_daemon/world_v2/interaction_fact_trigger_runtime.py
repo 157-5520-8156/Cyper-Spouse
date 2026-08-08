@@ -1587,27 +1587,72 @@ class InteractionFactTriggerRuntime:
             fact_authority_event_ref=fact_event.event_id,
         )
         if decision is None:
-            context = InteriorPurposeContext(
-                inner_turn_ref=f"memory:fact:{fact_event.event_id}",
-                trigger_ref=fact_event.event_id,
-                cursor=self._cursor(projection),
-                logical_time=memory_logical_time,
-                source_refs=tuple(
-                    dict.fromkeys((fact_event.event_id, source_event.event_id))
-                ),
-            )
-            opportunity = _memory_opportunity(
-                world_id=self._ledger.world_id,
-                actor_ref=self._memory_actor_ref or "",
-                purpose=_FACT_MEMORY_PURPOSE,
-                context=context,
-                capability_payload=_memory_retention_capability(
-                    source_kind="verified_user_fact",
-                    predicate_code=fact.values.predicate_code,
-                    source_text=observation.text,
-                ),
-            )
+            def build_memory_opportunity(current_projection):
+                current_logical_time = (
+                    current_projection.logical_time or source_event.logical_time
+                )
+                current_context = InteriorPurposeContext(
+                    inner_turn_ref=f"memory:fact:{fact_event.event_id}",
+                    trigger_ref=fact_event.event_id,
+                    cursor=self._cursor(current_projection),
+                    logical_time=current_logical_time,
+                    source_refs=tuple(
+                        dict.fromkeys((fact_event.event_id, source_event.event_id))
+                    ),
+                )
+                current_opportunity = _memory_opportunity(
+                    world_id=self._ledger.world_id,
+                    actor_ref=self._memory_actor_ref or "",
+                    purpose=_FACT_MEMORY_PURPOSE,
+                    context=current_context,
+                    capability_payload=_memory_retention_capability(
+                        source_kind="verified_user_fact",
+                        predicate_code=fact.values.predicate_code,
+                        source_text=observation.text,
+                    ),
+                )
+                return current_logical_time, current_context, current_opportunity
+
+            memory_logical_time, context, opportunity = build_memory_opportunity(projection)
             interior_result = await self._character_interior.consider(opportunity)
+            # A due Action/Clock wake may commit between the projection read
+            # above and CharacterInterior's cursor-pinned snapshot.  That is a
+            # normal CAS race, not a semantic memory failure.  Rebuild the
+            # opportunity once at the new head while the same fact authority
+            # is still active; do not use the new head to reinterpret a fact
+            # that has already been superseded, and do not retry a provider
+            # result after the model has actually authored a decision.
+            if (
+                interior_result.status == "technical_failure"
+                and interior_result.failure_code in {"invalid_projection", "projection_unavailable"}
+            ):
+                refreshed = await self._project()
+                refreshed_fact = next(
+                    (
+                        item
+                        for item in refreshed.facts
+                        if item.fact_id == fact.fact_id
+                        and item.entity_revision == fact.entity_revision
+                        and item.origin.accepted_event_ref == fact_event.event_id
+                        and item.values.status == "active"
+                    ),
+                    None,
+                )
+                refreshed_cursor = self._cursor(refreshed)
+                if refreshed_fact is None:
+                    return
+                if refreshed_cursor != context.cursor:
+                    fact = refreshed_fact
+                    projection = refreshed
+                    transition = next(
+                        item
+                        for item in projection.fact_transitions
+                        if item.transition_id == fact.origin.transition_id
+                    )
+                    memory_logical_time, context, opportunity = build_memory_opportunity(
+                        projection
+                    )
+                    interior_result = await self._character_interior.consider(opportunity)
             draft = _materialize_memory_retention(
                 result=interior_result,
                 opportunity=opportunity,
