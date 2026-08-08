@@ -822,6 +822,8 @@ RSS/NWS/USGS → hub 采集/去重/嵌入/聚类 → attention 影子/实时注�
 - **期望表现**：消息不是对上一句的回应，而是她生活的自然溢出。
 - **依赖机制链**：clock/生活事件 → 主动窗口（2/15/45 分钟；无新事件时 45 分钟~8 小时环境机会）→ `proactive_action`（持久终态的审议）→ `social_initiative` → 角色决定 now/later/silent。
 - **现状**：机制 [active]，但"效果未验证"（`companion-experience-roadmap` 现状表 #1）——频率、时机、内容质量没有实测数据。
+- 每次 `silent` 只结束当前考虑，不消费未来机会；持久化的沉默终态会产生下一次独立、可重放的
+  `post_silent` 考虑时间。恢复时必须保留该来源身份，不能把同一机会误并入 ambient，也不能把它改写成强制发送。
 - **修复要点**：记录主动消息的实际频率/时机/被回应的比例（§5.2 的评测思路可复用）；`inner-life-coverage-plan` 指出"主动联络之前无'想找人说话'的 durable 状态"——孤独/分享欲这类动机材料是否在快照中充分呈现，是内容质量的根因。
 - 来源：`companion-experience-roadmap` #1、`world-v2-inner-life-coverage-plan` 感受空白表。
 

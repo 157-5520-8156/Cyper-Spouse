@@ -785,6 +785,7 @@ def _proactive_source_frame(model_content_json: str) -> dict[str, object] | None
             "commitment",
             "spontaneous_contact",
             "ambient_presence",
+            "post_silent",
             "situation_change",
         }:
             candidates = value.get("candidates")
@@ -858,6 +859,7 @@ class ProactiveOpportunity(FrozenModel):
         "commitment",
         "spontaneous_contact",
         "ambient_presence",
+        "post_silent",
         "situation_change",
     ]
     source_id: str
@@ -1058,6 +1060,29 @@ class ProactiveDeliberationTurn:
             )
         elif opportunity.source_kind == "ambient_presence":
             valid_source = event.event_type == "ClockAdvanced"
+        elif opportunity.source_kind == "post_silent":
+            prior_process = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "proactive_action_deliberation"
+                    and item.trigger_id == opportunity.source_id
+                    and item.state == "terminal"
+                    and item.runtime_outcome_ref == "proactive:silent"
+                    and item.source_evidence_ref == event.event_id
+                ),
+                None,
+            )
+            completion = await self._find_trigger_completion(opportunity.source_id)
+            completion_payload = completion.payload() if completion is not None else {}
+            valid_source = (
+                event.event_type == "ClockAdvanced"
+                and prior_process is not None
+                and completion is not None
+                and completion_payload.get("trigger_id") == opportunity.source_id
+                and completion_payload.get("runtime_outcome_ref") == "proactive:silent"
+                and completion.causation_id == event.event_id
+            )
         elif opportunity.source_kind == "situation_change":
             stimulus_refs = tuple(
                 next(
@@ -1143,6 +1168,11 @@ class ProactiveDeliberationTurn:
                     "as non-directive context."
                     if opportunity.source_kind == "ambient_presence"
                     else (
+                        "A prior role-authored silent consideration is the timing source. It only opens "
+                        "another chance to think; the character still decides whether any motive or "
+                        "expression exists."
+                        if opportunity.source_kind == "post_silent"
+                        else (
                         (
                             "A bounded set of committed situation changes is available. "
                             "It is timing and attention evidence only; derive any motive "
@@ -1152,12 +1182,18 @@ class ProactiveDeliberationTurn:
                         )
                         if opportunity.source_kind == "situation_change"
                         else "A verified proactive opportunity exists."
+                        )
                     )
                 )
             )
         )
+        # The immutable Clock event remains the source authority for a
+        # post-silent opportunity.  Its source kind is carried by the verified
+        # opportunity advisory; a synthetic context key would not resolve to a
+        # committed event and would therefore fail the Interior source gate.
+        context_trigger_ref = opportunity.source_event_ref
         query = query_from_projection(
-            projection, actor_ref=self._actor, trigger_ref=opportunity.source_event_ref
+            projection, actor_ref=self._actor, trigger_ref=context_trigger_ref
         )
         if opportunity.source_kind == "situation_change":
             evidence_refs = _unique_committed_stimulus_refs(
@@ -1268,6 +1304,16 @@ class ProactiveDeliberationTurn:
             await asyncio.to_thread(self._ledger.lookup_event_commit, event_id)
             if self._ledger.blocks_event_loop
             else self._ledger.lookup_event_commit(event_id)
+        )
+
+    async def _find_trigger_completion(self, trigger_id: str):
+        finder = getattr(self._ledger, "find_trigger_completion", None)
+        if not callable(finder):
+            return None
+        return (
+            await asyncio.to_thread(finder, trigger_id)
+            if self._ledger.blocks_event_loop
+            else finder(trigger_id)
         )
 
     async def _project_at(self, cursor: ProjectionCursor):

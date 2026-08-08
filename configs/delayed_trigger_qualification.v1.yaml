@@ -30,6 +30,18 @@ host_scenario_evidence:
     qualification_scope: public_host_proactive_ambient_lifecycle
     excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
 
+  - scenario_id: proactive.post-silent-reconsideration-effect-once.1
+    mechanism_ids: [proactive.post_silent]
+    test_nodeid: tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::test_public_host_post_silent_reconsideration_is_effect_once
+    qualification_scope: public_host_proactive_post_silent_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
+  - scenario_id: proactive.post-silent-technical-retry-restart.1
+    mechanism_ids: [proactive.post_silent, proactive.technical_retry]
+    test_nodeid: tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::test_public_host_post_silent_failure_retry_preserves_identity
+    qualification_scope: public_host_post_silent_technical_retry_lifecycle
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
   - scenario_id: proactive.technical-retry-restart-effect-once.1
     mechanism_ids: [proactive.technical_retry]
     test_nodeid: tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::test_public_host_technical_retry_survives_restart_and_is_effect_once

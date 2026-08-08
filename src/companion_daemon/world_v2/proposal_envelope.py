@@ -1052,6 +1052,7 @@ class ProactiveExpressionSourceBinding(FrozenModel):
         "spontaneous_contact",
         "response_gap",
         "ambient_presence",
+        "post_silent",
         "situation_change",
     ]
     source_event_ref: BoundedRef
@@ -1076,6 +1077,7 @@ class ProactiveExpressionPlanSourceBindingV2(FrozenModel):
         "spontaneous_contact",
         "response_gap",
         "ambient_presence",
+        "post_silent",
         "situation_change",
     ]
     source_event_ref: BoundedRef
@@ -1118,6 +1120,7 @@ class ProactiveOpportunityDecision(FrozenModel):
         "spontaneous_contact",
         "response_gap",
         "ambient_presence",
+        "post_silent",
         "situation_change",
     ]
     source_event_ref: BoundedRef

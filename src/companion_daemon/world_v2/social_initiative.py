@@ -17,9 +17,9 @@ from zoneinfo import ZoneInfo
 from pydantic import Field, model_validator
 
 from .ledger import LedgerPort
-from .random_authority import RandomAuthority
+from .random_authority import RandomAuthority, RandomDrawRecordedPayload
 from .schema_core import FrozenModel
-from .schemas import WorldEvent
+from .schemas import CommittedWorldEventRef, WorldEvent
 
 
 _SITUATION_STIMULUS_EVENT_TYPES = frozenset(
@@ -167,6 +167,7 @@ class SocialInitiativeOpportunity(FrozenModel):
     source_kind: Literal[
         "spontaneous_contact",
         "ambient_presence",
+        "post_silent",
         "situation_change",
     ]
     source_id: str
@@ -325,7 +326,7 @@ def social_initiative_consideration_id(
     delay_seconds: int,
     epoch: int,
     source_kind: Literal[
-        "spontaneous_contact", "ambient_presence", "situation_change"
+        "spontaneous_contact", "ambient_presence", "post_silent", "situation_change"
     ],
 ) -> str:
     return "consideration:social-initiative:" + hashlib.sha256(
@@ -340,6 +341,73 @@ def social_initiative_consideration_id(
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
+
+
+_POST_SILENT_CONSIDERATION_PREFIX = "consideration:social-initiative:post-silent:"
+
+
+def post_silent_consideration_id(
+    *,
+    attempt_id: str,
+    delay_seconds: int,
+    epoch: int,
+    prior_trigger_id: str,
+) -> str:
+    """Return a durable, self-describing identity for a post-silent draw.
+
+    ``TriggerProcess`` deliberately keeps the long-lived trigger reference
+    opaque.  Recovery still needs to distinguish a post-silent opportunity
+    from an ambient Clock opportunity, however; otherwise the same persisted
+    process can be reopened through the ambient lane.  The prior trigger id is
+    encoded (rather than interpreted) so this marker carries no semantic
+    decision and remains reversible without a schema migration.
+    """
+
+    base = social_initiative_consideration_id(
+        attempt_id=attempt_id,
+        delay_seconds=delay_seconds,
+        epoch=epoch,
+        source_kind="post_silent",
+    )
+    encoded_trigger = prior_trigger_id.encode("utf-8").hex()
+    return _POST_SILENT_CONSIDERATION_PREFIX + encoded_trigger + ":" + base.rsplit(
+        ":", 1
+    )[-1]
+
+
+def post_silent_attempt_id(
+    *, completion_event_ref: str, prior_trigger_id: str, policy_version: str
+) -> str:
+    """Return one stable draw identity for a silent epoch.
+
+    Timing is selected once from the context available when this chain opens.
+    Later affect/activity changes may alter the next model context, but they
+    must not mint another draw for the same completed silent trigger.
+    """
+
+    material = {
+        "completion_event_ref": completion_event_ref,
+        "prior_trigger_id": prior_trigger_id,
+        "policy_version": policy_version,
+    }
+    return "social-initiative-post-silent:" + hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def post_silent_prior_trigger_id(consideration_id: str) -> str | None:
+    """Decode the prior silent trigger marker, failing closed on old ids."""
+
+    if not consideration_id.startswith(_POST_SILENT_CONSIDERATION_PREFIX):
+        return None
+    encoded = consideration_id[len(_POST_SILENT_CONSIDERATION_PREFIX) :].split(":", 1)[0]
+    if not encoded:
+        return None
+    try:
+        decoded = bytes.fromhex(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return decoded or None
 
 
 class SocialInitiativeCompiler:
@@ -416,7 +484,13 @@ class SocialInitiativeCompiler:
         if retry is not None and retry.source_kind in {
             "spontaneous_contact",
             "ambient_presence",
+            "post_silent",
         }:
+            return None
+        post_silent = await self._post_silent_consideration(projection, logical_time)
+        if post_silent is not None:
+            return post_silent
+        if await self._post_silent_chain_active(projection):
             return None
         spontaneous = await self._spontaneous_contact(projection, logical_time)
         if (
@@ -467,8 +541,13 @@ class SocialInitiativeCompiler:
                 continue
             event = located[0]
             if event.event_type == "ClockAdvanced":
-                source_kind = "ambient_presence"
-                source_id = f"ambient:recovery:{source_ref.world_revision}"
+                prior_trigger_id = post_silent_prior_trigger_id(consideration_id)
+                if prior_trigger_id is not None:
+                    source_kind = "post_silent"
+                    source_id = prior_trigger_id
+                else:
+                    source_kind = "ambient_presence"
+                    source_id = f"ambient:recovery:{source_ref.world_revision}"
                 stimulus_event_refs: tuple[str, ...] = ()
             elif event.event_type == "ObservationRecorded":
                 source_kind = "spontaneous_contact"
@@ -522,6 +601,187 @@ class SocialInitiativeCompiler:
                 cadence_reason_codes=("recovery:persisted_process",),
                 stimulus_event_refs=stimulus_event_refs,
             )
+        return None
+
+    async def _post_silent_chain_active(self, projection) -> bool:
+        """Keep a role-owned silent cadence from spawning an ambient sibling.
+
+        Once a consideration has been answered with ``silent``, its next
+        recorded draw owns the idle cadence until a newer user Observation
+        supersedes it.  This prevents one due Clock from invoking the model
+        twice (post-silent and ambient) in the same background drain.
+        """
+
+        latest_message_revision = (
+            projection.message_observations[-1].world_revision
+            if projection.message_observations
+            else 0
+        )
+        for process in reversed(getattr(projection, "trigger_processes", ())):
+            if (
+                process.process_kind != "proactive_action_deliberation"
+                or process.state != "terminal"
+                or process.runtime_outcome_ref != "proactive:silent"
+                or process.source_evidence_ref is None
+                or not process.trigger_ref.startswith(
+                    "proactive-consideration:consideration:social-initiative:"
+                )
+            ):
+                continue
+            prior_trigger_id = getattr(process, "trigger_id", None)
+            if not isinstance(prior_trigger_id, str) or not prior_trigger_id:
+                continue
+            completion_ref = await self._silent_completion_ref(projection, prior_trigger_id)
+            return completion_ref is not None and latest_message_revision <= completion_ref.world_revision
+        return False
+
+    async def _post_silent_consideration(
+        self, projection, logical_time: datetime
+    ) -> SocialInitiativeOpportunity | None:
+        """Open the next recorded opportunity after a role-owned silence.
+
+        A silent decision closes exactly one consideration.  The next timing
+        draw is a new opportunity anchored to that immutable terminal event;
+        it never reuses the old model result or invents a motive/wording.
+        """
+
+        latest_message_revision = (
+            projection.message_observations[-1].world_revision
+            if projection.message_observations
+            else 0
+        )
+        for process in reversed(getattr(projection, "trigger_processes", ())):
+            if (
+                process.process_kind != "proactive_action_deliberation"
+                or process.state != "terminal"
+                or process.runtime_outcome_ref != "proactive:silent"
+                or process.source_evidence_ref is None
+                or not process.trigger_ref.startswith(
+                    "proactive-consideration:consideration:social-initiative:"
+                )
+            ):
+                continue
+            prior_trigger_id = getattr(process, "trigger_id", None)
+            if not isinstance(prior_trigger_id, str) or not prior_trigger_id:
+                continue
+            completion_ref = await self._silent_completion_ref(projection, prior_trigger_id)
+            if completion_ref is None:
+                continue
+            if latest_message_revision > completion_ref.world_revision:
+                return None
+            profile = self._context.compile(projection=projection, logical_time=logical_time)
+            source_ref = next(
+                (
+                    item
+                    for item in projection.committed_world_event_refs
+                    if item.event_id == process.source_evidence_ref
+                ),
+                None,
+            )
+            if source_ref is None:
+                continue
+            attempt_id = post_silent_attempt_id(
+                completion_event_ref=completion_ref.event_id,
+                prior_trigger_id=prior_trigger_id,
+                policy_version=self._context.version,
+            )
+            draw_kwargs = dict(
+                attempt_id=attempt_id,
+                candidate_refs=tuple(
+                    f"delay:{seconds}" for seconds in profile.delay_candidates_seconds
+                ),
+                candidate_weights=profile.candidate_weights,
+                weight_policy_version=self._context.version,
+                catalog_version="social-initiative-post-silent-delay.1",
+                logical_time=logical_time,
+                seed_instant=completion_ref.logical_time,
+                actor="system:social-initiative",
+                trace_id="trace:social-initiative:post-silent:" + prior_trigger_id[-24:],
+                correlation_id=(
+                    "correlation:social-initiative:post-silent:" + prior_trigger_id[-24:]
+                ),
+            )
+            draw = await self._recorded_random_draw(projection, attempt_id)
+            if draw is None:
+                draw = (
+                    await asyncio.to_thread(self._random.draw, **draw_kwargs)
+                    if self._ledger.blocks_event_loop
+                    else self._random.draw(**draw_kwargs)
+                )
+            try:
+                delay_seconds = int(draw.selected_candidate_ref.removeprefix("delay:"))
+            except (AttributeError, ValueError):
+                raise ValueError("post-silent initiative draw did not select a delay")
+            if delay_seconds not in profile.delay_candidates_seconds:
+                raise ValueError("post-silent initiative draw selected an unknown delay")
+            scheduled_for = completion_ref.logical_time + timedelta(seconds=delay_seconds)
+            consideration_id = post_silent_consideration_id(
+                attempt_id=attempt_id,
+                delay_seconds=delay_seconds,
+                epoch=0,
+                prior_trigger_id=prior_trigger_id,
+            )
+            current = next(
+                (
+                    item
+                    for item in reversed(getattr(projection, "trigger_processes", ()))
+                    if item.process_kind == "proactive_action_deliberation"
+                    and item.trigger_ref == "proactive-consideration:" + consideration_id
+                ),
+                None,
+            )
+            if current is not None:
+                return None
+            if logical_time < scheduled_for:
+                return None
+            return await self._from_source(
+                source_kind="post_silent",
+                source_id=prior_trigger_id,
+                source_event_ref=source_ref.event_id,
+                source_world_revision=source_ref.world_revision,
+                consideration_id=consideration_id,
+                scheduled_for=scheduled_for,
+                cadence_reason_codes=("after:role_silent", *profile.reason_codes),
+            )
+        return None
+
+    async def _recorded_random_draw(
+        self, projection, attempt_id: str
+    ) -> RandomDrawRecordedPayload | None:
+        """Reuse a committed draw before compiling a changed soft profile."""
+
+        for ref in reversed(projection.committed_world_event_refs):
+            if ref.event_type != "RandomDrawRecorded":
+                continue
+            located = await self._lookup(ref.event_id)
+            if located is None:
+                continue
+            payload = located[0].payload()
+            if payload.get("attempt_id") == attempt_id:
+                return RandomDrawRecordedPayload.model_validate_json(
+                    json.dumps(payload, ensure_ascii=False)
+                )
+        return None
+
+    async def _silent_completion_ref(self, projection, trigger_id: str):
+        finder = getattr(self._ledger, "find_trigger_completion", None)
+        if callable(finder):
+            completion = (
+                await asyncio.to_thread(finder, trigger_id)
+                if self._ledger.blocks_event_loop
+                else finder(trigger_id)
+            )
+            if completion is not None:
+                located = await self._lookup(completion.event_id)
+                if located is not None:
+                    _event, commit = located
+                    return CommittedWorldEventRef(
+                        event_id=completion.event_id,
+                        event_type=completion.event_type,
+                        world_revision=commit.world_revision,
+                        payload_hash=completion.payload_hash,
+                        logical_time=completion.logical_time,
+                    )
         return None
 
     async def _observable_stimulus_refs(
@@ -774,8 +1034,14 @@ class SocialInitiativeCompiler:
         if located is None:
             return None
         event = located[0]
+        consideration_id = process.trigger_ref.removeprefix(
+            "proactive-consideration:"
+        )
+        prior_trigger_id = post_silent_prior_trigger_id(consideration_id)
         source_kind = (
-            "ambient_presence"
+            "post_silent"
+            if event.event_type == "ClockAdvanced" and prior_trigger_id is not None
+            else "ambient_presence"
             if event.event_type == "ClockAdvanced"
             else "spontaneous_contact"
             if event.event_type == "ObservationRecorded"
@@ -791,7 +1057,7 @@ class SocialInitiativeCompiler:
             actor_ref=self._actor_ref,
         ):
             return None
-        source_id = f"retry:{source_ref.event_id}"
+        source_id = prior_trigger_id or f"retry:{source_ref.event_id}"
         if source_kind == "spontaneous_contact":
             message = next(
                 (
@@ -827,9 +1093,7 @@ class SocialInitiativeCompiler:
             source_id=source_id,
             source_event_ref=source_ref.event_id,
             source_world_revision=source_ref.world_revision,
-            consideration_id=process.trigger_ref.removeprefix(
-                "proactive-consideration:"
-            ),
+            consideration_id=consideration_id,
             scheduled_for=source_ref.logical_time,
             cadence_reason_codes=("technical_failure:retry",),
             stimulus_event_refs=stimulus_event_refs,
@@ -1044,5 +1308,8 @@ __all__ = [
     "situation_stimulus_is_observable",
     "social_initiative_attempt_id",
     "social_initiative_consideration_id",
+    "post_silent_attempt_id",
+    "post_silent_consideration_id",
+    "post_silent_prior_trigger_id",
     "technical_failure_point",
 ]

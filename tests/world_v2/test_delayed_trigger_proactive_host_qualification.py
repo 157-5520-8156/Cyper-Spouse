@@ -10,6 +10,7 @@ from companion_daemon.config import Settings
 from companion_daemon.delayed_trigger_catalog import load_delayed_trigger_catalog
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world_v2.proactive_action import proactive_technical_retry_states
+from companion_daemon.world_v2.social_initiative import post_silent_prior_trigger_id
 from companion_daemon.world_v2.qq_c2c_host import build_qq_c2c_host
 
 
@@ -76,6 +77,7 @@ class _ProactiveRoleScript:
     def __init__(self, proactive_replies: tuple[dict[str, object] | str, ...]) -> None:
         self._proactive_replies = list(proactive_replies)
         self.proactive_calls = 0
+        self.proactive_source_kinds: list[str] = []
         self._ordinary = FakeCompanionModel()
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
@@ -102,6 +104,15 @@ class _ProactiveRoleScript:
         if "proactive_contact" not in joined or "impulse_summary" not in joined:
             return await self._ordinary.complete(messages, temperature=temperature)
         self.proactive_calls += 1
+        for source_kind in (
+            "post_silent",
+            "ambient_presence",
+            "spontaneous_contact",
+            "situation_change",
+        ):
+            if f'"source_kind":"{source_kind}"' in joined:
+                self.proactive_source_kinds.append(source_kind)
+                break
         reply = self._proactive_replies.pop(0)
         if isinstance(reply, str):
             return reply
@@ -383,6 +394,299 @@ async def test_public_host_ambient_consideration_survives_restart_and_is_effect_
         assert cold_processes == restarted_processes
     finally:
         await cold.aclose()
+
+
+@pytest.mark.asyncio
+async def test_public_host_post_silent_reconsideration_is_effect_once(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    _host_scenario(
+        "proactive.post-silent-reconsideration-effect-once.1",
+        request.node.nodeid,
+        mechanism_ids=("proactive.post_silent",),
+        qualification_scope="public_host_proactive_post_silent_lifecycle",
+    )
+    model = _ProactiveRoleScript((_silent(), _silent()))
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "proactive-public-host-post-silent.sqlite",
+        PRIMARY_USER_ID="geoff",
+        WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
+    )
+    delivery = _DeliveredQQ()
+    first_due = NOW + timedelta(hours=12, seconds=1)
+    second_due = first_due + timedelta(hours=8, seconds=1)
+
+    def build(bootstrap_at: datetime):
+        return build_qq_c2c_host(
+            settings=settings,
+            recipient_id="10001",
+            bootstrap_at=bootstrap_at,
+            model=model,
+            world_support_model=FakeCompanionModel(),
+            delivery=delivery,
+            use_configured_recall_embedding=False,
+        )
+
+    host = build(NOW)
+    try:
+        await host.inbound_text(
+            message_id="message:public-host-post-silent-source",
+            recipient_id="10001",
+            text="我先去忙一会儿。",
+            observed_at=NOW,
+        )
+        await host.tick(
+            tick_id="tick:public-host-post-silent:first",
+            logical_time_from=NOW,
+            logical_time_to=first_due,
+            observed_at=first_due,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        assert model.proactive_calls == 1
+        assert model.proactive_source_kinds == ["ambient_presence"]
+        first = host.export_replay_evidence()
+        first_processes = tuple(
+            item
+            for item in first.projection.trigger_processes
+            if item.process_kind == "proactive_action_deliberation"
+        )
+        assert len(first_processes) == 1
+        assert first_processes[0].runtime_outcome_ref == "proactive:silent"
+
+        # Rebuild after the first role-owned silence, before its next draw is
+        # due. Recovery must retain the post-silent marker rather than opening
+        # an ambient sibling from the same Clock event.
+        await host.aclose()
+        host = build(first_due)
+        await host.drain(max_action_units=0, max_background_units=0)
+        before_post_silent = host.export_replay_evidence()
+        before_processes = tuple(
+            item
+            for item in before_post_silent.projection.trigger_processes
+            if item.process_kind == "proactive_action_deliberation"
+        )
+        assert before_processes == first_processes
+        assert model.proactive_calls == 1
+
+        await host.tick(
+            tick_id="tick:public-host-post-silent:second",
+            logical_time_from=first_due,
+            logical_time_to=second_due,
+            observed_at=second_due,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        assert model.proactive_calls == 2
+        assert model.proactive_source_kinds == ["ambient_presence", "post_silent"]
+        second = host.export_replay_evidence()
+        second_processes = tuple(
+            item
+            for item in second.projection.trigger_processes
+            if item.process_kind == "proactive_action_deliberation"
+        )
+        assert len(second_processes) == 2
+        assert len({item.trigger_id for item in second_processes}) == 2
+        assert post_silent_prior_trigger_id(
+            second_processes[-1].trigger_ref.removeprefix("proactive-consideration:")
+        ) == first_processes[0].trigger_id
+        post_silent_source = next(
+            item
+            for item in second.projection.committed_world_event_refs
+            if item.event_id == second_processes[-1].source_evidence_ref
+        )
+        assert post_silent_source.event_type == "ClockAdvanced"
+        completion_events = tuple(
+            item.event
+            for item in second.events
+            if item.event.event_type == "TriggerProcessCompleted"
+            and item.event.payload().get("runtime_outcome_ref") == "proactive:silent"
+        )
+        assert len(completion_events) == 2
+        assert {
+            event.payload().get("trigger_id") for event in completion_events
+        } == {item.trigger_id for item in second_processes}
+        completion_by_trigger = {
+            event.payload().get("trigger_id"): event for event in completion_events
+        }
+        assert all(
+            completion_by_trigger[item.trigger_id].causation_id == item.source_evidence_ref
+            for item in second_processes
+        )
+
+        await host.tick(
+            tick_id="tick:public-host-post-silent:second",
+            logical_time_from=first_due,
+            logical_time_to=second_due,
+            observed_at=second_due,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        repeated = host.export_replay_evidence()
+        assert model.proactive_calls == 2
+        assert repeated.cursor == second.cursor
+        assert repeated.projection.semantic_hash == second.projection.semantic_hash
+
+        await host.aclose()
+        host = build(second_due)
+        await host.drain(max_action_units=0, max_background_units=0)
+        cold = host.export_replay_evidence()
+        assert model.proactive_calls == 2
+        assert cold.cursor == repeated.cursor
+        assert cold.projection.semantic_hash == repeated.projection.semantic_hash
+        assert cold.replay.semantic_hash == repeated.replay.semantic_hash
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_public_host_post_silent_failure_retry_preserves_identity(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    _host_scenario(
+        "proactive.post-silent-technical-retry-restart.1",
+        request.node.nodeid,
+        mechanism_ids=("proactive.post_silent", "proactive.technical_retry"),
+        qualification_scope="public_host_post_silent_technical_retry_lifecycle",
+    )
+    # The post-silent attempt receives one malformed result and one malformed
+    # same-role correction.  Only the later retry receives a valid silent
+    # decision; no local fallback is allowed to speak for the role.
+    model = _ProactiveRoleScript((_silent(), "{}", "{}", _silent()))
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "proactive-public-host-post-silent-retry.sqlite",
+        PRIMARY_USER_ID="geoff",
+        WORLD_V2_EXPRESSION_EPISODE_MODE="off",
+        WORLD_V2_TEXT_ENDPOINT_ENABLED=False,
+    )
+    delivery = _DeliveredQQ()
+    first_due = NOW + timedelta(hours=12, seconds=1)
+    post_silent_due = first_due + timedelta(hours=8, seconds=1)
+    retry_due = post_silent_due + timedelta(minutes=10)
+
+    def build(bootstrap_at: datetime):
+        return build_qq_c2c_host(
+            settings=settings,
+            recipient_id="10001",
+            bootstrap_at=bootstrap_at,
+            model=model,
+            world_support_model=FakeCompanionModel(),
+            delivery=delivery,
+            use_configured_recall_embedding=False,
+        )
+
+    host = build(NOW)
+    try:
+        await host.inbound_text(
+            message_id="message:public-host-post-silent-retry-source",
+            recipient_id="10001",
+            text="我先去忙一会儿。",
+            observed_at=NOW,
+        )
+        await host.tick(
+            tick_id="tick:public-host-post-silent-retry:first",
+            logical_time_from=NOW,
+            logical_time_to=first_due,
+            observed_at=first_due,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        assert model.proactive_calls == 1
+        assert model.proactive_source_kinds == ["ambient_presence"]
+        first_projection = host.export_replay_evidence().projection
+        first_process = next(
+            item
+            for item in first_projection.trigger_processes
+            if item.process_kind == "proactive_action_deliberation"
+        )
+    finally:
+        await host.aclose()
+
+    host = build(first_due)
+    try:
+        await host.drain(max_action_units=0, max_background_units=0)
+        await host.tick(
+            tick_id="tick:public-host-post-silent-retry:post-silent",
+            logical_time_from=first_due,
+            logical_time_to=post_silent_due,
+            observed_at=post_silent_due,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        assert model.proactive_calls == 3
+        assert model.proactive_source_kinds == [
+            "ambient_presence",
+            "post_silent",
+            "post_silent",
+        ]
+        failed_projection = host.export_replay_evidence().projection
+        failed_process = next(
+            item
+            for item in failed_projection.trigger_processes
+            if item.process_kind == "proactive_action_deliberation"
+            and str(item.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
+        )
+        retry_state = proactive_technical_retry_states(failed_projection)
+        assert len(retry_state) == 1
+        retry_state = retry_state[0]
+        assert retry_state.retry_ordinal == 1
+        assert retry_state.next_retry_at == retry_due
+        assert retry_state.trigger_ref == failed_process.trigger_ref
+        assert post_silent_prior_trigger_id(
+            failed_process.trigger_ref.removeprefix("proactive-consideration:")
+        ) == first_process.trigger_id
+
+        await host.aclose()
+        host = build(post_silent_due)
+        await host.tick(
+            tick_id="tick:public-host-post-silent-retry:retry",
+            logical_time_from=post_silent_due,
+            logical_time_to=retry_due,
+            observed_at=retry_due,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        assert model.proactive_calls == 4
+        assert model.proactive_source_kinds[-1] == "post_silent"
+        recovered = host.export_replay_evidence()
+        recovered_processes = tuple(
+            item
+            for item in recovered.projection.trigger_processes
+            if item.process_kind == "proactive_action_deliberation"
+        )
+        assert len(recovered_processes) == 3
+        assert sum(
+            str(item.runtime_outcome_ref).startswith("proactive:deliberation-failed:")
+            for item in recovered_processes
+        ) == 1
+        assert sum(item.runtime_outcome_ref == "proactive:silent" for item in recovered_processes) == 2
+        assert proactive_technical_retry_states(recovered.projection) == ()
+        assert _proactive_action_count(host) == 0
+
+        cursor = recovered.cursor
+        await host.tick(
+            tick_id="tick:public-host-post-silent-retry:retry",
+            logical_time_from=post_silent_due,
+            logical_time_to=retry_due,
+            observed_at=retry_due,
+            reason="virtual_public_host_qualification",
+            run_life_ecology=False,
+        )
+        await host.drain(max_action_units=8, max_background_units=16)
+        repeated = host.export_replay_evidence()
+        assert model.proactive_calls == 4
+        assert repeated.cursor == cursor
+    finally:
+        await host.aclose()
 
 
 @pytest.mark.asyncio

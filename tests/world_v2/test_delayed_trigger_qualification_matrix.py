@@ -161,6 +161,14 @@ def test_host_scenario_evidence_registers_only_the_committed_public_host_cases()
             "tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::"
             "test_public_host_ambient_consideration_survives_restart_and_is_effect_once"
         ),
+        "proactive.post-silent-reconsideration-effect-once.1": (
+            "tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::"
+            "test_public_host_post_silent_reconsideration_is_effect_once"
+        ),
+        "proactive.post-silent-technical-retry-restart.1": (
+            "tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::"
+            "test_public_host_post_silent_failure_retry_preserves_identity"
+        ),
         "proactive.technical-retry-restart-effect-once.1": (
             "tests/world_v2/test_delayed_trigger_proactive_host_qualification.py::"
             "test_public_host_technical_retry_survives_restart_and_is_effect_once"

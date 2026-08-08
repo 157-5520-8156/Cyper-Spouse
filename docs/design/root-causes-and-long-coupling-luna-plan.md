@@ -1114,7 +1114,7 @@ commit：hash
   全部 source event 并合并为一个 Action。该结果是 transport/daemon/CAS/回执连续性的人工证据，不是措辞、
   自主性或生产成功率证明。
 - 当时最终定向回归为 `533 passed`，ruff 与 `git diff --check` 通过；之后的表达式 carrier/证据边界回归另行
-  通过（表达式/入站/验收相关 506 项，Delayed Trigger Matrix/host 44 项）。真实 provider 证据仍严格标记
+  通过（表达式/入站/验收相关 506 项，Delayed Trigger Matrix/host 48 项）。真实 provider 证据仍严格标记
   `manual_only`/`qualification_incomplete`：当前未满足 100 次 forced-tool/stream/QQ 回执样本、自由对聊
   质量观察和 24 小时 soak 的发布门；旧生产 daemon 也未在本轮被替换或重启。
 
@@ -1129,10 +1129,22 @@ commit：hash
   技术失败仍准确终结；重复 drain 不重新打开已完成 trigger，冷重放语义哈希保持一致。
 - 该场景验证的是 Life Ecology 调度、隔离、退避和 replay 语义，不是 World Author 的真实模型质量或 Life
   内容生成资格。真实 provider、自主生活选择、OneBot 回执和 24 小时 soak 继续排除；Matrix 仍为
-  `declaration_only`。本薄片及既有延迟触发场景回归共 `46 passed`，静态 verifier 仍报告
+  `declaration_only`。本薄片及既有延迟触发场景回归共 `48 passed`，静态 verifier 仍报告
   `28 delayed trigger mechanisms`。
-- 当前仍有一个 `release_status: active` 机制没有独立 host 场景：`proactive.post_silent`。它保持现状，
-  不用空测试或降级状态伪造资格；公开关系/节奏材料仍需后续隔离场景或明确 release 取舍。
+
+### 2026-08-09：post-silent 主动联系再次考虑 public-host 调度资格薄片
+
+- 为 `proactive.post_silent` 增加公开宿主场景：角色第一次在 ambient 机会选择 `silent` 后，系统只依据该
+  已提交的沉默终态记录下一次随机化考虑时间；到期后再次把机会交给角色模型。测试确认第二次机会的
+  `source_kind` 仍是 `post_silent`，不会在持久化 Clock 恢复时退化为 ambient，也不会生成强制措辞或主动 Action。
+- 该身份通过可逆的 consideration marker 绑定原沉默 trigger；原 Clock 事件仍是来源权威，TriggerProcess、
+  TriggerProcessCompleted、CAS/effect-once 与重启后的冷重放保持同一语义哈希。重复 tick/drain 以及重建宿主
+  均不重复调用模型。
+- 另有隔离失败路径：post-silent 的首次调用和一次同角色纠正均失败时，技术退避仍绑定同一 marker，按
+  `10/30/120` 分钟恢复；重启后重试的模型上下文仍标记 `post_silent`，旧的 ambient 机会不会抢占或污染该次尝试。
+- 场景只证明 scripted role、隔离数据库和公开 `inbound_text → tick → drain → export_replay_evidence → aclose`
+  seam 的调度/恢复语义。Matrix 仍是 `declaration_only`，真实 DeepSeek/QQ transport、自主动机、24 小时
+  soak 和生产 daemon 重启继续排除；不能把该场景当作真实模型成功率或上线资格证明。
 
 ### 2026-08-09：Life activity lifecycle public-host 调度资格薄片
 
