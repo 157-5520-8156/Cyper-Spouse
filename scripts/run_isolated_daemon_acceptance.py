@@ -128,6 +128,43 @@ def _decoded_json_material(value: object, *, depth: int = 0) -> object:
     return value
 
 
+def _trusted_provider_user_material(
+    messages: list[object],
+) -> tuple[dict[str, object], ...]:
+    """Return only the canonical CharacterInterior user envelopes.
+
+    Provider prompts contain both trusted material and arbitrary counterpart
+    text.  A recursive search for names such as ``inner_life_snapshot`` or
+    ``observation`` cannot distinguish the two: the counterpart can send a
+    JSON string with those keys.  The production CharacterInterior wire puts
+    the snapshot at the top level of a user JSON envelope and marks it with
+    the immutable snapshot contract/authority.  Keep that exact boundary here
+    and fail closed for older or malformed presentations.
+    """
+
+    trusted: list[dict[str, object]] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        decoded = _decoded_json_material(content)
+        if not isinstance(decoded, dict):
+            continue
+        snapshot = decoded.get("inner_life_snapshot")
+        if not isinstance(snapshot, dict):
+            continue
+        if snapshot.get("contract") != "inner-life-snapshot.1":
+            continue
+        if snapshot.get("authority") != "derived_from_verified_context":
+            continue
+        if snapshot.get("availability") not in {"available", "unavailable"}:
+            continue
+        trusted.append(decoded)
+    return tuple(trusted)
+
+
 def _named_material(
     value: object,
     *,
@@ -151,24 +188,18 @@ def _named_material(
     return found
 
 
-def _presented_source_event_ids(value: object) -> list[str]:
-    """Extract source IDs from named context material, never arbitrary prose.
+def _presented_source_event_ids(
+    trusted_material: tuple[dict[str, object], ...],
+) -> list[str]:
+    """Extract source IDs from the canonical envelope only.
 
-    Provider prompts contain user text as well as pinned context.  Parsing a
-    user-supplied JSON snippet that happens to contain ``source_event_ids``
-    would create a false causal edge, so IDs are accepted only below a
-    context-bearing container.
+    This intentionally does not walk arbitrary snapshot descendants.  The
+    field is an optional acceptance-only manifest; if the production snapshot
+    does not expose it, the result is empty rather than inferred from a
+    source-like string in user prose.
     """
 
     found: list[str] = []
-    context_markers = (
-        "context",
-        "capsule",
-        "snapshot",
-        "observation",
-        "source_closure",
-        "turn_state",
-    )
 
     def add(raw: object) -> None:
         if isinstance(raw, str) and raw.strip():
@@ -178,22 +209,11 @@ def _presented_source_event_ids(value: object) -> list[str]:
                 if isinstance(item, str) and item.strip():
                     found.append(item)
 
-    def visit(item: object, path: tuple[str, ...] = ()) -> None:
-        if isinstance(item, dict):
-            for key, child in item.items():
-                key_name = str(key).lower()
-                trusted_container = any(
-                    any(marker in parent for marker in context_markers)
-                    for parent in path
-                )
-                if trusted_container and key_name in {"source_event_id", "source_event_ids"}:
-                    add(child)
-                visit(child, path + (key_name,))
-        elif isinstance(item, list):
-            for child in item:
-                visit(child, path)
-
-    visit(value)
+    for envelope in trusted_material:
+        add(envelope.get("source_event_ids"))
+        snapshot = envelope.get("inner_life_snapshot")
+        if isinstance(snapshot, dict):
+            add(snapshot.get("source_event_ids"))
     return list(dict.fromkeys(found))
 
 
@@ -437,16 +457,19 @@ def _available_recall_material(value: object) -> list[object]:
 def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
     raw_messages = payload.get("messages")
     messages = raw_messages if isinstance(raw_messages, list) else []
-    decoded = _decoded_json_material(messages)
+    trusted_material = _trusted_provider_user_material(messages)
     inner_life_snapshots = [
         state
-        for state in _named_material(
-            decoded,
-            names=frozenset({"inner_life_snapshot"}),
-        )
+        for envelope in trusted_material
+        for state in (envelope.get("inner_life_snapshot"),)
+        if isinstance(state, dict)
         if _has_source_bound_semantic_material(state)
     ]
-    recall = _available_recall_material(decoded)
+    recall = [
+        material
+        for snapshot in inner_life_snapshots
+        for material in _available_recall_material(snapshot)
+    ]
     emotion: list[object] = []
     for state in inner_life_snapshots:
         emotion.extend(
@@ -469,21 +492,27 @@ def _provider_request_evidence(payload: dict[str, object]) -> dict[str, object]:
     joined = "\n".join(
         str(message.get("content") or "") for message in messages if isinstance(message, dict)
     )
+    system_joined = "\n".join(
+        str(message.get("content") or "")
+        for message in messages
+        if isinstance(message, dict) and message.get("role") == "system"
+    )
     source_closure = (
-        "Audit only factual source closure" in joined or "Audit factual source closure" in joined
+        "Audit only factual source closure" in system_joined
+        or "Audit factual source closure" in system_joined
     )
     authoritative_role_request = (
-        "COMBINED OUTPUT ENVELOPE" in joined
-        or "exactly two keys: appraisal_draft and expression_draft" in joined
+        "COMBINED OUTPUT ENVELOPE" in system_joined
+        or "exactly two keys: appraisal_draft and expression_draft" in system_joined
         or (
-            "Decide the next expression as the independent person" in joined
-            and "This is a provisional first beat" not in joined
+            "Decide the next expression as the independent person" in system_joined
+            and "This is a provisional first beat" not in system_joined
         )
     ) and not source_closure
     inner_life_snapshot_hash = (
         _canonical_hash(inner_life_snapshots) if inner_life_snapshots else None
     )
-    source_event_ids = _presented_source_event_ids(decoded)
+    source_event_ids = _presented_source_event_ids(trusted_material)
     forced_tool_request_hashes = _forced_tool_request_hashes(payload)
     recall_hash = _canonical_hash(recall) if recall else None
     emotion_hash = _canonical_hash(emotion) if emotion else None

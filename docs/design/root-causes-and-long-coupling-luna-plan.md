@@ -1133,3 +1133,18 @@ commit：hash
 - 当前仍有三个 `release_status: active` 机制没有独立 host 场景：`proactive.post_silent`、
   `life.activity_lifecycle`、`life.aftermath_outcome`。它们保持现状，不用空测试或降级状态伪造资格；其中
   `proactive.post_silent` 的公开关系/节奏材料仍需后续隔离场景或明确 release 取舍。
+
+### 2026-08-09：隔离验收证据的精确上下文边界
+
+- 验收脚本此前按字段名递归扫描 provider 消息，`observation`、`inner_life_snapshot` 或
+  `source_event_ids` 出现在用户可控 JSON 中时，可能被误当作角色上下文。现改为只接受生产
+  CharacterInterior wire 的顶层 user envelope：`inner_life_snapshot` 必须同时带
+  `inner-life-snapshot.1` 与 `derived_from_verified_context`，快照、Recall 和情绪证据均从该
+  envelope 派生；任意嵌套或 malformed material 一律不计入。
+- `source_event_ids` 也不再从上下文路径猜测，只读取该 canonical envelope 的显式 acceptance
+  manifest；生产快照未提供时结果为空，不能凭 source-like 字符串补齐因果链。角色/用户文本中的
+  `COMBINED OUTPUT ENVELOPE` 等字样同样不再决定 provider purpose，purpose marker 只看 system
+  指令。这样会少报一部分证据，但不会把用户输入误报为来源或内心状态。
+- 新增嵌套伪造、观察字段伪造和合法 envelope 回归；隔离验收相关套件为 `45 passed`，完整回归为
+  `4871 passed, 1 warning`。这仍只改证据采集边界，不提升真实 provider、QQ、自主性或 24 小时
+  soak 资格；发布状态继续保持 `qualification_incomplete`。
