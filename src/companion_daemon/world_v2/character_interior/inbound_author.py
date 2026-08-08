@@ -368,20 +368,26 @@ class _CombinedInteriorStreamProvider:
         provider: ChatCompletionModel,
         stream_adapter: _ExpressionDraftWire,
         temperature: float,
+        model_version: str,
     ) -> None:
         self.model = str(getattr(provider, "model", "character-interior-stream"))
         self.reports_exact_request_emission = bool(
             getattr(provider, "reports_exact_request_emission", False)
         )
+        self.supports_required_tool_choice = bool(
+            getattr(provider, "supports_required_tool_choice", False)
+        )
         self._request = request
         self._provider = provider
         self._stream_adapter = stream_adapter
         self._temperature = temperature
+        self._model_version = model_version
         self._generation = stream_adapter._stream_generation(request)  # noqa: SLF001
         self._provider_identity: _ProviderInvocationIdentity | None = None
         self._messages: list[dict[str, str]] | None = None
         self._head_raw: str | None = None
         self._head_requested = False
+        self._retirement: PhysicalProviderInvocationAudit | None = None
 
     @property
     def provider_identity(self) -> _ProviderInvocationIdentity:
@@ -395,20 +401,36 @@ class _CombinedInteriorStreamProvider:
             raise RuntimeError("character interior stream has no head")
         return self._head_raw
 
+    @property
+    def retirement(self) -> PhysicalProviderInvocationAudit | None:
+        return self._retirement
+
     async def complete_json(
         self,
         messages: list[dict[str, str]],
         *,
         temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+        tool_contract_identity: dict[str, str] | None = None,
     ) -> str:
         if self._head_requested:
-            return await self._delegate_completion(messages, temperature=temperature)
+            self._retire_predecessor()
+            return await self._delegate_completion(
+                messages,
+                temperature=temperature,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
         self._head_requested = True
         identity = _provider_invocation_identity(
             parent_call_id=self._request.call_id,
             purpose="paired_cognition_initial",
             messages=messages,
             temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+            tool_contract_identity=tool_contract_identity,
         )
         self._provider_identity = identity
         self._messages = messages
@@ -420,6 +442,8 @@ class _CombinedInteriorStreamProvider:
                 part="head",
                 provider_identity=identity,
                 stream_generation=self._generation,
+                tools=tools,
+                tool_choice=tool_choice,
             )
         )
         if returned_identity != identity:
@@ -427,13 +451,56 @@ class _CombinedInteriorStreamProvider:
         self._head_raw = raw
         return raw
 
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, object]:
+        """Retire the physical stream before every metered correction lane."""
+
+        self._retire_predecessor()
+        return await self._delegate_metered_completion(
+            messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+            json_mode=True,
+        )
+
+    async def complete_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> tuple[str, object]:
+        """Retire the physical stream before a legacy metered correction."""
+
+        self._retire_predecessor()
+        return await self._delegate_metered_completion(
+            messages,
+            temperature=temperature,
+            json_mode=False,
+        )
+
     async def complete(
         self,
         messages: list[dict[str, str]],
         *,
         temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+        tool_contract_identity: dict[str, str] | None = None,
     ) -> str:
-        return await self.complete_json(messages, temperature=temperature)
+        return await self.complete_json(
+            messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+            tool_contract_identity=tool_contract_identity,
+        )
 
     async def tail(
         self,
@@ -464,6 +531,13 @@ class _CombinedInteriorStreamProvider:
     def cancel(self) -> None:
         self._stream_adapter._cancel_unit_stream_for(self._request)  # noqa: SLF001
 
+    def _retire_predecessor(self) -> None:
+        if self._head_requested and self._retirement is None:
+            self._retirement = self.retirement_audit(
+                model_id=str(getattr(self._provider, "model", self.model)),
+                model_version=self._model_version,
+            )
+
     def retirement_audit(
         self,
         *,
@@ -476,6 +550,9 @@ class _CombinedInteriorStreamProvider:
         session = self._stream_adapter._unit_stream_sessions.get(key)  # noqa: SLF001
         complete_raw: str | None = None
         usage: ModelUsageProvenance | None = None
+        cancellation_confirmed = bool(
+            session is not None and session.completed.cancelled()
+        )
         if session is not None and session.completed.done() and not session.completed.cancelled():
             try:
                 _head, _tail, usage_raw, complete_raw = session.completed.result()
@@ -489,13 +566,26 @@ class _CombinedInteriorStreamProvider:
         tail_identity = _stream_unit_identity(provider_identity, "tail")
         self.cancel()
         completed = complete_raw is not None
+        outcome = (
+            "completed"
+            if completed
+            else "cancelled"
+            if cancellation_confirmed
+            else "unresolved"
+        )
         return PhysicalProviderInvocationAudit(
             model_call_id=provider_identity.model_call_id,
             request_hash=provider_identity.request_hash,
             model_id=model_id,
             model_version=model_version,
-            outcome="completed" if completed else "cancelled",
-            failure_code=None if completed else "stream_reselected",
+            outcome=outcome,
+            failure_code=(
+                None
+                if completed
+                else "stream_reselected"
+                if cancellation_confirmed
+                else "stream_reselection_unresolved"
+            ),
             response_hash=(
                 sha256(complete_raw.encode("utf-8")).hexdigest()
                 if complete_raw is not None
@@ -505,7 +595,7 @@ class _CombinedInteriorStreamProvider:
                 "provider_reported"
                 if usage is not None
                 else "unresolved"
-                if completed
+                if completed or not cancellation_confirmed
                 else "cancelled"
             ),
             usage=usage,
@@ -520,13 +610,62 @@ class _CombinedInteriorStreamProvider:
         messages: list[dict[str, str]],
         *,
         temperature: float,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
     ) -> str:
-        operation = getattr(self._provider, "complete_json", None)
+        operation = (
+            getattr(self._provider, "complete_json", None)
+            if tools is not None
+            else None
+        )
         if not callable(operation):
             operation = getattr(self._provider, "complete", None)
         if not callable(operation):
             raise RuntimeError("character interior correction provider is unavailable")
-        return await operation(messages, temperature=temperature)
+        return await operation(
+            messages,
+            temperature=temperature,
+            **(
+                {"tools": tools, "tool_choice": tool_choice}
+                if tools is not None
+                else {}
+            ),
+        )
+
+    async def _delegate_metered_completion(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+        json_mode: bool,
+    ) -> tuple[str, object]:
+        operation = (
+            getattr(self._provider, "complete_json_with_usage", None)
+            if json_mode
+            else getattr(self._provider, "complete_with_usage", None)
+        )
+        if not callable(operation):
+            operation = getattr(self._provider, "complete_with_usage", None)
+        if not callable(operation):
+            raise RuntimeError("metered character interior correction is unavailable")
+        result = await operation(
+            messages,
+            temperature=temperature,
+            **(
+                {"tools": tools, "tool_choice": tool_choice}
+                if tools is not None
+                else {}
+            ),
+        )
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 2
+            or not isinstance(result[0], str)
+        ):
+            raise ValueError("metered character correction must return (text, usage)")
+        return result
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._provider, name)
@@ -1460,6 +1599,7 @@ class _InboundCharacterAuthor:
             provider=self._selected_provider(request),
             stream_adapter=route,
             temperature=self._temperature,
+            model_version=self.VERSION,
         )
         key = _cache_key(request)
         previous = self._interior_streams.pop(key, None)
@@ -1470,12 +1610,37 @@ class _InboundCharacterAuthor:
         while len(self._interior_streams) > 32:
             self._interior_streams.popitem(last=False)
 
-        appraisal_output = await self._propose_appraisal(
-            request,
-            transport_provider=stream,
-        )
-        expression_input = self._expression_materializer.bind_same_call_paired_request(request)
-        expression_output = await self._expression_materializer.propose(expression_input)
+        try:
+            appraisal_output = await self._propose_appraisal(
+                request,
+                transport_provider=stream,
+            )
+            expression_input = self._expression_materializer.bind_same_call_paired_request(request)
+            expression_output = await self._expression_materializer.propose(expression_input)
+        except asyncio.CancelledError:
+            raise
+        except ValidationTechnicalFailure as exc:
+            if stream.retirement is not None:
+                exc.physical_provider_audits = (
+                    *exc.physical_provider_audits,
+                    stream.retirement,
+                )
+            raise
+        except Exception as exc:
+            if stream.retirement is None:
+                raise
+            raise ValidationTechnicalFailure(
+                (
+                    "authored_subcall_timeout"
+                    if isinstance(exc, TimeoutError)
+                    else "authored_subcall_exception"
+                ),
+                attempted_model_id=str(
+                    getattr(self._selected_provider(request), "model", self._model_id_for(request))
+                ),
+                attempted_model_version=self.VERSION,
+                physical_provider_audits=(stream.retirement,),
+            ) from exc
         merged = _merge_cognition_outputs(
             appraisal=appraisal_output,
             expression=expression_output,
@@ -1497,7 +1662,9 @@ class _InboundCharacterAuthor:
             self._interior_streams.pop(key, None)
             return merged.model_copy(
                 update={
-                    "physical_provider_audits": (),
+                    "physical_provider_audits": (
+                        (stream.retirement,) if stream.retirement is not None else ()
+                    ),
                 }
             )
         unit_identity = _stream_unit_identity(provider_identity, "head")
@@ -1720,6 +1887,38 @@ class _InboundCharacterAuthor:
             trigger_ref=request.trigger_ref,
         )
 
+    def _final_tool_reselection_kwargs(
+        self,
+        *,
+        request: ModelInput,
+        provider: ChatCompletionModel,
+    ) -> dict[str, object]:
+        """Return the decision-only transport for an already-consumed choice.
+
+        Internal shape/source corrections and Recall follow-ups are final: the
+        transport must not advertise another Recall branch. Offline fixtures
+        without required-tool support retain the historical plain JSON seam.
+        """
+
+        if not bool(getattr(provider, "supports_required_tool_choice", False)):
+            return {}
+        contract = InboundToolContracts().contract_for(
+            phase="final",
+            transport="atomic",
+            capabilities=self._capabilities,
+            recall_allowed=False,
+            require_turn_posture=(
+                request.trigger_message is not None
+                and request.trigger_message.turn_attention_advisory is not None
+            ),
+        )
+        return {
+            "tools": list(contract.provider_tools),
+            "tool_choice": contract.provider_tool_choice,
+            "tool_contract_identity": contract.identity.request_identity_material(),
+            "unwrap_tool_result": contract.unwrap,
+        }
+
     async def _propose_shadow_episode_candidate(self, request: ModelInput) -> ModelOutput:
         adapter = self._expression_episode_observer
         if adapter is None:
@@ -1935,6 +2134,14 @@ class _InboundCharacterAuthor:
                 include_invalid_raw=(source_closure_review is None and not is_private_state),
                 model_id=reselection_model_id,
                 source_closure_lane_used=reselection_lane is not None,
+                **(
+                    self._final_tool_reselection_kwargs(
+                        request=request,
+                        provider=reselection_provider,
+                    )
+                    if combined and reselection_lane is None
+                    else {}
+                ),
             )
         except asyncio.CancelledError:
             raise
@@ -2105,6 +2312,10 @@ class _InboundCharacterAuthor:
                 timeout_seconds=timeout_seconds,
                 parent_call_id=request.call_id,
                 include_invalid_raw=False,
+                **self._final_tool_reselection_kwargs(
+                    request=request,
+                    provider=provider,
+                ),
             )
         except asyncio.CancelledError:
             raise
@@ -2471,17 +2682,17 @@ class _InboundCharacterAuthor:
             messages[0]["content"] += (
                 "\n\nCHARACTER INTERIOR STREAM TRANSPORT (overrides only the return "
                 "envelope wording above, never either semantic contract): return one raw "
-                "JSON object in this exact top-level field order: protocol, appraisal_draft, "
-                "events. protocol must equal character-interior-events.1. appraisal_draft "
+                "JSON object with protocol, appraisal_draft, and events; JSON member order is "
+                "irrelevant. protocol must equal character-interior-events.1. appraisal_draft "
                 "is the complete AppraisalDraft object chosen in this same cognition pass. "
                 "events is an append-only expression array: first one head event, then zero "
                 "or more beat events, then exactly {\"type\":\"end\"}. A head event has "
                 "type=head, all complete ExpressionDraft fields except beats and "
                 "episode_disposition, and either one visible beat field or a beats array. "
                 "Each continuation is exactly type=beat, beat=<one authored beat>, "
-                "world_claims=<claims for that beat>. The appraisal must finish serializing "
-                "before the head event, so no visible unit can precede the same decision's "
-                "private appraisal. Return no Markdown and no other top-level fields. If you "
+                "world_claims=<claims for that beat>. The application releases no visible unit "
+                "until both the complete appraisal and a complete visible head are available. "
+                "Return no Markdown and no other top-level fields. If you "
                 "instead choose the available recall-first option, return that exact recall "
                 "object normally; it has no expression continuation."
             )
@@ -2489,6 +2700,7 @@ class _InboundCharacterAuthor:
         model_id = self._model_id_for_provider(request, provider)
         cognition_contract = InboundToolContracts().contract_for(
             phase=("initial" if recall_context_available else "after_recall"),
+            transport=("stream" if transport_provider is not None else "atomic"),
             capabilities=self._capabilities,
             recall_allowed=recall_available,
             require_turn_posture=(
@@ -2505,15 +2717,23 @@ class _InboundCharacterAuthor:
         )
         if transport_provider is None and not callable(metered):
             metered = getattr(provider, "complete_with_usage", None)
-        use_forced_tool = callable(metered) and bool(
+        use_forced_tool = (callable(metered) or transport_provider is not None) and bool(
             getattr(provider, "supports_required_tool_choice", False)
         )
         if use_forced_tool:
+            decision_transport = (
+                "For result_kind=decision include result_kind, protocol, appraisal_draft, "
+                "and events in any valid JSON member order; protocol and events "
+                "are the append-only CHARACTER INTERIOR STREAM TRANSPORT above. "
+                if transport_provider is not None
+                else "For result_kind=decision include appraisal_draft and "
+                "expression_draft exactly as specified above. "
+            )
             messages[0]["content"] += (
                 "\n\nFORCED TOOL TRANSPORT (overrides only the outer JSON envelope above): "
                 "call the required function exactly once. Its arguments must include "
-                "result_kind. For result_kind=decision include appraisal_draft and "
-                "expression_draft exactly as specified above. "
+                "result_kind. "
+                + decision_transport
                 + (
                     "For result_kind=recall include recall_request"
                     + (
@@ -2556,7 +2776,23 @@ class _InboundCharacterAuthor:
                 entry_marker=mark_first_role_provider_entry,
                 completion_marker=mark_first_role_provider_completion,
             ):
-                if callable(metered):
+                if transport_provider is not None:
+                    raw = await provider.complete_json(
+                        messages,
+                        temperature=self._temperature,
+                        **(
+                            {
+                                "tools": cognition_tools,
+                                "tool_choice": cognition_tool_choice,
+                                "tool_contract_identity": (
+                                    cognition_contract.identity.request_identity_material()
+                                ),
+                            }
+                            if use_forced_tool
+                            else {}
+                        ),
+                    )
+                elif callable(metered):
                     # Main character call uses the forced combined_cognition
                     # tool: the envelope structure becomes a server-side
                     # guarantee. Providers without tool support (fixtures)
@@ -2591,7 +2827,7 @@ class _InboundCharacterAuthor:
                         if callable(complete_json)
                         else provider.complete(messages, temperature=self._temperature)
                     )
-            if use_forced_tool:
+            if use_forced_tool and transport_provider is None:
                 try:
                     raw = cognition_contract.unwrap(raw)
                 except ValueError as exc:
@@ -2840,11 +3076,26 @@ class _InboundCharacterAuthor:
                 },
             ]
             repair_messages = followup
+            followup_tool = self._final_tool_reselection_kwargs(
+                request=provider_expression_request,
+                provider=provider,
+            )
+            followup_tools = followup_tool.get("tools")
+            followup_tool_choice = followup_tool.get("tool_choice")
+            followup_contract_identity = followup_tool.get("tool_contract_identity")
+            followup_unwrap = followup_tool.get("unwrap_tool_result")
             followup_identity = _provider_invocation_identity(
                 parent_call_id=provider_expression_request.call_id,
                 purpose="paired_recall_followup",
                 messages=followup,
                 temperature=self._temperature,
+                tools=(followup_tools if isinstance(followup_tools, list) else None),
+                tool_choice=followup_tool_choice,
+                tool_contract_identity=(
+                    followup_contract_identity
+                    if isinstance(followup_contract_identity, dict)
+                    else None
+                ),
             )
             second_usage: ModelUsageProvenance | None = None
             recall_timeout = fit_secondary_call_timeout(8.0)
@@ -2852,7 +3103,18 @@ class _InboundCharacterAuthor:
                 raise TimeoutError("paired character recall follow-up budget exhausted")
             async with asyncio.timeout(recall_timeout):
                 if callable(metered):
-                    result = await metered(followup, temperature=self._temperature)
+                    result = await metered(
+                        followup,
+                        temperature=self._temperature,
+                        **(
+                            {
+                                "tools": followup_tools,
+                                "tool_choice": followup_tool_choice,
+                            }
+                            if isinstance(followup_tools, list)
+                            else {}
+                        ),
+                    )
                     if (
                         not isinstance(result, tuple)
                         or len(result) != 2
@@ -2860,14 +3122,29 @@ class _InboundCharacterAuthor:
                     ):
                         raise ValueError("metered paired recall result must be (text, usage)")
                     raw, usage_raw = result
+                    if callable(followup_unwrap):
+                        raw = followup_unwrap(raw)
                     second_usage = ModelUsageProvenance.model_validate(usage_raw)
                 else:
                     complete_json = getattr(provider, "complete_json", None)
                     raw = await (
-                        complete_json(followup, temperature=self._temperature)
+                        complete_json(
+                            followup,
+                            temperature=self._temperature,
+                            **(
+                                {
+                                    "tools": followup_tools,
+                                    "tool_choice": followup_tool_choice,
+                                }
+                                if isinstance(followup_tools, list)
+                                else {}
+                            ),
+                        )
                         if callable(complete_json)
                         else provider.complete(followup, temperature=self._temperature)
                     )
+                    if callable(followup_unwrap):
+                        raw = followup_unwrap(raw)
             usage = _combine_usage(usage, second_usage, request.call_id)
             prior_presentation_count = len(presented_prefetch_traces)
             presented_prefetch_traces = append_presented_prefetch(
@@ -2923,6 +3200,10 @@ class _InboundCharacterAuthor:
                 temperature=0.2,
                 timeout_seconds=repair_timeout,
                 parent_call_id=provider_request.call_id,
+                **self._final_tool_reselection_kwargs(
+                    request=provider_request,
+                    provider=provider,
+                ),
             )
             usage = _combine_usage(usage, corrected.usage, request.call_id)
             try:
@@ -2976,6 +3257,10 @@ class _InboundCharacterAuthor:
                 temperature=0.2,
                 timeout_seconds=repair_timeout,
                 parent_call_id=provider_request.call_id,
+                **self._final_tool_reselection_kwargs(
+                    request=provider_request,
+                    provider=provider,
+                ),
             )
             corrected_usage = _combine_usage(
                 usage,
@@ -3041,6 +3326,10 @@ class _InboundCharacterAuthor:
                 temperature=0.2,
                 timeout_seconds=repair_timeout,
                 parent_call_id=provider_request.call_id,
+                **self._final_tool_reselection_kwargs(
+                    request=provider_request,
+                    provider=provider,
+                ),
             )
             corrected_usage = _combine_usage(usage, corrected.usage, request.call_id)
             try:

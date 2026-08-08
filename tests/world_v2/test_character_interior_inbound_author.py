@@ -45,7 +45,10 @@ from companion_daemon.world_v2.deliberation import (
     TriggerMessage,
     ValidationTechnicalFailure,
 )
-from companion_daemon.world_v2.expression_draft import ExpressionDraftCapabilities
+from companion_daemon.world_v2.expression_draft import (
+    ExpressionDraftCapabilities,
+    QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+)
 from companion_daemon.world_v2.model_facing_context import (
     compact_chat_model_facing_context,
 )
@@ -1581,6 +1584,526 @@ async def test_inbound_forced_tool_request_identity_binds_versioned_schema() -> 
     assert "result_kind=decision" in provider.tool_messages[0][0]["content"]
 
 
+class _ForcedStreamingCombinedProvider:
+    model = "forced-streaming-combined"
+    supports_required_tool_choice = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[dict[str, object]] | None, object | None]] = []
+        self.release_tail = asyncio.Event()
+        self.tail_started = asyncio.Event()
+
+    @staticmethod
+    def payload() -> dict[str, object]:
+        return {
+            "result_kind": "decision",
+            "protocol": "character-interior-events.1",
+            "appraisal_draft": {
+                "appraise": False,
+                "affect": "no_change",
+                "brief_rationale": "这句不需要形成新的持久评价。",
+                "behavior_tendency": "自由接话",
+                "stance": "自然回应",
+                "display_strategy": "直接说",
+                "confidence": 7000,
+            },
+            "events": [
+                {
+                    "type": "head",
+                    "timing_choice": "now",
+                    "beat": {"modality": "text", "text": "第一条先到。"},
+                    "stance": "自然接话",
+                    "brief_rationale": "我想分两句说。",
+                    "confidence": 7000,
+                    "world_claims": [],
+                },
+                {
+                    "type": "beat",
+                    "beat": {"modality": "text", "text": "第二条随后到。"},
+                    "world_claims": [],
+                },
+                {"type": "end"},
+            ],
+        }
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del messages, temperature
+        self.calls.append((tools, tool_choice))
+        raw = json.dumps(
+            self.payload(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        marker = ',{"type":"beat"'
+        head_bytes, tail_bytes = raw.split(marker, 1)
+        if on_text_delta is not None:
+            on_text_delta(head_bytes)
+        self.tail_started.set()
+        await self.release_tail.wait()
+        if on_text_delta is not None:
+            on_text_delta(marker + tail_bytes)
+        return raw, _metered_usage(
+            ref="usage:forced-stream",
+            input_tokens=20,
+            output_tokens=10,
+        )
+
+
+@pytest.mark.asyncio
+async def test_forced_stream_releases_head_before_later_tool_argument_frames() -> None:
+    provider = _ForcedStreamingCombinedProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:forced-stream-head")
+
+    head_task = asyncio.create_task(author.propose_stream_head(request))
+    await asyncio.wait_for(provider.tail_started.wait(), timeout=0.5)
+    head = await asyncio.wait_for(head_task, timeout=0.5)
+
+    assert len(provider.calls) == 1
+    tools, tool_choice = provider.calls[0]
+    assert tools is not None
+    assert tools[0]["function"]["name"] == "character_inbound_initial_stream_v1"
+    assert tool_choice == {
+        "type": "function",
+        "function": {"name": "character_inbound_initial_stream_v1"},
+    }
+    assert head.semantic_stream_part == "head"
+
+    provider.release_tail.set()
+    tail = await asyncio.wait_for(
+        author.propose_stream_tail(request.model_copy(update={"call_id": "call:forced-tail"})),
+        timeout=0.5,
+    )
+    assert tail.semantic_stream_part == "tail"
+
+
+class _PermutedForcedStreamingProvider(_ForcedStreamingCombinedProvider):
+    def __init__(self, order: tuple[str, ...]) -> None:
+        super().__init__()
+        self.order = order
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del messages, temperature
+        self.calls.append((tools, tool_choice))
+        payload = self.payload()
+        raw = json.dumps(
+            {key: payload[key] for key in self.order},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if on_text_delta is not None:
+            on_text_delta(raw)
+        return raw, _metered_usage(
+            ref="usage:permuted-forced-stream",
+            input_tokens=20,
+            output_tokens=10,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("result_kind", "appraisal_draft", "protocol", "events"),
+        ("result_kind", "events", "protocol", "appraisal_draft"),
+        ("appraisal_draft", "protocol", "events", "result_kind"),
+    ],
+)
+async def test_forced_stream_accepts_legal_tool_argument_field_permutations(
+    order: tuple[str, ...],
+) -> None:
+    provider = _PermutedForcedStreamingProvider(order)
+    author = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:permuted-forced-stream")
+
+    head = await asyncio.wait_for(author.propose_stream_head(request), timeout=0.5)
+    tail = await asyncio.wait_for(
+        author.propose_stream_tail(
+            request.model_copy(update={"call_id": "call:permuted-forced-tail"})
+        ),
+        timeout=0.5,
+    )
+
+    assert head.semantic_stream_part == "head"
+    assert tail.semantic_stream_part == "tail"
+
+
+class _ResultKindLastStreamingProvider(_ForcedStreamingCombinedProvider):
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del messages, temperature
+        self.calls.append((tools, tool_choice))
+        payload = self.payload()
+        raw = json.dumps(
+            {
+                "protocol": payload["protocol"],
+                "appraisal_draft": payload["appraisal_draft"],
+                "events": payload["events"],
+                "result_kind": payload["result_kind"],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        marker = ',"result_kind"'
+        prefix, suffix = raw.split(marker, 1)
+        assert on_text_delta is not None
+        on_text_delta(prefix + ",")
+        self.tail_started.set()
+        await self.release_tail.wait()
+        on_text_delta('"result_kind"' + suffix)
+        return raw, _metered_usage(
+            ref="usage:result-kind-last-stream",
+            input_tokens=20,
+            output_tokens=10,
+        )
+
+
+@pytest.mark.asyncio
+async def test_forced_stream_waits_for_late_transport_discriminator() -> None:
+    provider = _ResultKindLastStreamingProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:result-kind-last-stream")
+
+    head_task = asyncio.create_task(author.propose_stream_head(request))
+    await asyncio.wait_for(provider.tail_started.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    assert not head_task.done()
+
+    provider.release_tail.set()
+    head = await asyncio.wait_for(head_task, timeout=0.5)
+    assert head.semantic_stream_part == "head"
+
+
+class _ExtraToolProtocolFailureProvider(_ForcedStreamingCombinedProvider):
+    def __init__(self, *, after_head: bool) -> None:
+        super().__init__()
+        self.after_head = after_head
+        self.release_failure = asyncio.Event()
+
+    async def complete_json_stream_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        on_text_delta=None,  # type: ignore[no-untyped-def]
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del messages, temperature
+        self.calls.append((tools, tool_choice))
+        assert on_text_delta is not None
+        if not self.after_head:
+            released = on_text_delta(
+                '{"result_kind":"decision","protocol":"character-interior-events.1",'
+            )
+            assert released is False
+            raise ValueError("model response must contain exactly one tool call")
+        raw = json.dumps(
+            self.payload(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        released = on_text_delta(raw)
+        assert released is True
+        await self.release_failure.wait()
+        raise ValueError("model response must contain exactly one tool call")
+
+
+@pytest.mark.asyncio
+async def test_extra_tool_before_closed_head_never_authorizes_a_stream_unit() -> None:
+    provider = _ExtraToolProtocolFailureProvider(after_head=False)
+    author = InboundCharacterAuthor(flash_model=provider)
+
+    with pytest.raises(ValueError, match="exactly one tool call"):
+        await asyncio.wait_for(
+            author.propose_stream_head(
+                _request(revision=3, call="call:extra-tool-before-head")
+            ),
+            timeout=0.5,
+        )
+
+
+@pytest.mark.asyncio
+async def test_extra_tool_after_closed_head_fails_only_the_unsettled_tail() -> None:
+    provider = _ExtraToolProtocolFailureProvider(after_head=True)
+    author = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:extra-tool-after-head")
+
+    head = await asyncio.wait_for(author.propose_stream_head(request), timeout=0.5)
+    assert head.semantic_stream_part == "head"
+
+    provider.release_failure.set()
+    with pytest.raises(ValueError, match="exactly one tool call"):
+        await asyncio.wait_for(
+            author.propose_stream_tail(
+                request.model_copy(update={"call_id": "call:extra-tool-failed-tail"})
+            ),
+            timeout=0.5,
+        )
+
+
+class _LaterMultiBeatStreamingProvider(_PermutedForcedStreamingProvider):
+    @staticmethod
+    def payload() -> dict[str, object]:
+        payload = _ForcedStreamingCombinedProvider.payload()
+        payload["events"] = [
+            {
+                "type": "head",
+                "timing_choice": "later",
+                "delay_seconds": 60,
+                "expires_after_seconds": 600,
+                "beats": [
+                    {"modality": "text", "text": "等我忙完先跟你说第一句。"},
+                    {"modality": "text", "text": "还有第二句也想一起发。"},
+                ],
+                "stance": "自然接话",
+                "brief_rationale": "我想稍后分两条说完。",
+                "confidence": 7000,
+                "world_claims": [],
+            },
+            {"type": "end"},
+        ]
+        return payload
+
+
+@pytest.mark.asyncio
+async def test_forced_stream_later_keeps_multiple_role_authored_beats() -> None:
+    provider = _LaterMultiBeatStreamingProvider(
+        ("result_kind", "protocol", "appraisal_draft", "events")
+    )
+    author = InboundCharacterAuthor(
+        flash_model=provider,
+        expression_capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
+            update={"max_later_beats": 2}
+        ),
+    )
+
+    request = _request(revision=3, call="call:later-multi-beat-stream")
+    context = json.loads(request.model_content_json)
+    context["logical_time"] = NOW.isoformat()
+    head = await asyncio.wait_for(
+        author.propose_stream_head(
+            request.model_copy(
+                update={
+                    "model_content_json": json.dumps(
+                        context,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                }
+            )
+        ),
+        timeout=0.5,
+    )
+    proposal = json.dumps(head.raw_proposal, ensure_ascii=False)
+
+    assert "等我忙完先跟你说第一句。" in proposal
+    assert "还有第二句也想一起发。" in proposal
+
+
+class _CorrectingForcedStreamingProvider(_ForcedStreamingCombinedProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_task: asyncio.Task[object] | None = None
+        self.correction_saw_stream_cancelling = False
+
+    async def complete_json_stream_with_usage(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        self.stream_task = asyncio.current_task()
+        return await super().complete_json_stream_with_usage(*args, **kwargs)
+
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> str:
+        del messages, temperature, tool_choice
+        self.correction_saw_stream_cancelling = bool(
+            self.stream_task is not None and self.stream_task.cancelling()
+        )
+        assert tools is not None
+        return json.dumps(
+            {
+                "result_kind": "decision",
+                "appraisal_draft": {
+                    "appraise": False,
+                    "affect": "no_change",
+                    "brief_rationale": "纠正后仍由我自己选择不形成持久评价。",
+                    "behavior_tendency": "自由接话",
+                    "stance": "自然回应",
+                    "display_strategy": "直接说",
+                    "confidence": 7000,
+                },
+                "expression_draft": {
+                    "timing_choice": "now",
+                    "beats": [{"modality": "text", "text": "我重新接好这句。"}],
+                    "stance": "自然回应",
+                    "brief_rationale": "替换结构无效的同一选择。",
+                    "confidence": 7000,
+                    "world_claims": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        raw = await self.complete_json(
+            messages,
+            temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        return raw, _metered_usage(
+            ref="usage:metered-stream-correction",
+            input_tokens=20,
+            output_tokens=10,
+        )
+
+
+class _FailingCorrectionStreamingProvider(_CorrectingForcedStreamingProvider):
+    @staticmethod
+    def payload() -> dict[str, object]:
+        payload = _ForcedStreamingCombinedProvider.payload()
+        appraisal = dict(payload["appraisal_draft"])
+        appraisal.pop("brief_rationale")
+        payload["appraisal_draft"] = appraisal
+        return payload
+
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del messages, temperature, tools, tool_choice
+        self.correction_saw_stream_cancelling = bool(
+            self.stream_task is not None and self.stream_task.cancelling()
+        )
+        raise ConnectionError("correction provider unavailable")
+
+
+@pytest.mark.asyncio
+async def test_failed_stream_correction_preserves_physical_retirement_audit() -> None:
+    provider = _FailingCorrectionStreamingProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+
+    with pytest.raises(ValidationTechnicalFailure) as raised:
+        await asyncio.wait_for(
+            author.propose_stream_head(
+                _request(revision=3, call="call:failed-stream-correction")
+            ),
+            timeout=0.5,
+        )
+
+    assert provider.correction_saw_stream_cancelling is True
+    assert len(raised.value.physical_provider_audits) == 1
+    physical = raised.value.physical_provider_audits[0]
+    assert physical.outcome == "unresolved"
+    assert physical.usage_status == "unresolved"
+
+
+@pytest.mark.asyncio
+async def test_streamed_correction_retires_old_physical_session_before_reselection() -> None:
+    provider = _CorrectingForcedStreamingProvider()
+    author = InboundCharacterAuthor(flash_model=provider)
+    request = _request(revision=3, call="call:stream-correction-retirement")
+
+    # Make the streamed appraisal structurally invalid while keeping a whole
+    # first frame available. The same role's final correction must replace it.
+    original_stream = provider.complete_json_stream_with_usage
+
+    async def invalid_stream(*args, **kwargs):  # type: ignore[no-untyped-def]
+        on_delta = kwargs.get("on_text_delta")
+        raw = json.dumps(
+            {
+                "result_kind": "decision",
+                "protocol": "character-interior-events.1",
+                "appraisal_draft": {
+                    "appraise": False,
+                    "affect": "no_change",
+                    "behavior_tendency": "自由接话",
+                    "stance": "自然回应",
+                    "display_strategy": "直接说",
+                    "confidence": 7000,
+                },
+                "events": [
+                    {
+                        "type": "head",
+                        "timing_choice": "now",
+                        "beat": {"modality": "text", "text": "这条不能发。"},
+                        "stance": "自然回应",
+                        "brief_rationale": "结构仍不完整。",
+                        "confidence": 7000,
+                        "world_claims": [],
+                    },
+                    {"type": "end"},
+                ],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        provider.stream_task = asyncio.current_task()
+        if on_delta is not None:
+            on_delta(raw)
+        await provider.release_tail.wait()
+        return raw, _metered_usage(
+            ref="usage:invalid-stream",
+            input_tokens=20,
+            output_tokens=10,
+        )
+
+    provider.complete_json_stream_with_usage = invalid_stream  # type: ignore[method-assign]
+    try:
+        output = await asyncio.wait_for(author.propose_stream_head(request), timeout=0.5)
+    finally:
+        provider.release_tail.set()
+        provider.complete_json_stream_with_usage = original_stream  # type: ignore[method-assign]
+
+    assert provider.correction_saw_stream_cancelling is True
+    assert output.semantic_stream_part is None
+    assert len(output.physical_provider_audits) == 1
+    assert output.physical_provider_audits[0].outcome == "unresolved"
+    assert output.physical_provider_audits[0].usage_status == "unresolved"
+    with pytest.raises(RuntimeError, match="continuation is unavailable"):
+        await author.propose_stream_tail(
+            request.model_copy(update={"call_id": "call:retired-tail"})
+        )
+
+
 class _ForcedMissingAffectProvider(_ToolIdentityCombinedProvider):
     async def complete_json_with_usage(
         self,
@@ -1600,7 +2123,6 @@ class _ForcedMissingAffectProvider(_ToolIdentityCombinedProvider):
         if len(self.tool_calls) == 1:
             parsed["appraisal_draft"].pop("affect")
             return json.dumps(parsed, ensure_ascii=False), usage
-        parsed.pop("result_kind", None)
         return json.dumps(parsed, ensure_ascii=False), usage
 
 
@@ -1613,7 +2135,10 @@ async def test_forced_missing_affect_uses_the_existing_same_role_correction() ->
 
     assert len(provider.tool_calls) == 2
     assert provider.tool_calls[0][0] is not None
-    assert provider.tool_calls[1][0] is None
+    assert provider.tool_calls[1][0] is not None
+    assert provider.tool_calls[1][0][0]["function"]["name"] == (
+        "character_inbound_final_atomic_v1"
+    )
 
 
 class _ForcedRepeatedMissingAffectProvider(_ForcedMissingAffectProvider):
@@ -1667,7 +2192,6 @@ class _MalformedForcedEnvelopeProvider(_ToolIdentityCombinedProvider):
         if len(self.tool_calls) == 1:
             parsed.pop("result_kind")
             return json.dumps(parsed, ensure_ascii=False), usage
-        parsed.pop("result_kind", None)
         return json.dumps(parsed, ensure_ascii=False), usage
 
 
@@ -1816,6 +2340,7 @@ class _RecallThenCombinedProvider(_CombinedProvider):
             {
                 "appraisal_draft": {
                     "appraise": False,
+                    "affect": "no_change",
                     "brief_rationale": "No durable appraisal is needed.",
                     "behavior_tendency": "observe",
                     "stance": "self_possessed",
@@ -1843,6 +2368,63 @@ class _RecallThenCombinedProvider(_CombinedProvider):
                     "world_claims": [],
                 },
             },
+            ensure_ascii=False,
+        )
+
+
+class _ToolRecallThenCombinedProvider(_RecallThenCombinedProvider):
+    supports_required_tool_choice = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tool_names: list[str] = []
+
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del tool_choice
+        assert tools is not None
+        self.tool_names.append(str(tools[0]["function"]["name"]))
+        raw = await self.complete(messages, temperature=temperature)
+        value = json.loads(raw)
+        if "recall_request" in value:
+            value = {"result_kind": "recall", **value}
+        else:
+            value = {"result_kind": "decision", **value}
+        return json.dumps(value, ensure_ascii=False), _metered_usage(
+            ref=f"usage:tool-recall:{len(self.tool_names)}",
+            input_tokens=20,
+            output_tokens=10,
+        )
+
+
+class _StrictNonMeteredToolRecallProvider(_RecallThenCombinedProvider):
+    supports_required_tool_choice = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tool_names: list[str] = []
+
+    async def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object | None = None,
+    ) -> str:
+        del tool_choice
+        raw = await self.complete(messages, temperature=temperature)
+        if tools is None:
+            return raw
+        self.tool_names.append(str(tools[0]["function"]["name"]))
+        return json.dumps(
+            {"result_kind": "decision", **json.loads(raw)},
             ensure_ascii=False,
         )
 
@@ -3859,7 +4441,7 @@ async def test_private_turn_state_is_audited_but_never_becomes_expression_author
 async def test_paired_cognition_honors_character_recall_and_replays_trace(
     tmp_path,
 ) -> None:
-    provider = _RecallThenCombinedProvider()
+    provider = _ToolRecallThenCombinedProvider()
     cognition = InboundCharacterAuthor(flash_model=provider)
     app = build_sqlite_world_v2_test_application(
         path=tmp_path / "single-call-recall.sqlite",
@@ -3889,6 +4471,10 @@ async def test_paired_cognition_honors_character_recall_and_replays_trace(
 
     assert outcome.status == "action_authorized"
     assert len(provider.calls) == 2
+    assert provider.tool_names == [
+        "character_inbound_initial_v1",
+        "character_inbound_after_recall_v1",
+    ]
     second_call = json.loads(provider.calls[1][-1]["content"])
     assert second_call["inner_life_snapshot"]["contract"] == "inner-life-snapshot.1"
     second_context = json.loads(second_call["request"]["model_content_json"])
@@ -3913,6 +4499,45 @@ async def test_paired_cognition_honors_character_recall_and_replays_trace(
         if item.event.event_type == "ModelResultRecorded"
     )
     assert "main_invalid" not in all_model_statuses
+
+
+@pytest.mark.asyncio
+async def test_nonmetered_recall_followup_keeps_local_contract_identity_off_provider_wire(
+    tmp_path,
+) -> None:
+    provider = _StrictNonMeteredToolRecallProvider()
+    cognition = InboundCharacterAuthor(flash_model=provider)
+    app = build_sqlite_world_v2_test_application(
+        path=tmp_path / "nonmetered-recall-contract.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        character_interior=compose_fixture_character_interior(
+            inbound_author=cognition,
+        ),
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    cognition._character_interior_recall_delegate = False  # noqa: SLF001
+    try:
+        outcome = await asyncio.wait_for(
+            app.respond(
+                InboundTurn(
+                    platform="test",
+                    platform_user_id="user.1",
+                    platform_message_id="message:nonmetered-recall-contract",
+                    text="你就是个没用的机器人。",
+                    observed_at=NOW,
+                    trace_id="trace:nonmetered-recall-contract",
+                )
+            ),
+            timeout=2.0,
+        )
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert provider.tool_names == ["character_inbound_final_atomic_v1"]
 
 
 @pytest.mark.asyncio

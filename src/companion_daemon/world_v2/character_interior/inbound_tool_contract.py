@@ -23,7 +23,8 @@ from ..recall_audit import CharacterRecallRequest
 from .inbound_appraisal_wire import AppraisalDraftWire
 
 
-InboundToolPhase = Literal["initial", "after_recall"]
+InboundToolPhase = Literal["initial", "after_recall", "final"]
+InboundToolTransport = Literal["atomic", "stream"]
 _CONTRACT_VERSION = "1"
 
 
@@ -141,6 +142,7 @@ def _capability_expression_schema(
 class InboundToolContractIdentity:
     contract_id: str
     phase: InboundToolPhase
+    transport: InboundToolTransport
     tool_name: str
     version: str
     schema_sha256: str
@@ -153,6 +155,7 @@ class InboundToolContractIdentity:
         return {
             "contract_id": self.contract_id,
             "phase": self.phase,
+            "transport": self.transport,
             "tool_name": self.tool_name,
             "version": self.version,
             "schema_sha256": self.schema_sha256,
@@ -166,6 +169,7 @@ class InboundToolContract:
     """One provider-standard function and lossless decoder for one phase."""
 
     phase: InboundToolPhase
+    transport: InboundToolTransport
     capabilities: ExpressionDraftCapabilities
     recall_allowed: bool
     require_turn_posture: bool
@@ -184,7 +188,11 @@ class InboundToolContract:
             raise ValueError("forced transport must be one JSON object")
         kind = value.get("result_kind")
         if kind == "decision":
-            expected = {"result_kind", "appraisal_draft", "expression_draft"}
+            expected = (
+                {"result_kind", "appraisal_draft", "expression_draft"}
+                if self.transport == "atomic"
+                else {"result_kind", "protocol", "appraisal_draft", "events"}
+            )
             if set(value) != expected:
                 raise ValueError("forced decision transport envelope is ambiguous")
         elif kind == "recall":
@@ -216,32 +224,161 @@ class InboundToolContracts:
         self,
         *,
         phase: InboundToolPhase,
+        transport: InboundToolTransport = "atomic",
         capabilities: ExpressionDraftCapabilities,
         recall_allowed: bool,
         require_turn_posture: bool = False,
     ) -> InboundToolContract:
-        if phase not in {"initial", "after_recall"}:
+        if phase not in {"initial", "after_recall", "final"}:
             raise ValueError("unsupported inbound tool phase")
+        if transport not in {"atomic", "stream"}:
+            raise ValueError("unsupported inbound tool transport")
         recall_allowed = phase == "initial" and recall_allowed
-        tool_name = f"character_inbound_{phase}_v{_CONTRACT_VERSION}"
+        tool_name = (
+            f"character_inbound_{phase}_v{_CONTRACT_VERSION}"
+            if transport == "atomic" and phase in {"initial", "after_recall"}
+            else f"character_inbound_{phase}_{transport}_v{_CONTRACT_VERSION}"
+        )
         appraisal_schema = _provider_schema(AppraisalDraftWire)
         appraisal_required = appraisal_schema.get("required")
         if not isinstance(appraisal_required, list):
             raise ValueError("AppraisalDraft canonical schema has no required fields")
         appraisal_schema["required"] = sorted({*appraisal_required, "affect"})
         appraisal_schema["anyOf"] = AppraisalDraftWire.provider_lifecycle_branches()
+        expression_schema = _capability_expression_schema(
+            capabilities,
+            require_turn_posture=require_turn_posture,
+        )
         decision_properties: dict[str, object] = {
             "result_kind": {"type": "string", "enum": ["decision"]},
             "appraisal_draft": appraisal_schema,
-            "expression_draft": _capability_expression_schema(
-                capabilities,
-                require_turn_posture=require_turn_posture,
-            ),
         }
+        decision_required = ["result_kind", "appraisal_draft", "expression_draft"]
+        if transport == "atomic":
+            decision_properties["expression_draft"] = expression_schema
+        else:
+            expression_properties = expression_schema.get("properties")
+            expression_required = expression_schema.get("required")
+            if not isinstance(expression_properties, dict) or not isinstance(
+                expression_required, list
+            ):
+                raise ValueError("ExpressionDraft stream schema is incomplete")
+            beat_array = expression_properties.get("beats")
+            if not isinstance(beat_array, dict) or not isinstance(
+                beat_array.get("items"), dict
+            ):
+                raise ValueError("ExpressionDraft stream beat schema is incomplete")
+            deferred_beats = deepcopy(beat_array)
+            deferred_beats["maxItems"] = capabilities.max_later_beats
+            deferred_modality = deferred_beats["items"].get("properties", {}).get(
+                "modality"
+            )
+            if not isinstance(deferred_modality, dict):
+                raise ValueError("ExpressionDraft deferred beat modality is incomplete")
+            deferred_modality["enum"] = ["text"]
+            head_properties = {
+                key: deepcopy(value)
+                for key, value in expression_properties.items()
+                if key not in {"beats", "episode_disposition"}
+            }
+            head_properties.update(
+                {
+                    "type": {"type": "string", "enum": ["head"]},
+                    "beat": deepcopy(beat_array["items"]),
+                    "beats": deferred_beats,
+                    "leading_typing_beat": deepcopy(beat_array["items"]),
+                }
+            )
+            beat_modality = head_properties["beat"].get("properties", {}).get(
+                "modality"
+            )
+            if isinstance(beat_modality, dict):
+                beat_modality["enum"] = [
+                    modality for modality in capabilities.modalities if modality != "typing"
+                ]
+            typing_modality = head_properties["leading_typing_beat"].get(
+                "properties", {}
+            ).get("modality")
+            if isinstance(typing_modality, dict):
+                typing_modality["enum"] = ["typing"]
+            head_required = [
+                "type",
+                *[
+                    field
+                    for field in expression_required
+                    if field not in {"beats", "episode_disposition"}
+                ],
+            ]
+            continuation = {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": ["beat"]},
+                    "beat": deepcopy(beat_array["items"]),
+                    "world_claims": deepcopy(expression_properties["world_claims"]),
+                },
+                "required": ["type", "beat", "world_claims"],
+                "additionalProperties": False,
+            }
+            end = {
+                "type": "object",
+                "properties": {"type": {"type": "string", "enum": ["end"]}},
+                "required": ["type"],
+                "additionalProperties": False,
+            }
+            decision_properties.update(
+                {
+                    "protocol": {
+                        "type": "string",
+                        "enum": ["character-interior-events.1"],
+                    },
+                    "events": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": capabilities.max_beats + 2,
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "properties": head_properties,
+                                    "required": head_required,
+                                    "additionalProperties": False,
+                                    "anyOf": [
+                                        {
+                                            "properties": {
+                                                "timing_choice": {"enum": ["now"]}
+                                            },
+                                            "required": ["beat"],
+                                        },
+                                        {
+                                            "properties": {
+                                                "timing_choice": {"enum": ["later"]}
+                                            },
+                                            "required": ["beats"],
+                                        },
+                                        {
+                                            "properties": {
+                                                "timing_choice": {"enum": ["silent"]}
+                                            }
+                                        },
+                                    ],
+                                },
+                                continuation,
+                                end,
+                            ]
+                        },
+                    },
+                }
+            )
+            decision_required = [
+                "result_kind",
+                "protocol",
+                "appraisal_draft",
+                "events",
+            ]
         decision_branch: dict[str, object] = {
             "type": "object",
             "properties": decision_properties,
-            "required": ["result_kind", "appraisal_draft", "expression_draft"],
+            "required": decision_required,
             "additionalProperties": False,
         }
         branches: list[dict[str, object]] = [decision_branch]
@@ -271,10 +408,19 @@ class InboundToolContracts:
                 + (
                     "result_kind is transport-only: choose recall only when requesting the "
                     "available recall-first path; otherwise return the complete appraisal_draft "
-                    "and expression_draft you chose."
+                    + (
+                        "and append-only expression events you chose."
+                        if transport == "stream"
+                        else "and expression_draft you chose."
+                    )
                     if recall_allowed
                     else "Return result_kind=decision with the complete appraisal_draft and "
-                    "expression_draft you chose; recall is not available on this call."
+                    + (
+                        "append-only expression events you chose; recall is not available "
+                        "on this call."
+                        if transport == "stream"
+                        else "expression_draft you chose; recall is not available on this call."
+                    )
                 )
                 + " Deployment capability profile="
                 + capabilities.profile_id
@@ -292,6 +438,7 @@ class InboundToolContracts:
             _canonical_json(
                 {
                     "phase": phase,
+                    "transport": transport,
                     "recall_allowed": recall_allowed,
                     "require_turn_posture": require_turn_posture,
                     "schema_sha256": digest,
@@ -303,6 +450,7 @@ class InboundToolContracts:
         identity = InboundToolContractIdentity(
             contract_id="character-inbound-forced-tool",
             phase=phase,
+            transport=transport,
             tool_name=tool_name,
             version=_CONTRACT_VERSION,
             schema_sha256=digest,
@@ -311,6 +459,7 @@ class InboundToolContracts:
         )
         return InboundToolContract(
             phase=phase,
+            transport=transport,
             capabilities=capabilities,
             recall_allowed=recall_allowed,
             require_turn_posture=require_turn_posture,
@@ -325,4 +474,5 @@ __all__ = [
     "InboundToolContractIdentity",
     "InboundToolContracts",
     "InboundToolPhase",
+    "InboundToolTransport",
 ]

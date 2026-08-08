@@ -17,7 +17,7 @@ import hashlib
 import json
 import logging
 from threading import Lock
-from typing import Any, Literal, NamedTuple, Protocol
+from typing import Any, Callable, Literal, NamedTuple, Protocol
 
 from pydantic import Field, ValidationError
 
@@ -1257,6 +1257,10 @@ async def complete_bounded_validation_reselection(
     model_id: str | None = None,
     model_version: str | None = None,
     source_closure_lane_used: bool = False,
+    tools: list[dict[str, object]] | None = None,
+    tool_choice: object | None = None,
+    tool_contract_identity: dict[str, str] | None = None,
+    unwrap_tool_result: Callable[[str], str] | None = None,
 ) -> ValidationReselectionResult:
     """Execute the one model-owned correction allowed by the call budget."""
 
@@ -1272,6 +1276,9 @@ async def complete_bounded_validation_reselection(
             purpose="validation_reselection",
             messages=corrective,
             temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+            tool_contract_identity=tool_contract_identity,
         )
         if parent_call_id is not None
         else None
@@ -1282,7 +1289,15 @@ async def complete_bounded_validation_reselection(
             if not callable(metered):
                 metered = getattr(model, "complete_with_usage", None)
             if callable(metered):
-                result = await metered(corrective, temperature=temperature)
+                result = await metered(
+                    corrective,
+                    temperature=temperature,
+                    **(
+                        {"tools": tools, "tool_choice": tool_choice}
+                        if tools is not None
+                        else {}
+                    ),
+                )
                 if (
                     not isinstance(result, tuple)
                     or len(result) != 2
@@ -1290,6 +1305,8 @@ async def complete_bounded_validation_reselection(
                 ):
                     raise ValueError("metered validation reselection result must be (text, usage)")
                 corrected, usage_raw = result
+                if unwrap_tool_result is not None:
+                    corrected = unwrap_tool_result(corrected)
                 return ValidationReselectionResult(
                     raw=corrected,
                     usage=ModelUsageProvenance.model_validate(usage_raw),
@@ -1303,10 +1320,23 @@ async def complete_bounded_validation_reselection(
                 )
             complete_json = getattr(model, "complete_json", None)
             corrected = await (
-                complete_json(corrective, temperature=temperature)
+                complete_json(
+                    corrective,
+                    temperature=temperature,
+                    **(
+                        {
+                            "tools": tools,
+                            "tool_choice": tool_choice,
+                        }
+                        if tools is not None
+                        else {}
+                    ),
+                )
                 if callable(complete_json)
                 else model.complete(corrective, temperature=temperature)
             )
+            if unwrap_tool_result is not None:
+                corrected = unwrap_tool_result(corrected)
             return ValidationReselectionResult(
                 raw=corrected,
                 usage=None,
@@ -7546,6 +7576,8 @@ class _ExpressionStreamGenerationCoordinator:
 
 def _stream_first_expression(raw: str) -> str:
     parsed = _parse_json_object(raw)
+    if parsed.get("result_kind") == "decision":
+        parsed = {key: value for key, value in parsed.items() if key != "result_kind"}
     if parsed.get("protocol") == "character-interior-events.1":
         value = _character_interior_event_envelope(parsed)
         events = value["events"]
@@ -7600,6 +7632,8 @@ def _stream_first_expression(raw: str) -> str:
 
 def _stream_tail_expression(raw: str) -> str:
     parsed = _parse_json_object(raw)
+    if parsed.get("result_kind") == "decision":
+        parsed = {key: value for key, value in parsed.items() if key != "result_kind"}
     if parsed.get("protocol") == "character-interior-events.1":
         value = _character_interior_event_envelope(parsed)
         expression_tail = _parse_json_object(
@@ -8107,7 +8141,164 @@ def _incremental_combined_envelope_first_expression(
 
 
 
-def _incremental_first_expression(buffer: str) -> str | None:
+def _without_forced_stream_result_kind(buffer: str) -> str | None:
+    """Expose a decision tool's argument body to the existing stream parser.
+
+    DeepSeek streams function ``arguments`` as ordinary JSON deltas.  The
+    transport-only discriminator is serialized first, so removing only that
+    completed member preserves the exact appraisal/event byte order and does
+    not wait for the tail. A recall control transfer has no visible frame and
+    therefore remains unavailable until the complete object arrives.
+    """
+
+    object_start = next(
+        (index for index, character in enumerate(buffer) if not character.isspace()),
+        -1,
+    )
+    if object_start < 0 or buffer[object_start] != "{":
+        return None
+    decoder = _STRICT_STREAM_JSON_DECODER
+    cursor = object_start + 1
+    while cursor < len(buffer) and buffer[cursor].isspace():
+        cursor += 1
+    try:
+        key, cursor = decoder.raw_decode(buffer, cursor)
+    except json.JSONDecodeError:
+        return None
+    if key != "result_kind":
+        return buffer
+    while cursor < len(buffer) and buffer[cursor].isspace():
+        cursor += 1
+    if cursor >= len(buffer) or buffer[cursor] != ":":
+        return None
+    cursor += 1
+    while cursor < len(buffer) and buffer[cursor].isspace():
+        cursor += 1
+    try:
+        kind, cursor = decoder.raw_decode(buffer, cursor)
+    except json.JSONDecodeError:
+        return None
+    if kind != "decision":
+        return None
+    while cursor < len(buffer) and buffer[cursor].isspace():
+        cursor += 1
+    if cursor >= len(buffer) or buffer[cursor] != ",":
+        return None
+    return buffer[:object_start] + "{" + buffer[cursor + 1 :]
+
+
+def _incremental_forced_stream_expression(buffer: str) -> tuple[bool, str | None]:
+    """Close a forced decision head without relying on JSON member order.
+
+    Function-call ``arguments`` are JSON objects and object member order is
+    semantically irrelevant.  We release only after the discriminator,
+    protocol, complete appraisal, and one complete head event have all arrived.
+    If ``events`` precedes the appraisal, this deliberately waits for the
+    later field rather than guessing from an incomplete object.
+    """
+
+    object_start = next(
+        (index for index, character in enumerate(buffer) if not character.isspace()),
+        -1,
+    )
+    if object_start < 0 or buffer[object_start] != "{":
+        return False, None
+    decoder = _STRICT_STREAM_JSON_DECODER
+    cursor = object_start + 1
+    members: dict[str, object] = {}
+    pending_key: str | None = None
+    pending_value_start: int | None = None
+    while True:
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+        if cursor >= len(buffer) or buffer[cursor] == "}":
+            break
+        try:
+            key, key_end = decoder.raw_decode(buffer, cursor)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(key, str):
+            return False, None
+        cursor = key_end
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+        if cursor >= len(buffer) or buffer[cursor] != ":":
+            pending_key = key
+            break
+        cursor += 1
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+        pending_key = key
+        pending_value_start = cursor
+        try:
+            value, value_end = decoder.raw_decode(buffer, cursor)
+        except json.JSONDecodeError:
+            break
+        members[key] = value
+        pending_key = None
+        pending_value_start = None
+        cursor = value_end
+        while cursor < len(buffer) and buffer[cursor].isspace():
+            cursor += 1
+        if cursor >= len(buffer) or buffer[cursor] == "}":
+            break
+        if buffer[cursor] != ",":
+            break
+        cursor += 1
+
+    # The same character-interior event protocol is also legal without a
+    # forced-tool wrapper.  Only the transport discriminator proves this is a
+    # tool-argument object; if it is serialized last, conservatively wait for
+    # the complete object rather than misclassifying the unwrapped stream.
+    forced = "result_kind" in members or pending_key == "result_kind"
+    if not forced:
+        return False, None
+    if members.get("result_kind") != "decision":
+        return True, None
+    if members.get("protocol") != "character-interior-events.1":
+        return True, None
+    appraisal = members.get("appraisal_draft")
+    if not isinstance(appraisal, dict):
+        return True, None
+    events = members.get("events")
+    event: object | None = events[0] if isinstance(events, list) and events else None
+    if event is None and pending_key == "events" and pending_value_start is not None:
+        array_cursor = pending_value_start
+        if array_cursor >= len(buffer) or buffer[array_cursor] != "[":
+            return True, None
+        array_cursor += 1
+        while array_cursor < len(buffer) and buffer[array_cursor].isspace():
+            array_cursor += 1
+        try:
+            event, _ = decoder.raw_decode(buffer, array_cursor)
+        except json.JSONDecodeError:
+            return True, None
+    if event is None:
+        return True, None
+    return True, json.dumps(
+        {
+            "appraisal_draft": appraisal,
+            "expression_draft": _parse_json_object(
+                _expression_event_head(event, continuation=None)
+            ),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _incremental_first_expression(
+    buffer: str,
+    *,
+    forced_tool: bool = False,
+) -> str | None:
+    forced, forced_first = _incremental_forced_stream_expression(buffer)
+    if forced_tool or forced:
+        return forced_first
+    normalized = _without_forced_stream_result_kind(buffer)
+    if normalized is None:
+        return None
+    buffer = normalized
     object_start = next(
         (index for index, character in enumerate(buffer) if not character.isspace()),
         -1,
@@ -8526,19 +8717,23 @@ class _ExpressionDraftWire:
                 assert current is not None
                 activated = False
 
-                def on_delta(delta: str) -> None:
+                def on_delta(delta: str) -> bool:
                     if not self._stream_generation_coordinator.is_current(stream_generation):
-                        return
+                        return False
                     chunks.append(delta)
                     if head_future.done():
-                        return
-                    first = _incremental_first_expression("".join(chunks))
+                        return True
+                    first = _incremental_first_expression(
+                        "".join(chunks),
+                        forced_tool=tools is not None,
+                    )
                     if first is not None:
                         # The final append/complete relationship cannot be
                         # known until continuation arrives, but the first
                         # ExpressionDraft itself is already structurally whole.
                         mark_interactive_turn_milestone("first_expression_frame")
                         head_future.set_result(first)
+                    return head_future.done()
 
                 try:
                     self._stream_generation_coordinator.activate(stream_generation, current)

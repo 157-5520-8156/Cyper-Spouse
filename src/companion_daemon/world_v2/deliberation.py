@@ -401,6 +401,7 @@ class ValidationTechnicalFailure(RuntimeError):
         usage: ModelUsageProvenance | None = None,
         provider_subcall_audits: tuple[ProviderSubcallAudit, ...] = (),
         authored_candidate_audits: tuple[AuthoredCandidateInvocationAudit, ...] = (),
+        physical_provider_audits: tuple[PhysicalProviderInvocationAudit, ...] = (),
     ):
         identity = (model_call_id, request_hash)
         if (identity[0] is None) != (identity[1] is None):
@@ -419,6 +420,7 @@ class ValidationTechnicalFailure(RuntimeError):
         self.usage = usage
         self.provider_subcall_audits = tuple(provider_subcall_audits)
         self.authored_candidate_audits = tuple(authored_candidate_audits)
+        self.physical_provider_audits = tuple(physical_provider_audits)
 
 
 def _validation_failure_with_preserved_attempt(
@@ -440,11 +442,13 @@ def _validation_failure_with_preserved_attempt(
     usage = getattr(exc, "usage", None)
     provider_subcall_audits = tuple(getattr(exc, "provider_subcall_audits", ()))
     authored_candidate_audits = tuple(getattr(exc, "authored_candidate_audits", ()))
+    physical_provider_audits = tuple(getattr(exc, "physical_provider_audits", ()))
     if model_call_id is None:
         return ValidationTechnicalFailure(
             failure_code,
             provider_subcall_audits=provider_subcall_audits,
             authored_candidate_audits=authored_candidate_audits,
+            physical_provider_audits=physical_provider_audits,
         )
     return ValidationTechnicalFailure(
         failure_code,
@@ -455,6 +459,7 @@ def _validation_failure_with_preserved_attempt(
         usage=usage,
         provider_subcall_audits=provider_subcall_audits,
         authored_candidate_audits=authored_candidate_audits,
+        physical_provider_audits=physical_provider_audits,
     )
 
 
@@ -4099,9 +4104,11 @@ class Deliberation:
         terminal_usage: ModelUsageProvenance | None = None
         provider_subcall_audits: tuple[ProviderSubcallAudit, ...] = ()
         authored_candidate_audits: tuple[AuthoredCandidateInvocationAudit, ...] = ()
+        physical_provider_audits: tuple[PhysicalProviderInvocationAudit, ...] = ()
         if technical_failure is not None:
             provider_subcall_audits = technical_failure.provider_subcall_audits
             authored_candidate_audits = technical_failure.authored_candidate_audits
+            physical_provider_audits = technical_failure.physical_provider_audits
             nested_provider_call_ids = {
                 item.model_call_id
                 for item in (
@@ -4126,6 +4133,7 @@ class Deliberation:
         if output is not None:
             provider_subcall_audits = output.provider_subcall_audits
             authored_candidate_audits = output.authored_candidate_audits
+            physical_provider_audits = output.physical_provider_audits
         response_hash = _output_response_hash(output) if output is not None else None
         return ModelResultAudit(
             model_call_id=model_call_id,
@@ -4185,9 +4193,7 @@ class Deliberation:
             ),
             provider_subcall_audits=provider_subcall_audits,
             authored_candidate_audits=authored_candidate_audits,
-            physical_provider_audits=(
-                output.physical_provider_audits if output is not None else ()
-            ),
+            physical_provider_audits=physical_provider_audits,
         )
 
     @staticmethod

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -8,6 +9,9 @@ from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
     InboundToolContracts,
 )
 from companion_daemon.world_v2.character_interior.inbound_wire import _provider_invocation_identity
+from companion_daemon.world_v2.character_interior.inbound_wire import (
+    complete_bounded_validation_reselection,
+)
 from companion_daemon.world_v2.character_interior.inbound_appraisal_wire import (
     AppraisalDraftWire,
     RelationshipSignalWire,
@@ -60,6 +64,76 @@ def test_after_recall_contract_cannot_reopen_recall() -> None:
 
     with pytest.raises(ValueError, match="recall"):
         contract.unwrap(json.dumps({"result_kind": "recall", "recall_request": {}}))
+
+
+def test_stream_contract_preserves_append_only_expression_event_transport() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    decision = next(
+        branch
+        for branch in parameters["anyOf"]
+        if branch["properties"]["result_kind"]["enum"] == ["decision"]
+    )
+
+    assert contract.identity.transport == "stream"
+    assert contract.identity.tool_name == "character_inbound_initial_stream_v1"
+    assert decision["required"] == [
+        "result_kind",
+        "protocol",
+        "appraisal_draft",
+        "events",
+    ]
+    assert decision["properties"]["protocol"]["enum"] == [
+        "character-interior-events.1"
+    ]
+    assert decision["properties"]["events"]["minItems"] == 2
+
+    raw = json.dumps(
+        {
+            "result_kind": "decision",
+            "protocol": "character-interior-events.1",
+            "appraisal_draft": _appraisal(),
+            "events": [
+                {
+                    "type": "head",
+                    "timing_choice": "now",
+                    "beat": {"modality": "text", "text": "第一条先到。"},
+                    "stance": "自然接话",
+                    "brief_rationale": "我想分两句说。",
+                    "confidence": 7000,
+                    "world_claims": [],
+                },
+                {
+                    "type": "beat",
+                    "beat": {"modality": "text", "text": "第二条随后到。"},
+                    "world_claims": [],
+                },
+                {"type": "end"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    assert json.loads(contract.unwrap(raw))["protocol"] == "character-interior-events.1"
+
+
+def test_final_contract_is_a_decision_only_atomic_contract() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="final",
+        transport="atomic",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+    )
+
+    assert contract.recall_allowed is False
+    assert contract.identity.phase == "final"
+    assert contract.identity.tool_name == "character_inbound_final_atomic_v1"
+    assert len(contract.provider_tools[0]["function"]["parameters"]["anyOf"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -241,6 +315,61 @@ def test_local_contract_identity_is_bound_into_provider_request_hash() -> None:
     assert bound.request_hash != unbound.request_hash
 
 
+@pytest.mark.asyncio
+async def test_nonmetered_correction_keeps_local_contract_identity_off_provider_wire() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="final",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=False,
+    )
+    expression = {
+        "timing_choice": "now",
+        "beats": [{"modality": "text", "text": "我重新选好了。"}],
+        "stance": "自然回应",
+        "brief_rationale": "结构修正不改变我的选择权。",
+        "confidence": 7000,
+        "world_claims": [],
+    }
+
+    class StrictProvider:
+        async def complete_json(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float,
+            tools: list[dict[str, object]],
+            tool_choice: object,
+        ) -> str:
+            del messages, temperature, tools, tool_choice
+            return json.dumps(
+                {
+                    "result_kind": "decision",
+                    "appraisal_draft": _appraisal(),
+                    "expression_draft": expression,
+                },
+                ensure_ascii=False,
+            )
+
+    result = await asyncio.wait_for(
+        complete_bounded_validation_reselection(
+            model=StrictProvider(),  # type: ignore[arg-type]
+            messages=[{"role": "user", "content": "choose"}],
+            raw="{}",
+            instruction="choose again",
+            temperature=0.8,
+            timeout_seconds=1.0,
+            parent_call_id="call:local-contract-only",
+            tools=list(contract.provider_tools),
+            tool_choice=contract.provider_tool_choice,
+            tool_contract_identity=contract.identity.request_identity_material(),
+            unwrap_tool_result=contract.unwrap,
+        ),
+        timeout=1.5,
+    )
+
+    assert json.loads(result.raw)["expression_draft"] == expression
+
+
 def test_later_branch_carries_the_stricter_capability_beat_limit() -> None:
     capabilities = QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
         update={"max_beats": 6, "max_later_beats": 2}
@@ -263,6 +392,41 @@ def test_later_branch_carries_the_stricter_capability_beat_limit() -> None:
     assert later_branches[0]["properties"]["beats"]["items"]["properties"]["modality"][
         "enum"
     ] == ["text"]
+
+
+def test_stream_later_head_preserves_the_full_deferred_beat_budget() -> None:
+    capabilities = QQ_NAPCAT_EXPRESSION_CAPABILITIES.model_copy(
+        update={"max_beats": 6, "max_later_beats": 2}
+    )
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=capabilities,
+        recall_allowed=False,
+    )
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+    decision = _object_schema(parameters)
+    events = decision["properties"]["events"]
+    assert isinstance(events, dict)
+    items = events["items"]
+    assert isinstance(items, dict)
+    event_variants = items["anyOf"]
+    head = next(
+        item
+        for item in event_variants
+        if _object_schema(item)["properties"]["type"]["enum"] == ["head"]
+    )
+    head_schema = _object_schema(head)
+    later = next(
+        branch
+        for branch in head_schema["anyOf"]
+        if _object_schema(branch)["properties"]["timing_choice"]["enum"] == ["later"]
+    )
+
+    beats = head_schema["properties"]["beats"]
+    assert isinstance(beats, dict)
+    assert beats["maxItems"] == 2
+    assert "beats" in _object_schema(later)["required"]
 
 
 def test_text_only_contract_never_advertises_later_reaction_or_sticker() -> None:

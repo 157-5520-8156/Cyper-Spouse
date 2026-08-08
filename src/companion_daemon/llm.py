@@ -939,7 +939,11 @@ class DeepSeekChatModel:
         usage: dict[str, object] = {}
         pieces: list[str] = []
         tool_args: dict[int, str] = {}
+        tool_arg_deltas: dict[int, list[str]] = {}
+        tool_arg_delivered: dict[int, int] = {}
         tool_names: dict[int, str] = {}
+        expected_tool_name = _forced_tool_name(tool_choice)
+        forced_tool_head_released = False
         try:
             if self.capacity_gate is not None:
                 capacity_token = self.capacity_gate.acquire()
@@ -1021,7 +1025,7 @@ class DeepSeekChatModel:
                                 if not pieces:
                                     mark_model_request_first_token(request_span)
                                 pieces.append(content)
-                                if on_text_delta is not None:
+                                if on_text_delta is not None and not tools:
                                     callback_result = on_text_delta(content)
                                     if inspect.isawaitable(callback_result):
                                         await callback_result
@@ -1034,23 +1038,50 @@ class DeepSeekChatModel:
                                     if not isinstance(call, dict):
                                         continue
                                     index = call.get("index", 0)
+                                    index = int(index)
+                                    if tools and index != 0 and not forced_tool_head_released:
+                                        raise ValueError(
+                                            "model response must contain exactly one tool call"
+                                        )
                                     function = call.get("function")
                                     if not isinstance(function, dict):
                                         continue
                                     name = function.get("name")
                                     if isinstance(name, str) and name:
-                                        existing_name = tool_names.get(int(index))
+                                        existing_name = tool_names.get(index)
                                         if existing_name is not None and existing_name != name:
                                             raise ValueError("model stream changed tool identity")
-                                        tool_names[int(index)] = name
+                                        tool_names[index] = name
+                                        if (
+                                            tools
+                                            and index == 0
+                                            and expected_tool_name is not None
+                                            and name != expected_tool_name
+                                        ):
+                                            raise ValueError(
+                                                "model response used an unexpected tool identity"
+                                            )
                                     arguments = function.get("arguments")
                                     if isinstance(arguments, str):
-                                        tool_args.setdefault(int(index), "")
-                                        tool_args[int(index)] += arguments
-                                        if on_text_delta is not None:
-                                            callback_result = on_text_delta(arguments)
+                                        tool_args.setdefault(index, "")
+                                        tool_args[index] += arguments
+                                        tool_arg_deltas.setdefault(index, []).append(arguments)
+                                    if (
+                                        tools
+                                        and index == 0
+                                        and tool_names.get(0) == expected_tool_name
+                                        and on_text_delta is not None
+                                    ):
+                                        deltas = tool_arg_deltas.get(0, [])
+                                        delivered = tool_arg_delivered.get(0, 0)
+                                        for argument_delta in deltas[delivered:]:
+                                            callback_result = on_text_delta(argument_delta)
                                             if inspect.isawaitable(callback_result):
-                                                await callback_result
+                                                callback_result = await callback_result
+                                            forced_tool_head_released = bool(
+                                                forced_tool_head_released or callback_result
+                                            )
+                                        tool_arg_delivered[0] = len(deltas)
             finally:
                 mark_model_request_completed(request_span)
             content = "".join(pieces)
@@ -1060,10 +1091,10 @@ class DeepSeekChatModel:
                         {
                             "function": {
                                 "name": tool_names.get(index),
-                                "arguments": tool_args[index],
+                                "arguments": tool_args.get(index, ""),
                             }
                         }
-                        for index in sorted(tool_args)
+                        for index in sorted(set(tool_names) | set(tool_args))
                     ],
                     expected_tool_name=_forced_tool_name(tool_choice),
                 )

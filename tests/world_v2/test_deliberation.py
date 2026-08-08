@@ -912,6 +912,52 @@ async def test_terminal_review_retry_preserves_the_last_reviewer_invocation_audi
 
 
 @pytest.mark.asyncio
+async def test_terminal_stream_correction_failure_preserves_physical_audit() -> None:
+    physical = PhysicalProviderInvocationAudit(
+        model_call_id="model-call:retired-physical-stream",
+        request_hash="a" * 64,
+        model_id="stream-role",
+        model_version="stream-role.1",
+        outcome="unresolved",
+        failure_code="stream_reselection_unresolved",
+        usage_status="unresolved",
+        semantic_model_call_ids=(
+            "model-call:retired-stream-head",
+            "model-call:retired-stream-tail",
+        ),
+    )
+
+    class FailedCorrection(_Main):
+        async def propose(self, request: ModelInput) -> ModelOutput:
+            self.requests.append(request)
+            raise ValidationTechnicalFailure(
+                "authored_subcall_exception",
+                attempted_model_id="stream-role",
+                attempted_model_version="stream-role.1",
+                physical_provider_audits=(physical,),
+            )
+
+    deliberation = Deliberation(
+        router=_Router(),
+        main_model=FailedCorrection(),
+        quick_recovery=_Quick(),
+    )
+    result = await deliberation.deliberate(
+        _capsule(),
+        attempt_id="attempt:failed-stream-correction-audit",
+        budget=InteractiveTurnBudgetPolicy(
+            total_seconds=1.0,
+            hedge_after_seconds=0.2,
+            acceptance_dispatch_reserve_seconds=0.2,
+        ).start(),
+    )
+
+    failed = result.attempt_audits[0]
+    assert failed.failure_code == "authored_subcall_exception"
+    assert failed.physical_provider_audits == (physical,)
+
+
+@pytest.mark.asyncio
 async def test_validation_recovery_from_one_candidate_does_not_starve_the_next_candidate() -> None:
     class ReviewRecoveringMain(_Main):
         def __init__(self) -> None:
