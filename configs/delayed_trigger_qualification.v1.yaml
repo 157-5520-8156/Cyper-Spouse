@@ -90,6 +90,12 @@ host_scenario_evidence:
     qualification_scope: public_host_scripted_typed_role_lifecycle
     excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
 
+  - scenario_id: life.ecology-clock-wake-retry-isolation.1
+    mechanism_ids: [life.ecology]
+    test_nodeid: tests/world_v2/test_delayed_trigger_life_ecology_host_qualification.py::test_public_host_life_ecology_wake_terminal_and_retry_does_not_block_inbound
+    qualification_scope: public_host_life_scheduler_terminal
+    excluded_scope: [real_provider_author_transport, production_stream_expression_episode, character_autonomy, onebot_provider_callback_normalization, 24_hour_soak]
+
 mechanisms:
   - mechanism_id: proactive.event_driven
     purpose: Event-driven proactive-contact consideration

@@ -1116,3 +1116,20 @@ commit：hash
 - 最终定向回归为 `533 passed`，ruff 与 `git diff --check` 通过。真实 provider 证据仍严格标记
   `manual_only`/`qualification_incomplete`：当前未满足 100 次 forced-tool/stream/QQ 回执样本、自由对聊
   质量观察和 24 小时 soak 的发布门；旧生产 daemon 也未在本轮被替换或重启。
+
+### 2026-08-09：Life Ecology public-host 调度资格薄片
+
+- 为 `life.ecology` 增加了唯一的 Matrix 场景绑定和 public-host 回归。场景只通过
+  `QQC2CHost.tick(run_life_ecology=True)`、`inbound_text`、`drain`、`export_replay_evidence`、
+  `world_health_diagnostics` 与 `aclose`，没有直调 Life worker、ledger 私有写入口或 trigger mutator。
+- 在隔离库中让 World Author 明确超时：ClockAdvanced 后 Life trigger 依次经历 open→claim/CAS→技术失败终态，
+  health 写出 `life_development.world_author_unavailable` 和下一次 10 分钟考虑时间；随后同一 host 的正常
+  用户入站仍得到 Action 授权，不被 Life 失败拖住。重建 host 后到期重试产生新的 trigger identity，第二次
+  技术失败仍准确终结；重复 drain 不重新打开已完成 trigger，冷重放语义哈希保持一致。
+- 该场景验证的是 Life Ecology 调度、隔离、退避和 replay 语义，不是 World Author 的真实模型质量或 Life
+  内容生成资格。真实 provider、自主生活选择、OneBot 回执和 24 小时 soak 继续排除；Matrix 仍为
+  `declaration_only`。本薄片及既有延迟触发场景回归共 `44 passed`，静态 verifier 仍报告
+  `28 delayed trigger mechanisms`。
+- 当前仍有三个 `release_status: active` 机制没有独立 host 场景：`proactive.post_silent`、
+  `life.activity_lifecycle`、`life.aftermath_outcome`。它们保持现状，不用空测试或降级状态伪造资格；其中
+  `proactive.post_silent` 的公开关系/节奏材料仍需后续隔离场景或明确 release 取舍。

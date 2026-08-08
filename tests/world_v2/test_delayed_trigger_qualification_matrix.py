@@ -201,6 +201,10 @@ def test_host_scenario_evidence_registers_only_the_committed_public_host_cases()
             "tests/world_v2/test_delayed_trigger_affect_silence_host_qualification.py::"
             "test_public_host_silence_technical_failure_is_not_role_no_change"
         ),
+        "life.ecology-clock-wake-retry-isolation.1": (
+            "tests/world_v2/test_delayed_trigger_life_ecology_host_qualification.py::"
+            "test_public_host_life_ecology_wake_terminal_and_retry_does_not_block_inbound"
+        ),
     }
     assert all(
         {"real_provider_author_transport", "production_stream_expression_episode", "character_autonomy",
