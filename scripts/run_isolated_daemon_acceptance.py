@@ -412,6 +412,24 @@ def _valid_expression_reselection_envelope(value: object) -> bool:
     return True
 
 
+def _valid_expression_transport_carrier(value: object) -> bool:
+    """Validate the compact host carrier used by non-source corrections."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "contract",
+        "authority",
+        "output_contract",
+    }:
+        return False
+    return (
+        value.get("contract") == "expression-reselection-transport.1"
+        and value.get("authority") == "host_compiled_transport_only"
+        and isinstance(value.get("output_contract"), dict)
+        and value["output_contract"].get("contract")
+        == "expression-source-reselection-direct.1"
+    )
+
+
 def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
     """Reconstruct local forced-tool identities without sending them upstream.
 
@@ -444,7 +462,8 @@ def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
         # contract in the source-closure reselection envelope.  Recompile it
         # through the production factory instead of mirroring its schema or
         # guessing capability/source fields from provider JSON.
-        output_contracts: list[dict[str, object]] = []
+        source_envelopes: list[dict[str, object]] = []
+        transport_carriers: list[dict[str, object]] = []
         for message in messages:
             if not isinstance(message, dict) or message.get("role") != "user":
                 continue
@@ -459,11 +478,19 @@ def _forced_tool_request_hashes(payload: dict[str, object]) -> list[str]:
                 decoded = json.loads(content)
             except json.JSONDecodeError:
                 continue
-            if not _valid_expression_reselection_envelope(decoded):
-                continue
-            candidate = decoded["output_contract"]
-            assert isinstance(candidate, dict)
-            output_contracts.append(candidate)
+            if _valid_expression_reselection_envelope(decoded):
+                candidate = decoded["output_contract"]
+                assert isinstance(candidate, dict)
+                source_envelopes.append(candidate)
+            elif _valid_expression_transport_carrier(decoded):
+                candidate = decoded["output_contract"]
+                assert isinstance(candidate, dict)
+                transport_carriers.append(candidate)
+        # Source-closure calls carry both the full failure envelope and the
+        # compact transport carrier. Prefer the former; structural/private/
+        # claim corrections carry only the latter. Multiple candidates of the
+        # same kind are ambiguous and must not create evidence.
+        output_contracts = source_envelopes or transport_carriers
         if len(output_contracts) != 1:
             return []
         hashes: list[str] = []

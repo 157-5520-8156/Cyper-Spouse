@@ -397,6 +397,13 @@ async def test_expression_structural_correction_uses_required_tool_without_plain
         "type": "function",
         "function": {"name": "character_expression_reselection_v1"},
     }
+    carrier = json.loads(provider.calls[1][0][-1]["content"])
+    assert carrier == {
+        "contract": "expression-reselection-transport.1",
+        "authority": "host_compiled_transport_only",
+        "output_contract": carrier["output_contract"],
+    }
+    assert carrier["output_contract"]["contract"] == "expression-source-reselection-direct.1"
     assert output.raw_proposal["proposed_changes"][0]["payload"]["canonical_json"]
 
 

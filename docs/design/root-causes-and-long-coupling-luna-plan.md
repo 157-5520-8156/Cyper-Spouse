@@ -1159,9 +1159,9 @@ commit：hash
   source-closure reselection envelope 顶层携带的 canonical `output_contract`，再调用
   `expression_reselection_tool_contract` 重新编译并比较完整 provider tool/choice；不复制表达式字段表，
   不从用户任意嵌套 JSON 猜测 capability 或来源。
-- **source-closure 表达式校正**的本地 contract identity 因而可以进入 `forced_tool_request_hashes`，与持久化
-  provider request hash 做同样的因果关联；缺少、嵌套伪造、顶层边界不完整或不匹配的 contract 会安全地不计入
-  证据，而不是冒充成功。结构/private/claim 表达式校正虽然已在生产使用同一 required-tool，当前验收脚本仍未为
-  它们建立 canonical contract carrier，不能把这些调用计入本片的因果资格。
+- 所有使用 `character_expression_reselection_v1` 的表达式校正现在都携带同一 canonical typed contract：
+  source-closure lane 保留完整失败 envelope，结构/private/claim lane 使用不含行为语义的
+  `expression-reselection-transport.1` carrier；验收脚本只重新编译并比较 provider tool/choice，不复制字段表。
+  缺少、嵌套伪造、顶层边界不完整、重复候选或不匹配的 contract 会安全地不计入证据，而不是冒充成功。
 - 这只闭合隔离验收的证据采集缺口，不等于真实 DeepSeek 首次成功率、QQ 回执、自由多轮对聊或 24 小时
   soak 已资格化；发布状态继续保持 `manual_only`/`qualification_incomplete`。

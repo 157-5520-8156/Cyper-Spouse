@@ -1158,6 +1158,27 @@ def test_provider_capture_reconstructs_expression_reselection_tool_identity() ->
     assert _forced_tool_request_hashes(
         {**payload, "messages": [*messages, messages[-1]]}
     ) == []
+    carrier_messages = [
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "contract": "expression-reselection-transport.1",
+                    "authority": "host_compiled_transport_only",
+                    "output_contract": output_contract,
+                },
+                separators=(",", ":"),
+            ),
+        }
+    ]
+    carrier_payload = {**payload, "messages": carrier_messages}
+    carrier_hash = _canonical_hash(
+        {
+            **carrier_payload,
+            "tool_contract_identity": compiled.identity.request_identity_material(),
+        }
+    )
+    assert _forced_tool_request_hashes(carrier_payload) == [carrier_hash]
 
     state = _ProviderCaptureState(mode="loopback-stub", upstream_base_url=None)
     status, _response = state.handle(

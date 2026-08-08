@@ -1262,6 +1262,7 @@ async def complete_bounded_validation_reselection(
     tool_choice: object | None = None,
     tool_contract_identity: dict[str, str] | None = None,
     unwrap_tool_result: Callable[[str], str] | None = None,
+    tool_contract_payload: dict[str, object] | None = None,
 ) -> ValidationReselectionResult:
     """Execute the one model-owned correction allowed by the call budget."""
 
@@ -1271,6 +1272,18 @@ async def complete_bounded_validation_reselection(
     if include_invalid_raw:
         corrective.append({"role": "assistant", "content": raw})
     corrective.append({"role": "user", "content": instruction})
+    if tool_contract_payload is not None:
+        corrective.append(
+            {
+                "role": "user",
+                "content": json.dumps(
+                    tool_contract_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+        )
     identity = (
         _provider_invocation_identity(
             parent_call_id=parent_call_id,
@@ -8545,6 +8558,15 @@ def _expression_tool_reselection_kwargs(
         "tool_choice": compiled.provider_tool_choice,
         "tool_contract_identity": compiled.identity.request_identity_material(),
         "unwrap_tool_result": compiled.unwrap,
+        # The provider request hash deliberately keeps this local identity
+        # out of the wire.  This compact typed carrier is the corresponding
+        # host-authored evidence handle for expression-only corrections; it
+        # contains no motive, wording, or behavior instruction.
+        "tool_contract_payload": {
+            "contract": "expression-reselection-transport.1",
+            "authority": "host_compiled_transport_only",
+            "output_contract": output_contract,
+        },
     }
 
 
