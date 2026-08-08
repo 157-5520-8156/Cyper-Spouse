@@ -134,6 +134,9 @@ def verify_delayed_trigger_catalog(
     )
 
     matrix_ids = {row.mechanism_id for row in catalog.mechanisms}
+    release_status_by_id = {
+        row.mechanism_id: row.release_status for row in catalog.mechanisms
+    }
     installed_owners = DELAYED_TRIGGER_OWNERS if owner_registry is None else owner_registry
     owner_ids = [str(row.mechanism_id) for row in installed_owners]
     if len(owner_ids) != len(set(owner_ids)):
@@ -180,6 +183,27 @@ def verify_delayed_trigger_catalog(
         if owner is None:
             errors.append(f"{row.mechanism_id}: no explicit delayed-trigger owner")
         else:
+            producer_dependencies = tuple(
+                str(item) for item in getattr(owner, "producer_dependencies", ())
+            )
+            unknown_producers = set(producer_dependencies) - matrix_ids
+            if unknown_producers:
+                errors.append(
+                    f"{row.mechanism_id}: unknown producer dependencies "
+                    f"{sorted(unknown_producers)}"
+                )
+            if (
+                row.release_status == "active"
+                and producer_dependencies
+                and not any(
+                    release_status_by_id.get(mechanism_id) == "active"
+                    for mechanism_id in producer_dependencies
+                )
+            ):
+                errors.append(
+                    f"{row.mechanism_id}: active mechanism has no active producer "
+                    f"dependency among {producer_dependencies!r}"
+                )
             if row.trigger_mode != owner.trigger_mode:
                 errors.append(
                     f"{row.mechanism_id}: trigger mode {row.trigger_mode!r} does not "

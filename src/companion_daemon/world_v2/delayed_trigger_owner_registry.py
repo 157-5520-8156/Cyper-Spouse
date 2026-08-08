@@ -154,6 +154,7 @@ class DelayedTriggerOwner:
     mechanism_id: str
     runtime_owner: object | None = None
     supporting_runtime_owners: tuple[object, ...] = ()
+    producer_dependencies: tuple[str, ...] = ()
     trigger_mode: str = "clock_due"
     public_seams: tuple[str, ...] = ()
     projection_due_fields: tuple[str, ...] = ()
@@ -311,6 +312,10 @@ DELAYED_TRIGGER_OWNERS: tuple[DelayedTriggerOwner, ...] = (
     DelayedTriggerOwner(
         mechanism_id="life.activity_occurrence",
         runtime_owner=LifeEcologyRuntime.advance_once,
+        producer_dependencies=(
+            "life.development",
+            "life.open_world_generation",
+        ),
         public_seams=_CLOCK_SEAMS,
         projection_due_fields=(
             _field(PlanStateProjection, "scheduled_window"),

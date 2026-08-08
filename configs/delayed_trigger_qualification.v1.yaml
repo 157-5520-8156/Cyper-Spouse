@@ -272,7 +272,7 @@ mechanisms:
 
   - mechanism_id: life.activity_occurrence
     purpose: Deterministic activity and occurrence due discovery
-    release_status: active
+    release_status: limited
     upstream_authority: [accepted Plan or Activity, committed WorldOccurrence]
     due_identity: {coordinates: [world_id, actor_ref, lifecycle_kind, source_id, revision], logical_deadline: lifecycle_due_at, merge_dedup_key: lifecycle_source_revision}
     controlled_injection: {public_seams: [QQC2CHost.tick, QQC2CHost.drain], upstream_material: [real accepted Plan/Activity/Occurrence, logical Clock advance]}
@@ -284,7 +284,7 @@ mechanisms:
     vertical_lanes: [life_ecology, clock]
     closure_mechanisms: [life-npc-outcome-continuity, open-world-temporary-events]
     projection_due_fields: [PlanStateProjection.scheduled_window, WorldOccurrenceProjection.time_window]
-    activation_note: Active deterministic discovery declaration only; each model-bearing followup is declared separately below.
+    activation_note: Limited because no active/public-qualified Plan or Occurrence producer is installed; blocked_by life.development and life.open_world_generation, which remain limited dependencies.
 
   - mechanism_id: life.activity_lifecycle
     purpose: Character-authored transition of one due Activity lifecycle opportunity

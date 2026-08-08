@@ -127,6 +127,34 @@ def test_life_model_followups_are_independently_and_honestly_declared() -> None:
     assert by_id["life.open_world_generation"].model_contract is None
 
 
+def test_life_activity_occurrence_cannot_be_active_without_an_active_producer() -> None:
+    catalog = load_delayed_trigger_catalog(CATALOG)
+    target = next(
+        row for row in catalog.mechanisms if row.mechanism_id == "life.activity_occurrence"
+    )
+    owner = next(
+        row for row in DELAYED_TRIGGER_OWNERS if row.mechanism_id == target.mechanism_id
+    )
+
+    assert target.release_status == "limited"
+    assert owner.producer_dependencies == (
+        "life.development",
+        "life.open_world_generation",
+    )
+    falsely_active = target.model_copy(update={"release_status": "active"})
+    mechanisms = tuple(
+        falsely_active if row.mechanism_id == target.mechanism_id else row
+        for row in catalog.mechanisms
+    )
+
+    with pytest.raises(DelayedTriggerCatalogError, match="no active producer dependency"):
+        verify_delayed_trigger_catalog(
+            catalog.model_copy(update={"mechanisms": mechanisms}),
+            vertical_registry=VERTICAL_REGISTRY,
+            mechanism_rows=_mechanism_rows(),
+        )
+
+
 def test_external_world_perception_has_its_own_closure() -> None:
     by_id = {
         row.mechanism_id: row for row in load_delayed_trigger_catalog(CATALOG).mechanisms
