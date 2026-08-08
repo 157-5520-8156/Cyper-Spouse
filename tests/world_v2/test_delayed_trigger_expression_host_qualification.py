@@ -270,6 +270,10 @@ class _PublicHostHarness:
             ingress_now=lambda: self.pacing_clock["now"],
             ingress_sleep=self.skip_pacing,
             action_due_now=lambda: self.scheduler_clock["now"],
+            # This host scenario qualifies Action/restart semantics, not the
+            # optional semantic embedding service.  Keep the fixture fully
+            # deterministic and avoid probing an unavailable local endpoint.
+            use_configured_recall_embedding=False,
         )
 
 
