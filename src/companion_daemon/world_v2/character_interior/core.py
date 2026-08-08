@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter, OrderedDict, deque
-from datetime import datetime
+from datetime import UTC, datetime
 import hashlib
 import inspect
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from typing import Mapping
@@ -48,6 +49,11 @@ from .ports import (
     _RecallRequest,
     _RecallResult,
     _RoleResultContractError,
+)
+from .turn_store import (
+    _CharacterInteriorTurnStore,
+    _TurnCoordinationRecord,
+    _TurnCoordinationRequest,
 )
 
 
@@ -196,6 +202,101 @@ class _TurnCacheEntry:
     decision: InnerDecision | None = None
 
 
+def _coordination_request(
+    subject: InteriorStimulus | InteriorOpportunity,
+    *,
+    turn_id: str,
+    snapshot: InnerLifeSnapshot,
+) -> _TurnCoordinationRequest:
+    subject_ref = (
+        subject.stimulus_ref if isinstance(subject, InteriorStimulus) else subject.opportunity_ref
+    )
+    capability = subject.capability_manifest
+    return _TurnCoordinationRequest(
+        world_id=subject.world_id,
+        actor_ref=subject.actor_ref,
+        inner_turn_id=turn_id,
+        phase="experience" if isinstance(subject, InteriorStimulus) else "consider",
+        purpose=subject.purpose,
+        subject_ref=subject_ref,
+        trigger_ref=subject.trigger_ref,
+        cursor_json=json.dumps(
+            subject.cursor.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        request_hash=_digest(
+            {
+                "contract": "character-interior-turn-request.1",
+                "subject_ref": subject_ref,
+                "inner_turn_ref": subject.inner_turn_ref,
+                "trigger_ref": subject.trigger_ref,
+                "purpose": subject.purpose,
+                "source_refs": subject.source_refs,
+                "context_note": subject.context_note,
+                "cursor": subject.cursor.model_dump(mode="json"),
+                "capability": capability.model_dump(mode="json") if capability else None,
+            }
+        ),
+        snapshot_id=snapshot.snapshot_id,
+        snapshot_hash=snapshot.snapshot_hash,
+        capability_hash=_digest(
+            capability.model_dump(mode="json") if capability is not None else None
+        ),
+    )
+
+
+def _prepared_turn_json(
+    *,
+    result: _InteriorRoleResult,
+    snapshot: InnerLifeSnapshot,
+    private_self_lineage: _PrivateSelfLineage,
+    entry: _TurnCacheEntry,
+) -> str:
+    return json.dumps(
+        {
+            "contract": "character-interior-prepared-turn.1",
+            "result": result.model_dump(mode="json"),
+            "snapshot": snapshot.model_dump(mode="json"),
+            "private_self_lineage": private_self_lineage.model_dump(mode="json"),
+            "presented_prefetch_traces": [
+                item.model_dump(mode="json") for item in (entry.presented_prefetch_traces or ())
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _restore_prepared_turn(
+    raw: str,
+) -> tuple[_InteriorRoleResult, InnerLifeSnapshot, _PrivateSelfLineage, tuple[PrefetchPresentationAudit, ...]]:
+    try:
+        payload = json.loads(raw)
+        if payload.get("contract") != "character-interior-prepared-turn.1":
+            raise ValueError("prepared turn contract is unsupported")
+        result = _InteriorRoleResult.model_validate_json(
+            json.dumps(payload["result"], ensure_ascii=False)
+        )
+        if result.status == "recall_request":
+            raise ValueError("prepared turn cannot contain an unfinished recall request")
+        snapshot = InnerLifeSnapshot.model_validate_json(
+            json.dumps(payload["snapshot"], ensure_ascii=False)
+        )
+        lineage = _PrivateSelfLineage.model_validate_json(
+            json.dumps(payload["private_self_lineage"], ensure_ascii=False)
+        )
+        traces = tuple(
+            PrefetchPresentationAudit.model_validate_json(json.dumps(item, ensure_ascii=False))
+            for item in payload.get("presented_prefetch_traces", ())
+        )
+        return result, snapshot, lineage, traces
+    except (KeyError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
+        raise _InteriorTechnicalError("invalid_durable_turn_checkpoint") from exc
+
+
 class CharacterInterior:
     """Deep module for private experience, choice, and source-bound projection."""
 
@@ -207,6 +308,10 @@ class CharacterInterior:
         recall: object | None = None,
         authority: object | None = None,
         faculties: tuple[object, ...] = (),
+        turn_store: _CharacterInteriorTurnStore | None = None,
+        turn_owner_id: str = "character-interior:runtime",
+        turn_lease_seconds: int = 120,
+        turn_clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not callable(getattr(projection, "project", None)):
             raise TypeError("CharacterInterior projection port must provide project")
@@ -218,10 +323,28 @@ class CharacterInterior:
             raise TypeError("CharacterInterior recall port must provide recall")
         if authority is not None and not callable(getattr(authority, "submit", None)):
             raise TypeError("CharacterInterior authority port must provide submit")
+        if turn_store is not None:
+            required_turn_store_methods = (
+                "acquire",
+                "checkpoint",
+                "complete",
+                "health",
+                "prune_terminal",
+            )
+            if any(not callable(getattr(turn_store, name, None)) for name in required_turn_store_methods):
+                raise TypeError("CharacterInterior turn store is incomplete")
+        if not turn_owner_id or turn_lease_seconds < 1:
+            raise ValueError("CharacterInterior turn lease configuration is invalid")
+        if turn_clock is not None and not callable(turn_clock):
+            raise TypeError("CharacterInterior turn clock must be callable")
         self._projection = projection
         self._registry = _FacultyRegistry(primary=role, additional=faculties)
         self._recall = recall
         self._authority = authority
+        self._turn_store = turn_store
+        self._turn_owner_id = turn_owner_id
+        self._turn_lease_seconds = turn_lease_seconds
+        self._turn_clock = turn_clock
         self._cache: OrderedDict[str, _TurnCacheEntry] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
         self._snapshot_cache: OrderedDict[str, InnerLifeSnapshot] = OrderedDict()
@@ -262,6 +385,125 @@ class CharacterInterior:
     def _is_bound_to(self, ledger: object) -> bool:
         driver = self._background_driver
         return bool(driver is not None and getattr(driver, "is_bound_to")(ledger))
+
+    def _turn_now(self) -> datetime:
+        value = self._turn_clock() if self._turn_clock is not None else datetime.now(UTC)
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise _InteriorTechnicalError("turn_store_clock_invalid")
+        return value
+
+    def _acquire_turn(
+        self,
+        *,
+        subject: InteriorStimulus | InteriorOpportunity,
+        turn_id: str,
+        snapshot: InnerLifeSnapshot,
+    ) -> tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None:
+        store = self._turn_store
+        if store is None:
+            return None
+        request = _coordination_request(subject, turn_id=turn_id, snapshot=snapshot)
+        try:
+            acquisition = store.acquire(
+                request=request,
+                owner_id=self._turn_owner_id,
+                now=self._turn_now(),
+                lease_seconds=self._turn_lease_seconds,
+            )
+        except _InteriorTechnicalError:
+            raise
+        except Exception as exc:
+            raise _InteriorTechnicalError("turn_store_unavailable", snapshot=snapshot) from exc
+        if acquisition.status == "owned_elsewhere":
+            raise _InteriorTechnicalError("turn_owned_elsewhere", snapshot=snapshot)
+        return request, acquisition.record
+
+    def _checkpoint_turn(
+        self,
+        *,
+        durable: tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None,
+        result: _InteriorRoleResult,
+        snapshot: InnerLifeSnapshot,
+        private_self_lineage: _PrivateSelfLineage,
+        entry: _TurnCacheEntry,
+    ) -> _TurnCoordinationRecord | None:
+        if durable is None or self._turn_store is None:
+            return durable[1] if durable is not None else None
+        request, record = durable
+        raw = _prepared_turn_json(
+            result=result,
+            snapshot=snapshot,
+            private_self_lineage=private_self_lineage,
+            entry=entry,
+        )
+        try:
+            return self._turn_store.checkpoint(
+                request=request,
+                owner_id=self._turn_owner_id,
+                lease_token=record.lease_token or "",
+                attempt_ordinal=record.attempt_ordinal,
+                authored_state_json=raw,
+                authored_state_hash=_digest(raw),
+                now=self._turn_now(),
+            )
+        except Exception as exc:
+            raise _InteriorTechnicalError("turn_checkpoint_failed", snapshot=snapshot) from exc
+
+    def _complete_turn(
+        self,
+        *,
+        durable: tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None,
+        result: InnerTransition | InnerDecision,
+    ) -> None:
+        if durable is None or self._turn_store is None:
+            return
+        request, record = durable
+        raw = json.dumps(
+            result.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        try:
+            self._turn_store.complete(
+                request=request,
+                owner_id=self._turn_owner_id,
+                lease_token=record.lease_token or "",
+                attempt_ordinal=record.attempt_ordinal,
+                terminal_result_json=raw,
+                terminal_result_hash=_digest(raw),
+                now=self._turn_now(),
+            )
+        except Exception as exc:
+            raise _InteriorTechnicalError("turn_completion_failed") from exc
+
+    @staticmethod
+    def _restore_terminal(
+        *,
+        raw: str,
+        subject: InteriorStimulus | InteriorOpportunity,
+        turn_id: str,
+    ) -> InnerTransition | InnerDecision:
+        try:
+            result: InnerTransition | InnerDecision = (
+                InnerTransition.model_validate_json(raw)
+                if isinstance(subject, InteriorStimulus)
+                else InnerDecision.model_validate_json(raw)
+            )
+        except (TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
+            raise _InteriorTechnicalError("invalid_durable_turn_terminal") from exc
+        expected_ref = (
+            subject.stimulus_ref if isinstance(subject, InteriorStimulus) else subject.opportunity_ref
+        )
+        actual_ref = result.stimulus_ref if isinstance(result, InnerTransition) else result.opportunity_ref
+        if (
+            result.inner_turn_id != turn_id
+            or actual_ref != expected_ref
+            or result.actor_ref != subject.actor_ref
+            or result.cursor != subject.cursor
+        ):
+            raise _InteriorTechnicalError("durable_turn_identity_mismatch")
+        return result
 
     async def _drain_reconsideration_once(self):
         driver = self._background_driver
@@ -421,6 +663,36 @@ class CharacterInterior:
         if self._registry.semantic_author_count != 1:
             topology_issues.append("multiple_semantic_authors")
         snapshot_latency = sorted(self._snapshot_compile_ms)
+        turn_store_health: dict[str, object]
+        if self._turn_store is None:
+            turn_store_health = {
+                "bound": False,
+                "status": "process_local_only",
+            }
+        else:
+            try:
+                metadata = self._last_turn_metadata if isinstance(self._last_turn_metadata, dict) else {}
+                health_world_id = str(metadata.get("world_id") or "")
+                health_actor_ref = str(metadata.get("actor_ref") or "")
+                turn_store_health = {
+                    "bound": True,
+                    "status": (
+                        "ready"
+                        if health_world_id and health_actor_ref
+                        else "ready_unscoped"
+                    ),
+                    **self._turn_store.health(
+                        world_id=health_world_id,
+                        actor_ref=health_actor_ref,
+                        now=self._turn_now(),
+                    ),
+                }
+            except Exception as exc:
+                turn_store_health = {
+                    "bound": True,
+                    "status": "unavailable",
+                    "error": type(exc).__name__,
+                }
 
         def percentile(fraction: float) -> float | None:
             if not snapshot_latency:
@@ -541,6 +813,7 @@ class CharacterInterior:
                 "evidence_contract": "frozen-faculty-registry.1",
             },
             "projection_contract": "subject_bound",
+            "durable_turn_store": turn_store_health,
         }
 
     async def project(
@@ -578,6 +851,7 @@ class CharacterInterior:
         turn_id = _inner_turn_id(stimulus, snapshot=None, faculty=faculty)
         lock = self._locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
+            durable: tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None = None
             try:
                 canonical_snapshot = await self.project(stimulus)
                 turn_id = _inner_turn_id(
@@ -595,68 +869,96 @@ class CharacterInterior:
                         )
                     self._metrics["effect_once_join"] += 1
                     return entry.transition
-                snapshot = await self._snapshot_without_relocking(
-                    stimulus,
-                    cache_key,
-                    canonical_snapshot=canonical_snapshot,
-                )
-                snapshot = await self._prefetch_for_first_pass(
+                durable = self._acquire_turn(
                     subject=stimulus,
-                    faculty=faculty,
                     turn_id=turn_id,
-                    snapshot=snapshot,
-                    entry=self._cache[cache_key],
+                    snapshot=canonical_snapshot,
                 )
-                request = _InteriorRoleRequest(
-                    inner_turn_id=turn_id,
-                    phase="experience",
-                    subject_ref=stimulus.stimulus_ref,
-                    trigger_ref=stimulus.trigger_ref,
-                    purpose=stimulus.purpose,
-                    context_note=stimulus.context_note,
-                    subject_source_refs=stimulus.source_refs,
-                    capability_manifest=stimulus.capability_manifest,
-                    snapshot=snapshot,
-                    recall_completed=self._cache[cache_key].recall_attempted,
-                )
-                result, snapshot, private_self_lineage = await self._run_role_phase(
-                    method_name="experience",
-                    request=request,
-                    snapshot=snapshot,
-                    entry=self._cache[cache_key],
-                    final_statuses={"transition", "no_change"},
-                )
-                proposal_refs = await self._submit_proposals(
-                    turn_id=turn_id,
-                    subject=stimulus,
-                    snapshot=snapshot,
-                    proposals=result.proposals,
-                    author_lineage=result.author_lineage,
-                    private_self_lineage=private_self_lineage,
-                    decision_material=result,
-                )
-                transition = InnerTransition(
-                    inner_turn_id=turn_id,
-                    stimulus_ref=stimulus.stimulus_ref,
-                    actor_ref=stimulus.actor_ref,
-                    cursor=stimulus.cursor,
-                    snapshot_id=snapshot.snapshot_id,
-                    snapshot_hash=snapshot.snapshot_hash,
-                    status=("transitioned" if result.status == "transition" else "model_no_change"),
-                    summary=result.summary,
-                    attended_source_refs=result.attended_source_refs,
-                    instant_private_self=_InstantPrivateSelf(
+                if durable is not None and durable[1].state == "terminal":
+                    transition = self._restore_terminal(
+                        raw=durable[1].terminal_result_json or "",
+                        subject=stimulus,
+                        turn_id=turn_id,
+                    )
+                else:
+                    entry = self._cache.setdefault(cache_key, _TurnCacheEntry())
+                    if durable is not None and durable[1].state == "checkpointed":
+                        result, snapshot, private_self_lineage, traces = _restore_prepared_turn(
+                            durable[1].authored_state_json or ""
+                        )
+                        entry.snapshot = snapshot
+                        entry.presented_prefetch_traces = list(traces)
+                    else:
+                        snapshot = await self._snapshot_without_relocking(
+                            stimulus,
+                            cache_key,
+                            canonical_snapshot=canonical_snapshot,
+                        )
+                        snapshot = await self._prefetch_for_first_pass(
+                            subject=stimulus,
+                            faculty=faculty,
+                            turn_id=turn_id,
+                            snapshot=snapshot,
+                            entry=entry,
+                        )
+                        request = _InteriorRoleRequest(
+                            inner_turn_id=turn_id,
+                            phase="experience",
+                            subject_ref=stimulus.stimulus_ref,
+                            trigger_ref=stimulus.trigger_ref,
+                            purpose=stimulus.purpose,
+                            context_note=stimulus.context_note,
+                            subject_source_refs=stimulus.source_refs,
+                            capability_manifest=stimulus.capability_manifest,
+                            snapshot=snapshot,
+                            recall_completed=entry.recall_attempted,
+                        )
+                        result, snapshot, private_self_lineage = await self._run_role_phase(
+                            method_name="experience",
+                            request=request,
+                            snapshot=snapshot,
+                            entry=entry,
+                            final_statuses={"transition", "no_change"},
+                        )
+                        durable_record = self._checkpoint_turn(
+                            durable=durable,
+                            result=result,
+                            snapshot=snapshot,
+                            private_self_lineage=private_self_lineage,
+                            entry=entry,
+                        )
+                        if durable is not None and durable_record is not None:
+                            durable = (durable[0], durable_record)
+                    proposal_refs = await self._submit_proposals(
+                        turn_id=turn_id,
+                        subject=stimulus,
+                        snapshot=snapshot,
+                        proposals=result.proposals,
+                        author_lineage=result.author_lineage,
+                        private_self_lineage=private_self_lineage,
+                        decision_material=result,
+                    )
+                    transition = InnerTransition(
+                        inner_turn_id=turn_id,
+                        stimulus_ref=stimulus.stimulus_ref,
+                        actor_ref=stimulus.actor_ref,
+                        cursor=stimulus.cursor,
+                        snapshot_id=snapshot.snapshot_id,
+                        snapshot_hash=snapshot.snapshot_hash,
+                        status=("transitioned" if result.status == "transition" else "model_no_change"),
                         summary=result.summary,
                         attended_source_refs=result.attended_source_refs,
-                    ),
-                    private_self_lineage=private_self_lineage,
-                    proposal_refs=proposal_refs,
-                    author_lineage=result.author_lineage,
-                    presented_prefetch_traces=tuple(
-                        self._cache[cache_key].presented_prefetch_traces or ()
-                    ),
-                    failure_code=None,
-                )
+                        instant_private_self=_InstantPrivateSelf(
+                            summary=result.summary,
+                            attended_source_refs=result.attended_source_refs,
+                        ),
+                        private_self_lineage=private_self_lineage,
+                        proposal_refs=proposal_refs,
+                        author_lineage=result.author_lineage,
+                        presented_prefetch_traces=tuple(entry.presented_prefetch_traces or ()),
+                        failure_code=None,
+                    )
+                    self._complete_turn(durable=durable, result=transition)
             except _InteriorTechnicalError as exc:
                 turn_id = _inner_turn_id(
                     stimulus,
@@ -677,7 +979,12 @@ class CharacterInterior:
                     error=_InteriorTechnicalError("interior_runtime_failure"),
                 )
             entry = self._cache.setdefault(cache_key, _TurnCacheEntry())
-            entry.transition = transition
+            # Technical failures are retryable work, not effect-once
+            # outcomes.  Keeping them in the process-local result cache would
+            # prevent a later scheduler pass (or an expired sidecar lease)
+            # from ever reacquiring the same turn.  Durable checkpoints still
+            # preserve any already-authored role result across that retry.
+            entry.transition = None if transition.status == "technical_failure" else transition
             self._cache.move_to_end(cache_key)
             self._trim_cache()
             self._record_terminal(
@@ -685,6 +992,8 @@ class CharacterInterior:
                 transition.status,
                 transition.failure_code,
                 purpose=stimulus.purpose,
+                world_id=stimulus.world_id,
+                actor_ref=stimulus.actor_ref,
                 inner_turn_id=transition.inner_turn_id,
                 cursor=transition.cursor,
                 snapshot_hash=transition.snapshot_hash,
@@ -700,6 +1009,7 @@ class CharacterInterior:
         turn_id = _inner_turn_id(opportunity, snapshot=None, faculty=faculty)
         lock = self._locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
+            durable: tuple[_TurnCoordinationRequest, _TurnCoordinationRecord] | None = None
             try:
                 canonical_snapshot = await self.project(opportunity)
                 turn_id = _inner_turn_id(
@@ -717,69 +1027,97 @@ class CharacterInterior:
                         )
                     self._metrics["effect_once_join"] += 1
                     return entry.decision
-                snapshot = await self._snapshot_without_relocking(
-                    opportunity,
-                    cache_key,
-                    canonical_snapshot=canonical_snapshot,
-                )
-                snapshot = await self._prefetch_for_first_pass(
+                durable = self._acquire_turn(
                     subject=opportunity,
-                    faculty=faculty,
                     turn_id=turn_id,
-                    snapshot=snapshot,
-                    entry=self._cache[cache_key],
+                    snapshot=canonical_snapshot,
                 )
-                request = _InteriorRoleRequest(
-                    inner_turn_id=turn_id,
-                    phase="consider",
-                    subject_ref=opportunity.opportunity_ref,
-                    trigger_ref=opportunity.trigger_ref,
-                    purpose=opportunity.purpose,
-                    context_note=opportunity.context_note,
-                    subject_source_refs=opportunity.source_refs,
-                    capability_manifest=opportunity.capability_manifest,
-                    snapshot=snapshot,
-                    recall_completed=self._cache[cache_key].recall_attempted,
-                )
-                result, snapshot, private_self_lineage = await self._run_role_phase(
-                    method_name="consider",
-                    request=request,
-                    snapshot=snapshot,
-                    entry=self._cache[cache_key],
-                    final_statuses={"decision", "silent"},
-                )
-                proposal_refs = await self._submit_proposals(
-                    turn_id=turn_id,
-                    subject=opportunity,
-                    snapshot=snapshot,
-                    proposals=result.proposals,
-                    author_lineage=result.author_lineage,
-                    private_self_lineage=private_self_lineage,
-                    decision_material=result,
-                )
-                decision = InnerDecision(
-                    inner_turn_id=turn_id,
-                    opportunity_ref=opportunity.opportunity_ref,
-                    actor_ref=opportunity.actor_ref,
-                    cursor=opportunity.cursor,
-                    snapshot_id=snapshot.snapshot_id,
-                    snapshot_hash=snapshot.snapshot_hash,
-                    status="decided" if result.status == "decision" else "model_silent",
-                    summary=result.summary,
-                    attended_source_refs=result.attended_source_refs,
-                    instant_private_self=_InstantPrivateSelf(
+                if durable is not None and durable[1].state == "terminal":
+                    decision = self._restore_terminal(
+                        raw=durable[1].terminal_result_json or "",
+                        subject=opportunity,
+                        turn_id=turn_id,
+                    )
+                else:
+                    entry = self._cache.setdefault(cache_key, _TurnCacheEntry())
+                    if durable is not None and durable[1].state == "checkpointed":
+                        result, snapshot, private_self_lineage, traces = _restore_prepared_turn(
+                            durable[1].authored_state_json or ""
+                        )
+                        entry.snapshot = snapshot
+                        entry.presented_prefetch_traces = list(traces)
+                    else:
+                        snapshot = await self._snapshot_without_relocking(
+                            opportunity,
+                            cache_key,
+                            canonical_snapshot=canonical_snapshot,
+                        )
+                        snapshot = await self._prefetch_for_first_pass(
+                            subject=opportunity,
+                            faculty=faculty,
+                            turn_id=turn_id,
+                            snapshot=snapshot,
+                            entry=entry,
+                        )
+                        request = _InteriorRoleRequest(
+                            inner_turn_id=turn_id,
+                            phase="consider",
+                            subject_ref=opportunity.opportunity_ref,
+                            trigger_ref=opportunity.trigger_ref,
+                            purpose=opportunity.purpose,
+                            context_note=opportunity.context_note,
+                            subject_source_refs=opportunity.source_refs,
+                            capability_manifest=opportunity.capability_manifest,
+                            snapshot=snapshot,
+                            recall_completed=entry.recall_attempted,
+                        )
+                        result, snapshot, private_self_lineage = await self._run_role_phase(
+                            method_name="consider",
+                            request=request,
+                            snapshot=snapshot,
+                            entry=entry,
+                            final_statuses={"decision", "silent"},
+                        )
+                        durable_record = self._checkpoint_turn(
+                            durable=durable,
+                            result=result,
+                            snapshot=snapshot,
+                            private_self_lineage=private_self_lineage,
+                            entry=entry,
+                        )
+                        if durable is not None and durable_record is not None:
+                            durable = (durable[0], durable_record)
+                    proposal_refs = await self._submit_proposals(
+                        turn_id=turn_id,
+                        subject=opportunity,
+                        snapshot=snapshot,
+                        proposals=result.proposals,
+                        author_lineage=result.author_lineage,
+                        private_self_lineage=private_self_lineage,
+                        decision_material=result,
+                    )
+                    decision = InnerDecision(
+                        inner_turn_id=turn_id,
+                        opportunity_ref=opportunity.opportunity_ref,
+                        actor_ref=opportunity.actor_ref,
+                        cursor=opportunity.cursor,
+                        snapshot_id=snapshot.snapshot_id,
+                        snapshot_hash=snapshot.snapshot_hash,
+                        status="decided" if result.status == "decision" else "model_silent",
                         summary=result.summary,
                         attended_source_refs=result.attended_source_refs,
-                    ),
-                    private_self_lineage=private_self_lineage,
-                    decision=result.decision,
-                    proposal_refs=proposal_refs,
-                    author_lineage=result.author_lineage,
-                    presented_prefetch_traces=tuple(
-                        self._cache[cache_key].presented_prefetch_traces or ()
-                    ),
-                    failure_code=None,
-                )
+                        instant_private_self=_InstantPrivateSelf(
+                            summary=result.summary,
+                            attended_source_refs=result.attended_source_refs,
+                        ),
+                        private_self_lineage=private_self_lineage,
+                        decision=result.decision,
+                        proposal_refs=proposal_refs,
+                        author_lineage=result.author_lineage,
+                        presented_prefetch_traces=tuple(entry.presented_prefetch_traces or ()),
+                        failure_code=None,
+                    )
+                    self._complete_turn(durable=durable, result=decision)
             except _InteriorTechnicalError as exc:
                 turn_id = _inner_turn_id(
                     opportunity,
@@ -800,7 +1138,9 @@ class CharacterInterior:
                     error=_InteriorTechnicalError("interior_runtime_failure"),
                 )
             entry = self._cache.setdefault(cache_key, _TurnCacheEntry())
-            entry.decision = decision
+            # A model/provider/authority failure must remain retryable; only
+            # a role-authored decision or silence is effect-once cached.
+            entry.decision = None if decision.status == "technical_failure" else decision
             self._cache.move_to_end(cache_key)
             self._trim_cache()
             self._record_terminal(
@@ -808,6 +1148,8 @@ class CharacterInterior:
                 decision.status,
                 decision.failure_code,
                 purpose=opportunity.purpose,
+                world_id=opportunity.world_id,
+                actor_ref=opportunity.actor_ref,
                 inner_turn_id=decision.inner_turn_id,
                 cursor=decision.cursor,
                 snapshot_hash=decision.snapshot_hash,
@@ -1309,10 +1651,12 @@ class CharacterInterior:
             faculty = self._registry.for_purpose(current_request.purpose)
             method = getattr(faculty, method_name)
             structural_failure_code: str | None = None
+            structural_failure_detail: str | None = None
             try:
                 raw = await _resolve(method(current_request))
             except _RoleResultContractError as exc:
                 structural_failure_code = exc.code
+                structural_failure_detail = exc.detail
             except Exception as exc:
                 import logging
 
@@ -1347,6 +1691,7 @@ class CharacterInterior:
                     if exc.code != "invalid_role_result":
                         raise
                     structural_failure_code = exc.code
+                    structural_failure_detail = str(exc)
 
             assert structural_failure_code is not None
             if entry.correction_attempted:
@@ -1360,6 +1705,7 @@ class CharacterInterior:
                 update={
                     "correction_ordinal": 1,
                     "correction_failure_code": structural_failure_code,
+                    "correction_failure_detail": structural_failure_detail,
                 }
             )
             try:
@@ -1714,6 +2060,8 @@ class CharacterInterior:
         failure_code: str | None,
         *,
         purpose: str,
+        world_id: str,
+        actor_ref: str,
         inner_turn_id: str,
         cursor: ProjectionCursor,
         snapshot_hash: str | None,
@@ -1724,6 +2072,8 @@ class CharacterInterior:
             "inner_turn_id": inner_turn_id,
             "phase": phase,
             "purpose": purpose,
+            "world_id": world_id,
+            "actor_ref": actor_ref,
             "cursor": cursor.model_dump(mode="json"),
             "snapshot_hash": snapshot_hash,
             "terminal_status": status,

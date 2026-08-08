@@ -13,7 +13,7 @@ import json
 from typing import Literal
 
 from .appraisal_acceptance_runtime import appraisal_mutation_event_id
-from .appraisal_events import appraisal_mutation_hash
+from .appraisal_events import AppraisalAcceptedPayload, appraisal_mutation_hash
 from .batch_invariants import interaction_appraisal_trigger_identity
 from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .event_identity import domain_idempotency_key
@@ -423,6 +423,37 @@ class AppraisalProposalCompiler:
             source_cluster_ref = "perception-result:" + _digest(
                 {"event": source_event.event_id, "request": request.request_id}
             )
+        elif source_event.event_type == "AppraisalAccepted":
+            # A reflection is a new, role-authored interpretation of an
+            # already accepted appraisal.  It is intentionally a distinct
+            # source kind from the original observation/world occurrence:
+            # the reflection trigger is claimed by the world-stimulus lane,
+            # and the accepted appraisal remains the only evidence exposed to
+            # this compiler.  Treating it as unsupported used to leave every
+            # reflection trigger stuck after the role had already authored a
+            # valid decision.
+            accepted = AppraisalAcceptedPayload.model_validate_json(
+                source_event.payload_json
+            )
+            trigger = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "life_reflection"
+                    and item.source_evidence_ref == source_event.event_id
+                ),
+                None,
+            )
+            if (
+                trigger is None
+                or trigger.state != "claimed"
+                or trigger.trigger_ref != f"reflection:{source_event.event_id}"
+            ):
+                raise AppraisalProposalCompilerError("source_trigger_not_claimed")
+            source_evidence_ref = source_event.event_id
+            source_evidence_type = "committed_world_event"
+            subject_ref = accepted.appraisal.subject_ref
+            source_cluster_ref = accepted.appraisal.source_cluster_ref
         else:
             raise AppraisalProposalCompilerError("trigger_source_unsupported")
         return self._compile_bound_activate(

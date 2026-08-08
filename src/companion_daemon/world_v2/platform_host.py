@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import logging
 from typing import Awaitable, Callable, Literal, Mapping, Protocol
 
 from .dashboard_projection_adapter import DashboardPublicProjectionDTO, DashboardRoomProjectionDTO
@@ -19,6 +20,9 @@ from .production_turn_application import WorldV2TurnApplication
 from .production_latency_trace import ProductionLatencySample
 from .replay_evidence import ReplayEvidence
 from .schemas import ProjectionRequest
+
+
+_LOG = logging.getLogger(__name__)
 
 
 def _require_nonempty(**values: str) -> None:
@@ -604,7 +608,27 @@ class WorldV2PlatformHost:
             and not preempted()
         ):
             background_reads += 1
-            result = await self.drain_background_once()
+            try:
+                result = await self.drain_background_once()
+            except Exception as exc:  # noqa: BLE001 - scheduler isolation boundary
+                # A malformed historical trigger, provider adapter, or
+                # reducer-side technical fault must not abort the whole
+                # scheduler pass (and therefore starve inbound/Action work).
+                # The owning runtime keeps its durable claim/retry state; the
+                # host reports one bounded technical unit and resumes on the
+                # next wake rather than inventing a semantic no-op.
+                _LOG.exception("world v2 background scheduler unit failed")
+                background_units_used += 1
+                background_statuses.append(
+                    "technical_failure:" + type(exc).__name__.lower()
+                )
+                # Keep consuming independent units within the caller's
+                # explicit budget.  The failed worker owns its durable claim
+                # and retry/backoff; stopping here lets one malformed
+                # historical trigger starve every unrelated background lane.
+                # ``max_background_reads`` still bounds a worker that raises
+                # before it can persist a retry.
+                continue
             if result is None:
                 empty_background_reads += 1
                 if empty_background_reads >= 2:
@@ -612,7 +636,13 @@ class WorldV2PlatformHost:
                 continue
             empty_background_reads = 0
             background_units_used += 1
-            background_statuses.append(str(getattr(result, "work_status", "processed")))
+            work_status = str(getattr(result, "work_status", "processed"))
+            background_statuses.append(work_status)
+            if work_status == "technical_failure":
+                # The worker has already persisted its retry/backoff.  Let
+                # other independently claimable work use the remaining
+                # budget; a technical result is not an idle sentinel.
+                continue
 
         # Background deliberation may authorize a proactive/follow-up Action.
         # Give that newly-created effect the caller's still-unused action

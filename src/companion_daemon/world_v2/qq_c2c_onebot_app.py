@@ -564,13 +564,26 @@ async def _scheduler_loop(
 ) -> None:
     """Bounded recovery loop; each pass resumes from the durable v2 clock."""
 
+    # One model-backed background unit can fan out into a Life/NPC/Memory
+    # settlement and therefore take seconds or minutes.  Starting with the
+    # historical budget of eight units made a restart spend an unbounded
+    # foreground-looking burst on backlog recovery: /health remained in
+    # ``starting`` and the user-visible lane competed with stale cognition.
+    # Durable claims already provide fairness across wakes, so one unit per
+    # pass is the safer production quantum.  Action recovery remains at its
+    # normal bounded budget and inbound turns can preempt this lane.
+    background_units_per_pass = 1
     while True:
         started_at = datetime.now(UTC)
         started = time.monotonic()
         diagnostics.passes_started += 1
         diagnostics.last_started_at = started_at
         try:
-            await host.scheduler_once(observed_at=datetime.now(UTC))
+            await host.scheduler_once(
+                observed_at=datetime.now(UTC),
+                max_action_units=8,
+                max_background_units=background_units_per_pass,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

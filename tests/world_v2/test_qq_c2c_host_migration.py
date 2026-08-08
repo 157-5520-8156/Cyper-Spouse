@@ -3537,9 +3537,11 @@ def test_qq_public_health_forwards_expression_diagnostics_without_removing_old_f
 @pytest.mark.asyncio
 async def test_qq_c2c_scheduler_diagnostics_record_real_pass_progress() -> None:
     completed = asyncio.Event()
+    scheduler_kwargs: dict[str, object] = {}
 
     class _Host:
-        async def scheduler_once(self, **_kwargs: object) -> None:
+        async def scheduler_once(self, **kwargs: object) -> None:
+            scheduler_kwargs.update(kwargs)
             completed.set()
 
     diagnostics = QQC2CSchedulerDiagnostics(interval_seconds=60)
@@ -3557,6 +3559,8 @@ async def test_qq_c2c_scheduler_diagnostics_record_real_pass_progress() -> None:
         assert snapshot["failures"] == 0
         assert snapshot["last_success_at"] is not None
         assert snapshot["last_duration_ms"] is not None
+        assert scheduler_kwargs["max_action_units"] == 8
+        assert scheduler_kwargs["max_background_units"] == 1
         assert diagnostics.snapshot(
             now=datetime.now(UTC),
             world={

@@ -1,6 +1,6 @@
 # Luna 执行计划：因果基底、统一内心与长程涌现生产化
 
-状态：待执行。本文是施工顺序、验证门槛和交接契约，不替代架构设计。
+状态：进行中（L0 基线已完成；L2 与 L3 的第一批生产阻断修复已实现，完整生产资格仍待 daemon 重启、全量测试和真实对聊证据）。本文是施工顺序、验证门槛和交接契约，不替代架构设计。
 
 执行者：Luna；架构复核：Sol；建立：2026-08-08。
 
@@ -804,3 +804,70 @@ commit：hash
 
 除此之外，Luna 应主动追到根因、查阅业内方案、补齐测试和生产证据，不把“需进一步研究”作为
 默认终点，也不通过堆规则让某个演示样例看起来正确。
+
+## 21. 2026-08-08 执行记录（Luna）
+
+本节只记录本轮实际核验与改动，不把代码存在或测试变绿误写成生产完成。
+
+### L0 基线与已证实根因
+
+- 当前 production QQ scheduler 在重启前连续 `318/318` 失败；日志显示 `life_reflection` 触发器已经引用
+  已提交的 `AppraisalAccepted`，但反思编译器仍拒绝该 source，随后 host 又把异常路径解释成
+  `appraisal_only`，因此 trigger 不终结并在每轮重复。这是生产接线错误，不是角色选择沉默。
+- 本轮还核验了本地 embedding LaunchAgent：旧的 BAAI/bge-m3 MLX 不兼容 crash-loop 已被前一提交退休
+  （`RunAtLoad=false`、`KeepAlive=false`，安装脚本把 label 列入 retired 集合）；当前不再作为聊天或后台生产
+  依赖。Recall 仍有可用的本地/特征哈希降级路径，semantic embedding qualification 另行记录，不能把它写成
+  已通过。
+- 工作树中的 `.idea/vcs.xml` 与 `training/` 是用户并行修改，本轮不纳入提交。
+
+### L2：CharacterInterior durable turn coordination
+
+- 新增技术 sidecar `world_v2_character_interior_turns`，不进入 V2 immutable event/head/prefix proof。
+  SQLite 与内存实现共享 claim → checkpoint → terminal 的 CAS 语义；每次 lease 有独立稳定 token，过期
+  reclaim 会增加 attempt ordinal，旧 owner 不能 checkpoint/complete。
+- production QQ composition 在同一 World 数据库打开 sidecar，并以 `world_id/actor_ref/inner_turn_id`
+  做坐标；跨 runtime 的 terminal/recovery 会复用已保存的 role result，不再依赖单进程 `_cache`。旧进程缓存
+  仅作同实例 effect-once 加速，不是跨进程 authority。
+- 生产失败语义保持技术失败：sidecar/role/authority 异常不会由本地模板改成 silent/no-change；checkpoint 后
+  崩溃可恢复，terminal 后重启只重放结果，不重新调用模型。
+
+### L3：Reflection 与 scheduler 隔离
+
+- `AppraisalAccepted` 现在是 `life_reflection` 的明确 source：compiler 只读取该 accepted event，并要求
+  当前 claimed trigger 的 `reflection:<event_id>` identity；reducer/trigger contract 同步接受
+  `life_reflection` 的 `committed_world_event` evidence。原始事件未改写，冷重放语义保持不变。
+- world-stimulus 的 affect/settlement 编译或 CAS 异常现在保留 claimed trigger 为技术可重试状态，不再伪装
+  `appraisal_only`；platform host 对单个后台单元建立隔离边界，技术失败不会拖垮同一轮 scheduler 的其他
+  inbound/Action 工作，也不会在同一轮立即重选同一个坏 trigger。
+- 已补充从原始世界变化 → AppraisalAccepted → ReflectionScheduler → CharacterInterior reflection 的
+  集成回归，以及双 runtime sidecar claim/recovery、world-scoped prune 测试。
+
+### 当前证据与未完成门（早期记录，已由下方补充核验更新）
+
+- 该段保留为交接时的早期基线；完整测试、静态门和最终 daemon 证据见下方“补充核验”。
+- 仍未完成的资格门是冷重放、真实 QQ 自由多轮对聊和 24 小时稳定性样本；若样本不足，状态保持
+  `qualification_incomplete`，不能把单轮 scheduler 通过当作生产资格。
+
+### L0/L2/L3 补充核验（2026-08-08，继续）
+
+- 结构化角色线协议只增加了无损的 transport-shape 归一化：只有模型已经同时写出完整
+  `decision.source_refs` 与 `decision.payload` 时才保留既有对象；typed proposal 只把模型写出的同一对象
+  移入 `proposals`。裸的扁平 decision 不再把 `attended_source_refs` 提升为证据，而是进入同一模型的一次
+  纠正；Life choice 仅在已有 envelope 且 payload 缺 `completion` 时把模型已写出的对象放入该键。没有补
+  summary、source refs、事实、动机、timing、silence 或任何语义值。
+- 一次纠正现在同时携带本地校验的精确失败细节（仍绑定同一 pinned cursor、同一角色模型和 attempt），使
+  `private_impression` 的 predecessor/source 闭包及 proactive `world_claims` 对象形状可以被模型直接修正；
+  不启用备用语义作者。主动联系真实日志中出现一次 `world_claims` 字符串形状错误后，第二次同作者结果成功
+  物化并发送；这是生产轨迹证据，不是固定 fixture 推断。
+- 冻结场景完整 120 案例的可见事件族、输出、Action 状态和调用数未改变；结构化提示/审计身份变化按既有规则
+  升级 offline mechanism baseline 到 `.53`。完整场景测试通过。
+- 相关回归：`149 passed, 1 warning`；全套：`4731 passed, 1 warning in 338.08s`；`uv run ruff check .`
+  与 `git diff --check` 均通过。
+- 最新代码已以前台方式重启到 PID `91125`，应用 bootstrap 约 16 秒；首轮 scheduler 完成、`failures=0`、
+  `last_duration_ms=33783`。Health 显示 fast stream 为活动回复接口、delayed attention 接口保持禁用；sidecar
+  暴露 `scope/expired_claim_count/recovered_attempt_count`，不再用未绑定 actor 的空查询伪装成 scoped ready。
+- 真实运行仍保留 28 个历史过期 sidecar claim，scheduler 会按预算逐个回收；这不是重复发送授权。此前已观察到
+  world-stimulus appraisal/affect 成功提交和一次 proactive 纠正后成功发送；本次重启未观察到新的 scheduler 异常。
+- 仍未宣称生产资格完成：当前生产账本保留 24 小时历史技术失败 warning，语义 embedding 8190 未部署时 Recall
+  会降级到本地索引，Perception enforcement authority 与独立事实 reviewer 仍是明确 degraded 能力；这些不被
+  结构化封套修复冒充为角色选择。真实 QQ 自由对聊、冷重放和 24 小时稳定性样本仍是 qualification gate。

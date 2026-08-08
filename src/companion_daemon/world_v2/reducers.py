@@ -3640,6 +3640,7 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
             "silence_appraisal",
             "plan_disruption_appraisal",
             "perception_result_deliberation",
+            "life_reflection",
         }
         or trigger.state != "claimed"
         or trigger.trigger_ref != proposal.trigger_ref
@@ -3661,6 +3662,7 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
         # committed authority, not a settlement or a user message.
         "plan_disruption_appraisal": "committed_world_event",
         "perception_result_deliberation": "committed_world_event",
+        "life_reflection": "committed_world_event",
     }[trigger.process_kind]
     if source_evidence is None or source_evidence.evidence_type != expected_source_kind:
         raise ValueError("appraisal proposal source evidence has the wrong authority kind")
@@ -13365,6 +13367,7 @@ def _require_authorized_appraisal(
             "silence_appraisal",
             "plan_disruption_appraisal",
             "perception_result_deliberation",
+            "life_reflection",
         }
         or trigger.state != "claimed"
     ):

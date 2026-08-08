@@ -240,6 +240,35 @@ async def test_platform_scheduler_does_not_mistake_one_cursor_race_for_an_empty_
 
 
 @pytest.mark.asyncio
+async def test_platform_scheduler_keeps_independent_background_work_after_technical_failure() -> None:
+    class _FailThenHealthyApplication(_FakeApplication):
+        def __init__(self) -> None:
+            super().__init__()
+            self._results = [
+                SimpleNamespace(work_status="technical_failure"),
+                SimpleNamespace(work_status="accepted"),
+                None,
+                None,
+            ]
+
+        async def drain_background_once(self):  # type: ignore[no-untyped-def]
+            self.calls.append(("background", None))
+            return self._results.pop(0)
+
+    application = _FailThenHealthyApplication()
+    result = await WorldV2PlatformHost(application=application).drain_scheduled_work(
+        max_action_units=0,
+        max_background_units=2,
+        media_preview_trace_id="trace:technical-background",
+        media_preview_correlation_id="correlation:technical-background",
+    )
+
+    assert result.background_units_used == 2
+    assert result.background_statuses == ("technical_failure", "accepted")
+    assert application.calls == [("background", None)] * 2
+
+
+@pytest.mark.asyncio
 async def test_platform_scheduler_shares_each_budget_across_all_worker_classes() -> None:
     class _BudgetedApplication(_FakeApplication):
         def __init__(self) -> None:

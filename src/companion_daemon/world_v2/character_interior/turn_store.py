@@ -9,8 +9,12 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+import secrets
 from threading import RLock
 from typing import Literal, Protocol
+
+from ..sqlite_coordination import configure_shared_sqlite_connection, sqlite_write_lock
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +38,7 @@ class _TurnCoordinationRecord:
     request: _TurnCoordinationRequest
     state: Literal["claimed", "checkpointed", "terminal"]
     lease_owner: str | None
+    lease_token: str | None
     lease_expires_at: datetime | None
     attempt_ordinal: int
     authored_state_json: str | None
@@ -64,6 +69,7 @@ class _CharacterInteriorTurnStore(Protocol):
         *,
         request: _TurnCoordinationRequest,
         owner_id: str,
+        lease_token: str,
         attempt_ordinal: int,
         authored_state_json: str,
         authored_state_hash: str,
@@ -75,15 +81,26 @@ class _CharacterInteriorTurnStore(Protocol):
         *,
         request: _TurnCoordinationRequest,
         owner_id: str,
+        lease_token: str,
         attempt_ordinal: int,
         terminal_result_json: str,
         terminal_result_hash: str,
         now: datetime,
     ) -> _TurnCoordinationRecord: ...
 
-    def health(self, *, world_id: str, actor_ref: str) -> dict[str, int]: ...
+    def health(
+        self,
+        *,
+        world_id: str,
+        actor_ref: str,
+        now: datetime | None = None,
+    ) -> dict[str, object]: ...
 
-    def prune_terminal(self, *, before: datetime, limit: int = 256) -> int: ...
+    def prune_terminal(
+        self, *, world_id: str, before: datetime, limit: int = 256
+    ) -> int: ...
+
+    async def aclose(self) -> None: ...
 
 
 def _utc(value: datetime) -> datetime:
@@ -96,6 +113,38 @@ def _same_request(
     left: _TurnCoordinationRequest, right: _TurnCoordinationRequest
 ) -> bool:
     return left == right
+
+
+def _health_scope(*, world_id: str, actor_ref: str) -> str:
+    if world_id and actor_ref:
+        return "world_actor"
+    if world_id:
+        return "world"
+    if actor_ref:
+        return "actor"
+    return "all"
+
+
+def _health_payload(
+    rows: tuple[_TurnCoordinationRecord, ...],
+    *,
+    world_id: str,
+    actor_ref: str,
+    now: datetime,
+) -> dict[str, object]:
+    return {
+        "scope": _health_scope(world_id=world_id, actor_ref=actor_ref),
+        "pending_claim_count": sum(row.state != "terminal" for row in rows),
+        "checkpointed_claim_count": sum(row.state == "checkpointed" for row in rows),
+        "terminal_turn_count": sum(row.state == "terminal" for row in rows),
+        "expired_claim_count": sum(
+            row.state != "terminal"
+            and row.lease_expires_at is not None
+            and row.lease_expires_at <= now
+            for row in rows
+        ),
+        "recovered_attempt_count": sum(row.attempt_ordinal > 1 for row in rows),
+    }
 
 
 class _InMemoryCharacterInteriorTurnStore:
@@ -128,6 +177,7 @@ class _InMemoryCharacterInteriorTurnStore:
                     request=request,
                     state="claimed",
                     lease_owner=owner_id,
+                    lease_token=secrets.token_urlsafe(24),
                     lease_expires_at=now + timedelta(seconds=lease_seconds),
                     attempt_ordinal=1,
                     authored_state_json=None,
@@ -142,16 +192,12 @@ class _InMemoryCharacterInteriorTurnStore:
                 raise ValueError("CharacterInterior turn identity has conflicting request bytes")
             if row.state == "terminal":
                 return _TurnAcquisition(status="terminal", record=row)
-            if row.lease_owner == owner_id and row.lease_expires_at is not None and now < row.lease_expires_at:
-                return _TurnAcquisition(
-                    status="recovered" if row.authored_state_json is not None else "acquired",
-                    record=row,
-                )
             if row.lease_expires_at is not None and now < row.lease_expires_at:
                 return _TurnAcquisition(status="owned_elsewhere", record=row)
             row = replace(
                 row,
                 lease_owner=owner_id,
+                lease_token=secrets.token_urlsafe(24),
                 lease_expires_at=now + timedelta(seconds=lease_seconds),
                 attempt_ordinal=row.attempt_ordinal + 1,
                 updated_at=now,
@@ -167,6 +213,7 @@ class _InMemoryCharacterInteriorTurnStore:
         *,
         request: _TurnCoordinationRequest,
         owner_id: str,
+        lease_token: str,
         attempt_ordinal: int,
         authored_state_json: str,
         authored_state_hash: str,
@@ -174,7 +221,7 @@ class _InMemoryCharacterInteriorTurnStore:
     ) -> _TurnCoordinationRecord:
         now = _utc(now)
         with self._lock:
-            row = self._owned(request, owner_id, attempt_ordinal, now)
+            row = self._owned(request, owner_id, lease_token, attempt_ordinal, now)
             if row.authored_state_json is not None:
                 if (
                     row.authored_state_json != authored_state_json
@@ -197,6 +244,7 @@ class _InMemoryCharacterInteriorTurnStore:
         *,
         request: _TurnCoordinationRequest,
         owner_id: str,
+        lease_token: str,
         attempt_ordinal: int,
         terminal_result_json: str,
         terminal_result_hash: str,
@@ -214,7 +262,7 @@ class _InMemoryCharacterInteriorTurnStore:
                 ):
                     raise ValueError("CharacterInterior terminal result bytes changed")
                 return row
-            row = self._owned(request, owner_id, attempt_ordinal, now)
+            row = self._owned(request, owner_id, lease_token, attempt_ordinal, now)
             if row.authored_state_json is None:
                 raise ValueError("CharacterInterior terminal result lacks authored checkpoint")
             row = replace(
@@ -233,6 +281,7 @@ class _InMemoryCharacterInteriorTurnStore:
         self,
         request: _TurnCoordinationRequest,
         owner_id: str,
+        lease_token: str,
         attempt_ordinal: int,
         now: datetime,
     ) -> _TurnCoordinationRecord:
@@ -242,6 +291,7 @@ class _InMemoryCharacterInteriorTurnStore:
             or not _same_request(row.request, request)
             or row.state == "terminal"
             or row.lease_owner != owner_id
+            or row.lease_token != lease_token
             or row.attempt_ordinal != attempt_ordinal
             or row.lease_expires_at is None
             or now >= row.lease_expires_at
@@ -249,20 +299,29 @@ class _InMemoryCharacterInteriorTurnStore:
             raise RuntimeError("CharacterInterior turn lease is no longer owned")
         return row
 
-    def health(self, *, world_id: str, actor_ref: str) -> dict[str, int]:
+    def health(
+        self,
+        *,
+        world_id: str,
+        actor_ref: str,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        now = _utc(now or datetime.now(UTC))
         with self._lock:
             rows = tuple(
                 row
                 for key, row in self._rows.items()
-                if key[0] == world_id and key[1] == actor_ref
+                if (not world_id or key[0] == world_id)
+                and (not actor_ref or key[1] == actor_ref)
             )
-        return {
-            "pending_claim_count": sum(row.state != "terminal" for row in rows),
-            "checkpointed_claim_count": sum(row.state == "checkpointed" for row in rows),
-            "terminal_turn_count": sum(row.state == "terminal" for row in rows),
-        }
+        return _health_payload(
+            rows,
+            world_id=world_id,
+            actor_ref=actor_ref,
+            now=now,
+        )
 
-    def prune_terminal(self, *, before: datetime, limit: int = 256) -> int:
+    def prune_terminal(self, *, world_id: str, before: datetime, limit: int = 256) -> int:
         before = _utc(before)
         if limit < 1:
             raise ValueError("CharacterInterior prune limit must be positive")
@@ -273,10 +332,14 @@ class _InMemoryCharacterInteriorTurnStore:
                     self._rows.items(), key=lambda item: item[1].updated_at
                 )
                 if row.state == "terminal" and row.updated_at < before
+                and row.request.world_id == world_id
             ][:limit]
             for key in keys:
                 del self._rows[key]
         return len(keys)
+
+    async def aclose(self) -> None:
+        return None
 
 
 class _SQLiteCharacterInteriorTurnStore:
@@ -287,10 +350,11 @@ class _SQLiteCharacterInteriorTurnStore:
         *,
         connection: sqlite3.Connection,
         world_id: str,
-        database_write_lock: RLock,
+        database_write_lock: object,
         thread_lock: RLock,
     ) -> None:
         self._connection = connection
+        self._connection.row_factory = sqlite3.Row
         self._world_id = world_id
         self._database_write_lock = database_write_lock
         self._thread_lock = thread_lock
@@ -314,6 +378,7 @@ class _SQLiteCharacterInteriorTurnStore:
                 capability_hash TEXT NOT NULL,
                 state TEXT NOT NULL CHECK (state IN ('claimed', 'checkpointed', 'terminal')),
                 lease_owner TEXT,
+                lease_token TEXT,
                 lease_expires_at TEXT,
                 attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal >= 1),
                 authored_state_json TEXT,
@@ -334,6 +399,19 @@ class _SQLiteCharacterInteriorTurnStore:
             )
             """
         )
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(world_v2_character_interior_turns)"
+            )
+        }
+        if "lease_token" not in columns:
+            # The sidecar was introduced after the first WIP checkpoint.  This
+            # additive migration keeps old coordination rows recoverable while
+            # ensuring every newly acquired lease has a distinct token.
+            connection.execute(
+                "ALTER TABLE world_v2_character_interior_turns ADD COLUMN lease_token TEXT"
+            )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS world_v2_character_interior_turns_retention
@@ -358,15 +436,16 @@ class _SQLiteCharacterInteriorTurnStore:
                 row = self._select(request)
                 if row is None:
                     expires = now + timedelta(seconds=lease_seconds)
+                    lease_token = secrets.token_urlsafe(24)
                     self._connection.execute(
                         """INSERT INTO world_v2_character_interior_turns
                            (world_id, actor_ref, inner_turn_id, phase, purpose, subject_ref,
                             trigger_ref, cursor_json, request_hash, snapshot_id, snapshot_hash,
-                            capability_hash, state, lease_owner, lease_expires_at,
-                            attempt_ordinal, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?, 1, ?)""",
+                            capability_hash, state, lease_owner, lease_token,
+                            lease_expires_at, attempt_ordinal, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?, ?, 1, ?)""",
                         self._request_values(request)
-                        + (owner_id, expires.isoformat(), now.isoformat()),
+                        + (owner_id, lease_token, expires.isoformat(), now.isoformat()),
                     )
                     record = self._select_required(request)
                     self._connection.commit()
@@ -377,32 +456,20 @@ class _SQLiteCharacterInteriorTurnStore:
                 if record.state == "terminal":
                     self._connection.commit()
                     return _TurnAcquisition(status="terminal", record=record)
-                if (
-                    record.lease_owner == owner_id
-                    and record.lease_expires_at is not None
-                    and now < record.lease_expires_at
-                ):
-                    self._connection.commit()
-                    return _TurnAcquisition(
-                        status=(
-                            "recovered"
-                            if record.authored_state_json is not None
-                            else "acquired"
-                        ),
-                        record=record,
-                    )
                 if record.lease_expires_at is not None and now < record.lease_expires_at:
                     self._connection.commit()
                     return _TurnAcquisition(status="owned_elsewhere", record=record)
                 expires = now + timedelta(seconds=lease_seconds)
+                lease_token = secrets.token_urlsafe(24)
                 changed = self._connection.execute(
                     """UPDATE world_v2_character_interior_turns
-                       SET lease_owner = ?, lease_expires_at = ?,
+                       SET lease_owner = ?, lease_token = ?, lease_expires_at = ?,
                            attempt_ordinal = attempt_ordinal + 1, updated_at = ?
                        WHERE world_id = ? AND actor_ref = ? AND inner_turn_id = ?
                          AND state != 'terminal' AND attempt_ordinal = ?""",
                     (
                         owner_id,
+                        lease_token,
                         expires.isoformat(),
                         now.isoformat(),
                         request.world_id,
@@ -432,6 +499,7 @@ class _SQLiteCharacterInteriorTurnStore:
         *,
         request: _TurnCoordinationRequest,
         owner_id: str,
+        lease_token: str,
         attempt_ordinal: int,
         authored_state_json: str,
         authored_state_hash: str,
@@ -440,13 +508,14 @@ class _SQLiteCharacterInteriorTurnStore:
         return self._write_owned(
             request=request,
             owner_id=owner_id,
+            lease_token=lease_token,
             attempt_ordinal=attempt_ordinal,
             now=now,
             statement="""UPDATE world_v2_character_interior_turns
                          SET state = 'checkpointed', authored_state_json = ?,
                              authored_state_hash = ?, updated_at = ?
                          WHERE world_id = ? AND actor_ref = ? AND inner_turn_id = ?
-                           AND state != 'terminal' AND lease_owner = ?
+                           AND state != 'terminal' AND lease_owner = ? AND lease_token = ?
                            AND attempt_ordinal = ? AND lease_expires_at > ?
                            AND (authored_state_json IS NULL OR
                                 (authored_state_json = ? AND authored_state_hash = ?))""",
@@ -459,6 +528,7 @@ class _SQLiteCharacterInteriorTurnStore:
         *,
         request: _TurnCoordinationRequest,
         owner_id: str,
+        lease_token: str,
         attempt_ordinal: int,
         terminal_result_json: str,
         terminal_result_hash: str,
@@ -486,7 +556,7 @@ class _SQLiteCharacterInteriorTurnStore:
                        SET state = 'terminal', lease_owner = NULL, lease_expires_at = NULL,
                            terminal_result_json = ?, terminal_result_hash = ?, updated_at = ?
                        WHERE world_id = ? AND actor_ref = ? AND inner_turn_id = ?
-                         AND state = 'checkpointed' AND lease_owner = ?
+                           AND state = 'checkpointed' AND lease_owner = ? AND lease_token = ?
                          AND attempt_ordinal = ? AND lease_expires_at > ?""",
                     (
                         terminal_result_json,
@@ -496,6 +566,7 @@ class _SQLiteCharacterInteriorTurnStore:
                         request.actor_ref,
                         request.inner_turn_id,
                         owner_id,
+                        lease_token,
                         attempt_ordinal,
                         now.isoformat(),
                     ),
@@ -514,6 +585,7 @@ class _SQLiteCharacterInteriorTurnStore:
         *,
         request: _TurnCoordinationRequest,
         owner_id: str,
+        lease_token: str,
         attempt_ordinal: int,
         now: datetime,
         statement: str,
@@ -536,6 +608,7 @@ class _SQLiteCharacterInteriorTurnStore:
                         request.actor_ref,
                         request.inner_turn_id,
                         owner_id,
+                        lease_token,
                         attempt_ordinal,
                         now.isoformat(),
                     )
@@ -550,25 +623,47 @@ class _SQLiteCharacterInteriorTurnStore:
                 self._connection.rollback()
                 raise
 
-    def health(self, *, world_id: str, actor_ref: str) -> dict[str, int]:
+    def health(
+        self,
+        *,
+        world_id: str,
+        actor_ref: str,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        now = _utc(now or datetime.now(UTC))
+        clauses: list[str] = []
+        values: list[object] = []
+        if world_id:
+            clauses.append("world_id = ?")
+            values.append(world_id)
+        if actor_ref:
+            clauses.append("actor_ref = ?")
+            values.append(actor_ref)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._thread_lock:
             rows = tuple(
                 self._connection.execute(
-                    """SELECT state, COUNT(*) AS count
-                       FROM world_v2_character_interior_turns
-                       WHERE world_id = ? AND actor_ref = ? GROUP BY state""",
-                    (world_id, actor_ref),
+                    f"""SELECT state, attempt_ordinal, lease_expires_at
+                       FROM world_v2_character_interior_turns{where}""",
+                    tuple(values),
                 )
             )
-        counts = {str(row["state"]): int(row["count"]) for row in rows}
+        pending = sum(row["state"] != "terminal" for row in rows)
         return {
-            "pending_claim_count": counts.get("claimed", 0)
-            + counts.get("checkpointed", 0),
-            "checkpointed_claim_count": counts.get("checkpointed", 0),
-            "terminal_turn_count": counts.get("terminal", 0),
+            "scope": _health_scope(world_id=world_id, actor_ref=actor_ref),
+            "pending_claim_count": pending,
+            "checkpointed_claim_count": sum(row["state"] == "checkpointed" for row in rows),
+            "terminal_turn_count": sum(row["state"] == "terminal" for row in rows),
+            "expired_claim_count": sum(
+                row["state"] != "terminal"
+                and row["lease_expires_at"] is not None
+                and datetime.fromisoformat(str(row["lease_expires_at"])) <= now
+                for row in rows
+            ),
+            "recovered_attempt_count": sum(int(row["attempt_ordinal"]) > 1 for row in rows),
         }
 
-    def prune_terminal(self, *, before: datetime, limit: int = 256) -> int:
+    def prune_terminal(self, *, world_id: str, before: datetime, limit: int = 256) -> int:
         before = _utc(before)
         if limit < 1:
             raise ValueError("CharacterInterior prune limit must be positive")
@@ -579,16 +674,23 @@ class _SQLiteCharacterInteriorTurnStore:
                     """DELETE FROM world_v2_character_interior_turns
                        WHERE rowid IN (
                            SELECT rowid FROM world_v2_character_interior_turns
-                           WHERE state = 'terminal' AND updated_at < ?
+                           WHERE world_id = ? AND state = 'terminal' AND updated_at < ?
                            ORDER BY updated_at LIMIT ?
                        )""",
-                    (before.isoformat(), limit),
+                    (world_id, before.isoformat(), limit),
                 )
                 self._connection.commit()
                 return int(changed.rowcount)
             except Exception:
                 self._connection.rollback()
                 raise
+
+    def close(self) -> None:
+        with self._database_write_lock, self._thread_lock:
+            self._connection.close()
+
+    async def aclose(self) -> None:
+        self.close()
 
     @staticmethod
     def _request_values(request: _TurnCoordinationRequest) -> tuple[object, ...]:
@@ -642,6 +744,7 @@ class _SQLiteCharacterInteriorTurnStore:
             request=request,
             state=str(row["state"]),
             lease_owner=(str(row["lease_owner"]) if row["lease_owner"] is not None else None),
+            lease_token=(str(row["lease_token"]) if row["lease_token"] is not None else None),
             lease_expires_at=(
                 datetime.fromisoformat(str(row["lease_expires_at"]))
                 if row["lease_expires_at"] is not None
@@ -672,4 +775,38 @@ class _SQLiteCharacterInteriorTurnStore:
         )
 
 
-__all__: list[str] = []
+def open_sqlite_character_interior_turn_store(
+    *, path: str | Path, world_id: str
+) -> _SQLiteCharacterInteriorTurnStore:
+    """Open the technical CharacterInterior sidecar over one World database.
+
+    The connection is independent from the immutable ledger connection, while
+    sharing its file-level writer lock and WAL policy.  No sidecar row is part
+    of a World event, reducer head, or prefix proof.
+    """
+
+    database_path = Path(path).expanduser().absolute()
+    connection = sqlite3.connect(
+        str(database_path), isolation_level=None, check_same_thread=False
+    )
+    thread_lock = RLock()
+    writer_lock = sqlite_write_lock(database_path)
+    try:
+        with writer_lock, thread_lock:
+            configure_shared_sqlite_connection(connection)
+            store = _SQLiteCharacterInteriorTurnStore(
+                connection=connection,
+                world_id=world_id,
+                database_write_lock=writer_lock,
+                thread_lock=thread_lock,
+            )
+            store.create_schema(connection)
+        return store
+    except BaseException:
+        connection.close()
+        raise
+
+
+__all__ = [
+    "open_sqlite_character_interior_turn_store",
+]

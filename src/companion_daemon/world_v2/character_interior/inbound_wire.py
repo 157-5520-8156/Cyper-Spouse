@@ -7907,6 +7907,12 @@ def _expression_event_envelope(value: dict[str, object]) -> dict[str, object]:
     end = events[-1]
     if not isinstance(head, dict) or head.get("type") != "head":
         raise ValueError("expression event stream must begin with a head frame")
+    # This is a live provider transport, not historical ExpressionDraft
+    # replay.  Missing timing cannot be interpreted as ``now`` here: doing so
+    # would let the host turn an incomplete role result into an immediate
+    # visible effect before the normal authored-field validator runs.
+    if "timing_choice" not in head:
+        raise ValueError("expression event head requires explicit timing_choice")
     if end != {"type": "end"}:
         raise ValueError("expression event stream must finish with an exact end frame")
     for event in events[1:-1]:
@@ -7959,6 +7965,8 @@ def _expression_event_head(event: object, *, continuation: bool | None) -> str:
 
     if not isinstance(event, dict) or event.get("type") != "head":
         raise ValueError("expression event head frame is invalid")
+    if "timing_choice" not in event:
+        raise ValueError("expression event head requires explicit timing_choice")
     beat = event.get("beat")
     leading_typing = event.get("leading_typing_beat")
     plural_beats = event.get("beats")
@@ -7966,7 +7974,7 @@ def _expression_event_head(event: object, *, continuation: bool | None) -> str:
         raise ValueError("expression event head beat transports are ambiguous")
     if plural_beats is not None and not isinstance(plural_beats, list):
         raise ValueError("expression event head beats must be an array")
-    timing = event.get("timing_choice", "now")
+    timing = event["timing_choice"]
     if leading_typing is not None and (
         not isinstance(leading_typing, dict) or leading_typing.get("modality") != "typing"
     ):

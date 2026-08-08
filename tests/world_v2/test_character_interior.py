@@ -16,6 +16,9 @@ from companion_daemon.world_v2.character_interior import (
     InteriorStimulus,
 )
 from companion_daemon.world_v2.schemas import ProjectionCursor
+from companion_daemon.world_v2.character_interior.turn_store import (
+    open_sqlite_character_interior_turn_store,
+)
 
 
 _NOW = datetime(2026, 8, 4, 10, 30, tzinfo=UTC)
@@ -618,14 +621,8 @@ async def test_concurrent_same_opportunity_is_effect_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_instances_join_one_durable_inner_turn() -> None:
-    """Concurrent callers of one opportunity join a single effect-once InnerTurn.
-
-    The durable cross-instance join moved into the TriggerProcess/WorldRuntime
-    layer during the .52 cutover.  Within one CharacterInterior instance,
-    concurrent callers share the process-local turn cache, so the role model
-    is invoked exactly once and the second caller joins the cached decision.
-    """
+async def test_concurrent_callers_join_one_process_local_inner_turn() -> None:
+    """Concurrent callers in one instance join one effect-once InnerTurn."""
     cursor = ProjectionCursor(
         world_revision=0,
         deliberation_revision=0,
@@ -643,6 +640,35 @@ async def test_concurrent_instances_join_one_durable_inner_turn() -> None:
     assert left == right
     assert len(role.consider_requests) == 1
     assert interior.runtime_health()["effect_once_join_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_two_character_interior_instances_join_terminal_sidecar_turn(tmp_path) -> None:
+    path = tmp_path / "character-interior.sqlite"
+    first_store = open_sqlite_character_interior_turn_store(path=path, world_id="world:test")
+    second_store = open_sqlite_character_interior_turn_store(path=path, world_id="world:test")
+    first_role = _Role()
+    second_role = _Role()
+    first = CharacterInterior(
+        projection=_Projection(),
+        role=first_role,
+        turn_store=first_store,
+    )
+    second = CharacterInterior(
+        projection=_Projection(),
+        role=second_role,
+        turn_store=second_store,
+    )
+
+    first_result = await first.consider(_opportunity())
+    second_result = await second.consider(_opportunity())
+
+    assert second_result == first_result
+    assert len(first_role.consider_requests) == 1
+    assert second_role.consider_requests == []
+    assert second.runtime_health()["durable_turn_store"]["terminal_turn_count"] == 1
+    first_store.close()
+    second_store.close()
 
 
 def test_runtime_health_derives_topology_from_the_frozen_registry() -> None:
@@ -855,6 +881,32 @@ async def test_valid_model_silence_is_not_confused_with_technical_failure() -> N
     assert failed_result.failure_code == "role_faculty_unavailable"
     assert failed_result.summary is None
     assert failed_result.decision is None
+
+
+@pytest.mark.asyncio
+async def test_technical_failure_is_not_cached_as_an_effect_once_outcome() -> None:
+    class _RetryingRole(_Role):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def consider(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                self.consider_requests.append(request)
+                raise TimeoutError("provider timed out once")
+            return await super().consider(request)
+
+    role = _RetryingRole()
+    interior = CharacterInterior(projection=_Projection(), role=role)
+    opportunity = _opportunity()
+
+    failed = await interior.consider(opportunity)
+    recovered = await interior.consider(opportunity)
+
+    assert failed.status == "technical_failure"
+    assert recovered.status == "decided"
+    assert role.calls == 2
 
 
 @pytest.mark.asyncio

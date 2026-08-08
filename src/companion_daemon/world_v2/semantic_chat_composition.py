@@ -26,6 +26,7 @@ from companion_daemon.llm import (
 
 from .character_interior import CharacterInterior
 from .character_interior.production import compose_production_character_interior
+from .character_interior.turn_store import _CharacterInteriorTurnStore
 from .companion_identity import CompanionIdentityFrame
 from .expression_draft import (
     ExpressionDraftCapabilities,
@@ -830,6 +831,8 @@ def build_semantic_chat_composition(
         PRODUCTION_TEXT_ONLY_EXPRESSION_CAPABILITIES
     ),
     usage_observer: object | None = None,
+    character_interior_turn_store: _CharacterInteriorTurnStore | None = None,
+    character_interior_turn_owner_id: str = "character-interior:production",
 ) -> SemanticChatComposition:
     """Build one explicitly supplied or provider-backed Character author.
 
@@ -885,6 +888,8 @@ def build_semantic_chat_composition(
     owned: list[object] = []
     owned_closeables: list[object] = []
     owned_task_owners: list[object] = []
+    if character_interior_turn_store is not None:
+        owned_closeables.append(character_interior_turn_store)
 
     auto_flash = flash_model is None
     if flash_model is None:
@@ -1679,6 +1684,8 @@ def build_semantic_chat_composition(
         ),
         expression_capabilities=expression_capabilities,
         identity_frame=identity_frame,
+        turn_store=character_interior_turn_store,
+        turn_owner_id=character_interior_turn_owner_id,
         # A provider object may expose a historical ``fallback`` attribute,
         # but CharacterInterior has one semantic author. Structural repair is
         # the bounded same-author correction in the inner turn; a later

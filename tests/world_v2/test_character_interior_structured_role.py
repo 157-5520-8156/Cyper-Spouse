@@ -244,6 +244,7 @@ async def _request(
     capability_manifest: _InteriorCapabilityManifest | None = None,
     correction_ordinal: int = 0,
     correction_failure_code: str | None = None,
+    correction_failure_detail: str | None = None,
 ) -> _InteriorRoleRequest:
     opportunity = InteriorOpportunity(
         opportunity_ref="opportunity:71",
@@ -272,6 +273,7 @@ async def _request(
         snapshot=snapshot,
         correction_ordinal=correction_ordinal,
         correction_failure_code=correction_failure_code,
+        correction_failure_detail=correction_failure_detail,
     )
 
 
@@ -352,7 +354,7 @@ async def test_decision_is_source_capability_and_author_lineage_bound() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bare_decision_payload_is_rejected_without_host_source_binding() -> None:
+async def test_bare_decision_payload_requires_explicit_decision_source_refs() -> None:
 
     manifest = _manifest("media-token:1", "media-token:2")
     model = _QueueModel(
@@ -370,6 +372,149 @@ async def test_bare_decision_payload_is_rejected_without_host_source_binding() -
         await role.consider(
             await _request(purpose="media_selection", capability_manifest=manifest)
         )
+
+
+@pytest.mark.asyncio
+async def test_bare_decision_payload_without_attended_sources_stays_invalid() -> None:
+    manifest = _manifest("media-token:1", "media-token:2")
+    model = _QueueModel(
+        json.dumps(
+            {
+                "status": "decision",
+                "summary": "A choice without an authored source binding.",
+                "attended_source_refs": [],
+                "decision": {"decision": "select", "selected_token": "media-token:2"},
+                "recall_query": None,
+                "proposals": [],
+            }
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
+
+    with pytest.raises(StructuredRoleResultError, match="role_result_schema_invalid"):
+        await role.consider(
+            await _request(purpose="media_selection", capability_manifest=manifest)
+        )
+
+
+@pytest.mark.asyncio
+async def test_typed_proposal_duplicate_decision_echo_is_not_a_second_choice() -> None:
+    manifest = _manifest("appraisal:h1", kind="private_impression_reflection")
+    model = _QueueModel(
+        _result(
+            status="transition",
+            decision=None,
+        )
+    )
+    raw = json.loads(model.responses[0])
+    raw["decision"] = "retain"
+    raw["proposals"] = [
+        {
+            "proposal_type": "private_impression_transition",
+            "decision": "retain",
+            "predecessor_refs": [],
+            "source_refs": ["appraisal:h1"],
+            "reflection_summary": "A tentative impression remains open.",
+            "confidence_bp": 5000,
+            "expiry_condition": "one_month_without_support",
+        }
+    ]
+    model.responses[0] = json.dumps(raw)
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
+
+    result = await role.experience(
+        await _request(
+            phase="experience",
+            purpose="private_impression_reflection",
+            capability_manifest=manifest,
+        )
+    )
+
+    assert result["decision"] is None
+    assert result["proposals"][0]["payload"]["decision"] == "retain"
+
+
+@pytest.mark.asyncio
+async def test_typed_proposal_in_generic_slot_keeps_its_authored_semantics() -> None:
+    manifest = _manifest("appraisal:h1", kind="private_impression_reflection")
+    proposal = {
+        "proposal_type": "private_impression_transition",
+        "decision": "retain",
+        "predecessor_refs": [],
+        "source_refs": ["appraisal:h1"],
+        "reflection_summary": "A tentative impression remains open.",
+        "confidence_bp": 5000,
+        "expiry_condition": "one_month_without_support",
+    }
+    model = _QueueModel(
+        json.dumps(
+            {
+                "status": "decision",
+                "summary": "A tentative impression remains open.",
+                "attended_source_refs": ["source:private_self"],
+                "decision": proposal,
+                "recall_query": None,
+                "proposals": [],
+            }
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
+
+    result = await role.experience(
+        await _request(
+            phase="experience",
+            purpose="private_impression_reflection",
+            capability_manifest=manifest,
+        )
+    )
+
+    assert result["status"] == "transition"
+    assert result["decision"] is None
+    assert result["proposals"][0]["payload"]["decision"] == "retain"
+
+
+@pytest.mark.asyncio
+async def test_life_choice_nested_payload_is_wrapped_without_changing_authored_choice() -> None:
+    model = _QueueModel(
+        _result(
+            status="decision",
+            decision={
+                "source_refs": ["source:private_self"],
+                "payload": {"decision": "no_op"},
+            },
+        )
+    )
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
+
+    result = await role.consider(
+        await _request(
+            purpose="life_development_choice",
+            capability_manifest=_life_development_manifest(),
+        )
+    )
+
+    assert result["decision"]["payload"]["completion"]["decision"] == "no_op"
+
+
+@pytest.mark.asyncio
+async def test_correction_prompt_includes_exact_wire_failure_detail() -> None:
+    model = _QueueModel(_result(status="silent"))
+    role = StructuredCharacterRoleFaculty(model=model, model_id="deepseek-chat-v4")
+
+    await role.consider(
+        await _request(
+            correction_ordinal=1,
+            correction_failure_code="role_result_schema_invalid",
+            correction_failure_detail=(
+                "private impression predecessors must also be selected sources"
+            ),
+        )
+    )
+
+    correction = json.loads(model.calls[0][0][1]["content"])["correction"]
+    assert correction["failure_detail"].startswith(
+        "private impression predecessors must also be selected sources"
+    )
 
 
 @pytest.mark.asyncio
@@ -1138,19 +1283,22 @@ async def test_life_development_cross_field_failure_is_corrected_inside_one_inne
     }
     corrected = {**invalid, "participant_refs": ["npc:friend"]}
     model = _QueueModel(
-        _result(
-            status="decision",
-            decision={
-                "source_refs": ["source:private_self"],
-                "payload": {"completion": invalid},
-            },
-        ),
-        _result(
-            status="decision",
-            decision={
-                "source_refs": ["source:private_self"],
-                "payload": {"completion": corrected},
-            },
+        *(
+            json.dumps(
+                {
+                    "status": "decision",
+                    "summary": "private decision",
+                    "attended_source_refs": ["source:private_self"],
+                    "decision": {
+                        "source_refs": ["source:private_self"],
+                        "payload": {"completion": item},
+                    },
+                    "recall_query": None,
+                    "proposals": [],
+                },
+                ensure_ascii=False,
+            )
+            for item in (invalid, corrected)
         ),
     )
     interior = CharacterInterior(
@@ -1219,6 +1367,14 @@ async def test_prompt_exposes_all_facets_and_no_engagement_behavior_recipe() -> 
     assert "instant_private_self" not in payload
     assert "instant private self" in prompt
     assert "selective_recall" in prompt
+    wire = payload["wire_contract"]
+    assert wire["placement_rules"]["generic_decision"].startswith(
+        "When status is decision, decision MUST be an object"
+    )
+    assert wire["shape_example"]["generic_decision"]["decision"] == {
+        "source_refs": ["<one supplied pinned source ref>"],
+        "payload": {"<purpose-specific field>": "<role-authored value>"},
+    }
     for forbidden in (
         "always reply",
         "never stay silent",

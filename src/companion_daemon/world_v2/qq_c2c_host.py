@@ -55,6 +55,7 @@ from .semantic_chat_composition import (
     build_semantic_chat_composition,
     unavailable_life_source_authority_health,
 )
+from .character_interior.turn_store import open_sqlite_character_interior_turn_store
 from .text_turn_endpoint import (
     TextTurnEndpointController,
     TextTurnEndpointEvidence,
@@ -2464,20 +2465,31 @@ def build_qq_c2c_host(
     )
     interactive_turn_budget_policy = interactive_turn_budget_policy or InteractiveTurnBudgetPolicy()
     usage_store = WorldV2UsageStore(path=str(settings.database_path))
-    semantic_chat = build_semantic_chat_composition(
-        settings=settings,
-        flash_model=model,
-        thinking_model=thinking_model,
-        world_support_model=world_support_model,
-        source_closure_model=source_closure_model,
-        life_source_closure_model=life_source_closure_model,
-        candidate_external_proposition_inventory_model=(
-            candidate_external_proposition_inventory_model
-        ),
-        model_id_prefix="qq-c2c-v2",
-        expression_capabilities=expression_capabilities,
-        usage_observer=usage_store.record,
+    world_id = qq_c2c_world_id(settings.primary_user_id)
+    character_turn_store = open_sqlite_character_interior_turn_store(
+        path=settings.database_path,
+        world_id=world_id,
     )
+    try:
+        semantic_chat = build_semantic_chat_composition(
+            settings=settings,
+            flash_model=model,
+            thinking_model=thinking_model,
+            world_support_model=world_support_model,
+            source_closure_model=source_closure_model,
+            life_source_closure_model=life_source_closure_model,
+            candidate_external_proposition_inventory_model=(
+                candidate_external_proposition_inventory_model
+            ),
+            model_id_prefix="qq-c2c-v2",
+            expression_capabilities=expression_capabilities,
+            usage_observer=usage_store.record,
+            character_interior_turn_store=character_turn_store,
+            character_interior_turn_owner_id=f"qq-c2c:{recipient_id}",
+        )
+    except BaseException:
+        character_turn_store.close()
+        raise
     background_model = semantic_chat.world_support_model
     life_world_author = RoleBoundLifeDevelopmentModelAdapter(
         model=background_model,
@@ -2511,7 +2523,7 @@ def build_qq_c2c_host(
     application = build_sqlite_world_v2_turn_application(
         path=Path(settings.database_path),
         config=WorldV2TurnApplicationConfig(
-            world_id=qq_c2c_world_id(settings.primary_user_id),
+            world_id=world_id,
             companion_actor_ref="agent:companion",
             reply_target=qq_c2c_target(recipient_id),
             action_pump_owner="pump:qq-c2c-v2",

@@ -80,6 +80,7 @@ from .snapshot_compiler import (
     source_envelopes_from_capsule,
 )
 from .structured_role import StructuredCharacterRoleFaculty
+from .turn_store import _CharacterInteriorTurnStore
 from .world_stimulus import (
     CharacterInteriorWorldStimulusRuntime,
     _WorldStimulusInteriorAuthorityHandler,
@@ -900,6 +901,8 @@ def compose_production_character_interior(
     thinking_model_id: str | None,
     expression_capabilities: ExpressionDraftCapabilities,
     identity_frame: CompanionIdentityFrame,
+    turn_store: _CharacterInteriorTurnStore | None = None,
+    turn_owner_id: str = "character-interior:production",
 ) -> CharacterInterior:
     """Build and freeze every protagonist author Faculty exactly once."""
 
@@ -939,6 +942,8 @@ def compose_production_character_interior(
         ),
         faculties=(inbound_turn,),
         authority=_DeferredInteriorAuthority(),
+        turn_store=turn_store,
+        turn_owner_id=turn_owner_id,
     )
     # Immutable composition material used only by source-closure/capsule
     # authorities after the ledger is bound.  It is not an extractable role

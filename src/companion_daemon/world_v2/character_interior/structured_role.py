@@ -955,6 +955,46 @@ class StructuredCharacterRoleFaculty:
                     "source_refs": "one_or_more_pinned_refs",
                     "payload": "one_json_object",
                 },
+                # Keep the transport envelope unambiguous for providers that
+                # support JSON mode but not a provider-enforced JSON Schema.
+                # This is a placement contract only: the values below are
+                # placeholders, never a suggested character decision.
+                "placement_rules": {
+                    "generic_decision": (
+                        "When status is decision, decision MUST be an object with exactly "
+                        "source_refs (a non-empty list of supplied refs) and payload (one "
+                        "purpose-specific JSON object). Put every purpose field inside "
+                        "decision.payload; do not put timing, retention, life, or appraisal "
+                        "fields directly inside decision."
+                    ),
+                    "typed_proposal": (
+                        "When this purpose contract declares a proposal_type, keep decision "
+                        "null and put the complete purpose-specific object in proposals. "
+                        "Do not put the proposal's semantic decision string in the outer "
+                        "decision field."
+                    ),
+                },
+                "shape_example": {
+                    "generic_decision": {
+                        "status": "decision",
+                        "summary": "<one short role-authored instant private self>",
+                        "attended_source_refs": ["<one supplied pinned source ref>"],
+                        "decision": {
+                            "source_refs": ["<one supplied pinned source ref>"],
+                            "payload": {"<purpose-specific field>": "<role-authored value>"},
+                        },
+                        "recall_query": None,
+                        "proposals": [],
+                    },
+                    "typed_proposal": {
+                        "status": "<transition or no_change as allowed>",
+                        "summary": "<one short role-authored instant private self>",
+                        "attended_source_refs": ["<one supplied pinned source ref>"],
+                        "decision": None,
+                        "recall_query": None,
+                        "proposals": ["<one complete purpose-specific proposal object>"],
+                    },
+                },
                 "summary_semantics": (
                     "one short instant private self: what currently matters, feels salient, "
                     "or is wanted/avoided; no hidden chain-of-thought and no invented fact"
@@ -966,7 +1006,8 @@ class StructuredCharacterRoleFaculty:
             user_payload["correction"] = {
                 "ordinal": 1,
                 "failure_code": code,
-                "failure_detail": _FAILURE_DETAILS.get(code, code),
+                "failure_detail": request.correction_failure_detail
+                or _FAILURE_DETAILS.get(code, code),
                 "scope": "return_a_complete_new_result_for_the_same_pinned_request",
             }
         return [
@@ -981,7 +1022,11 @@ class StructuredCharacterRoleFaculty:
                     "conversational outcome, motive, tone, or action. Selective recall is optional "
                     "when available. The capability manifest describes only choices the system can "
                     "carry out. Return exactly one JSON object with the supplied wire fields, never "
-                    "Markdown. Cite only supplied source refs and capability tokens. Do not return "
+                    "Markdown. For a generic decision, use the nested shape "
+                    "decision:{source_refs:[...],payload:{...}} and put all purpose fields in "
+                    "payload. For a typed-proposal purpose, keep decision null and put the "
+                    "complete proposal in proposals. Never flatten a purpose payload into the "
+                    "outer decision field. Cite only supplied source refs and capability tokens. Do not return "
                     "author audit fields; the trusted boundary adds those after the provider call."
                 ),
             },
@@ -1023,6 +1068,11 @@ class StructuredCharacterRoleFaculty:
                 detail=_FAILURE_DETAILS["role_result_not_object"],
                 response_hash=response_hash,
             )
+        decoded = self._normalize_provider_wire_shape(
+            decoded,
+            request=request,
+            contract=contract,
+        )
         try:
             result = _WireRoleResult.model_validate(decoded)
         except ValidationError as exc:
@@ -1060,6 +1110,95 @@ class StructuredCharacterRoleFaculty:
                 response_hash=response_hash,
             )
         return result, response_hash
+
+    @staticmethod
+    def _normalize_provider_wire_shape(
+        decoded: dict[str, object],
+        *,
+        request: _InteriorRoleRequest,
+        contract: PurposeDecisionContract,
+    ) -> dict[str, object]:
+        """Repair only an unambiguous provider transport wrapper.
+
+        DeepSeek's JSON mode occasionally emits a complete purpose payload in
+        the generic ``decision`` slot while omitting the envelope.  This
+        adapter only moves an object when its own explicit source binding is
+        already present; it must never promote attention refs or invent
+        summary, refs, timing, silence, or any semantic field.  Proposal contracts have the inverse legacy
+        shape: a duplicate semantic decision string appears beside an already
+        complete typed proposal.  It is safe to discard that duplicate only
+        when it exactly agrees with the typed proposal.
+        """
+
+        normalized = dict(decoded)
+        raw_decision = normalized.get("decision")
+        proposals = normalized.get("proposals")
+
+        # Some providers use the generic status name for an experience turn
+        # even though they supplied the complete typed proposal.  The typed
+        # proposal itself is the semantic evidence; mapping only this phase
+        # label keeps the proposal intact and does not select an outcome.
+        if (
+            request.phase == "experience"
+            and normalized.get("status") == "decision"
+            and contract.proposal_type is not None
+            and isinstance(proposals, list)
+            and len(proposals) == 1
+        ):
+            normalized["status"] = "transition"
+
+        if isinstance(raw_decision, dict):
+            if (
+                contract.proposal_type is not None
+                and isinstance(proposals, list)
+                and not proposals
+                and raw_decision.get("proposal_type") == contract.proposal_type
+            ):
+                # The typed proposal was placed in the generic slot.  Move
+                # that same object to its declared collection without
+                # changing any semantic value.
+                normalized["proposals"] = [raw_decision]
+                normalized["decision"] = None
+                if request.phase == "experience":
+                    normalized["status"] = "transition"
+                return normalized
+            # Already canonical.  Do not reinterpret a host-shaped or
+            # otherwise partially wrapped object; strict validation should
+            # explain the exact missing/extra field to the one correction.
+            if "source_refs" in raw_decision or "payload" in raw_decision:
+                if (
+                    contract.purpose == "life_development_choice"
+                    and isinstance(raw_decision.get("payload"), dict)
+                    and "completion" not in raw_decision["payload"]
+                ):
+                    # Life providers sometimes use the generic envelope but
+                    # place the complete character-choice object directly in
+                    # ``payload``.  Keep the exact authored object and add
+                    # only the purpose's declared transport key.
+                    normalized["decision"] = {
+                        **raw_decision,
+                        "payload": {"completion": raw_decision["payload"]},
+                    }
+                return normalized
+            # A bare decision has no explicit evidence binding.  Attention
+            # refs are a separate model-authored signal and cannot be promoted
+            # into decision evidence by the host; strict validation must send
+            # this result through the bounded same-author correction instead.
+            return normalized
+
+        if isinstance(raw_decision, str) and contract.proposal_type is not None:
+            proposals = normalized.get("proposals")
+            if isinstance(proposals, list) and len(proposals) == 1:
+                proposal = proposals[0]
+                if (
+                    isinstance(proposal, dict)
+                    and proposal.get("proposal_type") == contract.proposal_type
+                    and proposal.get("decision") == raw_decision
+                ):
+                    # Preserve the complete typed proposal and remove only
+                    # its redundant primitive echo from the generic slot.
+                    normalized["decision"] = None
+        return normalized
 
     @staticmethod
     def _allowed_statuses(
@@ -1889,7 +2028,22 @@ class StructuredCharacterRoleFaculty:
                 "brief_rationale": "short free text",
                 "impulse_summary": "free text",
                 "confidence": "integer 0..10000",
-                "world_claims": "source-bound declarations or []",
+                "world_claims": [
+                    {
+                        "claim_text": "one concrete claim",
+                        "scope": (
+                            "current_world|past_world|counterpart_history|"
+                            "shared_history|stable_identity"
+                        ),
+                        "source_refs": ["one supplied matching pinned ref"],
+                    }
+                ],
+                "world_claims_rule": (
+                    "Use objects, never strings. Only factual claims need entries; "
+                    "feelings and hypothetical impulses use no claim. Every grounded "
+                    "claim cites at least one matching supplied source ref; use [] when "
+                    "the beats contain no factual claim."
+                ),
             }
         if contract.purpose == "expression_reconsideration":
             view["payload_schema"] = {
@@ -1911,6 +2065,11 @@ class StructuredCharacterRoleFaculty:
                     "selected offered short tokens from "
                     "capability_manifest.payload.short_tokens; at least one "
                     "anchor_short_tokens entry must be included"
+                ),
+                "cross_field_rules": (
+                    "predecessor_refs are the exact offered short tokens, every "
+                    "predecessor must also be listed in source_refs, retain has no "
+                    "predecessors, and consolidate/supersede has at least one"
                 ),
                 "reflection_summary": "free tentative private reading",
                 "confidence_bp": "integer 0..10000",

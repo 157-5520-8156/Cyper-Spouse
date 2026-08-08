@@ -251,7 +251,12 @@ class ScenarioVerificationError(AssertionError):
 # world-stimulus author.  Appraisal and optional immediate Affect now share one
 # source-bound role result, so the old independent Affect trigger and third
 # background model call are deliberately absent.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.52"
+# ``.53`` keeps those observable predicates unchanged while making the
+# structured CharacterInterior wire contract explicit and accepting only
+# provider-shaped legacy envelopes whose refs/payload were authored by the
+# model.  The fixed fixture consequently gets new request/audit identities;
+# no semantic decision, event family, or action state is silently rewritten.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.53"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
@@ -282,8 +287,15 @@ FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.52"
 # back (model self-selection was unreliable); repair temperature lowered to
 # 0.2 and yield/now anti-pattern added to the author contract. Fake-suite
 # prompt/partition input shifts; deterministic boundary unchanged.
+# 2026-08-08 2nd: the CharacterInterior structured-role contract now states
+# the nested generic decision and typed-proposal shapes explicitly.  The
+# boundary accepts only a structural legacy-envelope normalization when the
+# model already supplied the source refs and complete payload; it never
+# fabricates summary, refs, facts, motive, timing, or silence.  The resulting
+# fixture request/audit identities move while exported event families,
+# visible outputs, action states, and model-call counts remain unchanged.
 FROZEN_OFFLINE_SUITE_MANIFEST_HASH = (
-    "4c8c31fa5196b2a68b59b2952ddde4024321b8a2b3f1be92e5bea24b0a06cce0"
+    "4e9721823f2f7d1bca916af404268e7f450576bdc12ba63ea46a83f071ec4f50"
 )
 
 

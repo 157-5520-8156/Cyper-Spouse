@@ -137,11 +137,18 @@ class _InteriorRoleRequest(FrozenModel):
         min_length=1,
         max_length=128,
     )
+    correction_failure_detail: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4_096,
+    )
 
     @model_validator(mode="after")
     def correction_lineage_is_explicit(self) -> "_InteriorRoleRequest":
         if (self.correction_ordinal == 1) != (self.correction_failure_code is not None):
             raise ValueError("role correction lineage is incomplete")
+        if self.correction_ordinal == 0 and self.correction_failure_detail is not None:
+            raise ValueError("role correction detail requires a correction attempt")
         return self
 
 

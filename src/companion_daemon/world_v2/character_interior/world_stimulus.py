@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 import logging
+import time
 from typing import Protocol
 
 from ..affect_target_bounds import (
@@ -126,6 +127,7 @@ _EVIDENCE_KIND = {
 }
 
 _PERCEPTION_RESULT_CONTEXT_LIMIT = 720
+_TECHNICAL_FAILURE_DEFER_SECONDS = 30.0
 
 
 def _canonical(value: object) -> str:
@@ -1128,8 +1130,24 @@ class CharacterInteriorWorldStimulusRuntime:
         )
         self._lease_seconds = lease_seconds
         self._source = source
+        # Technical scheduling state only.  A malformed/provider-failed
+        # trigger must not monopolize the host's bounded background budget;
+        # the immutable trigger remains open/claimed and is retried after this
+        # short wall-clock defer.  No semantic choice or world fact is stored
+        # here, and a restart simply reuses the durable trigger lease.
+        self._technical_failure_deferred_until: dict[str, float] = {}
 
     async def drain_one(self) -> CharacterInteriorRunResult:
+        result = await self._drain_one_impl()
+        if result.work_status == "technical_failure" and result.trigger_id:
+            self._technical_failure_deferred_until[result.trigger_id] = (
+                time.monotonic() + _TECHNICAL_FAILURE_DEFER_SECONDS
+            )
+        elif result.trigger_id:
+            self._technical_failure_deferred_until.pop(result.trigger_id, None)
+        return result
+
+    async def _drain_one_impl(self) -> CharacterInteriorRunResult:
         projection = await self._project()
         process = self._next_process(projection)
         if process is None:
@@ -1279,20 +1297,24 @@ class CharacterInteriorWorldStimulusRuntime:
                 proposal_id=audit.proposal_id,
             )
         except (ConcurrencyConflict, ValueError) as exc:
-            # A model-inconsistent affect leg (e.g. an update against a
-            # revision this same appraisal just opened) is deterministically
-            # un-compilable for this audit: retrying can never change it and
-            # would starve later appraisals. The appraisal itself already
-            # landed, so settle appraisal-only instead of failing the trigger
-            # or letting the compiler error escape and kill the whole tick.
+            # A compiler/acceptance failure is technical work, never a role
+            # choice.  In particular, do not infer ``appraisal_only`` merely
+            # because the exception happened while processing the combined
+            # emotion lane: before Appraisal acceptance there is no durable
+            # semantic result to settle.  The claimed trigger remains
+            # recoverable and the next scheduler pass can retry it.
             _LOG.warning(
-                "world stimulus affect leg failed; settling appraisal-only "
+                "world stimulus affect leg failed; keeping trigger retryable "
                 "trigger=%s error=%s",
                 active.trigger_id,
                 exc,
             )
-            emotion = None
-        emotion_status = "appraisal_only" if emotion is None else emotion.status
+            return CharacterInteriorRunResult(
+                trigger_id=active.trigger_id,
+                status="processed",
+                work_status="technical_failure",
+            )
+        emotion_status = emotion.status
         if emotion_status not in {"no_change", "appraisal_only", "accepted"}:
             raise RuntimeError("world stimulus emotion settlement returned invalid status")
         completed_status = (
@@ -1303,6 +1325,9 @@ class CharacterInteriorWorldStimulusRuntime:
             and experience.status == "no_change"
             else "accepted"
         )
+        # ``appraisal_only`` means the Appraisal acceptance already
+        # terminalized this source trigger in its own atomic batch.  Only a
+        # genuine no-change appraisal needs this runtime's completion event.
         if not terminal_recovery and emotion_status == "no_change":
             await self._complete(
                 process=active,
@@ -1319,12 +1344,25 @@ class CharacterInteriorWorldStimulusRuntime:
         )
 
     def _next_process(self, projection: object) -> TriggerProcess | None:
+        now = time.monotonic()
+        self._technical_failure_deferred_until = {
+            trigger_id: deferred_until
+            for trigger_id, deferred_until in self._technical_failure_deferred_until.items()
+            if deferred_until > now
+        }
+
+        def eligible(process: TriggerProcess) -> bool:
+            return (
+                process.state != "terminal"
+                and process.trigger_id not in self._technical_failure_deferred_until
+            )
+
         for kind in _PROCESS_PRIORITY:
             match = next(
                 (
                     item
                     for item in projection.trigger_processes
-                    if item.process_kind == kind and item.state != "terminal"
+                    if item.process_kind == kind and eligible(item)
                 ),
                 None,
             )
@@ -1336,7 +1374,11 @@ class CharacterInteriorWorldStimulusRuntime:
         # that part of the same CharacterInterior decision.
         for kind in _PROCESS_PRIORITY:
             for process in projection.trigger_processes:
-                if process.process_kind != kind or process.state != "terminal":
+                if (
+                    process.process_kind != kind
+                    or process.state != "terminal"
+                    or process.trigger_id in self._technical_failure_deferred_until
+                ):
                     continue
                 source_ref = process.source_evidence_ref
                 audit = (

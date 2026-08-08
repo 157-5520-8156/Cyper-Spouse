@@ -901,6 +901,25 @@ async def test_provider_failure_stays_technical_and_leaves_trigger_retryable() -
 
 
 @pytest.mark.asyncio
+async def test_provider_failure_defers_same_trigger_so_background_budget_can_move_on() -> None:
+    model = _RoleModel(failure=ConnectionError("provider unavailable"))
+    runtime, ledger, _projection = _runtime(model=model)
+
+    first = await runtime.drain_one()
+    second = await runtime.drain_one()
+
+    assert first.work_status == "technical_failure"
+    assert second.status == "idle"
+    assert model.calls == 1
+    process = next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "npc_world_appraisal"
+    )
+    assert process.state == "claimed"
+
+
+@pytest.mark.asyncio
 async def test_restart_reuses_durable_character_result_without_calling_provider_twice() -> None:
     model = _RoleModel(decision="activate")
     runtime, ledger, _projection = _runtime(
@@ -1578,3 +1597,48 @@ def test_reflection_scheduler_skips_already_reflected_appraisal() -> None:
     result = scheduler.open_once(trace_id="t", correlation_id="c")
     assert result.opened == 0
     assert ledger.commits == []
+
+
+@pytest.mark.asyncio
+async def test_life_reflection_reuses_accepted_appraisal_as_source_bound_stimulus() -> None:
+    # The original world occurrence has already crossed the appraisal lane.
+    # A later reflection must be allowed to form a fresh interpretation from
+    # that immutable AppraisalAccepted event instead of being sent through a
+    # compiler that only understands raw observations/world occurrences.
+    first_model = _RoleModel(decision="activate")
+    runtime, ledger, _projection = _runtime(model=first_model)
+    first = await runtime.drain_one()
+    assert first.work_status == "accepted"
+    accepted_ref = ledger.project().appraisals[0].origin.accepted_event_ref
+
+    from companion_daemon.world_v2.reflection_scheduler import ReflectionScheduler
+
+    opened = ReflectionScheduler(ledger=ledger, actor="worker:reflection").open_once(
+        trace_id="trace:reflection-test",
+        correlation_id="correlation:reflection-test",
+    )
+    assert opened.opened == 1
+
+    reflection_model = _RoleModel(
+        decision="activate",
+        include_affect=True,
+        source_ref=accepted_ref,
+    )
+    reflection_runtime, _ledger, _projection = _runtime_for_ledger(
+        ledger=ledger,
+        issuer=ledger._accepted_batch_issuer,  # noqa: SLF001 - fixture authority
+        model=reflection_model,
+        source_ref=accepted_ref,
+        companion_actor_ref="actor:companion",
+    )
+    reflected = await reflection_runtime.drain_one()
+
+    assert reflected.work_status == "accepted"
+    assert reflection_model.calls == 1
+    process = next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "life_reflection"
+    )
+    assert process.state == "terminal"
+    assert len(ledger.project().affect_episodes) == 1

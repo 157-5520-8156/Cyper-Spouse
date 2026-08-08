@@ -681,6 +681,29 @@ def test_fast_canonical_stream_rejects_duplicate_fields_inside_first_beat() -> N
         _incremental_first_expression(raw_prefix)
 
 
+def test_expression_event_stream_requires_role_owned_timing_before_head_release() -> None:
+    raw = json.dumps(
+        {
+            "protocol": "expression-events.1",
+            "events": [
+                {
+                    "type": "head",
+                    "beat": {"modality": "text", "text": "这条不能替角色决定时机。"},
+                    "stance": "brief",
+                    "brief_rationale": "The role did not state timing.",
+                    "world_claims": [],
+                },
+                {"type": "end"},
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(ValueError, match="requires explicit timing_choice"):
+        _stream_first_expression(raw)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("timing_choice", "head_fields"),
