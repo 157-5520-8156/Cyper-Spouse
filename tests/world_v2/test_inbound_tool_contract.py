@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from companion_daemon.world_v2.character_interior.inbound_tool_contract import (
     InboundToolContracts,
@@ -93,6 +94,32 @@ def test_stream_contract_preserves_append_only_expression_event_transport() -> N
     ]
     assert decision["properties"]["events"]["minItems"] == 2
 
+
+def test_stream_function_parameters_have_an_object_root_for_deepseek() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+    )
+
+    parameters = contract.provider_tools[0]["function"]["parameters"]
+
+    assert parameters["type"] == "object"
+    assert parameters["required"] == ["result_kind"]
+    assert parameters["properties"]["result_kind"]["enum"] == [
+        "decision",
+        "recall",
+    ]
+    assert set(parameters["properties"]) >= {
+        "result_kind",
+        "protocol",
+        "appraisal_draft",
+        "events",
+        "recall_request",
+        "private_turn_state",
+    }
+
     raw = json.dumps(
         {
             "result_kind": "decision",
@@ -120,6 +147,31 @@ def test_stream_contract_preserves_append_only_expression_event_transport() -> N
     )
 
     assert json.loads(contract.unwrap(raw))["protocol"] == "character-interior-events.1"
+
+
+def test_stream_provider_root_accepts_both_decision_and_recall_branches() -> None:
+    contract = InboundToolContracts().contract_for(
+        phase="initial",
+        transport="stream",
+        capabilities=QQ_NAPCAT_EXPRESSION_CAPABILITIES,
+        recall_allowed=True,
+    )
+    schema = contract.provider_tools[0]["function"]["parameters"]
+    validator = Draft202012Validator(schema)
+
+    decision = {
+        "result_kind": "decision",
+        "protocol": "character-interior-events.1",
+        "appraisal_draft": _appraisal(),
+        "events": [{"type": "end"}, {"type": "end"}],
+    }
+    recall = {
+        "result_kind": "recall",
+        "recall_request": {"query_text": "上次说的那家店"},
+    }
+
+    assert list(validator.iter_errors(decision)) == []
+    assert list(validator.iter_errors(recall)) == []
 
 
 def test_final_contract_is_a_decision_only_atomic_contract() -> None:

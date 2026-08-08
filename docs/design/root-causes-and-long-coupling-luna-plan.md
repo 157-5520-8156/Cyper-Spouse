@@ -1094,3 +1094,25 @@ commit：hash
 - 这只证明当前隔离数据库和 scripted role 在生产公开上游 seam 上的调度、重启和 effect-once 语义；Matrix
   仍是 `declaration_only`，真实 DeepSeek/QQ transport、自主措辞、24 小时 soak 及生产 daemon 重启均
   明确排除，不能把本场景写成上线或模型成功率资格证明。
+
+### 2026-08-09：真实 DeepSeek required-tool 方言修复与最终临时验收
+
+- 首次使用真实 DeepSeek、临时数据库和 OneBot loopback capture 的隔离 daemon 验收，所有模型调用都在
+  provider 首次请求前以 400 失败。捕获的原始错误为：`Invalid schema for function
+  'character_inbound_initial_stream_v1': schema must be a JSON Schema of 'type: "object"', got 'type: null'`。
+  这不是模型语义选择失败，而是 stream function parameters 的根 schema 不符合 DeepSeek 的 function-calling
+  方言；此前 MockTransport 测试没有覆盖该 provider 边界。
+- 先增加红测，再在 `InboundToolContracts` 的 provider-facing 根封套加入 `type=object`、完整联合属性、
+  `required=["result_kind"]` 与 `additionalProperties=false`。分支级 `anyOf` 仍分别约束 decision/recall，
+  根 discriminator 明确合并为 `decision/recall`；不会因 recall 分支覆盖 result_kind 而删除角色立即回答的合法选择。
+  本地 `unwrap` 与既有 materializer 继续负责精确语义校验，不补默认、不把非法输出改写成角色决定。
+- 最终工作树在该合并修复后重新执行真实 provider 临时验收：报告时间 `2026-08-08T19:56:55Z`，命令使用
+  `--model-mode real-provider --allow-real-provider`，两次独立 daemon 进程、临时库、外部 DeepSeek 经本地
+  hash proxy、OneBot loopback capture；生产数据库与真实 QQ 均未触碰。所有 7 个入站/打断/burst/restart
+  场景得到 HTTP 200，确定性 invariant `passed=true`；6 个 provider-accepted Action、重复重启无新增可见
+  效果、cold replay 与 live head 一致，第二条入站在第一条 provider 请求仍在途时成功提交，三条 burst 保留
+  全部 source event 并合并为一个 Action。该结果是 transport/daemon/CAS/回执连续性的人工证据，不是措辞、
+  自主性或生产成功率证明。
+- 最终定向回归为 `533 passed`，ruff 与 `git diff --check` 通过。真实 provider 证据仍严格标记
+  `manual_only`/`qualification_incomplete`：当前未满足 100 次 forced-tool/stream/QQ 回执样本、自由对聊
+  质量观察和 24 小时 soak 的发布门；旧生产 daemon 也未在本轮被替换或重启。

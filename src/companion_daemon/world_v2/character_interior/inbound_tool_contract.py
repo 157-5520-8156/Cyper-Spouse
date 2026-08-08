@@ -398,7 +398,42 @@ class InboundToolContracts:
                     "additionalProperties": False,
                 }
             )
+        # DeepSeek's function-calling dialect requires every function's root
+        # parameters schema to declare ``type: object``.  Keep the semantic
+        # decision/recall union below that provider-compatible root; the root
+        # properties are only the lossless union of branch properties, while
+        # the branch schemas and local ``unwrap`` remain authoritative for
+        # exact result-kind validation.
+        root_properties: dict[str, object] = {}
+        for branch in branches:
+            branch_properties = branch.get("properties")
+            if not isinstance(branch_properties, dict):
+                raise ValueError("inbound tool branch has no object properties")
+            for property_name, property_schema in branch_properties.items():
+                if property_name != "result_kind":
+                    root_properties.setdefault(property_name, deepcopy(property_schema))
+                    continue
+                # ``result_kind`` is shared by both branches.  The provider
+                # facing envelope must admit every branch discriminator; the
+                # branch-level ``anyOf`` schemas still enforce the exact
+                # discriminator/field pairing and ``unwrap`` remains the
+                # semantic authority after transport decoding.
+                current = root_properties.get(property_name)
+                if current is None:
+                    root_properties[property_name] = deepcopy(property_schema)
+                    continue
+                if not isinstance(current, dict) or not isinstance(property_schema, dict):
+                    raise ValueError("inbound result_kind schema is not an object")
+                current_enum = current.get("enum")
+                branch_enum = property_schema.get("enum")
+                if not isinstance(current_enum, list) or not isinstance(branch_enum, list):
+                    raise ValueError("inbound result_kind schema has no enum")
+                current["enum"] = list(dict.fromkeys([*current_enum, *branch_enum]))
         parameters = {
+            "type": "object",
+            "properties": root_properties,
+            "required": ["result_kind"],
+            "additionalProperties": False,
             "anyOf": branches,
         }
         function = {
