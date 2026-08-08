@@ -110,7 +110,6 @@ from ..source_closure_verdict import (
 from ..source_review_authority import (
     InventoryAvailabilityExhausted,
     SOURCE_REVIEW_CALL_TIMEOUT_SECONDS,
-    SourceReviewAttemptsExhausted,
 )
 from ..source_closure_lane import SourceClosureReselectionLane
 from ..structured_expression_reselection_model import (
@@ -8532,21 +8531,19 @@ class _ExpressionDraftWire:
                 try:
                     self._stream_generation_coordinator.activate(stream_generation, current)
                     activated = True
-                    try:
+                    if tools is None:
+                        result = await operation(
+                            messages,
+                            temperature=temperature,
+                            on_text_delta=on_delta,
+                        )
+                    else:
                         result = await operation(
                             messages,
                             temperature=temperature,
                             on_text_delta=on_delta,
                             tools=tools,
                             tool_choice=tool_choice,
-                        )
-                    except TypeError:
-                        # Fixture providers without tool support fall back to
-                        # the plain streamed envelope.
-                        result = await operation(
-                            messages,
-                            temperature=temperature,
-                            on_text_delta=on_delta,
                         )
                     self._stream_generation_coordinator.require_current(stream_generation)
                     if (
@@ -9426,46 +9423,16 @@ class _ExpressionDraftWire:
             )
             if active_reviewer is None:
                 raise ValueError("source-closure review route is unavailable")
-            try:
-                review_result = await review_expression_with_candidate_external_coverage(
-                    reviewer=active_reviewer,
-                    inventory_model=active_inventory,
-                    report_relative_reviewer=active_report_relative_reviewer,
-                    request=request,
-                    raw=raw,
-                    identity_frame=self._identity_frame,
-                    model_visible_context_json=private_state_context_json,
-                    source_ref_aliases=source_ref_aliases,
-                )
-            except (asyncio.CancelledError, TimeoutError, SourceReviewAttemptsExhausted):
-                # The truth review is the sole semantic effect gate, but the
-                # interactive budget can cancel the review provider after the
-                # role call already spent, and a local review endpoint outage
-                # exhausts all lanes without producing a semantic verdict.  A
-                # candidate that declares no World claim has nothing for the
-                # review to verify; degrade to an unaudited pass instead of
-                # killing the whole turn.  Candidates with declared claims
-                # still fail closed (durable lifecycle).  Malformed-wire and
-                # transport ValidationTechnicalFailures are deliberately NOT
-                # degraded: a review that ran (or a rejected verdict) must
-                # never be discarded for a wire hiccup.
-                material = _prepare_source_closure_review_material(
-                    request=request,
-                    raw=raw,
-                    identity_frame=self._identity_frame,
-                    model_visible_context_json=private_state_context_json,
-                    source_ref_aliases=source_ref_aliases,
-                    effect_bearing_only=False,
-                )
-                if material.draft.world_claims:
-                    raise
-                logger.warning(
-                    "source closure review cancelled; degrading claim-free expression "
-                    "trigger=%s",
-                    request.trigger_ref,
-                    exc_info=True,
-                )
-                review_result = SourceClosureReviewResult(review=None, usage=None)
+            review_result = await review_expression_with_candidate_external_coverage(
+                reviewer=active_reviewer,
+                inventory_model=active_inventory,
+                report_relative_reviewer=active_report_relative_reviewer,
+                request=request,
+                raw=raw,
+                identity_frame=self._identity_frame,
+                model_visible_context_json=private_state_context_json,
+                source_ref_aliases=source_ref_aliases,
+            )
             report_relative_adjudication_used = review_result.report_relative_adjudication_used
             if review_result.usage is not None:
                 usage = _combine_usage(

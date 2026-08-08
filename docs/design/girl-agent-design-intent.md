@@ -381,11 +381,15 @@ store + ledger hash/ref、tenant key crypto-erasure 与现有明文账本方案�
 **状态** → **关键文件**。状态以 2026-08-07 工作区为准（分支 `feature/companion-turn-v2`，
 正在从旧架构迁移到统一 CharacterInterior）。
 
-### 4.1 Character Interior（统一角色内心）——[active]
+### 4.1 Character Interior（统一角色内心）——[partial]
 
 **为什么存在**：旧架构里模型调用散落在十几个 vertical（appraisal worker、affect worker、
 advisory worker、quick reaction、interaction bid……各调各的模型），每路独立提提议、互相
 不同步。统一内心把"角色的一次私人整合/选择"收敛为**唯一的角色作者入口**（ADR 0016）。
+
+当前状态仍是 `[partial]`：主要生产入口和退役门禁已经接入，但 durable turn、全部旧业务旁路删除、
+provider tool contract 逐 purpose 资格化和真实生产轨迹尚未全部闭合；在这些证据完成前不得升级为
+`[active]`。
 
 设计意图（CONTEXT.md Character Interior 词条）："owns the single production boundary for
 subjective integration and Character Decisions"，确定性投影一个 Inner Life Snapshot，让

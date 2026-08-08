@@ -2703,13 +2703,16 @@ class _InboundCharacterAuthor:
         )
         if transport_provider is None and not callable(metered):
             metered = getattr(provider, "complete_with_usage", None)
+        use_forced_tool = callable(metered) and bool(
+            getattr(provider, "supports_required_tool_choice", False)
+        )
         winning_provider_identity = _provider_invocation_identity(
             parent_call_id=provider_request.call_id,
             purpose="paired_cognition_initial",
             messages=messages,
             temperature=self._temperature,
-            tools=(cognition_tools if callable(metered) else None),
-            tool_choice=(cognition_tool_choice if callable(metered) else None),
+            tools=(cognition_tools if use_forced_tool else None),
+            tool_choice=(cognition_tool_choice if use_forced_tool else None),
         )
         usage: ModelUsageProvenance | None = None
         exact_request_emission = bool(
@@ -2730,21 +2733,19 @@ class _InboundCharacterAuthor:
                     # tool: the envelope structure becomes a server-side
                     # guarantee. Providers without tool support (fixtures)
                     # fall back to the plain JSON envelope path.
-                    tool_kwargs: dict[str, object] = {
-                        "tools": cognition_tools,
-                        "tool_choice": cognition_tool_choice,
-                    }
-                    try:
-                        result = await metered(
-                            messages,
-                            temperature=self._temperature,
-                            **tool_kwargs,
-                        )
-                    except TypeError:
-                        result = await metered(
-                            messages,
-                            temperature=self._temperature,
-                        )
+                    tool_kwargs: dict[str, object] = (
+                        {
+                            "tools": cognition_tools,
+                            "tool_choice": cognition_tool_choice,
+                        }
+                        if use_forced_tool
+                        else {}
+                    )
+                    result = await metered(
+                        messages,
+                        temperature=self._temperature,
+                        **tool_kwargs,
+                    )
                     if (
                         not isinstance(result, tuple)
                         or len(result) != 2

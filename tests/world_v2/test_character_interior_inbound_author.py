@@ -1483,6 +1483,49 @@ class _JsonMeteredOrdinaryCombinedProvider(_MeteredOrdinaryCombinedProvider):
         )
 
 
+class _InternalTypeErrorToolProvider(_CombinedProvider):
+    supports_required_tool_choice = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.metered_calls = 0
+        self.plain_calls = 0
+
+    async def complete_json_with_usage(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: dict[str, object] | None = None,
+    ) -> tuple[str, ModelUsageProvenance]:
+        del messages, temperature, tools, tool_choice
+        self.metered_calls += 1
+        raise TypeError("provider transport failed after request emission")
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+    ) -> str:
+        del messages, temperature
+        self.plain_calls += 1
+        raise AssertionError("an internal TypeError must not trigger a second provider call")
+
+
+@pytest.mark.asyncio
+async def test_forced_tool_internal_type_error_never_retries_plain_request() -> None:
+    provider = _InternalTypeErrorToolProvider()
+    cognition = InboundCharacterAuthor(flash_model=provider)
+
+    with pytest.raises(TypeError, match="after request emission"):
+        await cognition.propose(_request(revision=3, call="call:tool-internal-type-error"))
+
+    assert provider.metered_calls == 1
+    assert provider.plain_calls == 0
+
+
 class _MeteredSourceClosureReviewer(_SourceClosureReviewer):
     async def complete_with_usage(
         self, messages: list[dict[str, str]], *, temperature: float = 0.8

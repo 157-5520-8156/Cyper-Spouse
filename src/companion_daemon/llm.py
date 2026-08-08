@@ -773,6 +773,7 @@ class ChatModel(Protocol):
 class DeepSeekChatModel:
     provider = "deepseek"
     reports_exact_request_emission = True
+    supports_required_tool_choice = True
 
     def __init__(
         self,

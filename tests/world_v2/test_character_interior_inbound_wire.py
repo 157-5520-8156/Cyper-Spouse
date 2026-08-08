@@ -1625,6 +1625,64 @@ async def test_character_may_pull_one_source_bound_recall_before_deciding() -> N
 
 
 @pytest.mark.asyncio
+async def test_claim_free_expression_still_fails_closed_when_source_review_is_unavailable() -> None:
+    visible_fact = "下午翻书的时候，我忽然想起这件事。"
+
+    class _UnavailableReviewer:
+        model = "fixture:unavailable-source-reviewer"
+
+        async def complete_json(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.0,
+        ) -> str:
+            del messages, temperature
+            raise TimeoutError("source reviewer unavailable")
+
+    author = _SequenceJsonModel(
+        [
+            json.dumps(
+                {
+                    "timing_choice": "now",
+                    "beats": [
+                        {
+                            "modality": "text",
+                            "text": visible_fact,
+                        }
+                    ],
+                    "stance": "attend",
+                    "brief_rationale": "Acknowledge the current turn.",
+                    "confidence": 7_000,
+                    "world_claims": [],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    with pytest.raises(ValidationTechnicalFailure, match="source_review_timeout"):
+        await _ExpressionDraftWire(
+            model=author,
+            source_closure_reviewer=_UnavailableReviewer(),
+            candidate_external_proposition_inventory_model=(
+                _StrictInventorySequenceJsonModel(
+                    [
+                        _inventory_v5(
+                            [
+                                {
+                                    "locator": _coverage_locator(visible_fact),
+                                    "semantic_role": "standalone_external_proposition",
+                                }
+                            ]
+                        )
+                    ]
+                )
+            ),
+        ).propose(_qq_request())
+
+
+@pytest.mark.asyncio
 async def test_ready_prefetch_is_visible_before_role_model_may_decline_a_deeper_pull() -> None:
     canonical_recall_ref = "event:fact:counterpart-tea:sha256:" + "d" * 64
     model = _SequenceJsonModel(

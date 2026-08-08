@@ -15,7 +15,6 @@ HEALTH_TIMEOUT_SECONDS="${GIRL_AGENT_INSTALL_HEALTH_TIMEOUT_SECONDS:-120}"
 DAEMON_HEALTH_URL="${GIRL_AGENT_DAEMON_HEALTH_URL:-http://127.0.0.1:8765/health}"
 
 BASE_LABELS=(
-  com.girl-agent.qq-ws
   com.girl-agent.daemon
   com.girl-agent.napcat
   com.girl-agent.rsshub
@@ -26,6 +25,8 @@ TEXT_LABELS=(
 )
 OPTIONAL_LABELS=(com.girl-agent.sillytavern)
 RETIRED_LABELS=(
+  com.girl-agent.qq-ws
+  com.girl-agent.local-embedding
   com.girl-agent.proactive
   com.girl-agent.local-appraisal-watchdog
   com.girl-agent.local-appraisal
@@ -148,7 +149,6 @@ import sys
 
 root = Path(sys.argv[1]).resolve()
 contracts = {
-    "com.girl-agent.qq-ws": ([str(root / "scripts/run_qq_ws.sh")], root),
     "com.girl-agent.daemon": ([str(root / "scripts/run_daemon.sh")], root),
     "com.girl-agent.napcat": ([str(root / "scripts/run_napcat_adapter.sh")], root),
     "com.girl-agent.rsshub": ([str(root / "scripts/run_rsshub.sh")], root),
@@ -197,7 +197,6 @@ preflight() {
   for script in \
     "$ROOT/scripts/install_launchd.sh" \
     "$ROOT/scripts/run_daemon.sh" \
-    "$ROOT/scripts/run_qq_ws.sh" \
     "$ROOT/scripts/run_napcat_adapter.sh" \
     "$ROOT/scripts/run_rsshub.sh" \
     "$ROOT/scripts/run_text_endpoint.sh" \

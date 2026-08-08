@@ -9,7 +9,6 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_launchd.sh"
 BASE_LABELS = {
-    "com.girl-agent.qq-ws",
     "com.girl-agent.daemon",
     "com.girl-agent.napcat",
     "com.girl-agent.rsshub",
@@ -19,6 +18,8 @@ TEXT_LABELS = {
     "com.girl-agent.text-endpoint-watchdog",
 }
 RETIRED_LABELS = {
+    "com.girl-agent.qq-ws",
+    "com.girl-agent.local-embedding",
     "com.girl-agent.proactive",
     "com.girl-agent.local-appraisal-watchdog",
     "com.girl-agent.local-appraisal",

@@ -471,8 +471,9 @@ register。它们通常没有组织、住处、Life Arc、可用时间和退出�
   提议只能经 `CharacterInterior` 路由；
 - `current-self-state.1` 只保留历史 replay，不能成为兼容生产旁路。
 
-详细设计、八项 Faculty、不变量、迁移删除矩阵和发布验收以
-`docs/design/unified-character-interior.md` 为唯一实施基线。
+该文件后续章节和 `docs/design/unified-character-interior.md` 仅保留为历史设计证据。当前业务与架构
+意图只以 `docs/design/girl-agent-design-intent.md` 为权威，实施顺序只以
+`docs/design/root-causes-and-long-coupling-luna-plan.md` 为权威；发生冲突时不得沿用本文件的旧结论。
 
 ## 10. `CharacterInterior` 深 Module 设计
 

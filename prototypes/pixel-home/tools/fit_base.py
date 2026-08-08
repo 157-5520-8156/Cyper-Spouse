@@ -16,7 +16,6 @@ Prints a ready-to-paste --pts argument for make_sprite.py.
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 from PIL import Image
 

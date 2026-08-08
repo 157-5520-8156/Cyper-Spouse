@@ -18,8 +18,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import colorsys
 import json
-import math
 from pathlib import Path
 
 from PIL import Image
@@ -67,9 +67,6 @@ def build_palette() -> list[tuple[int, int, int]]:
         for factor in SHADE_FACTORS:
             colors.add(shade(base, factor))
     return sorted(colors)
-
-
-import colorsys
 
 
 def key_background(img: Image.Image, mode: str) -> Image.Image:
