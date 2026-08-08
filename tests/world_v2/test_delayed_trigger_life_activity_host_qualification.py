@@ -149,6 +149,11 @@ class _LifeSourceReviewer:
 class _CharacterModel(FakeCompanionModel):
     model = "fixture:life-activity-character"
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.outcome_offered_tokens: tuple[str, ...] = ()
+        self.outcome_selected_tokens: list[str] = []
+
     async def complete_json(
         self,
         messages: list[dict[str, str]],
@@ -191,8 +196,11 @@ class _CharacterModel(FakeCompanionModel):
             }
         elif purpose == "outcome_selection":
             offered_tokens = request["capability_manifest"]["payload"]["offered_tokens"]
+            self.outcome_offered_tokens = tuple(offered_tokens)
+            selected_token = offered_tokens[-1]
+            self.outcome_selected_tokens.append(selected_token)
             payload = {
-                "selected_token": offered_tokens[0],
+                "selected_token": selected_token,
                 "character_life_direction": None,
             }
         else:
@@ -484,11 +492,60 @@ async def test_public_host_aftermath_outcome_is_role_owned_and_effect_once(
         )
         settled = host.export_replay_evidence()
         assert settled.projection.world_occurrences[0].status == "settled"
-        assert any(
-            item.event.event_type == "OutcomeObservationRecorded" for item in settled.events
+
+        observation_events = tuple(
+            item for item in settled.events if item.event.event_type == "OutcomeObservationRecorded"
         )
-        assert any(item.event.event_type == "OutcomeProposalRecorded" for item in settled.events)
-        assert any(item.event.event_type == "WorldOccurrenceSettled" for item in settled.events)
+        proposal_events = tuple(
+            item for item in settled.events if item.event.event_type == "OutcomeProposalRecorded"
+        )
+        settlement_events = tuple(
+            item for item in settled.events if item.event.event_type == "WorldOccurrenceSettled"
+        )
+        assert len(observation_events) == len(proposal_events) == 1
+        observation = observation_events[0].event.payload()
+        proposal = proposal_events[0].event.payload()
+        acceptance_events = tuple(
+            item
+            for item in settled.events
+            if item.event.event_type == "AcceptanceRecorded"
+            and item.event.payload().get("proposal_id") == proposal["outcome_proposal_id"]
+        )
+        assert len(acceptance_events) == len(settlement_events) == 1
+        acceptance = acceptance_events[0].event.payload()
+        settlement = settlement_events[0].event.payload()
+        assert len(character_model.outcome_offered_tokens) >= 2
+        assert character_model.outcome_selected_tokens == [
+            character_model.outcome_offered_tokens[-1]
+        ]
+        assert character_model.outcome_selected_tokens[0] != character_model.outcome_offered_tokens[0]
+        assert proposal["decision_authority"] == "character_model"
+        assert proposal["decision_model"] == character_model.model
+        assert proposal["candidate_result_ref"] == character_model.outcome_selected_tokens[0]
+        assert proposal["occurrence_id"] == active.projection.world_occurrences[0].occurrence_id
+        assert proposal["decision_model_result_ref"]
+        assert proposal["decision_model_result_event_ref"]
+        assert proposal["decision_audit_proposal_event_ref"]
+        assert any(
+            item.event.event_id == proposal["decision_model_result_event_ref"]
+            and item.event.event_type == "ModelResultRecorded"
+            for item in settled.events
+        )
+        assert any(
+            item.event.event_id == proposal["decision_audit_proposal_event_ref"]
+            and item.event.event_type == "ProposalRecorded"
+            for item in settled.events
+        )
+        assert observation["observation"]["occurrence_id"] == proposal["occurrence_id"]
+        assert proposal_events[0].event.causation_id == proposal["decision_audit_proposal_event_ref"]
+        assert acceptance["proposal_id"] == proposal["outcome_proposal_id"]
+        assert acceptance["accepted_change_hash"] == proposal["proposed_change_hash"]
+        assert settlement["occurrence_id"] == proposal["occurrence_id"]
+        assert settlement["outcome_proposal_id"] == proposal["outcome_proposal_id"]
+        assert settlement["candidate_result_ref"] == proposal["candidate_result_ref"]
+        assert settlement["accepted_change_hash"] == proposal["proposed_change_hash"]
+        assert settlement_events[0].event.causation_id == acceptance_events[0].event.event_id
+
         def calls_for_purpose(purpose: str) -> int:
             count = 0
             for messages in character_model.calls:
@@ -529,6 +586,7 @@ async def test_public_host_aftermath_outcome_is_role_owned_and_effect_once(
             for item in repeated.events
             if item.event.event_type in outcome_event_types
         ) == outcome_event_ids
+        assert repeated.projection.semantic_hash == repeated.replay.semantic_hash
         assert calls_for_purpose("outcome_selection") == outcome_calls_before_repeat
 
         await host.aclose()
@@ -537,6 +595,7 @@ async def test_public_host_aftermath_outcome_is_role_owned_and_effect_once(
         cold = host.export_replay_evidence()
         assert cold.cursor == repeated.cursor
         assert cold.projection.semantic_hash == repeated.projection.semantic_hash
+        assert cold.projection.semantic_hash == cold.replay.semantic_hash
         assert len(cold.events) == len(repeated.events)
         assert tuple(
             item.event.event_id
